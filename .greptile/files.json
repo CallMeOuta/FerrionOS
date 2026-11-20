@@ -1,0 +1,79 @@
+{
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "description": "Contributor contract: FerrionOS/Redox naming, architecture names, how to run builds, sources of truth kept in code. CLAUDE.md only imports this file."
+    },
+    {
+      "path": "agents/skills/recipes.md",
+      "description": "Recipe placement, the #TODO convention, schema gotchas, build-script environment",
+      "scope": [
+        "recipes/**"
+      ]
+    },
+    {
+      "path": "agents/skills/filesystem-configs.md",
+      "description": "Config merge rules and what a config change costs",
+      "scope": [
+        "config/**"
+      ]
+    },
+    {
+      "path": "agents/skills/cookbook.md",
+      "description": "Cookbook binaries, what depends on the Rust code, error and test conventions",
+      "scope": [
+        "src/**",
+        "Cargo.toml"
+      ]
+    },
+    {
+      "path": "agents/skills/build-scripts.md",
+      "description": "Portability rules for shell and make, Podman passthrough, host dependency lists",
+      "scope": [
+        "Makefile",
+        "mk/**",
+        "scripts/**",
+        "podman/**",
+        "*.sh",
+        "flake.nix"
+      ]
+    },
+    {
+      "path": "docs/build-system.md",
+      "description": "Build stages, per-recipe directories, settings, recipe rules, target names",
+      "scope": [
+        "Makefile",
+        "mk/**",
+        "src/**"
+      ]
+    },
+    {
+      "path": "docs/testing.md",
+      "description": "The check ladder and what upstream CI ran",
+      "scope": [
+        "src/**",
+        "config/**",
+        "mk/ci.mk"
+      ]
+    },
+    {
+      "path": "docs/upstream.md",
+      "description": "What is still fetched from Redox's repositories and servers",
+      "scope": [
+        "recipes/core/**",
+        "Cargo.toml",
+        "mk/prefix.mk",
+        "mk/podman.mk",
+        "config/base.toml"
+      ]
+    },
+    {
+      "path": "docs/redox-state.md",
+      "description": "Redox's current limits and outdated beliefs, dated 2026-11-20",
+      "scope": [
+        "recipes/**",
+        "config/**"
+      ]
+    }
+  ]
+}
