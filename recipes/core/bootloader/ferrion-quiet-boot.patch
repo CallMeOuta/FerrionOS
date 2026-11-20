@@ -1,0 +1,285 @@
+FerrionOS changes to the Redox bootloader (MIT licence, kept), made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8:
+- quiet boot on UEFI: the screen stays blank for one second while a key can ask for the mode menu and the status text; without a key nothing is printed, the best mode is taken, the framebuffer is filled with the background color, and the kernel gets QUIET=1 and BOOT_BACKGROUND=000000. Warnings stay off the screen; errors, panics and the RedoxFS password prompt still show. BIOS boots as before;
+- a failing SetAttribute no longer panics, which a serial port behind a socket triggered;
+- the banners name FerrionOS.
+
+diff --git a/src/editor.rs b/src/editor.rs
+index a4ab291..d21a17d 100644
+--- a/src/editor.rs
++++ b/src/editor.rs
+@@ -2,9 +2,9 @@ use crate::os::{Os, OsKey};
+ 
+ fn edit_banner(os: &impl Os) {
+     os.clear_text();
+-    println!("--- Redox Bootloader Environment Editor ---");
++    println!("--- FerrionOS Bootloader Environment Editor ---");
+     println!("ENTER twice to boot. UP/DOWN to edit lines.");
+-    println!("-------------------------------------------");
++    println!("-----------------------------------------------");
+ }
+ 
+ pub fn edit_env(os: &impl Os, env_ptr: *mut u8, env_size: &mut usize, max_size: usize) {
+diff --git a/src/logger.rs b/src/logger.rs
+index afd1b71..00141ba 100644
+--- a/src/logger.rs
++++ b/src/logger.rs
+@@ -1,3 +1,4 @@
++use core::sync::atomic::Ordering;
+ use log::{LevelFilter, Log, Metadata, Record};
+ 
+ pub static LOGGER: Logger = Logger;
+@@ -7,7 +8,12 @@ pub struct Logger;
+ impl Logger {
+     pub fn init(&'static self) {
+         log::set_logger(self).unwrap();
+-        log::set_max_level(LevelFilter::Info);
++        // A quiet boot keeps warnings off the screen; errors still show
++        log::set_max_level(if crate::QUIET.load(Ordering::Relaxed) {
++            LevelFilter::Error
++        } else {
++            LevelFilter::Info
++        });
+     }
+ }
+ 
+@@ -18,7 +24,7 @@ impl Log for Logger {
+ 
+     fn log(&self, record: &Record) {
+         if self.enabled(record.metadata()) {
+-            println!("{} - {}", record.level(), record.args());
++            loud_println!("{} - {}", record.level(), record.args());
+         }
+     }
+ 
+diff --git a/src/main.rs b/src/main.rs
+index 28d1e24..c6a6cf9 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -12,6 +12,7 @@ use core::{
+     cmp,
+     fmt::{self, Write},
+     mem, ptr, slice, str,
++    sync::atomic::{AtomicBool, Ordering},
+ };
+ use redoxfs::{Disk, Node, TreeData};
+ 
+@@ -123,6 +124,15 @@ pub struct KernelArgs {
+     bootstrap_size: u64,
+ }
+ 
++/// Whether this boot is quiet: the screen shows nothing but the background color, errors, panics
++/// and the RedoxFS password prompt. Only UEFI boots quietly, and it passes `QUIET=1` to the
++/// kernel so that the OS stays quiet too.
++pub static QUIET: AtomicBool = AtomicBool::new(false);
++
++/// The color a quiet boot fills the screen with, as 0xRRGGBB. The kernel environment carries it
++/// as `BOOT_BACKGROUND`, so that the OS draws on the same color.
++const BACKGROUND_COLOR: u32 = 0x000000;
++
+ fn select_mode(
+     os: &impl Os,
+     output_i: usize,
+@@ -170,6 +180,11 @@ fn select_mode(
+     }
+     println!();
+ 
++    // A quiet boot takes the best mode without showing the menu
++    if QUIET.load(Ordering::Relaxed) {
++        return modes.iter().find(|x| x.0.id == selected).map(|x| x.0);
++    }
++
+     println!("Arrow keys and enter select mode");
+     let live_mode = os.get_text_position();
+     if *live {
+@@ -297,7 +312,7 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+     for attempt in 0..=attempts {
+         let mut password_opt = None;
+         if attempt > 0 {
+-            print!("\rRedoxFS password ({}/{}): ", attempt, attempts);
++            loud_print!("\rRedoxFS password ({}/{}): ", attempt, attempts);
+ 
+             let mut password = String::new();
+ 
+@@ -305,12 +320,12 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+                 match os.get_key() {
+                     OsKey::Backspace | OsKey::Delete => {
+                         if !password.is_empty() {
+-                            print!("\x08 \x08");
++                            loud_print!("\x08 \x08");
+                             password.pop();
+                         }
+                     }
+                     OsKey::Char(c) => {
+-                        print!("*");
++                        loud_print!("*");
+                         password.push(c)
+                     }
+                     OsKey::Enter => break,
+@@ -320,7 +335,7 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+ 
+             // Erase password information
+             while os.get_text_position().0 > 0 {
+-                print!("\x08 \x08");
++                loud_print!("\x08 \x08");
+             }
+ 
+             if !password.is_empty() {
+@@ -464,9 +479,21 @@ fn elf_entry(data: &[u8]) -> (u64, bool) {
+     }
+ }
+ 
++/// Paints a whole framebuffer in the background color, so that a quiet boot shows nothing until
++/// the OS draws. The framebuffer has 32-bit pixels, as the kernel and the display drivers expect.
++fn fill_background(mode: &OsVideoMode) {
++    if mode.base == 0 {
++        return;
++    }
++    let pixels = unsafe {
++        slice::from_raw_parts_mut(mode.base as *mut u32, (mode.stride * mode.height) as usize)
++    };
++    pixels.fill(BACKGROUND_COLOR);
++}
++
+ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+     println!(
+-        "Redox OS Bootloader {} on {}",
++        "FerrionOS Bootloader {} on {}",
+         env!("CARGO_PKG_VERSION"),
+         os.name()
+     );
+@@ -600,6 +627,9 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+     for (output_i, mode_opt) in mode_opts.iter_mut().enumerate() {
+         if let Some(mode) = mode_opt {
+             os.set_video_mode(output_i, mode);
++            if QUIET.load(Ordering::Relaxed) {
++                fill_background(mode);
++            }
+         }
+     }
+ 
+@@ -656,6 +686,10 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+                 .expect("Could not retrieve boot hart id from EFI implementation!");
+             writeln!(w, "BOOT_HART_ID={:016x}", boot_hartid).unwrap();
+         }
++        if QUIET.load(Ordering::Relaxed) {
++            writeln!(w, "QUIET=1").unwrap();
++            writeln!(w, "BOOT_BACKGROUND={BACKGROUND_COLOR:06x}").unwrap();
++        }
+         if edit_env {
+             editor::edit_env(os, env_base, &mut w.i, max_env_size);
+         }
+diff --git a/src/os/bios/macros.rs b/src/os/bios/macros.rs
+index 1dc11eb..a710da4 100644
+--- a/src/os/bios/macros.rs
++++ b/src/os/bios/macros.rs
+@@ -18,3 +18,12 @@ macro_rules! println {
+     ($fmt:expr_2021) => (print!(concat!($fmt, "\n")));
+     ($fmt:expr_2021, $($arg:tt)*) => (print!(concat!($fmt, "\n"), $($arg)*));
+ }
++
++/// A BIOS boot is never quiet, so printing that must show in a quiet boot is plain printing
++macro_rules! loud_print {
++    ($($arg:tt)*) => (print!($($arg)*));
++}
++
++macro_rules! loud_println {
++    ($($arg:tt)*) => (println!($($arg)*));
++}
+diff --git a/src/os/uefi/mod.rs b/src/os/uefi/mod.rs
+index f55d8e8..745fa31 100644
+--- a/src/os/uefi/mod.rs
++++ b/src/os/uefi/mod.rs
+@@ -20,6 +20,37 @@ use self::{
+     video_mode::VideoModeIter,
+ };
+ 
++// A quiet boot (`crate::QUIET`) keeps the bootloader's status text off the screen. These two
++// shadow uefi_std's `print!` and `println!` in the rest of the crate, which sees them after
++// `mod os`; errors, panics and prompts print through `loud_print!` and `loud_println!`.
++macro_rules! print {
++    ($($arg:tt)*) => {
++        if !$crate::QUIET.load(core::sync::atomic::Ordering::Relaxed) {
++            std::io::_print(format_args!($($arg)*));
++        }
++    };
++}
++
++macro_rules! println {
++    () => (print!("\n"));
++    ($($arg:tt)*) => ({
++        print!($($arg)*);
++        print!("\n");
++    });
++}
++
++macro_rules! loud_print {
++    ($($arg:tt)*) => (std::io::_print(format_args!($($arg)*)));
++}
++
++macro_rules! loud_println {
++    () => (loud_print!("\n"));
++    ($($arg:tt)*) => ({
++        loud_print!($($arg)*);
++        loud_print!("\n");
++    });
++}
++
+ mod acpi;
+ mod arch;
+ mod device;
+@@ -359,7 +390,9 @@ impl Os for OsEfi {
+ 
+     fn set_text_highlight(&self, highlight: bool) {
+         let attr = if highlight { 0x70 } else { 0x07 };
+-        status_to_result((self.st.ConsoleOut.SetAttribute)(self.st.ConsoleOut, attr)).unwrap();
++        // Ignore error: a console that mirrors to a serial port behind a socket
++        // reports a device error here, and highlighting is cosmetic
++        let _ = status_to_result((self.st.ConsoleOut.SetAttribute)(self.st.ConsoleOut, attr));
+     }
+ }
+ 
+@@ -409,6 +442,27 @@ fn set_max_mode(output: &uefi::text::TextOutput) -> Result<()> {
+     Ok(())
+ }
+ 
++/// How long a boot waits, on a blank screen, for a key that asks for the mode menu and the
++/// status text instead of a quiet boot.
++const MENU_KEY_WINDOW_MS: u64 = 1000;
++
++/// Whether a key arrives within `timeout_ms`; the key itself is dropped.
++fn key_pressed_within(st: &SystemTable, timeout_ms: u64) -> bool {
++    // Poll rather than wait on a timer event: the uefi crate does not expose SetTimer, and a
++    // 10 ms poll costs nothing at this point
++    let mut key = TextInputKey {
++        ScanCode: 0,
++        UnicodeChar: 0,
++    };
++    for _ in 0..timeout_ms.div_ceil(10) {
++        if (st.ConsoleIn.ReadKeyStroke)(st.ConsoleIn, &mut key).is_success() {
++            return true;
++        }
++        let _ = (st.BootServices.Stall)(10_000);
++    }
++    false
++}
++
+ #[unsafe(no_mangle)]
+ pub extern "C" fn main() -> Status {
+     let uefi = std::system_table();
+@@ -416,9 +470,15 @@ pub extern "C" fn main() -> Status {
+     let _ = (uefi.BootServices.SetWatchdogTimer)(0, 0, 0, ptr::null());
+ 
+     if let Err(err) = set_max_mode(uefi.ConsoleOut) {
+-        println!("Failed to set max mode: {:?}", err);
++        loud_println!("Failed to set max mode: {:?}", err);
+     }
+ 
++    // Boot quietly unless a key asks for the menu and the status text
++    crate::QUIET.store(
++        !key_pressed_within(uefi, MENU_KEY_WINDOW_MS),
++        core::sync::atomic::Ordering::Relaxed,
++    );
++
+     if let Err(err) = arch::main() {
+         panic!("App error: {:?}", err);
+     }
