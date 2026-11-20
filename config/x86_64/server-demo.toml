@@ -125,7 +125,7 @@ path = "/var/www/html/index.php"
 data = """
 <?php
 
-echo "Hello from PHP on Redox!";
+echo "Hello from PHP on FerrionOS!";
 """
 
 [[files]]
@@ -288,9 +288,9 @@ php-fpm --nodaemonize &
 path = "/home/user/Welcome.txt"
 data = """
 ##############################################################################
-# Welcome to Redox Server Demo!
+# Welcome to FerrionOS Server Demo!
 #
-# This is a quick demonstration of Redox used as server stack.
+# This is a quick demonstration of FerrionOS used as server stack.
 # At the moment we support SSH, NGINX, Python, PHP. There's more to come
 #
 # This server demo is insecure by design, we encourage you to get familiar into
@@ -303,7 +303,7 @@ data = """
 # > sudo bash server.sh
 #
 # The server will start port 22 (ssh), 80 (static web) and 8081 (php)
-# If you use the Redox OS build system, starting QEMU with `net=redir`
+# If you use the FerrionOS build system, starting QEMU with `net=redir`
 #   should expose those port to 8022, 8080 and 8081.
 # Try logging in to console via SSH with `ssh user@localhost -p 8022`
 #

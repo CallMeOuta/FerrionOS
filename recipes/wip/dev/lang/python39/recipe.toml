@@ -39,7 +39,7 @@ mkdir -p "${BUILDMACH_BUILD}"
 mkdir -p "${BUILDMACH_STAGE}"
 
 cd "${BUILDMACH_BUILD}"
-# Use env that does not use the Redox build tools
+# Use env that does not use the FerrionOS build tools
 env -i PATH="$PATH" CC="$CC_WRAPPER gcc" "${COOKBOOK_SOURCE}/configure"
 env -i PATH="$PATH" CC="$CC_WRAPPER gcc" "${COOKBOOK_MAKE}" -j "${COOKBOOK_MAKE_JOBS}"
 "${COOKBOOK_MAKE}" install DESTDIR="${BUILDMACH_STAGE}"

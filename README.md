@@ -1,8 +1,4 @@
-<p align="center">
-<img alt="Redox" width="346" src="https://gitlab.redox-os.org/redox-os/assets/raw/master/logos/redox/logo.png">
-</p>
-
-This repository is the **Build System** for Redox OS.
+This repository is the **Build System** for FerrionOS, a fork of [Redox OS](https://www.redox-os.org).
 
 Redox is under active development by a vibrant community, you can see the key links below:
 
@@ -12,9 +8,9 @@ Redox is under active development by a vibrant community, you can see the key li
 - [Patreon](https://www.patreon.com/redox_os), [Donate](https://redox-os.org/donate/) and [Merch](https://redox-os.creator-spring.com/).
 - Scroll down for a list of key Redox components and their repositories.
 
-[Redox](https://www.redox-os.org) is an open-source operating system written in Rust, a language with focus on safety, efficiency and high performance. Redox uses a microkernel architecture, and aims to be reliable, secure, usable, correct, and free. Redox is inspired by previous operating systems, such as seL4, MINIX, Plan 9, Linux and BSD.
+FerrionOS is an open-source operating system written in Rust, a language with focus on safety, efficiency and high performance. FerrionOS uses a microkernel architecture, and aims to be reliable, secure, usable, correct, and free. FerrionOS is inspired by previous operating systems, such as seL4, MINIX, Plan 9, Linux and BSD.
 
-Redox _is not_ just a kernel, it's a **full-featured operating system**, providing components (file system, display server, core utilities, etc.) that together make up a functional and convenient operating system. Redox uses the COSMIC desktop apps, and provides source code compatibility with many Rust, Linux and BSD programs.
+FerrionOS _is not_ just a kernel, it's a **full-featured operating system**, providing components (file system, display server, core utilities, etc.) that together make up a functional and convenient operating system. FerrionOS uses the COSMIC desktop apps, and provides source code compatibility with many Rust, Linux and BSD programs.
 
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
@@ -22,8 +18,9 @@ Redox _is not_ just a kernel, it's a **full-featured operating system**, providi
 
 - [Book](https://doc.redox-os.org/book/)
 - [Contribute](CONTRIBUTING.md)
+- [Working on this repository](AGENTS.md): task guides in `agents/skills/`, reference in `docs/`
 - [Hardware Compatibility](https://doc.redox-os.org/book/hardware-support.html)
-- Run Redox in a [Virtual Machine](https://doc.redox-os.org/book/running-vm.html) or on [Real Hardware](https://doc.redox-os.org/book/real-hardware.html)
+- Run FerrionOS in a [Virtual Machine](https://doc.redox-os.org/book/running-vm.html) or on [Real Hardware](https://doc.redox-os.org/book/real-hardware.html)
 - [Trying Out Redox](https://doc.redox-os.org/book/trying-out-redox.html)
 - [Building Redox](https://doc.redox-os.org/book/podman-build.html)
 - [Build System Documentation](https://doc.redox-os.org/book/build-system-reference.html)
@@ -44,7 +41,7 @@ Some of the key repositories on the Redox GitLab:
 | [Termion (terminal library)](https://gitlab.redox-os.org/redox-os/termion)                                  | **@jackpot51**
 | [pkgutils (current package manager)](https://gitlab.redox-os.org/redox-os/pkgutils)                         | **@jackpot51**
 | [Orbital (display server and window manager)](https://gitlab.redox-os.org/redox-os/orbital)                 | **@jackpot51**
-| This repo - the root of the Build System                                                                    | **@jackpot51** **@hatred_45**
+| [Build System](https://gitlab.redox-os.org/redox-os/redox) (upstream of this repo)                          | **@jackpot51** **@hatred_45**
 | [Redoxer (tool for easy Redox development on Linux)](https://gitlab.redox-os.org/redox-os/redoxer)          | **@jackpot51**
 | [The Redox Book](https://gitlab.redox-os.org/redox-os/book)                                                 | **@jackpot51** **@hatred_45**
 | [Website](https://gitlab.redox-os.org/redox-os/website)                                                     | **@jackpot51** **@hatred_45**

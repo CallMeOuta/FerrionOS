@@ -1,5 +1,5 @@
 [package]
-description = "Graphical Redox installer"
+description = "Graphical FerrionOS installer"
 
 [source]
 same_as = "../../core/installer"

@@ -1,5 +1,5 @@
 [package]
-description = "Package format utilities for Redox"
+description = "Package format utilities for FerrionOS"
 
 [source]
 same_as = "../pkgutils"

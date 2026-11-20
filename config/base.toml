@@ -96,15 +96,15 @@ data = """
 [[files]]
 path = "/usr/lib/os-release"
 data = """
-PRETTY_NAME="Redox OS 0.9.0"
-NAME="Redox OS"
+PRETTY_NAME="FerrionOS 0.9.0"
+NAME="FerrionOS"
 VERSION_ID="0.9.0"
 VERSION="0.9.0"
-ID="redox-os"
+ID="ferrionos"
+# os-release's field for derivatives: tools that look for Redox still match.
+ID_LIKE="redox-os"
 
-HOME_URL="https://redox-os.org/"
-DOCUMENTATION_URL="https://redox-os.org/docs/"
-SUPPORT_URL="https://redox-os.org/community/"
+DOCUMENTATION_URL="https://doc.redox-os.org/book/"
 """
 # VARIANT and BUILD_ID are appended by redox_installer when creating images.
 

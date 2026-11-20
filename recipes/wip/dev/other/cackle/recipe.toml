@@ -1,5 +1,5 @@
 #TODO camino crate error
-#TODO Probably needs to be ported to Redox
+#TODO Probably needs to be ported to FerrionOS
 [source]
 git = "https://github.com/davidlattimore/cackle"
 shallow_clone = true

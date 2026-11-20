@@ -1,4 +1,4 @@
-#TODO scanning loop, broken Redox support
+#TODO scanning loop, broken FerrionOS support
 [source]
 git = "https://github.com/mrjackwills/havn"
 [build]

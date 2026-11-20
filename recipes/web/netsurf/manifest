@@ -3,4 +3,4 @@ binary=/usr/bin/netsurf-fb
 icon=/usr/share/icons/apps/internet-web-browser.png
 accept=*.html
 author=The Netsurf Developers
-description=Browser for Redox
+description=Browser for FerrionOS

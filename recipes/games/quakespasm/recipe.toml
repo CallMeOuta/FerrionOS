@@ -29,7 +29,7 @@ DYNAMIC_INIT
 COOKBOOK_CONFIGURE="true"
 COOKBOOK_CONFIGURE_FLAGS=""
 
-# Ensure the build system is aware of Redox
+# Ensure the build system is aware of FerrionOS
 # The build system uses sdl-config for Unix, but SDL recommends using pkg-config
 export HOST_OS="redox"
 export PKG_CONFIG="${TARGET}-pkg-config"
@@ -48,7 +48,7 @@ fi
 # Source is in Quake/ and icons are in Misc/
 rsync -av --delete "${COOKBOOK_SOURCE}/Quake/" "${COOKBOOK_SOURCE}/Misc" ./
 
-# According to frantic grepping, the Redox build system doesn't apply patches to git
+# According to frantic grepping, the FerrionOS build system doesn't apply patches to git
 git apply "${COOKBOOK_RECIPE}/redox.patch"
 
 cookbook_configure

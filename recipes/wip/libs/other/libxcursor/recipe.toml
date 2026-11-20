@@ -22,7 +22,7 @@ template = "custom"
 script = """
 DYNAMIC_INIT
 
-# Force libtool to build shared libraries for Redox
+# Force libtool to build shared libraries for FerrionOS
 # Override libtool's platform detection
 export lt_cv_deplibs_check_method=pass_all
 export ac_cv_lib_dl_dlopen=yes

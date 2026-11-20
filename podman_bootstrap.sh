@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# This script setup the Redox build system with Podman
+# This script setup the FerrionOS build system with Podman
 # It install the Podman dependencies for cross-compilation
 # and download the build system configuration files
 
@@ -12,14 +12,14 @@ set -e
 banner()
 {
   echo "|------------------------------------------|"
-  echo "|----- Welcome to the redox bootstrap -----|"
+  echo "|--- Welcome to the FerrionOS bootstrap ---|"
   echo "|-------- for building with Podman --------|"
   echo "|------------------------------------------|"
 }
 
 ############################################################################
 # This function takes care of installing a dependency via package manager of
-# choice for building Redox on BSDs (macOS, FreeBSD, etc.).
+# choice for building FerrionOS on BSDs (macOS, FreeBSD, etc.).
 # @params:    $1 package manager
 #             $2 package name
 #             $3 binary name (optional)
@@ -87,7 +87,7 @@ osx()
 
 ###############################################################################
 # This function takes care of installing all dependencies using MacPorts
-# for building Redox on macOS
+# for building FerrionOS on macOS
 # @params:    $1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
 osx_macports()
@@ -115,7 +115,7 @@ osx_macports()
 
 ###############################################################################
 # This function takes care of installing all dependencies using Homebrew
-# for building Redox on macOS
+# for building FerrionOS on macOS
 # @params:    $1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
 osx_homebrew()
@@ -143,7 +143,7 @@ osx_homebrew()
 
 ###############################################################################
 # This function takes care of installing all dependencies using pkg
-# for building Redox on FreeBSD
+# for building FerrionOS on FreeBSD
 # @params:    $1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
 freebsd()
@@ -171,7 +171,7 @@ freebsd()
 }
 
 ###############################################################################
-# This function takes care of installing all dependencies for building Redox on
+# This function takes care of installing all dependencies for building FerrionOS on
 # Arch Linux
 # @params:	$1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
@@ -199,7 +199,7 @@ archLinux()
 }
 
 ###############################################################################
-# This function takes care of installing all dependencies for building Redox on
+# This function takes care of installing all dependencies for building FerrionOS on
 # Debian-based Linux
 # @params:	$1 the emulator to install, "virtualbox" or "qemu"
 # 		$2 the package manager to use
@@ -246,7 +246,7 @@ ubuntu()
 }
 
 ###############################################################################
-# This function takes care of installing all dependencies for building Redox on
+# This function takes care of installing all dependencies for building FerrionOS on
 # Fedora Linux
 # @params:	$1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
@@ -290,7 +290,7 @@ fedora()
 }
 
 ###############################################################################
-# This function takes care of installing all dependencies for building Redox on
+# This function takes care of installing all dependencies for building FerrionOS on
 # *SUSE Linux
 # @params:	$1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
@@ -386,7 +386,7 @@ suse()
 }
 
 ###############################################################################
-# This function takes care of installing all dependencies for building Redox on
+# This function takes care of installing all dependencies for building FerrionOS on
 # Gentoo Linux
 # @params:	$1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
@@ -435,7 +435,7 @@ gentoo()
 }
 
 ###############################################################################
-# This function takes care of installing all dependencies for building Redox on
+# This function takes care of installing all dependencies for building FerrionOS on
 # Solus
 # @params:	$1 the emulator to install, "virtualbox" or "qemu"
 ###############################################################################
@@ -477,9 +477,9 @@ solus()
 ######################################################################
 usage()
 {
-    echo "------------------------"
-    echo "|Redox bootstrap script|"
-    echo "------------------------"
+    echo "----------------------------"
+    echo "|FerrionOS bootstrap script|"
+    echo "----------------------------"
     echo "Usage: ./podman_bootstrap.sh"
     echo "OPTIONS:"
     echo
@@ -580,7 +580,7 @@ boot()
     echo "If you need a much quicker installation, run: "
     echo "  echo REPO_BINARY=1 >> redox/.config"
     echo
-    echo "Run the following commands to build Redox using Podman:"
+    echo "Run the following commands to build FerrionOS using Podman:"
     echo
     echo "cd redox"
     MAKE="make"
@@ -663,4 +663,4 @@ if [ "$dependenciesonly" = false ]; then
     boot
 fi
 
-echo "Redox bootstrap complete!"
+echo "FerrionOS bootstrap complete!"

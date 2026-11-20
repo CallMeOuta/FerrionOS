@@ -10,13 +10,13 @@
 #
 # Each share gets its own host-side virtiofsd daemon (started and stopped by
 # scripts/virtiofs-run.sh), a vhost-user-fs device, and a virtio-fsd scheme
-# process on Redox. In the guest, a share appears at /scheme/virtio-fsd.<tag>.
+# process on FerrionOS. In the guest, a share appears at /scheme/virtio-fsd.<tag>.
 # The emulator flags for each share are added in mk/qemu.mk and mk/ch.mk.
 # Shared directories must exist. The guest cannot change anything in a :ro share.
 #
 # WARNING: share=redox exposes the whole build tree to the guest, including
-# the harddrive.img Redox is booted from, .git and .config. Writing to them
-# from Redox can corrupt the build system. share=redox:ro avoids that.
+# the harddrive.img FerrionOS is booted from, .git and .config. Writing to them
+# from FerrionOS can corrupt the build system. share=redox:ro avoids that.
 #
 # virtiofsd runs on the host. The first one found is used: VIRTIOFSD, then
 # virtiofsd in PATH, /usr/libexec/virtiofsd or /usr/lib/qemu/virtiofsd. When

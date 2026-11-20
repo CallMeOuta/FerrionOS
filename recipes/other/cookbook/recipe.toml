@@ -9,7 +9,7 @@ cp -rv "${COOKBOOK_SOURCE}/native_bootstrap.sh" "${COOKBOOK_STAGE}/usr/bin/redox
 """
 
 [package]
-description = "Redox build system"
+description = "FerrionOS build system"
 dependencies = [
     "cbindgen",
     "curl",

@@ -16,8 +16,8 @@
 # CH_REMOTE or CH_FIRMWARE to use other files, e.g. CH=cloud-hypervisor for
 # the one in PATH.
 #
-# The serial console puts this terminal in raw mode, so Ctrl-C goes to Redox.
-# Redox cannot power off Cloud Hypervisor by itself yet: use make ch-shutdown.
+# The serial console puts this terminal in raw mode, so Ctrl-C goes to FerrionOS.
+# FerrionOS cannot power off Cloud Hypervisor by itself yet: use make ch-shutdown.
 #
 # The network is passt by default: a user-mode network stack, started by
 # scripts/passt-run.sh, that answers the guest's DHCP and DNS and carries its
@@ -83,7 +83,7 @@ CHFLAGS+= \
 PASST_RUN=
 
 ifeq ($(net),tap)
-	# The Redox virtio-net driver only acknowledges VIRTIO_NET_F_MAC at the moment.
+	# The FerrionOS virtio-net driver only acknowledges VIRTIO_NET_F_MAC at the moment.
 	CHFLAGS+=--net tap=$(CH_TAP),mac=$(CH_MAC),offload_tso=off,offload_ufo=off,offload_csum=off
 else ifneq ($(net),no)
 	CHFLAGS+=--net vhost_user=true,socket=$(CH_PASST_SOCK),mac=$(CH_MAC)

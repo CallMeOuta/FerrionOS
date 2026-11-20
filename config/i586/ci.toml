@@ -1,4 +1,4 @@
-# The Redox build server configuration
+# The FerrionOS build server configuration
 
 # General settings
 [general]
@@ -9,7 +9,7 @@ prompt = false
 [packages]
 
 # If you need to disable some broken package comment out instead of removal to not increase the maintenance cost
-#TODO: commented out recipes need to be built and tested inside of Redox to verify if they returned to work
+#TODO: commented out recipes need to be built and tested inside of FerrionOS to verify if they returned to work
 
 # Meta-packages below
 

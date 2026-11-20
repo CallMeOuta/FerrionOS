@@ -1,4 +1,4 @@
-# Configuration file with the commands configuration of the Redox image
+# Configuration file with the commands configuration of the FerrionOS image
 
 $(BUILD)/harddrive.img: $(FSTOOLS) $(REPO_TAG)
 ifeq ($(FSTOOLS_IN_PODMAN),1)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# This script show the changelog of all Redox components
+# This script show the changelog of all FerrionOS components
 
 set -e
 

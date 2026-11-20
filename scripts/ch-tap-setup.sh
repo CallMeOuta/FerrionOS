@@ -346,9 +346,9 @@ run_checks() {
 print_summary() {
     echo
     echo "${TAP} is ready. It shows NO-CARRIER until cloud-hypervisor opens it; that is normal."
-    echo "Start Redox with 'make ch net=tap'. It adds:"
+    echo "Start FerrionOS with 'make ch net=tap'. It adds:"
     echo "  --net tap=${TAP},mac=${GUEST_MAC},offload_tso=off,offload_ufo=off,offload_csum=off"
-    echo "Then optionally run 'dhcpd -v' in Redox and watch leases happen on the host with 'journalctl -t dnsmasq-dhcp -f'."
+    echo "Then optionally run 'dhcpd -v' in FerrionOS and watch leases happen on the host with 'journalctl -t dnsmasq-dhcp -f'."
 }
 
 main() {

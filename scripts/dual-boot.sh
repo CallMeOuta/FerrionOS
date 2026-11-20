@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# This script install Redox in the free space of your storage device
+# This script install FerrionOS in the free space of your storage device
 # and add a boot entry (if you are using the systemd-boot boot loader)
 
 set -e
@@ -39,14 +39,14 @@ set -x
 sudo mkdir -pv "${ESP}/EFI" "${ESP}/loader/entries"
 sudo cp -v "${BOOTLOADER}" "${ESP}/EFI/redox.efi"
 sudo tee "${ESP}/loader/entries/redox.conf" <<EOF
-title Redox OS
+title FerrionOS
 efi /EFI/redox.efi
 EOF
 set +x
 
 sync
 
-echo "Finished installing Redox OS dual boot"
+echo "Finished installing FerrionOS dual boot"
 echo ""
 echo "To mount the RedoxFS partition, run:"
 echo "  ./scripts/mount-redoxfs.sh ${DISK}"

@@ -5,7 +5,7 @@
 HOST_ARCH?=$(shell uname -m)
 
 # Configuration
-## Architecture to build Redox for (aarch64, i586, or x86_64). Defaults to a host one
+## Architecture to build FerrionOS for (aarch64, i586, or x86_64). Defaults to a host one
 ARCH?=$(HOST_ARCH)
 ## Sub-device type for aarch64 if needed
 BOARD?=
@@ -125,7 +125,7 @@ else ifeq ($(UNAME),Redox)
 	export CARGO_NET_GIT_FETCH_WITH_CLI=true
 # TODO: allow overriding to cross compiler toolchain when build server have one prebuilt
 	HOSTED_REDOX=1
-# Don't check for dependencies if you will be using Hosted Redox
+# Don't check for dependencies if you will be using Hosted FerrionOS
 	SKIP_CHECK_TOOLS=1
 ifneq ($(shell which repo),)
 	REPO_BIN=repo

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# This script allow the user to copy a Rust backtrace from Redox
+# This script allow the user to copy a Rust backtrace from FerrionOS
 # and retrieve the symbols
 
 usage()

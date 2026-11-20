@@ -1,7 +1,7 @@
 # Configuration file for QEMU
 
 QEMU?=qemu-system-$(QEMU_ARCH)
-QEMUFLAGS?=-d guest_errors -name "Redox OS $(ARCH)"
+QEMUFLAGS?=-d guest_errors -name "FerrionOS $(ARCH)"
 netboot?=no
 redoxer?=no
 VGA_SUPPORTED=no

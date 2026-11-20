@@ -1,6 +1,6 @@
 # Hardware Compatibility
 
-This document tracks the current hardware compatibility of Redox OS.
+This document tracks the current hardware compatibility of FerrionOS.
 
 - [Why are hardware reports needed?](#why-are-hardware-reports-needed)
 - [What if my computer is customized?](#what-if-my-computer-is-customized)
@@ -39,7 +39,7 @@ The following limitations apply to any status.
 - Only Intel GPUs are supported, other GPU vendors use BIOS VESA or UEFI GOP
 - I2C devices aren't supported yet (PS/2 or USB devices should be used)
 - USB support varies on each device model because some USB devices require specific drivers (use input devices with standardized controls for more compatibility)
-- Automatic operating system discovery is not implemented in the boot loader yet (remember this before installing Redox)
+- Automatic operating system discovery is not implemented in the boot loader yet (remember this before installing FerrionOS)
 
 ### Recommended
 
@@ -65,7 +65,7 @@ You will use this template to insert your computer on the table.
 |  |  |  |  |  |  |  |  |
 ```
 
-The Redox image date should use the [ISO format](https://en.wikipedia.org/wiki/ISO_8601)
+The FerrionOS image date should use the [ISO format](https://en.wikipedia.org/wiki/ISO_8601)
 
 ### Table row ordering
 

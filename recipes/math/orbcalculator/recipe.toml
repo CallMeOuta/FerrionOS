@@ -1,5 +1,5 @@
 [package]
-description = "Basic Redox graphical calculator"
+description = "Basic FerrionOS graphical calculator"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/orbcalculator.git"

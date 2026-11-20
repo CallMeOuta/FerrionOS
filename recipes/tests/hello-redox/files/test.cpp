@@ -2,5 +2,5 @@
 
 int main()
 {
-   std::cout << "Hello, Redox!" << std::endl;
+   std::cout << "Hello, FerrionOS!" << std::endl;
 }

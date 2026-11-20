@@ -163,7 +163,7 @@ pub struct OptionalPackageRecipe {
     pub files: Vec<String>,
 }
 
-/// Everything required to build a Redox package
+/// Everything required to build a FerrionOS package
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Recipe {
