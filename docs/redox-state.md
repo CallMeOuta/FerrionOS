@@ -2,7 +2,7 @@
 
 FerrionOS builds Redox's components ([`upstream.md`](upstream.md)), so Redox's state is FerrionOS's state until a component changes here. This page keeps the facts that change how you work: beliefs about Redox that are out of date, limits that explain a failing port, test or boot, and places where upstream's documentation is wrong. Every fact is as of 2026-11-20 and carries its source. Confirm a fact at its source before a decision rests on it.
 
-Upstream develops on gitlab.redox-os.org, which answered scripted requests with a Cloudflare challenge (HTTP 403) on 2026-11-20: open its links in a browser. Read source through the GitHub mirrors at `github.com/redox-os/<repo>`, which exist for kernel, relibc, redoxfs, syscall and orbital among others. `base` has no mirror.
+Upstream develops on gitlab.redox-os.org. On 2026-11-20 its web pages answered scripted requests with a Cloudflare challenge (HTTP 403) while git over HTTPS kept working: open its links in a browser, and read source with git or through the GitHub mirrors at `github.com/redox-os/<repo>`, which exist for kernel, relibc, redoxfs, syscall and orbital among others. `base` has no mirror.
 
 ## Out of date: what you may remember
 

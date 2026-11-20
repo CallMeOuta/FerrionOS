@@ -25,4 +25,4 @@ List the recipes that fetch from Redox's GitLab with `rg -l 'gitlab\.redox-os\.o
 - `REPO_BINARY=1` installs packages that Redox's build server compiled from Redox's sources. It tests a config and the image assembly; it cannot test a change to a recipe or to a component.
 - Recipes without `rev` move with upstream, so two cooks on different days can build different code. `make repo-lock` freezes the revisions now checked out, and `REPO_OFFLINE=1` stops fetching.
 - The bootstrap scripts clone upstream Redox into a new `redox/` directory. In this checkout run them with `-d`, which installs the dependencies and stops there.
-- When gitlab.redox-os.org is unreachable, the cookbook cannot be built from an empty Cargo cache and the component recipes cannot be fetched.
+- When gitlab.redox-os.org is unreachable, the cookbook cannot be built from an empty Cargo cache and the component recipes cannot be fetched. On 2026-11-20 it served git over HTTPS (`git ls-remote https://gitlab.redox-os.org/redox-os/base.git HEAD` answered `20f7573b`) while web page requests got a Cloudflare challenge, so builds fetch normally; browse its pages in a browser.
