@@ -38,6 +38,7 @@ else ifeq ($(ARCH),x86_64)
 		FIRMWARE=$(firstword \
 			$(wildcard /usr/share/ovmf/OVMF.fd) \
 			$(wildcard /usr/share/OVMF/OVMF_CODE.fd) \
+			$(wildcard /usr/share/edk2/x64/OVMF.4m.fd) \
 		)
 		ifeq ($(FIRMWARE),)
 			PFLASH0=$(firstword \
@@ -76,6 +77,7 @@ else ifeq ($(ARCH),aarch64)
 		ifeq ($(uefi),yes)
 			FIRMWARE=$(firstword \
 				$(wildcard /usr/share/AAVMF/AAVMF_CODE.fd) \
+				$(wildcard /usr/share/edk2/aarch64/QEMU_EFI.fd) \
 			)
 			ifeq ($(FIRMWARE),)
 				PFLASH0=$(firstword \

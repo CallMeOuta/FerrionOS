@@ -3,6 +3,8 @@ description = "FerrionOS bootloader"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/bootloader.git"
+rev = "f3d9261b5fc81418c259c5059f46ee7087e86ed8"
+patches = ["ferrion-boot-timeout.patch"]
 
 [build]
 template = "custom"

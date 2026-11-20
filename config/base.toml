@@ -113,6 +113,18 @@ path = "/etc/os-release"
 data = "../usr/lib/os-release"
 symlink = true
 
+# Console greeting; replaces the upstream banner that names Redox OS.
+[[files]]
+path = "/etc/issue"
+data = """
+########## FerrionOS #########
+# Login with the following:  #
+# `user`                     #
+# `root`:`password`          #
+##############################
+ 
+"""
+
 [[files]]
 path = "/etc/pkg.d/50_redox"
 data = "https://static.redox-os.org/pkg"
