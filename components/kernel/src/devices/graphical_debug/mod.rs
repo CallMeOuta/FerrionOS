@@ -18,6 +18,7 @@ pub fn init(env: &[u8]) {
     let mut width = 0;
     let mut height = 0;
     let mut stride = 0;
+    let mut quiet = false;
 
     //TODO: should errors be reported?
     for line in str::from_utf8(env).unwrap_or("").lines() {
@@ -44,6 +45,10 @@ pub fn init(env: &[u8]) {
         if name == "FRAMEBUFFER_STRIDE" {
             stride = usize::from_str_radix(value, 16).unwrap_or(0);
         }
+
+        if name == "QUIET" {
+            quiet = value == "1";
+        }
     }
 
     *FRAMEBUFFER.lock() = (phys, virt, stride * height * 4);
@@ -57,6 +62,12 @@ pub fn init(env: &[u8]) {
         "Framebuffer {}x{} stride {} at {:X} mapped to {:X}",
         width, height, stride, phys, virt
     );
+
+    // A quiet boot keeps the screen for the boot splash; the log still goes to the serial port
+    if quiet {
+        println!("Quiet boot: graphical debug stays off");
+        return;
+    }
 
     let debug_display = DebugDisplay::new(width, height, stride, virt as *mut u32);
     *DEBUG_DISPLAY.lock() = Some(debug_display);
