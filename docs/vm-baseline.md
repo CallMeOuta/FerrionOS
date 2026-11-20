@@ -1,6 +1,6 @@
 # VM baseline
 
-What upstream's daily images do in a virtual machine, measured 2026-11-20 for step V0 and A0 of [`plans/product-roadmap.md`](../plans/product-roadmap.md). Upstream images are built from the same component sources this repository fetches, so they stand in for a FerrionOS image until one can be built here. Rerun these checks on every new FerrionOS image and keep the old columns for comparison.
+What upstream's daily images do in a virtual machine, measured 2026-11-20 as the baseline for FerrionOS's virtual-machine work. Upstream images are built from the same component sources this repository fetches, so they stand in for a FerrionOS image until one can be built here. Rerun these checks on every new FerrionOS image and keep the old columns for comparison.
 
 ## Setup
 

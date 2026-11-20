@@ -19,12 +19,9 @@ Read the matching guide before starting:
 - Choosing a check, or about to start a build: [`docs/testing.md`](docs/testing.md)
 - How a `make` run becomes an image, where a setting comes from, what a target name means: [`docs/build-system.md`](docs/build-system.md)
 - What still comes from Redox's servers and repositories: [`docs/upstream.md`](docs/upstream.md)
-- Setting up git, hosting or component forks, or starting work on the kernel, relibc or RedoxFS: [`plans/kernel-roadmap.md`](plans/kernel-roadmap.md)
-- Deciding what to build next for users (the VM as reference machine, browsers, games, ARM): [`plans/product-roadmap.md`](plans/product-roadmap.md)
-- Porting a Linux driver, an experimental track: [`plans/linux-driver-compat.md`](plans/linux-driver-compat.md)
-- Changing a build flag, a hot path or a hardening default, where speed and security meet: [`plans/performance-roadmap.md`](plans/performance-roadmap.md)
+- Roadmaps, when `plans/` exists on this machine (it is kept out of git, so a clone has none): `plans/kernel-roadmap.md` before setting up hosting or forks or starting kernel, relibc or RedoxFS work; `plans/product-roadmap.md` before deciding what to build next for users; `plans/linux-driver-compat.md` before porting a Linux driver; `plans/performance-roadmap.md` before changing a build flag, a hot path or a hardening default; `plans/security-roadmap.md` before any change listed under Security. Never commit them.
 
-Documentation is split by genre. `agents/skills/` holds task procedure, `docs/` holds reference on how the build system is shaped, and `plans/` holds dated roadmaps that end with questions for the maintainer; all three are for anyone working on the codebase. User documentation is upstream's [Redox Book](https://doc.redox-os.org/book/).
+Documentation is split by genre. `agents/skills/` holds task procedure and `docs/` holds reference on how the build system is shaped; both are for anyone working on the codebase. The roadmaps in `plans/` stay local to the maintainer's machine. User documentation is upstream's [Redox Book](https://doc.redox-os.org/book/).
 
 # Rules
 
@@ -35,7 +32,7 @@ Documentation is split by genre. `agents/skills/` holds task procedure, `docs/` 
 
 # Security
 
-FerrionOS is unhardened today. Before changing accounts, file modes, scheme lists, compiler or linker flags, a recipe's `[source]`, or a download in `mk/` or `podman/`, and before writing that FerrionOS protects against something, read [`plans/security-roadmap.md`](plans/security-roadmap.md): its "FerrionOS today" table is the wording to use, and its items say where each change belongs.
+FerrionOS is unhardened today. Before changing accounts, file modes, scheme lists, compiler or linker flags, a recipe's `[source]`, or a download in `mk/` or `podman/`, and before writing that FerrionOS protects against something, apply the rules below, and read `plans/security-roadmap.md` when it exists on this machine: its "FerrionOS today" table is the wording to use, and its items say where each change belongs.
 
 - Claim a protection only with evidence that shows it on a built image, such as a boot test. Without it, write "planned" and name the roadmap item.
 - The accounts in `config/base.toml` (`root` with the password `password`, `user` with an empty password in group `sudo`) are dev credentials. An image that leaves the build machine carries its own accounts.
