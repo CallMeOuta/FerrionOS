@@ -21,6 +21,7 @@ What upstream's daily images do in a virtual machine, measured 2026-11-20 for st
 |virtio-vga|Yes|`virtio-gpud` takes over from the boot framebuffer at 1280x800|
 |virtio-gpu-pci, no VGA|Yes|No boot framebuffer, so the bootloader screen is blank; `virtio-gpud` brings up the display|
 |virtio-vga-gl, host rendering through EGL|Yes|Login prompt on the serial console; the guest draws in 2D only, since Mesa is built for the CPU (`swrast`)|
+|FerrionOS image: VGA, NVMe, virtio-net|Yes|Built here on 2026-11-20 with `make all REPO_BINARY=1` at commit `8395b5e7`; same graphical login as upstream's image within 18 s of Enter; `virtio-netd` starts; `/usr/lib/os-release` reads `NAME="FerrionOS"`, `ID="ferrionos"`, `ID_LIKE="redox-os"`|
 
 ## aarch64
 
@@ -41,6 +42,6 @@ On aarch64 no PCI disk driver brought up the root filesystem: the virtio drivers
 1. The bootloader waits at its resolution menu with no timeout, so an unattended VM never boots. It is the first thing to fix for V2.
 2. The bootloader panics when the serial port is a socket instead of a file: "Failed to set max mode" and then `src/os/uefi/mod.rs:362:87` unwrapping a "device error" (bootloader 1.0.0).
 3. `make qemu` looks for UEFI firmware in `/usr/share/ovmf`, `/usr/share/OVMF`, `/usr/share/AAVMF` and QEMU's own share folder, not in `/usr/share/edk2/x64/` and `/usr/share/edk2/aarch64/`, where Arch-based distributions install it. On such hosts an x86_64 guest falls back to legacy BIOS boot without a message.
-4. Upstream branding shows in the running system: the login background is the Redox logo from the `orbdata` package, the bootloader prints "Redox OS Bootloader", and the console greets with a "Redox OS" banner. Each comes from a fetched component, so it needs a FerrionOS replacement before an image is distributed.
+4. Upstream branding shows in the running system: the login background is the Redox logo from the `orbdata` package, the bootloader prints "Redox OS Bootloader", and the console greets with a "Redox OS" banner from `/etc/issue`. The image built here shows all three too. `/etc/issue` is a plain file a config can replace; the logo and the bootloader text come from fetched components and need FerrionOS replacements before an image is distributed.
 5. The login screen has `user` filled in and accepts an empty password: the dev accounts of `config/base.toml`.
 6. A QEMU without its optional display modules has no virtio-gpu devices and no window: on split-package distributions `make qemu gpu=virtio-gl` needs the `virtio-vga-gl`, GTK and OpenGL modules installed.
