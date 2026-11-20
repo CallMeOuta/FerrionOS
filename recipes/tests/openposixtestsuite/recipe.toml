@@ -1,0 +1,20 @@
+[source]
+git = "https://gitlab.redox-os.org/redox-os/openposixtestsuite.git"
+branch = "redox"
+
+[build]
+template = "custom"
+script = """
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/openposixtestsuite"
+cp -rv "${COOKBOOK_SOURCE}"/* "${COOKBOOK_STAGE}/usr/share/openposixtestsuite"
+"""
+
+[package]
+description = "Tests based on Open POSIX test suite"
+dependencies = [
+    "gcc13",
+    "gnu-binutils",
+    "gnu-make",
+    "sed",
+]
+

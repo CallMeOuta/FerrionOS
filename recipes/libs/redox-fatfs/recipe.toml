@@ -1,0 +1,7 @@
+[package]
+description = "Redox FAT filesystem family library"
+
+[source]
+git = "https://gitlab.redox-os.org/redox-os/redox-fatfs.git"
+[build]
+template = "cargo"

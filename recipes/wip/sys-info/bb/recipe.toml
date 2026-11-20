@@ -1,0 +1,5 @@
+#TODO outdated nix crate? (after cargo update)
+[source]
+git = "https://github.com/epilys/bb"
+[build]
+template = "cargo"

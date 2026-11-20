@@ -1,0 +1,23 @@
+[source]
+git = "https://gitlab.redox-os.org/redox-os/redox.git"
+shallow_clone = true
+[build]
+template = "custom"
+script = """
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+cp -rv "${COOKBOOK_SOURCE}/native_bootstrap.sh" "${COOKBOOK_STAGE}/usr/bin/redox_bootstrap"
+"""
+
+[package]
+description = "Redox build system"
+dependencies = [
+    "cbindgen",
+    "curl",
+    "dev-essential",
+    "git",
+    "gnu-make",
+    "llvm21-common",
+    "pkgar",
+    "qemu",
+    "wget",
+]

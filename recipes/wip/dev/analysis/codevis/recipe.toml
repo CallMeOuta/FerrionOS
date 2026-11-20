@@ -1,0 +1,6 @@
+#TODO very outdated "open" crate (after cargo update)
+[source]
+git = "https://github.com/sloganking/codevis"
+shallow_clone = true
+[build]
+template = "cargo"

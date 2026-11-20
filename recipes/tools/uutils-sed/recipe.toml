@@ -1,0 +1,8 @@
+[package]
+description = "Tool for filtering and transforming text (uutils implementation)"
+
+[source]
+git = "https://github.com/uutils/sed"
+shallow_clone = true
+[build]
+template = "cargo"

@@ -1,0 +1,12 @@
+diff -ruwN source/configure source-new/configure
+--- source/configure	2026-05-05 14:22:01.000000000 +0000
++++ source-new/configure	2026-11-02 05:18:51.788806151 +0000
+@@ -5814,6 +5814,8 @@
+         ;;
+     minix)
+         ;;
++    redox)
++        ;;
+     none)
+         ;;
+     *)

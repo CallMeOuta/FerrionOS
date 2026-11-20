@@ -1,0 +1,5 @@
+#TODO compiled but untested
+[source]
+git = "https://codeberg.org/lukeflo/bibiman"
+[build]
+template = "cargo"

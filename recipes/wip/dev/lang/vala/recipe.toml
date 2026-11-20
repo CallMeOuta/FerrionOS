@@ -1,0 +1,10 @@
+#TODO Unable to retrieve girdir from gobject-introspection-1.0.pc
+#TODO require bootstraping from another vala compiler
+# build instructions: https://gitlab.gnome.org/GNOME/vala#building-vala
+[source]
+tar = "https://download.gnome.org/sources/vala/0.56/vala-0.56.18.tar.xz"
+[build]
+template = "configure"
+dependencies = [
+    "glib",
+]

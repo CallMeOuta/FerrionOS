@@ -1,0 +1,6 @@
+#TODO build error, disable tests?
+[source]
+tar = "https://sourceforge.net/projects/procps-ng/files/Production/procps-ng-4.0.4.tar.xz/download"
+[build]
+template = "configure"
+dependencies = ["ncursesw"]

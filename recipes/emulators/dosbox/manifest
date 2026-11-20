@@ -1,0 +1,4 @@
+name=DOSBox
+category=Games
+binary=/bin/dosbox
+icon=/usr/share/icons/apps/dosbox.png

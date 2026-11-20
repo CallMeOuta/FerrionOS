@@ -1,0 +1,9 @@
+[package]
+description = "When creating a customized Redox image from Redox build system, add files to this recipe to auto-install them in the Redox "user" user directory"
+
+[build]
+template = "custom"
+script = """
+mkdir -pv "${COOKBOOK_STAGE}/home/user"
+cp -rv "${COOKBOOK_SOURCE}"/* "${COOKBOOK_STAGE}/home/user"
+"""

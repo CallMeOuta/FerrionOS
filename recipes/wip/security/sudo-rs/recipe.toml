@@ -1,0 +1,5 @@
+#TODO port
+[source]
+git = "https://github.com/memorysafety/sudo-rs"
+[build]
+template = "cargo"

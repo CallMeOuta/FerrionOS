@@ -1,0 +1,6 @@
+#TODO wayland-backend crate error
+[source]
+git = "https://github.com/boclair/fractal-explorer"
+shallow_clone = true
+[build]
+template = "cargo"

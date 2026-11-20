@@ -1,0 +1,11 @@
+[source]
+git = "https://github.com/google/brotli"
+patches = [ "redox.patch" ]
+rev = "v1.2.1"
+shallow_clone = true
+
+[build]
+template = "cmake"
+cmakeflags = [
+    "-DBROTLI_DISABLE_TESTS=TRUE"
+]

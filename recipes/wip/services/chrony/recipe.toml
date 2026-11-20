@@ -1,0 +1,9 @@
+#TODO can't open makefiles
+# build instructions: https://gitlab.com/chrony/chrony/-/blob/master/doc/installation.adoc?ref_type=heads
+[source]
+tar = "https://chrony-project.org/releases/chrony-4.8.tar.gz"
+[build]
+template = "configure"
+dependencies = [
+    "gnutls3",
+]

@@ -1,0 +1,19 @@
+[package]
+description = "C bindings to the Orbital client library"
+
+[source]
+git = "https://gitlab.redox-os.org/redox-os/liborbital.git"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+rsync -av --delete "${COOKBOOK_SOURCE}/" ./
+
+if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
+    export "${REDOXER_RUSTFLAGS_KEY}+= -C link-arg=-Wl,-soname,liborbital.so.0"
+fi
+
+"${COOKBOOK_MAKE}" all CARGO="${COOKBOOK_CARGO}" HOST="${TARGET}"
+"${COOKBOOK_MAKE}" install CARGO="${COOKBOOK_CARGO}" HOST="${TARGET}" DESTDIR="${COOKBOOK_STAGE}"
+"""

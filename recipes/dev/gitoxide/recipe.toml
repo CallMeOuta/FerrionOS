@@ -1,0 +1,16 @@
+[package]
+description = "Rust reimplementation of Git"
+
+[source]
+git = "https://github.com/Byron/gitoxide.git"
+rev = "v0.54.0"
+shallow_clone = true
+patches = [
+    "redox.patch"
+]
+
+[build]
+dependencies = [
+    "openssl3",
+]
+template = "cargo"

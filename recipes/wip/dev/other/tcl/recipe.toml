@@ -1,0 +1,21 @@
+#TODO compiled but not tested
+[source]
+tar = "http://prdownloads.sourceforge.net/tcl/tcl9.1.0-src.tar.gz"
+blake3 = "a5c4860fdbd9e01f002ab2cf8508f912f43ab218a5035d93cad23d57ac8b8db3"
+patches = [
+    "redox.patch"
+]
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+COOKBOOK_CONFIGURE="$COOKBOOK_SOURCE/unix/configure"
+COOKBOOK_CONFIGURE_FLAGS+=(
+    ac_cv_func_memcmp_working=yes
+    tcl_cv_strstr_unbroken=
+    tcl_cv_strtoul_unbroken=
+    --disable-zipfs
+)
+cookbook_configure
+"""

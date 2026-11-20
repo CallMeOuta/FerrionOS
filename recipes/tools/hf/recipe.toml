@@ -1,0 +1,7 @@
+[package]
+description = "Show and hide hidden files in a cross-platform (POSIX and Windows) way"
+
+[source]
+git = "https://github.com/sorairolake/hf"
+[build]
+template = "cargo"

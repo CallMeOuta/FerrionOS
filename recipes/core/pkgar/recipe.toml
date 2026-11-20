@@ -1,0 +1,15 @@
+[package]
+description = "Package format utilities for Redox"
+
+[source]
+same_as = "../pkgutils"
+
+[build]
+template = "cargo"
+cargopackages = [
+    "pkgar",
+    "pkgar-keys",
+]
+cargoflags = [
+    "--features cli"
+]

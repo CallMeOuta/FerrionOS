@@ -1,0 +1,17 @@
+#TODO compile and test
+[source]
+tar = "https://mirrors.edge.kernel.org/pub/software/utils/pciutils/pciutils-3.9.0.tar.xz"
+[build]
+template = "custom"
+dependencies = [
+    "zlib",
+]
+script = """
+rsync -av --delete "${COOKBOOK_SOURCE}/" ./
+DYNAMIC_INIT
+#MAKEFLAGS=(
+ #   CROSS_COMPILE=
+#)
+"${COOKBOOK_MAKE}" -j "${COOKBOOK_MAKE_JOBS}" #"${MAKEFLAGS[@]}"
+"${COOKBOOK_MAKE}" install DESTDIR="${COOKBOOK_STAGE}/usr"
+"""

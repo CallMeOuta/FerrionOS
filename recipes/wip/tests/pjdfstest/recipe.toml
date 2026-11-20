@@ -1,0 +1,12 @@
+#TODO compilation error, warnings treated as errors
+[source]
+git = "https://github.com/pjd/pjdfstest"
+rev = "85a8aea"
+shallow_clone = true
+script = """
+autotools_recursive_regenerate
+"""
+[build]
+template = "configure"
+[package]
+dependencies = ["perl5"]

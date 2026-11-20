@@ -1,0 +1,7 @@
+[package]
+description = "\"Next-gen\" ls tool implementation"
+
+[source]
+git = "https://github.com/lsd-rs/lsd"
+[build]
+template = "cargo"

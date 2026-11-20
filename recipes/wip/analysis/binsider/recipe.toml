@@ -1,0 +1,6 @@
+#TODO lurk-cli crate error
+[source]
+git = "https://github.com/orhun/binsider"
+shallow_clone = true
+[build]
+template = "cargo"

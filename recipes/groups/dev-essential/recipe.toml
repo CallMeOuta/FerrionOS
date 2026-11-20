@@ -1,0 +1,25 @@
+[package]
+dependencies = [
+    "autotools",
+    #"bison", #TODO: fix compilation error
+    "cmake",
+    #"debugedit", #TODO: compile and test
+    "gcc13",
+    "gcc13.cxx",
+    "groff",
+    "gawk",
+    "file",
+    "lua54",
+    "m4",
+    "meson",
+    "nasm",
+    "perl5",
+    "python312",
+    "patch",
+    "pkg-config",
+    "ripgrep",
+    "rust",
+    "uutils-grep",
+    "uutils-sed",
+]
+description = "Essential development tools meta-package"

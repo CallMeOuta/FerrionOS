@@ -1,0 +1,18 @@
+[package]
+description = "Partial Lua 5.3 compatibility library for Lua 5.1-standard interpreter"
+
+[source]
+git = "https://github.com/lunarmodules/lua-compat-5.3.git"
+[build]
+template = "custom"
+dependencies = [
+    "lua54"
+]
+script = """
+${CC} -O2 -fPIC ${CPPFLAGS} -c "${COOKBOOK_SOURCE}/c-api/compat-5.3.c" -o compat-5.3.o
+${AR} rcs libcompat53.a compat-5.3.o
+
+mkdir -p "${COOKBOOK_STAGE}/usr/lib" "${COOKBOOK_STAGE}/usr/include"
+cp libcompat53.a "${COOKBOOK_STAGE}/usr/lib/"
+cp "${COOKBOOK_SOURCE}/c-api/compat-5.3.h" "${COOKBOOK_STAGE}/usr/include/"
+"""

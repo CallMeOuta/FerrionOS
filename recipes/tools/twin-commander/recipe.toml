@@ -1,0 +1,8 @@
+[package]
+description = "Terminal file manager"
+
+[source]
+git = "https://github.com/kivimango/twin-commander.git"
+
+[build]
+template = "cargo"

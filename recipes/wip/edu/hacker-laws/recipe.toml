@@ -1,0 +1,10 @@
+#TODO not tested
+[source]
+git = "https://github.com/dwmkerr/hacker-laws"
+shallow_clone = true
+[build]
+template = "custom"
+script = """
+mkdir -pv "${COOKBOOK_STAGE}"/usr/share/hacker-laws
+cp -rv "${COOKBOOK_SOURCE}"/* "${COOKBOOK_STAGE}"/usr/share/hacker-laws
+"""

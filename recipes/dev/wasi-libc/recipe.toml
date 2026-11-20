@@ -1,0 +1,14 @@
+[package]
+description = "C Standard Library implementation for WebAssembly/WASI"
+
+# NOTE: This is only used to compile into wasi
+[source]
+git = "https://github.com/WebAssembly/wasi-libc"
+shallow_clone = true
+
+[build]
+template = "custom"
+compiler = "clang"
+script = """
+cookbook_cmake -DCMAKE_LINK_DEPENDS_USE_LINKER=FALSE
+"""

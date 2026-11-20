@@ -1,0 +1,51 @@
+[package]
+description = "Tools and libraries for video conversion and playback"
+
+[source]
+tar = "https://ffmpeg.org/releases/ffmpeg-6.1.5.tar.xz"
+blake3 = "da8e6743d96f27d5b5425339218f9a954d9440cb27ba449b449d686b411292e9"
+patches = [
+    "ffmpeg.patch",
+]
+
+[build]
+template = "custom"
+dependencies = [
+    "liborbital",
+    "mesa",
+    "sdl2",
+    "zlib",
+]
+dev-dependencies = [
+    "libstdcxx"
+]
+compiler = "gcc"
+script = """
+DYNAMIC_INIT
+
+ARCH="${TARGET%%-*}"
+COOKBOOK_CONFIGURE_FLAGS=(
+    --enable-cross-compile
+    --target-os=redox
+    --arch="${ARCH}"
+    --cross_prefix="${GNU_TARGET}-"
+    --prefix=/usr
+    --disable-doc
+    --disable-stripping
+    --enable-shared
+    --disable-static
+    --disable-network
+    --enable-sdl2
+    --enable-zlib
+    --enable-pic
+    --enable-encoder=png
+    --enable-decoder=png
+)
+if [[ "$REDOXER_USE_LTO" = "1" || "$REDOXER_USE_LTO" = "true" ]]; then
+COOKBOOK_CONFIGURE_FLAGS+=(--enable-lto)
+fi
+
+cookbook_configure
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/ui/apps"
+cp -v "${COOKBOOK_RECIPE}/manifest" "${COOKBOOK_STAGE}/usr/share/ui/apps/ffplay"
+"""

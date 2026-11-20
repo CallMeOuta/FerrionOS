@@ -1,0 +1,8 @@
+[package]
+description = "Print lines that match patterns like grep, but smarter and faster"
+
+[source]
+git = "https://github.com/jackpot51/ripgrep.git"
+
+[build]
+template = "cargo"

@@ -1,0 +1,12 @@
+[package]
+description = "\"Hello world\" examples in over 1000 languages"
+
+[source]
+git = "https://github.com/leachim6/hello-world"
+shallow_clone = true
+[build]
+template = "custom"
+script = """
+mkdir -pv "${COOKBOOK_STAGE}"/usr/share/hello-world-examples
+cp -rv "${COOKBOOK_SOURCE}"/[#,a-z] "${COOKBOOK_STAGE}"/usr/share/hello-world-examples
+"""
