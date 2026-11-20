@@ -20,6 +20,8 @@ Read the matching guide before starting:
 - How a `make` run becomes an image, where a setting comes from, what a target name means: [`docs/build-system.md`](docs/build-system.md)
 - What still comes from Redox's servers and repositories: [`docs/upstream.md`](docs/upstream.md)
 - Setting up git, hosting or component forks, or starting work on the kernel, relibc or RedoxFS: [`plans/kernel-roadmap.md`](plans/kernel-roadmap.md)
+- Deciding what to build next for users (the VM as reference machine, browsers, games, ARM): [`plans/product-roadmap.md`](plans/product-roadmap.md)
+- Porting a Linux driver, an experimental track: [`plans/linux-driver-compat.md`](plans/linux-driver-compat.md)
 
 Documentation is split by genre. `agents/skills/` holds task procedure, `docs/` holds reference on how the build system is shaped, and `plans/` holds dated roadmaps that end with questions for the maintainer; all three are for anyone working on the codebase. User documentation is upstream's [Redox Book](https://doc.redox-os.org/book/).
 
