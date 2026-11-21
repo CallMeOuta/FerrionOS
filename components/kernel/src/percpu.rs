@@ -46,6 +46,8 @@ pub struct PercpuBlock {
     pub ptrace_flags: Cell<PtraceFlags>,
     pub ptrace_session: RefCell<Option<Weak<Session>>>,
     pub inside_syscall: Cell<bool>,
+    /// The running context's `Context::foreign_call`, read on every system call entry.
+    pub foreign_call: Cell<[usize; 3]>,
 
     pub syscall_debug_info: Cell<SyscallDebugInfo>,
 
@@ -227,6 +229,7 @@ impl PercpuBlock {
             ptrace_flags: Cell::new(PtraceFlags::empty()),
             ptrace_session: RefCell::new(None),
             inside_syscall: Cell::new(false),
+            foreign_call: Cell::new([0; 3]),
 
             syscall_debug_info: Cell::new(SyscallDebugInfo::default()),
 

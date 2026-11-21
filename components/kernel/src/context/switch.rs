@@ -1246,6 +1246,7 @@ unsafe fn switch_to(
     //*percpu.ptrace_session.borrow_mut() = ptrace_session;
     percpu.ptrace_flags.set(ptrace_flags);
     prev_context.inside_syscall = percpu.inside_syscall.replace(next_context.inside_syscall);
+    percpu.foreign_call.set(next_context.foreign_call);
 
     #[cfg(feature = "profiling")]
     {

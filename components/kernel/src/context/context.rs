@@ -133,6 +133,10 @@ pub struct Context {
     /// not running, otherwise the status must be read from the percpu (which can not be accessed
     /// by other hw-threads, unless frozen).
     pub inside_syscall: bool,
+    /// Foreign-call registration of this thread: `[entry, start, end]`, all zero when unset. A
+    /// `syscall` instruction outside `start..end` is not dispatched but resumed at `entry`, with
+    /// every register intact. Mirrored in the percpu block while the context runs.
+    pub foreign_call: [usize; 3],
 
     #[cfg(feature = "syscall_debug")]
     pub syscall_debug_info: crate::syscall::debug::SyscallDebugInfo,
@@ -234,6 +238,7 @@ impl Context {
             sched_cpu_time: 0,
             sched_affinity: LogicalCpuSet::all(),
             inside_syscall: false,
+            foreign_call: [0; 3],
             syscall_head: SyscallFrame::Free(RaiiFrame::allocate()?),
             syscall_tail: SyscallFrame::Free(RaiiFrame::allocate()?),
             wake: None,
@@ -387,9 +392,13 @@ impl Context {
             return addr_space;
         };
 
+        // A new address space no longer holds the code the registration named.
+        self.foreign_call = [0; 3];
+
         if self.is_current_context() {
             // TODO: Share more code with context::arch::switch_to.
             let this_percpu = PercpuBlock::current();
+            this_percpu.foreign_call.set([0; 3]);
 
             if let Some(ref prev_addrsp) = self.addr_space {
                 assert!(Arc::ptr_eq(

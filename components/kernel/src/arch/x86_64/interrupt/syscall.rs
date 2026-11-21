@@ -65,9 +65,23 @@ pub unsafe fn init() {
     }
 }
 
+/// Returns true for a foreign call: a `syscall` instruction outside the range the thread
+/// registered through its `foreign-call` handle. It is not dispatched; the thread resumes at the
+/// registered entry with every register as the instruction left it (RCX and R11 hold the return
+/// address and flags), through the IRETQ exit below.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __inner_syscall_instruction(stack: *mut InterruptStack) {
+pub unsafe extern "C" fn __inner_syscall_instruction(stack: *mut InterruptStack) -> bool {
     unsafe {
+        let [entry, start, end] = crate::percpu::PercpuBlock::current().foreign_call.get();
+        if entry != 0 {
+            // `syscall` is two bytes long, and RIP was pushed from RCX, the address after it.
+            let instruction = (*stack).iret.rip.wrapping_sub(2);
+            if !(start..end).contains(&instruction) {
+                (*stack).iret.rip = entry;
+                return true;
+            }
+        }
+
         let mut token = CleanLockToken::new();
         let allowed = ptrace::breakpoint_callback(PTRACE_STOP_PRE_SYSCALL, None, &mut token)
             .and_then(|_| ptrace::next_breakpoint().map(|f| !f.contains(PTRACE_FLAG_IGNORE)));
@@ -89,6 +103,7 @@ pub unsafe extern "C" fn __inner_syscall_instruction(stack: *mut InterruptStack)
         }
 
         ptrace::breakpoint_callback(PTRACE_STOP_POST_SYSCALL, None, &mut token);
+        false
     }
 }
 
@@ -113,6 +128,8 @@ pub unsafe extern "C" fn syscall_instruction() {
     // Call inner funtion
     "mov rdi, rsp;",
     "call __inner_syscall_instruction;",
+    "test al, al;",
+    "jnz 3f;",
 
     "
     .globl enter_usermode
@@ -174,6 +191,23 @@ pub unsafe extern "C" fn syscall_instruction() {
     xor rcx, rcx
     xor r11, r11
     iretq
+
+    // Foreign-call exit: every general register as the thread left it and RIP at the entry the
+    // thread registered, which the registration checked to be a user address. IRETQ restores
+    // RFLAGS from the frame; RCX and R11 keep the return address and flags of the `syscall`.
+    .p2align 4
+3:
+    ",
+    pop_preserved!(),
+    pop_scratch!(),
+    "swapgs;",
+    // IRETQ with the nested-task flag set raises #GP in long mode, and FMASK leaves that flag as
+    // the user set it. The frame's RFLAGS still carries it back.
+    "pushfq;",
+    "and QWORD PTR [rsp], ~0x4000;",
+    "popfq;",
+    "iretq;",
+    "
     .globl __syscall_instruction_end
 __syscall_instruction_end:
     ",

@@ -123,6 +123,8 @@ enum ContextHandle {
 
     Regs(RegsKind),
     Sighandler,
+    /// The thread's foreign-call registration; only the thread itself may change it.
+    ForeignCall,
     Start,
     NewFiletable {
         filetable: Arc<LockedFdTbl>,
@@ -248,6 +250,7 @@ impl ProcScheme {
             "regs/int" => (ContextHandle::Regs(RegsKind::Int), false),
             "regs/env" => (ContextHandle::Regs(RegsKind::Env), false),
             "sighandler" => (ContextHandle::Sighandler, false),
+            "foreign-call" => (ContextHandle::ForeignCall, false),
             "start" => (ContextHandle::Start, false),
             "open_via_dup" => (ContextHandle::OpenViaDup, false),
             "mmap-min-addr" => (
@@ -1130,6 +1133,33 @@ impl ContextHandle {
 
                 Ok(size_of::<SetSighandlerData>())
             }
+            ContextHandle::ForeignCall => {
+                // Three words: the entry, then the start and end of the native range. Three zeros
+                // unregister. The registration only moves where this thread's own `syscall`
+                // instructions resume, so it grants nothing, and no other thread may set it.
+                if !cfg!(target_arch = "x86_64") {
+                    return Err(Error::new(EOPNOTSUPP));
+                }
+                let mut words = buf.usizes();
+                let mut next = || words.next().ok_or(Error::new(EINVAL))?;
+                let (entry, start, end) = (next()?, next()?, next()?);
+                if !Arc::ptr_eq(&context, &*crate::context::current()) {
+                    return Err(Error::new(EPERM));
+                }
+                let registration = [entry, start, end];
+                if registration != [0; 3]
+                    && !(start < end && end <= crate::USER_END_OFFSET && (start..end).contains(&entry))
+                {
+                    return Err(Error::new(EINVAL));
+                }
+                // The context first, then this CPU's mirror: a switch in between copies the
+                // context's value into the mirror.
+                context.write(token.token()).foreign_call = registration;
+                crate::percpu::PercpuBlock::current()
+                    .foreign_call
+                    .set(registration);
+                Ok(3 * size_of::<usize>())
+            }
             ContextHandle::Start => {
                 let cpu_id = {
                     let mut guard = context.write(token.token());
@@ -1582,6 +1612,14 @@ impl ContextHandle {
                     prio,
                     debug_name,
                 })
+            }
+            ContextHandle::ForeignCall => {
+                let words = context.read(token.token()).foreign_call;
+                let mut bytes = [0_u8; 3 * size_of::<usize>()];
+                for (chunk, word) in bytes.chunks_exact_mut(size_of::<usize>()).zip(words) {
+                    chunk.copy_from_slice(&word.to_ne_bytes());
+                }
+                buf.copy_common_bytes_from_slice(&bytes)
             }
             ContextHandle::Sighandler => {
                 let data = match context.read(token.token()).sig {
