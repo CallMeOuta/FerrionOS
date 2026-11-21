@@ -1,4 +1,4 @@
-//! Loading a static Linux ELF64 x86-64 program.
+//! Loading a Linux ELF64 x86-64 program, and the dynamic linker it names.
 
 use crate::{LINUX_TOP, errno::*, mem};
 
@@ -9,6 +9,8 @@ pub struct Loaded {
     pub phnum: u64,
     /// End of the highest segment, where the break starts.
     pub end: u64,
+    /// Where the image was placed: its link address subtracted (0 for ET_EXEC).
+    pub base: u64,
 }
 
 fn u16_at(b: &[u8], o: usize) -> u64 {
@@ -30,7 +32,7 @@ pub fn check(file: &[u8]) -> Result<(), (i64, String)> {
     let no = |why: &str| Err((ENOEXEC, why.to_string()));
     if file.len() < 64 || &file[..4] != b"\x7fELF" {
         if file.starts_with(b"#!") {
-            return no("scripts are not started by LC1's linux-run");
+            return no("a script: linux-run starts its interpreter, which execve finds itself");
         }
         return no("not an ELF file");
     }
@@ -58,7 +60,10 @@ pub fn check(file: &[u8]) -> Result<(), (i64, String)> {
         let ph = &file[(phoff + i * 56) as usize..][..56];
         let ptype = u32_at(ph, 0);
         if ptype == PT_INTERP {
-            return no("a dynamically linked program; linux-run loads static programs until LC3");
+            if interp(file).is_none() {
+                return no("a bad interpreter name");
+            }
+            continue;
         }
         if ptype != PT_LOAD {
             continue;
@@ -86,6 +91,22 @@ pub fn check(file: &[u8]) -> Result<(), (i64, String)> {
         return no("no loadable segment");
     }
     Ok(())
+}
+
+/// The dynamic linker a program names (PT_INTERP), an absolute path, if it names one.
+pub fn interp(file: &[u8]) -> Option<Vec<u8>> {
+    let (phoff, phnum) = (u64_at(file, 32), u16_at(file, 56));
+    for i in 0..phnum {
+        let ph = &file[(phoff + i * 56) as usize..][..56];
+        if u32_at(ph, 0) != PT_INTERP {
+            continue;
+        }
+        let (off, size) = (u64_at(ph, 8) as usize, u64_at(ph, 32) as usize);
+        let name = file.get(off..off.checked_add(size)?)?;
+        let name = name.strip_suffix(b"\0")?;
+        return (name.starts_with(b"/") && !name.contains(&0)).then(|| name.to_vec());
+    }
+    None
 }
 
 pub fn load(file: &[u8]) -> Result<Loaded, (i64, String)> {
@@ -173,5 +194,6 @@ pub fn load(file: &[u8]) -> Result<Loaded, (i64, String)> {
         phent: 56,
         phnum,
         end: base + hi,
+        base,
     })
 }

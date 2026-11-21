@@ -16,6 +16,17 @@ pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOEXEC: i64 = 8;
 pub const E2BIG: i64 = 7;
+pub const EBADF: i64 = 9;
+pub const EACCES: i64 = 13;
+pub const ENODEV: i64 = 19;
+pub const EMFILE: i64 = 24;
+pub const ELOOP: i64 = 40;
+pub const ENODATA: i64 = 61;
+pub const EOPNOTSUPP: i64 = 95;
+pub const EAFNOSUPPORT: i64 = 97;
+pub const ENOENT: i64 = 2;
+pub const ERANGE: i64 = 34;
+pub const ENOTSOCK: i64 = 88;
 
 pub fn linux_errno(native: i32) -> i64 {
     match native {

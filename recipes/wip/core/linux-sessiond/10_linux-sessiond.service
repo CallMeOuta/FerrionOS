@@ -1,0 +1,6 @@
+[unit]
+description = "Linux session file systems"
+
+[service]
+cmd = "linux-sessiond"
+type = "notify"

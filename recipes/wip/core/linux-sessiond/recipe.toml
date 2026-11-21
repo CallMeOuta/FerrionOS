@@ -1,0 +1,21 @@
+#TODO compiled but not tested: LC3 of plans/linux-compat.md; `scripts/vm-test.py linux-dynamic` uses it
+# linux-sessiond: the `linux-session` scheme, which gives each Linux session (`linux-run
+# --session`) the read-only Debian root of linux-root and a memory file system of its own. The
+# crate lives in crate/ beside this file.
+#
+# Widened access: a service started at boot that runs as root (10_linux-sessiond.service), since
+# only uid 0 may create the file systems' schemes. It starts without the hardware right, caps
+# each session's memory file system at 256 MiB and each uid at 4 sessions, and hands out only the
+# two file system handles. config/base.toml adds `linux-session` to `user`'s login namespace.
+[package]
+description = "Linux session file systems (read-only root, memory file system)"
+dependencies = ["linux-root", "redoxfs"]
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+mkdir -pv "${COOKBOOK_STAGE}/usr/lib/init.d"
+cp "${COOKBOOK_RECIPE}/10_linux-sessiond.service" "${COOKBOOK_STAGE}/usr/lib/init.d/10_linux-sessiond.service"
+"""

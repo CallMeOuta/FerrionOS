@@ -1,0 +1,16 @@
+[package]
+name = "linux-sessiond"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "FerrionOS's Linux session service: the Linux root and a memory file system for each session"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
+libredox = { version = "0.1.25", default-features = false, features = ["call"] }
+redox_syscall = { version = "0.9.5", features = ["std"] }
+redox-scheme = "0.12"
+
+[profile.release]
+panic = "abort"

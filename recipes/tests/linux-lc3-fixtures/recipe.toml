@@ -1,0 +1,21 @@
+# The Linux layer's LC3 fixture (plans/linux-compat.md): a dynamic glibc hello, a four-thread
+# program and a posix_spawn of a missing file, built on the build host from the C sources in
+# files/ with the pinned Debian tools in files/toolchain.tsv (gcc -O2 -Wl,--build-id=none
+# -pthread, in debian:trixie with LC0's cached tool packages, no network), and lc3.sh, the core
+# tools script, packed in files/fixtures.tar. expected.* is what Linux gave for
+# `dash -c 'mkdir /tmp/f && tar -xf - -C /tmp/f && /bin/dash /tmp/f/lc3.sh' < fixtures.tar` as
+# uid 1000 in the root linux-root assembles, with the /etc files a session writes. Kept as files
+# because no FerrionOS recipe can build Linux programs yet; the script refuses any file whose
+# SHA-256 differs from files/SHA256SUMS. `scripts/vm-test.py linux-dynamic` runs it in a session.
+[package]
+description = "Dynamic, threaded and posix_spawn Linux programs and the core tools script"
+
+[build]
+template = "custom"
+script = """
+dest="${COOKBOOK_STAGE}/usr/share/linux-lc3"
+mkdir -pv "${dest}"
+cd "${COOKBOOK_RECIPE}/files"
+sha256sum -c SHA256SUMS
+cp -v fixtures.tar lc3.sh expected.stdout expected.stderr expected.status SHA256SUMS "${dest}/"
+"""

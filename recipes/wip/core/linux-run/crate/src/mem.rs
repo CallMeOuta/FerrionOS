@@ -189,6 +189,9 @@ pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, off: u64) -> i6
     } else {
         fd as i32
     };
+    if fd >= 0 && !shared {
+        return map_private_file(addr, len, prot, flags & !MAP_POPULATE, fd, off);
+    }
     let result = if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE_L) != 0 {
         if addr % PAGE != 0 {
             return -EINVAL;
@@ -239,6 +242,62 @@ pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, off: u64) -> i6
         }
         Err(e) => -e,
     }
+}
+
+/// A private mapping of a file (what the dynamic linker makes of every library): anonymous
+/// memory at the place `mmap` would pick, filled with a read of the file, then given the asked
+/// protection (plans/linux-compat.md, Memory: "otherwise a read into anonymous memory"). The
+/// pages are the process's own copy, as a private mapping's are after a write; a later change
+/// of the file does not show in them, which Linux leaves unspecified. Bytes past the end of the
+/// file read as zeros.
+fn map_private_file(addr: u64, len: u64, prot: u64, flags: u64, fd: i32, off: u64) -> i64 {
+    const MAP_ANONYMOUS: u64 = 0x20;
+    let mut st: libc::stat = unsafe { core::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return -last_errno();
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return -ENODEV;
+    }
+    let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if fl < 0 || fl & libc::O_ACCMODE == libc::O_WRONLY {
+        return -EACCES;
+    }
+    let at = mmap(addr, len, 3, flags | MAP_ANONYMOUS, -1, 0);
+    if at < 0 {
+        return at;
+    }
+    let mut done = 0u64;
+    while done < len {
+        let n = unsafe {
+            libc::pread(
+                fd,
+                (at as u64 + done) as *mut libc::c_void,
+                (len - done) as usize,
+                (off + done) as libc::off_t,
+            )
+        };
+        if n < 0 {
+            let e = last_errno();
+            if e == EINTR {
+                continue;
+            }
+            munmap(at as u64, len);
+            return -e;
+        }
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+    }
+    if prot != 3 {
+        let r = mprotect(at as u64, len, prot);
+        if r < 0 {
+            munmap(at as u64, len);
+            return r;
+        }
+    }
+    at
 }
 
 pub fn munmap(addr: u64, len: u64) -> i64 {

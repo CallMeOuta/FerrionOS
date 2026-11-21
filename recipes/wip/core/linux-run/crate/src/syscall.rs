@@ -20,6 +20,8 @@ static PID: AtomicI32 = AtomicI32::new(0);
 /// Linux's AT_FDCWD as a call argument.
 const AT_FDCWD_U: u64 = -100i64 as u64;
 pub static TRACE: AtomicBool = AtomicBool::new(false);
+/// LINUX_RUN_TRACE=all: every call and its result, not only the failed ones.
+pub static TRACE_ALL: AtomicBool = AtomicBool::new(false);
 /// The Linux program's path, for /proc/self/exe.
 pub static EXE: OnceLock<CString> = OnceLock::new();
 /// This binary, for execve.
@@ -56,6 +58,19 @@ pub extern "C" fn lr_dispatch(frame: *mut Frame, data: usize) {
     let thread = thread::current(data);
     let number = frame.rax;
     if let Some(r) = call(thread, frame) {
+        if TRACE.load(Ordering::Relaxed) && (r < 0 || TRACE_ALL.load(Ordering::Relaxed)) {
+            eprintln!("linux-run: system call {number} ({:#x}, {:#x}, {:#x}) gave {r}", frame.rdi, frame.rsi, frame.rdx);
+        }
+        // A write to a pipe with no reader raises SIGPIPE on Linux; the native call only fails.
+        const EPIPE: i64 = 32;
+        if r == -EPIPE && matches!(number, 1 | 18 | 20 | 40) {
+            // Before the call returns, as on Linux.
+            match signal::handler_of(13) {
+                0 if thread.mask.load(Ordering::Relaxed) & (1 << 12) == 0 => signal::default_action(13),
+                1 => {}
+                _ => signal::send_thread(thread, 13, thread),
+            }
+        }
         if r == -EINTR && number != 34 && number != 130 && signal::restart_after_eintr(thread) {
             // Restarted as Linux does: back over the two-byte `syscall` with the call number,
             // after any handler that runs first.
@@ -80,8 +95,13 @@ pub fn log_once(what: &str) {
     }
 }
 
-/// Reads a NUL-terminated Linux string.
+/// A Linux path argument, as the native path it names (src/session.rs, `linux_path`).
 pub fn path(p: u64) -> Result<CString, i64> {
+    cstr(p).map(crate::session::linux_path)
+}
+
+/// Reads a NUL-terminated Linux string as it is.
+pub fn cstr(p: u64) -> Result<CString, i64> {
     if !user_ok(p, 1) {
         return Err(EFAULT);
     }
@@ -183,6 +203,181 @@ fn write_stat(st: &libc::stat, out: u64) -> i64 {
     0
 }
 
+const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+
+/// fstatat with Linux's arguments: an empty path with AT_EMPTY_PATH names `dir` itself.
+fn stat_at(dir: u64, p: u64, flags: u64) -> Result<libc::stat, i64> {
+    let raw = cstr(p)?;
+    let mut st: libc::stat = unsafe { core::mem::zeroed() };
+    let r = if raw.as_bytes().is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(ENOENT);
+        }
+        unsafe { libc::fstat(dir as i32, &mut st) }
+    } else {
+        let p = crate::files::native_path(raw);
+        let fl = if flags & AT_SYMLINK_NOFOLLOW != 0 { libc::AT_SYMLINK_NOFOLLOW } else { 0 };
+        unsafe { libc::fstatat(crate::files::dirfd(dir), p.as_ptr(), &mut st, fl) }
+    };
+    if r != 0 { Err(last_errno()) } else { Ok(st) }
+}
+
+/// statx(dir, path, flags, mask, buf): the basic fields, from fstatat. No birth time.
+fn statx(dir: u64, p: u64, flags: u64, _mask: u64, out: u64) -> i64 {
+    const STATX_BASIC_STATS: u32 = 0x7ff;
+    if !user_ok(out, 256) {
+        return -EFAULT;
+    }
+    let st = match stat_at(dir, p, flags) {
+        Ok(st) => st,
+        Err(e) => return -e,
+    };
+    // glibc's gnu_dev_major and gnu_dev_minor.
+    let major = |d: u64| (((d >> 8) & 0xfff) | ((d >> 32) & !0xfff)) as u32;
+    let minor = |d: u64| ((d & 0xff) | ((d >> 12) & !0xff)) as u32;
+    let mut b = [0u8; 256];
+    let mut put = |at: usize, v: &[u8]| b[at..at + v.len()].copy_from_slice(v);
+    put(0, &STATX_BASIC_STATS.to_ne_bytes());
+    put(4, &(st.st_blksize as u32).to_ne_bytes());
+    put(16, &(st.st_nlink as u32).to_ne_bytes());
+    put(20, &st.st_uid.to_ne_bytes());
+    put(24, &st.st_gid.to_ne_bytes());
+    put(28, &(st.st_mode as u16).to_ne_bytes());
+    put(32, &(st.st_ino as u64).to_ne_bytes());
+    put(40, &(st.st_size as u64).to_ne_bytes());
+    put(48, &(st.st_blocks as u64).to_ne_bytes());
+    for (at, sec, nsec) in [
+        (64, st.st_atime, st.st_atime_nsec),
+        (96, st.st_ctime, st.st_ctime_nsec),
+        (112, st.st_mtime, st.st_mtime_nsec),
+    ] {
+        put(at, &(sec as i64).to_ne_bytes());
+        put(at + 8, &(nsec as u32).to_ne_bytes());
+    }
+    let (rdev, dev) = (st.st_rdev as u64, st.st_dev as u64);
+    put(128, &major(rdev).to_ne_bytes());
+    put(132, &minor(rdev).to_ne_bytes());
+    put(136, &major(dev).to_ne_bytes());
+    put(140, &minor(dev).to_ne_bytes());
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), out as *mut u8, 256) };
+    0
+}
+
+/// statfs and fstatfs: Linux's structure from relibc's statvfs.
+fn statfs(fd: Option<i32>, p: u64, out: u64) -> i64 {
+    /// f_type: a value no Linux file system uses ("FrOS"), for RedoxFS and the other schemes.
+    const FERRION_MAGIC: i64 = 0x46724f53;
+    const ST_RDONLY: i64 = 1;
+    if !user_ok(out, 120) {
+        return -EFAULT;
+    }
+    unsafe extern "C" {
+        fn redox_fpath_v1(fd: usize, buf: *mut u8, len: usize) -> usize;
+    }
+    let mut v: libc::statvfs = unsafe { core::mem::zeroed() };
+    // The native path, to tell the session's read-only root (relibc reports no ST_RDONLY).
+    let (r, native) = match fd {
+        Some(fd) => {
+            let mut buf = vec![0u8; 4096];
+            let n = raw(unsafe { redox_fpath_v1(fd as usize, buf.as_mut_ptr(), buf.len()) }).unwrap_or(0);
+            buf.truncate(n);
+            (unsafe { libc::fstatvfs(fd, &mut v) }, buf)
+        }
+        None => {
+            let p = match cstr(p) {
+                Ok(p) => crate::files::native_path(p),
+                Err(e) => return -e,
+            };
+            (unsafe { libc::statvfs(p.as_ptr(), &mut v) }, p.as_bytes().to_vec())
+        }
+    };
+    if r != 0 {
+        return -last_errno();
+    }
+    let read_only = crate::session::active() && native.starts_with(crate::session::ROOT.as_bytes());
+    let w: [i64; 15] = [
+        FERRION_MAGIC,
+        v.f_bsize as i64,
+        v.f_blocks as i64,
+        v.f_bfree as i64,
+        v.f_bavail as i64,
+        v.f_files as i64,
+        v.f_ffree as i64,
+        v.f_fsid as i64,
+        255,
+        v.f_frsize as i64,
+        if read_only { ST_RDONLY } else { 0 },
+        0,
+        0,
+        0,
+        0,
+    ];
+    unsafe { core::ptr::copy_nonoverlapping(w.as_ptr(), out as *mut i64, 15) };
+    0
+}
+
+/// The extended attribute calls: FerrionOS's file systems keep none. Listing gives an empty
+/// list and reading ENODATA, as on a Linux file system with no attributes set; setting and
+/// removing give EOPNOTSUPP. The file named must exist.
+fn xattr(number: u64, target: u64) -> i64 {
+    let exists = match number {
+        // fsetxattr, fgetxattr, flistxattr, fremovexattr name a descriptor.
+        190 | 193 | 196 | 199 => unsafe { libc::fcntl(target as i32, libc::F_GETFD) >= 0 }
+            .then_some(())
+            .ok_or_else(last_errno),
+        // lsetxattr, lgetxattr, llistxattr, lremovexattr do not follow a link.
+        189 | 192 | 195 | 198 => stat_at(AT_FDCWD_U, target, AT_SYMLINK_NOFOLLOW).map(|_| ()),
+        _ => stat_at(AT_FDCWD_U, target, 0).map(|_| ()),
+    };
+    if let Err(e) = exists {
+        return -e;
+    }
+    match number {
+        194..=196 => 0,
+        191..=193 => -ENODATA,
+        _ => -EOPNOTSUPP,
+    }
+}
+
+/// Processors online: the launcher's fact in a session, which has no /scheme/sys.
+fn cpus() -> i64 {
+    if crate::session::active() {
+        crate::session::FACTS.cpus as i64
+    } else {
+        unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }.max(1) as i64
+    }
+}
+
+/// sysinfo: uptime from the monotonic clock, memory from the launcher's facts (or relibc
+/// outside a session), no load averages, swap or process count.
+fn sysinfo(out: u64) -> i64 {
+    if !user_ok(out, 112) {
+        return -EFAULT;
+    }
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    let (total, free) = if crate::session::active() {
+        let f = &*crate::session::FACTS;
+        (f.memory, f.memory_free)
+    } else {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(0) as u64;
+        unsafe {
+            (
+                libc::sysconf(crate::ffi::SC_PHYS_PAGES).max(0) as u64 * page,
+                libc::sysconf(crate::ffi::SC_AVPHYS_PAGES).max(0) as u64 * page,
+            )
+        }
+    };
+    let mut b = [0u8; 112];
+    b[0..8].copy_from_slice(&(ts.tv_sec as i64).to_ne_bytes());
+    b[32..40].copy_from_slice(&total.to_ne_bytes());
+    b[40..48].copy_from_slice(&free.to_ne_bytes());
+    b[104..108].copy_from_slice(&1u32.to_ne_bytes());
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), out as *mut u8, 112) };
+    0
+}
+
 /// Linux clock ids to relibc's.
 fn clock(id: u64) -> Result<libc::clockid_t, i64> {
     match id {
@@ -274,11 +469,21 @@ fn futex(frame: &Frame) -> i64 {
     }
 }
 
-fn execve(thread: &Thread, frame: &Frame) -> i64 {
-    let file = match path(frame.rdi) {
-        Ok(p) => crate::files::exe_alias(&p).unwrap_or(p),
-        Err(e) => return -e,
-    };
+/// An execve whose arguments were read and whose file was checked: the native argument and
+/// environment lists that start the runtime again on it.
+pub struct Exec {
+    args: Vec<CString>,
+    envp: Vec<CString>,
+}
+
+/// Reads execve's arguments and checks the file, so that the errors Linux's execve returns
+/// (ENOENT, EACCES, ENOEXEC and the rest) come back from here, not from the next runtime. A `#!`
+/// script names its interpreter, which is checked the same way, four levels deep at most.
+pub fn prepare_exec(frame: &Frame) -> Result<Exec, i64> {
+    let mut file = cstr(frame.rdi)?;
+    if let Some(exe) = crate::files::exe_alias(&file) {
+        file = exe;
+    }
     let list = |p: u64| -> Result<Vec<CString>, i64> {
         let mut out = Vec::new();
         if p == 0 {
@@ -292,31 +497,63 @@ fn execve(thread: &Thread, frame: &Frame) -> i64 {
             if s == 0 {
                 return Ok(out);
             }
-            out.push(path(s)?);
+            out.push(cstr(s)?);
         }
         Err(E2BIG)
     };
-    let (argv, envp) = match (list(frame.rsi), list(frame.rdx)) {
-        (Ok(a), Ok(e)) => (a, e),
-        (Err(e), _) | (_, Err(e)) => return -e,
-    };
-    // Errors Linux's execve would return come back from here, not from the next linux-run.
-    let bytes = match std::fs::read(std::ffi::OsStr::from_bytes(file.as_bytes())) {
-        Ok(b) => b,
-        Err(e) => return -linux_errno(e.raw_os_error().unwrap_or(libc::EIO)),
-    };
-    if let Err((e, _)) = crate::elf::check(&bytes) {
-        return -e;
+    let mut argv = list(frame.rsi)?;
+    let envp = list(frame.rdx)?;
+    for level in 0.. {
+        let native = crate::session::linux_path(file.clone());
+        if unsafe { libc::access(native.as_ptr(), libc::X_OK) } != 0 {
+            return Err(last_errno());
+        }
+        let bytes = std::fs::read(std::ffi::OsStr::from_bytes(native.as_bytes())).map_err(|e| {
+            match e.raw_os_error() {
+                Some(libc::EISDIR) => EACCES,
+                n => linux_errno(n.unwrap_or(libc::EIO)),
+            }
+        })?;
+        if !bytes.starts_with(b"#!") {
+            crate::elf::check(&bytes).map_err(|(e, _)| e)?;
+            break;
+        }
+        if level == 4 {
+            return Err(ELOOP);
+        }
+        // `#!interpreter [one argument]`: the script's path follows them, then argv[1..].
+        let line = bytes[2..].split(|&b| b == b'\n').next().unwrap_or_default();
+        let line = line.trim_ascii();
+        let (interp, arg) = match line.iter().position(|b| b.is_ascii_whitespace()) {
+            Some(i) => (&line[..i], Some(line[i..].trim_ascii())),
+            None => (line, None),
+        };
+        if interp.is_empty() {
+            return Err(ENOEXEC);
+        }
+        let interp = CString::new(interp).map_err(|_| ENOEXEC)?;
+        let mut next = vec![interp.clone()];
+        if let Some(arg) = arg.filter(|a| !a.is_empty()) {
+            next.push(CString::new(arg).map_err(|_| ENOEXEC)?);
+        }
+        next.push(file);
+        next.extend(argv.into_iter().skip(1));
+        argv = next;
+        file = interp;
     }
-    drop(bytes);
     let argv0 = argv.first().cloned().unwrap_or_else(|| file.clone());
+    let runtime = if crate::session::active() { crate::session::RUNTIME } else { LINUX_RUN };
     let mut args: Vec<CString> = vec![
-        CString::new(LINUX_RUN).unwrap(),
+        CString::new(runtime).unwrap(),
         CString::new("--argv0").unwrap(),
         argv0,
         CString::new("--").unwrap(),
         file,
     ];
+    if signal::handler_of(13) == 1 {
+        // SIG_IGN crosses execve; the next runtime cannot see it natively (src/signal.rs, init).
+        args.insert(1, CString::new("--sigpipe-ignored").unwrap());
+    }
     args.extend(argv.into_iter().skip(1));
     let envp: Vec<CString> = envp
         .into_iter()
@@ -325,30 +562,51 @@ fn execve(thread: &Thread, frame: &Frame) -> i64 {
                 && !e.as_bytes().starts_with(b"LD_PRELOAD=")
         })
         .collect();
-    let mut a: Vec<*const libc::c_char> = args.iter().map(|s| s.as_ptr()).collect();
+    Ok(Exec { args, envp })
+}
+
+/// Replaces this process with the runtime on `exec`'s program; returns only on failure, with the
+/// error. The Linux mask crosses execve as the native one (src/signal.rs, init).
+pub fn run_exec(exec: &Exec, mask: u64) -> i64 {
+    let mut a: Vec<*const libc::c_char> = exec.args.iter().map(|s| s.as_ptr()).collect();
     a.push(core::ptr::null());
-    let mut e: Vec<*const libc::c_char> = envp.iter().map(|s| s.as_ptr()).collect();
+    let mut e: Vec<*const libc::c_char> = exec.envp.iter().map(|s| s.as_ptr()).collect();
     e.push(core::ptr::null());
-    // The Linux mask crosses execve as the native one (src/signal.rs, init).
-    signal::mask_for_exec(thread.mask.load(Ordering::Relaxed));
+    signal::mask_for_exec(mask);
     unsafe { libc::execve(a[0], a.as_ptr(), e.as_ptr()) };
     let err = last_errno();
     signal::unmask_after_exec();
-    -err
+    err
+}
+
+fn execve(thread: &Thread, frame: &mut Frame) -> i64 {
+    let exec = match prepare_exec(frame) {
+        Ok(exec) => exec,
+        Err(e) => return -e,
+    };
+    if crate::spawn::active() {
+        return crate::spawn::exec(thread, frame, &exec);
+    }
+    -run_exec(&exec, thread.mask.load(Ordering::Relaxed))
 }
 
 fn uname(buf: u64) -> i64 {
     if !user_ok(buf, 6 * 65) {
         return -EFAULT;
     }
-    let mut native: libc::utsname = unsafe { core::mem::zeroed() };
-    unsafe { libc::uname(&mut native) };
-    let node: Vec<u8> = native
-        .nodename
-        .iter()
-        .take_while(|&&c| c != 0)
-        .map(|&c| c as u8)
-        .collect();
+    // In a session the host name is the launcher's fact: /scheme/sys is not in its namespace.
+    let node: Vec<u8> = if crate::session::active() {
+        crate::session::FACTS.hostname.clone()
+    } else {
+        let mut native: libc::utsname = unsafe { core::mem::zeroed() };
+        unsafe { libc::uname(&mut native) };
+        native
+            .nodename
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect()
+    };
     let fields: [&[u8]; 6] = [
         b"Linux",
         &node,
@@ -438,15 +696,14 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         39 => pid() as i64,
         56 => thread::clone(thread, f),
         57 | 58 => {
-            // fork, and vfork, which is fork-like here: the parent waits for exec or exit.
-            let rdi = f.rdi;
-            f.rdi = if f.rax == 58 { 0x4000 | 0x100 | 17 } else { 17 };
-            f.rsi = 0;
-            let r = thread::clone(thread, f);
-            f.rdi = rdi;
-            r
+            // fork, and vfork, whose child shares the parent's memory (src/spawn.rs). The
+            // registers stay as the program left them: glibc's vfork keeps its return address
+            // in RDI across the call.
+            let flags = if f.rax == 58 { 0x4000 | 0x100 | 17 } else { 17 };
+            thread::clone_with(thread, f, flags, 0, 0, 0, 0)
         }
         59 => execve(thread, f),
+        60 if crate::spawn::active() => crate::spawn::exit(thread, f, a as i32),
         60 => thread::exit_thread(thread, a as i32),
         62 => kill(a as i64, b),
         63 => uname(a),
@@ -468,7 +725,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             if !user_ok(c, b.min(128)) {
                 return Some(-EFAULT);
             }
-            let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }.clamp(1, 64) as u32;
+            let n = cpus().clamp(1, 64) as u32;
             unsafe {
                 core::ptr::write_bytes(c as *mut u8, 0, b.min(128) as usize);
                 *(c as *mut u64) = if n == 64 { !0 } else { (1u64 << n) - 1 };
@@ -507,24 +764,35 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             unsafe { *(b as *mut [i64; 2]) = [ts.tv_sec, ts.tv_nsec as i64] };
             0
         }
+        231 if crate::spawn::active() => crate::spawn::exit(thread, f, a as i32),
         231 => exit_group(a as i32),
         234 => tgkill(thread, a as i64, b as i64, c),
-        2 | 257 => {
-            let (a, b, c, d) = if f.rax == 2 { (AT_FDCWD_U, a, b, c) } else { (a, b, c, d) };
-            let p = match path(b) {
-                Ok(p) => crate::files::exe_alias(&p).unwrap_or(p),
+        2 | 257 | 85 => {
+            // open(path, flags, mode), creat(path, mode), openat(dir, path, flags, mode).
+            let (a, b, c, d) = match f.rax {
+                2 => (AT_FDCWD_U, a, b, c),
+                85 => (AT_FDCWD_U, a, 0x241 /* O_WRONLY|O_CREAT|O_TRUNC */, b),
+                _ => (a, b, c, d),
+            };
+            let p = match cstr(b) {
+                Ok(p) => crate::files::native_path(p),
                 Err(e) => return Some(-e),
             };
             let flags = match open_flags(c) {
                 Ok(o) => o,
                 Err(e) => return Some(-e),
             };
+            if let Some(r) = crate::files::open_own_fd(&p, c & 0x80000 != 0) {
+                return Some(r);
+            }
             if c & 3 == 0 {
                 if let Some(r) = crate::files::etc_view(&p, c & 0x80000 != 0) {
                     return Some(r);
                 }
             }
-            ret(unsafe { libc::openat(a as i32, p.as_ptr(), flags, d as libc::c_uint) } as isize)
+            crate::files::new_fd(ret(unsafe {
+                libc::openat(crate::files::dirfd(a), p.as_ptr(), flags, d as libc::c_uint)
+            } as isize))
         }
         4 | 6 | 262 => {
             let (a, b, c, d) = match f.rax {
@@ -532,29 +800,12 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
                 6 => (AT_FDCWD_U, a, b, 0x100),
                 _ => (a, b, c, d),
             };
-            const AT_EMPTY_PATH: u64 = 0x1000;
-            const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-            let p = match path(b) {
-                Ok(p) => p,
-                Err(e) => return Some(-e),
-            };
-            let p = crate::files::exe_alias(&p).unwrap_or(p);
-            let mut st: libc::stat = unsafe { core::mem::zeroed() };
-            let r = if p.as_bytes().is_empty() && d & AT_EMPTY_PATH != 0 {
-                unsafe { libc::fstat(a as i32, &mut st) }
-            } else {
-                let fl = if d & AT_SYMLINK_NOFOLLOW != 0 {
-                    libc::AT_SYMLINK_NOFOLLOW
-                } else {
-                    0
-                };
-                unsafe { libc::fstatat(a as i32, p.as_ptr(), &mut st, fl) }
-            };
-            if r != 0 {
-                return Some(-last_errno());
+            match stat_at(a, b, d) {
+                Ok(st) => write_stat(&st, c),
+                Err(e) => -e,
             }
-            write_stat(&st, c)
         }
+        332 => statx(a, b, c, d, f.r8),
         267 => readlinkat(a, b, c, d),
         273 => {
             if b != 24 {
@@ -578,7 +829,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         19 => crate::files::readv(a, b, c),
         21 => crate::files::faccessat(AT_FDCWD_U, a, b, 0),
         22 => crate::files::pipe2(a, 0),
-        32 => ret(unsafe { libc::dup(a as i32) } as isize),
+        32 => crate::files::dup(a),
         33 => crate::files::dup2(a, b),
         34 => {
             let mut none: libc::sigset_t = unsafe { core::mem::zeroed() };
@@ -645,8 +896,10 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         }
         105 => ret(unsafe { libc::setuid(a as u32) } as isize),
         106 => ret(unsafe { libc::setgid(a as u32) } as isize),
+        109 if crate::spawn::active() => crate::spawn::setpgid(a as i32, b as i32),
         109 => ret(unsafe { libc::setpgid(a as i32, b as i32) } as isize),
         111 => ret(unsafe { libc::getpgrp() } as isize),
+        112 if crate::spawn::active() => crate::spawn::setsid(),
         112 => ret(unsafe { libc::setsid() } as isize),
         113 => ret(unsafe { libc::setreuid(a as u32, b as u32) } as isize),
         114 => ret(unsafe { libc::setregid(a as u32, b as u32) } as isize),
@@ -717,12 +970,14 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         292 => crate::files::dup3(a, b, c),
         293 => crate::files::pipe2(a, b),
         436 => {
-            // close_range(first, last, flags): CLOSE_RANGE_CLOEXEC is 4.
+            // close_range(first, last, flags): CLOSE_RANGE_CLOEXEC is 4. The runtime's own
+            // descriptors stay (src/files.rs, `reserved`).
             if a > b {
                 return Some(-EINVAL);
             }
-            for fd in a..=b.min(4095) {
+            for fd in a..=b.min(crate::files::RESERVED as u64 - 1) {
                 if c & 4 != 0 {
+                    crate::spawn::before_fd_change(fd as i32);
                     unsafe { libc::fcntl(fd as i32, libc::F_SETFD, libc::FD_CLOEXEC) };
                 } else {
                     crate::files::close(fd);
@@ -730,8 +985,26 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             }
             0
         }
-        // rseq: glibc carries on without it. clone3: glibc falls back to clone.
-        334 | 435 => -ENOSYS,
+        435 => thread::clone3(thread, f, a, b),
+        137 => statfs(None, a, b),
+        138 => statfs(Some(a as i32), 0, b),
+        188..=199 => xattr(f.rax, a),
+        // Sockets come with the network (LC5): no family is offered yet.
+        41 => -EAFNOSUPPORT,
+        42 => {
+            if unsafe { libc::fcntl(a as i32, libc::F_GETFD) } < 0 {
+                -EBADF
+            } else {
+                -ENOTSOCK
+            }
+        }
+        // fadvise64: advice only.
+        221 => {
+            if unsafe { libc::fcntl(a as i32, libc::F_GETFD) } < 0 { -EBADF } else { 0 }
+        }
+        99 => sysinfo(a),
+        // rseq: glibc carries on without it.
+        334 => -ENOSYS,
         n => {
             if TRACE.load(Ordering::Relaxed) {
                 eprintln!("linux-run: system call {n} is not answered (ENOSYS)");
@@ -744,9 +1017,17 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
 
 fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
     let fd = fd as i32;
+    if crate::files::reserved(fd) {
+        return -EBADF;
+    }
     match cmd {
-        0 => ret(unsafe { libc::fcntl(fd, libc::F_DUPFD, arg as i32) } as isize),
-        1030 => ret(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, arg as i32) } as isize),
+        0 | 1030 => {
+            if arg >= crate::files::RESERVED as u64 {
+                return -EINVAL;
+            }
+            let how = if cmd == 0 { libc::F_DUPFD } else { libc::F_DUPFD_CLOEXEC };
+            crate::files::new_fd(ret(unsafe { libc::fcntl(fd, how, arg as i32) } as isize))
+        }
         1 => {
             let r = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             if r < 0 {
@@ -756,6 +1037,7 @@ fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
             }
         }
         2 => ret(unsafe {
+            crate::spawn::before_fd_change(fd);
             libc::fcntl(
                 fd,
                 libc::F_SETFD,
@@ -764,11 +1046,19 @@ fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
         } as isize),
         3 => {
             let r = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-            if r < 0 {
-                -last_errno()
-            } else {
-                linux_status_flags(r) as i64
+            if r >= 0 {
+                return linux_status_flags(r) as i64;
             }
+            let e = last_errno();
+            // RedoxFS answers F_GETFL on a directory with EBADF; a directory is open for reading.
+            let mut st: libc::stat = unsafe { core::mem::zeroed() };
+            if e == EBADF
+                && unsafe { libc::fstat(fd, &mut st) } == 0
+                && st.st_mode & libc::S_IFMT == libc::S_IFDIR
+            {
+                return 0x8000 | 0x10000; // O_RDONLY | O_LARGEFILE | O_DIRECTORY
+            }
+            -e
         }
         4 => {
             let mut n = 0;
@@ -903,6 +1193,13 @@ fn prlimit(target: u64, res: u64, new: u64, old: u64) -> i64 {
     // which Linux programs see as unlimited.
     if res <= 8 && unsafe { libc::getrlimit(res as i32, &mut cur) } != 0 {
         return -last_errno();
+    }
+    // RLIMIT_NOFILE: descriptors from RESERVED up are the runtime's (src/files.rs).
+    const RLIMIT_NOFILE: u64 = 7;
+    if res == RLIMIT_NOFILE {
+        let top = crate::files::RESERVED as u64;
+        cur.rlim_cur = cur.rlim_cur.min(top);
+        cur.rlim_max = cur.rlim_max.min(top);
     }
     if old != 0 {
         unsafe { *(old as *mut [u64; 2]) = [cur.rlim_cur, cur.rlim_max] };

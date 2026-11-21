@@ -324,12 +324,50 @@ const CLONE_CHILD_SETTID: u64 = 0x1000000;
 /// clone(flags, stack, parent_tid, child_tid, tls).
 pub fn clone(thread: &Thread, frame: &mut Frame) -> i64 {
     let (flags, stack, ptid, ctid, tls) = (frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
+    clone_with(thread, frame, flags, stack, ptid, ctid, tls)
+}
+
+/// clone3(args, size): the same as clone with the arguments in a structure, the new stack given
+/// by its base and size.
+pub fn clone3(thread: &Thread, frame: &mut Frame, args: u64, size: u64) -> i64 {
+    const CLONE_PIDFD: u64 = 0x1000;
+    const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+    if !(64..=4096).contains(&size) {
+        return -EINVAL;
+    }
+    if !user_ok(args, size) {
+        return -EFAULT;
+    }
+    // flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid,
+    // set_tid_size, cgroup.
+    let w = |i: u64| if 8 * i < size { unsafe { *((args + 8 * i) as *const u64) } } else { 0 };
+    let (flags, child_tid, parent_tid, exit_signal) = (w(0), w(2), w(3), w(4));
+    let (stack, stack_size, tls, set_tid_size) = (w(5), w(6), w(7), w(9));
+    if flags & (CLONE_PIDFD | CLONE_INTO_CGROUP) != 0 || set_tid_size != 0 || exit_signal > 64 || flags & 0xff != 0 {
+        return -EINVAL;
+    }
+    if (stack == 0) != (stack_size == 0) {
+        return -EINVAL;
+    }
+    let top = if stack == 0 { 0 } else { stack + stack_size };
+    clone_with(thread, frame, flags | exit_signal, top, parent_tid, child_tid, tls)
+}
+
+pub fn clone_with(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> i64 {
     if flags & CLONE_THREAD == 0 {
-        // A new process. Without CLONE_VM it is a fork; with CLONE_VM (vfork, posix_spawn) the
-        // child gets a copy of the address space too, not the parent's memory, and the parent
-        // waits, as with vfork, until the child execs or exits (plans/linux-compat.md, Processes
-        // and threads). A child that reports through shared memory (glibc's posix_spawn after a
-        // failed exec) is not served by the copy: LC3.
+        // A new process. With CLONE_VM and CLONE_VFORK (vfork, posix_spawn) the child runs on
+        // the parent's memory until it execs or exits (src/spawn.rs). Without CLONE_VM it is a
+        // fork; CLONE_VM alone, or a second vfork child while one runs, gets a copy of the
+        // address space and the parent waits until the child execs or exits.
+        if flags & (CLONE_VM | CLONE_VFORK) == CLONE_VM | CLONE_VFORK {
+            if flags & CLONE_PARENT_SETTID != 0 && !user_ok(ptid, 4) {
+                return -EFAULT;
+            }
+            let settid = if flags & CLONE_PARENT_SETTID != 0 { ptid } else { 0 };
+            if crate::spawn::start(thread, frame, stack, settid) {
+                return 0;
+            }
+        }
         let hold = flags & (CLONE_VM | CLONE_VFORK) != 0;
         return fork(thread, frame, flags, stack, ptid, ctid, hold);
     }

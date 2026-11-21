@@ -29,10 +29,12 @@ const AT_MINSIGSTKSZ: u64 = 51;
 const HWCAP2_FSGSBASE: u64 = 2;
 
 /// Maps an 8 MiB stack at a random place below the runtime's window and fills it. Returns the
-/// stack pointer the program starts with. No vDSO is offered (no AT_SYSINFO_EHDR): the C
-/// libraries and Go then make their clock calls as system calls, which the runtime answers.
+/// stack pointer the program starts with. `interp_base` is where the dynamic linker was loaded,
+/// or 0 for a static program. No vDSO is offered (no AT_SYSINFO_EHDR): the C libraries and Go
+/// then make their clock calls as system calls, which the runtime answers.
 pub fn build(
     loaded: &Loaded,
+    interp_base: u64,
     execfn: &str,
     argv: &[Vec<u8>],
     envp: &[Vec<u8>],
@@ -72,7 +74,7 @@ pub fn build(
         (AT_PHENT, loaded.phent),
         (AT_PHNUM, loaded.phnum),
         (AT_PAGESZ, mem::PAGE),
-        (AT_BASE, 0),
+        (AT_BASE, interp_base),
         (AT_FLAGS, 0),
         (AT_ENTRY, loaded.entry),
         (AT_UID, uid as u64),

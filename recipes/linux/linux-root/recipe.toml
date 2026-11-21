@@ -1,0 +1,44 @@
+#TODO compiled but not tested: LC3 of plans/linux-compat.md; `scripts/vm-test.py linux-dynamic` runs programs from it
+# The Linux layer's root: Debian 13 packages that lock.tsv pins by SHA-256, unpacked by
+# assemble.sh into one tree and archived into a RedoxFS image. The image is data on FerrionOS:
+# linux-sessiond serves it read-only (`redoxfs --read-only`) to each Linux session as its `/`,
+# and no native program runs from it. Each package file is fetched from Debian's mirror, or from
+# the snapshot service at the lock's timestamp when the mirror no longer has it, and refused
+# unless its SHA-256 equals the lock's; a file already in target/debian-packages with that hash is
+# used as it is. The package installs the image, read-only, and the lock it was built from.
+[package]
+description = "Debian root for the Linux layer's sessions (read-only RedoxFS image)"
+
+[build]
+template = "custom"
+dev-dependencies = ["host:redoxfs"]
+script = """
+lock="${COOKBOOK_RECIPE}/lock.tsv"
+cache="${COOKBOOK_RECIPE}/target/debian-packages"
+snapshot="$(awk '$2 == "snapshot" { print $3 }' "${lock}")"
+mkdir -p "${cache}"
+while IFS=$'\\t' read -r name version arch path size sha256; do
+    [ -z "${name}" ] && continue
+    case "${name}" in \\#*) continue ;; esac
+    deb="${cache}/$(basename "${path}")"
+    if printf '%s  %s\\n' "${sha256}" "${deb}" | sha256sum --check --quiet - 2>/dev/null; then
+        continue
+    fi
+    rm -f "${deb}" "${deb}.part"
+    curl -fsSL --retry 3 -o "${deb}.part" "https://deb.debian.org/debian/${path}" \
+        || curl -fsSL --retry 3 -o "${deb}.part" "https://snapshot.debian.org/archive/debian/${snapshot}/${path}"
+    printf '%s  %s\\n' "${sha256}" "${deb}.part" | sha256sum --check --quiet -
+    mv "${deb}.part" "${deb}"
+done < "${lock}"
+
+rm -rf root root.redoxfs
+"${COOKBOOK_RECIPE}/assemble.sh" "${lock}" "${cache}" root
+redoxfs_ar="$(find "${COOKBOOK_TOOLCHAIN}" -name redoxfs-ar -type f | head -n 1)"
+[ -n "${redoxfs_ar}" ] || { echo "no redoxfs-ar in ${COOKBOOK_TOOLCHAIN}" >&2; exit 1; }
+# The tree's size plus a quarter and 16 MiB for RedoxFS's own blocks.
+bytes="$(du -sb root | cut -f1)"
+truncate -s "$(( (bytes + bytes / 4 + (16 << 20)) / 4096 * 4096 ))" root.redoxfs
+"${redoxfs_ar}" root.redoxfs root
+install -D -m 0444 root.redoxfs "${COOKBOOK_STAGE}/usr/share/linux-root/root.redoxfs"
+install -m 0444 "${lock}" "${COOKBOOK_STAGE}/usr/share/linux-root/lock.tsv"
+"""

@@ -1199,6 +1199,40 @@ def test_linux_busybox(vm, args):
     return True, "; ".join(report)
 
 
+def test_linux_dynamic(vm, args):
+    """Linux layer LC3: as `user`, `linux-run --session` starts a Linux session (linux-sessiond gives it the pinned Debian root read-only and a memory file system) and runs Debian's dash on the LC3 fixture (hash-checked in its recipe stage first), fed on standard input: the dynamic glibc hello, the four-thread program, a posix_spawn of a missing file that must report ENOENT, the session's checks (no DISPLAY, no /tmp/.X11-unix, no /lib/ld-linux.so.2, a write into /usr refused) and the core tools script over 30 tools with find, grep, tar and gzip. Its stdout, stderr and status must equal what Linux gave. Then, from the native login, `ls /scheme` must show neither `linux-root` nor `linux-mem`."""
+    stage = ROOT / "recipes/tests/linux-lc3-fixtures/target" / f"{args.arch}-unknown-redox" / "stage/usr/share/linux-lc3"
+    sums = subprocess.run(["sha256sum", "-c", "--ignore-missing", "SHA256SUMS"], cwd=stage, capture_output=True, text=True)
+    if sums.returncode != 0:
+        return False, f"fixture hashes in {stage} do not match: {sums.stdout.strip()} {sums.stderr.strip()}"
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    d = "/usr/share/linux-lc3"
+    same = lambda a, b: f"[ \"$(cat {a}; echo x)\" = \"$(cat {b}; echo x)\" ]"
+    status, out = guest_run(vm, "ld", "cd /tmp && linux-run --session /bin/dash -c "
+                            "\"mkdir /tmp/f && tar -xf - -C /tmp/f && /bin/dash /tmp/f/lc3.sh\" "
+                            f"<{d}/fixtures.tar >/tmp/ld.out 2>/tmp/ld.err; echo $? >/tmp/ld.st; "
+                            f"{same('/tmp/ld.out', d + '/expected.stdout')} && o=same || o=differs; "
+                            f"{same('/tmp/ld.err', d + '/expected.stderr')} && e=same || e=differs; "
+                            f"{same('/tmp/ld.st', d + '/expected.status')} && s=same || s=differs; "
+                            "echo ld-result $o $e $s; echo ==out; cat /tmp/ld.out; echo ==err; head -c 3000 /tmp/ld.err; "
+                            "echo ==st; cat /tmp/ld.st; echo ==schemes; ls /scheme", 600)
+    (vm.out / "linux-dynamic.txt").write_text(out)
+    found = re.search(r"ld-result (same|differs) (same|differs) (same|differs)", out)
+    verdict = found.groups() if found else ("none", "none", "none")
+    problems = []
+    if verdict != ("same", "same", "same"):
+        problems.append(f"lc3 script: stdout {verdict[0]}, stderr {verdict[1]}, status {verdict[2]}")
+    schemes = out.split("==schemes", 1)[-1]
+    if re.search(r"^linux-(root|mem)$", schemes, re.M):
+        problems.append("a session file system is listed in the native /scheme")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'linux-dynamic.txt'}"
+    return True, "dynamic hello, threads, posix_spawn ENOENT, session checks and core tools equal Linux's; root not in native /scheme"
+
+
 def test_sudo_notty(vm, args):
     """Issue 10: as `user` on the serial console, `sudo true` with standard input, output and error off the terminal does not panic and exits 0, since `user`'s password is empty (config/dev-accounts.toml)."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -3827,6 +3861,7 @@ TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
 TESTS["linux-hello"] = test_linux_hello
 TESTS["linux-busybox"] = test_linux_busybox
+TESTS["linux-dynamic"] = test_linux_dynamic
 TESTS["dso-atexit"] = test_dso_atexit
 TESTS["gtk-window"] = test_gtk_window
 TESTS["gtk-window-wayland"] = test_gtk_window_wayland

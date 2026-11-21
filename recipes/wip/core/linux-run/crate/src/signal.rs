@@ -100,7 +100,12 @@ fn mirror(sig: u64, handler: u64) {
 /// At start: signals the parent left ignored stay ignored (as across Linux's execve), the native
 /// mask the launcher inherited becomes the Linux thread's mask, and native signals are then
 /// unblocked, since the runtime's entry takes them. Returns the Linux mask.
-pub fn init() -> u64 {
+///
+/// SIGPIPE is the exception: Rust's start-up code ignores it natively before `main`, so its
+/// state is lost there. `sigpipe_ignored` says what it was: an `execve` passes
+/// `--sigpipe-ignored` when the program ignored it; otherwise it is at its default.
+pub fn init(sigpipe_ignored: bool) -> u64 {
+    const SIGPIPE: u64 = 13;
     let mut actions = ACTIONS.lock().unwrap();
     for sig in 1..=31u64 {
         if !native(sig) {
@@ -108,8 +113,10 @@ pub fn init() -> u64 {
         }
         let mut old: libc::sigaction = unsafe { core::mem::zeroed() };
         unsafe { libc::sigaction(sig as i32, core::ptr::null(), &mut old) };
-        if old.sa_sigaction == libc::SIG_IGN {
+        let ignored = if sig == SIGPIPE { sigpipe_ignored } else { old.sa_sigaction == libc::SIG_IGN };
+        if ignored {
             actions[sig as usize].handler = SIG_IGN;
+            mirror(sig, SIG_IGN);
         } else {
             mirror(sig, SIG_DFL);
         }
@@ -144,6 +151,24 @@ pub fn mask_for_exec(mask: u64) {
 /// After a failed execve: native signals open again.
 pub fn unmask_after_exec() {
     mask_for_exec(0);
+}
+
+/// The Linux signal actions, kept while a vfork child runs in this process (src/spawn.rs).
+pub struct SavedActions([Action; 65]);
+
+pub fn save_actions() -> SavedActions {
+    SavedActions(*ACTIONS.lock().unwrap())
+}
+
+/// Puts saved actions back, with their native mirrors.
+pub fn restore_actions(saved: SavedActions) {
+    let mut actions = ACTIONS.lock().unwrap();
+    for sig in 1..=64u64 {
+        if actions[sig as usize].handler != saved.0[sig as usize].handler {
+            mirror(sig, saved.0[sig as usize].handler);
+        }
+    }
+    *actions = saved.0;
 }
 
 pub fn rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {

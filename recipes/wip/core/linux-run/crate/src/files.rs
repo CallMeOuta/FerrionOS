@@ -1,11 +1,12 @@
-//! The file, directory, descriptor, identity and process calls a shell needs (plans/linux-compat.md,
-//! LC2): each is relibc's call with Linux's flags, layouts and error numbers.
+//! The file, directory, descriptor, identity and process calls a shell and the core tools need
+//! (plans/linux-compat.md, LC2 and LC3): each is relibc's call with Linux's flags, layouts and
+//! error numbers.
 
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Mutex;
 
-use crate::{errno::*, mem::user_ok, syscall::path};
+use crate::{errno::*, mem::user_ok, syscall::{cstr, path}};
 
 const AT_FDCWD: i64 = -100;
 const L_AT_SYMLINK_NOFOLLOW: u64 = 0x100;
@@ -14,12 +15,62 @@ const L_AT_EACCESS: u64 = 0x200;
 const L_AT_SYMLINK_FOLLOW: u64 = 0x400;
 const L_AT_EMPTY_PATH: u64 = 0x1000;
 
+/// Descriptors from this number up are the runtime's: the copies a vfork child's changes keep
+/// (src/spawn.rs) and the session handle (src/session.rs). Linux calls cannot name, close or
+/// replace them, and RLIMIT_NOFILE ends below them.
+pub const RESERVED: i32 = crate::spawn::SAVED_FDS;
+
+pub fn reserved(fd: i32) -> bool {
+    fd >= RESERVED
+}
+
 fn ret(r: isize) -> i64 {
     if r < 0 { -last_errno() } else { r as i64 }
 }
 
-fn dirfd(fd: u64) -> i32 {
+/// A descriptor a call created for the Linux program: one in the runtime's range is given back
+/// (EMFILE), as when Linux's table is full; a vfork child's is noted (src/spawn.rs).
+pub fn new_fd(r: i64) -> i64 {
+    if r < 0 {
+        return r;
+    }
+    if reserved(r as i32) {
+        unsafe { libc::close(r as i32) };
+        return -EMFILE;
+    }
+    crate::spawn::fd_created(r as i32);
+    r
+}
+
+pub fn dirfd(fd: u64) -> i32 {
     if fd as i64 as i32 as i64 == AT_FDCWD { libc::AT_FDCWD } else { fd as i32 }
+}
+
+/// The native path for a Linux path: /proc/self/exe answered, then the session's mounts.
+pub fn native_path(raw: CString) -> CString {
+    let p = exe_alias(&raw).unwrap_or(raw);
+    crate::session::linux_path(p)
+}
+
+/// Opening /dev/stdin, /dev/stdout, /dev/stderr, /dev/fd/N or /proc/self/fd/N gives a new
+/// descriptor of the open file N, as Linux's reopen of it does for pipes and terminals.
+pub fn open_own_fd(p: &CString, cloexec: bool) -> Option<i64> {
+    let b = p.as_bytes();
+    let n: i32 = match b {
+        b"/dev/stdin" => 0,
+        b"/dev/stdout" => 1,
+        b"/dev/stderr" => 2,
+        _ => {
+            let rest = b.strip_prefix(b"/dev/fd/").or_else(|| b.strip_prefix(b"/proc/self/fd/"))?;
+            std::str::from_utf8(rest).ok()?.parse().ok()?
+        }
+    };
+    if reserved(n) {
+        return Some(-ENOENT);
+    }
+    let how = if cloexec { libc::F_DUPFD_CLOEXEC } else { libc::F_DUPFD };
+    let r = unsafe { libc::fcntl(n, how, 0) };
+    Some(if r < 0 { -ENOENT } else { new_fd(r as i64) })
 }
 
 macro_rules! p {
@@ -125,6 +176,10 @@ pub fn lseek(fd: u64, off: u64, whence: u64) -> i64 {
 }
 
 pub fn close(fd: u64) -> i64 {
+    if reserved(fd as i32) {
+        return -EBADF;
+    }
+    crate::spawn::before_fd_change(fd as i32);
     forget_dir(fd as i32);
     ret(unsafe { libc::close(fd as i32) } as isize)
 }
@@ -147,14 +202,34 @@ pub fn pipe2(fds: u64, flags: u64) -> i64 {
     if unsafe { libc::pipe2(p.as_mut_ptr(), n) } != 0 {
         return -last_errno();
     }
+    if reserved(p[0]) || reserved(p[1]) {
+        unsafe {
+            libc::close(p[0]);
+            libc::close(p[1]);
+        }
+        return -EMFILE;
+    }
+    crate::spawn::fd_created(p[0]);
+    crate::spawn::fd_created(p[1]);
     unsafe { *(fds as *mut [i32; 2]) = p };
     0
+}
+
+pub fn dup(old: u64) -> i64 {
+    if reserved(old as i32) {
+        return -EBADF;
+    }
+    new_fd(ret(unsafe { libc::fcntl(old as i32, libc::F_DUPFD, 0) } as isize))
 }
 
 pub fn dup3(old: u64, new: u64, flags: u64) -> i64 {
     if flags & !0x80000 != 0 || old == new {
         return -EINVAL;
     }
+    if reserved(old as i32) || reserved(new as i32) {
+        return -EBADF;
+    }
+    crate::spawn::before_fd_change(new as i32);
     forget_dir(new as i32);
     let r = unsafe { libc::dup2(old as i32, new as i32) };
     if r < 0 {
@@ -167,9 +242,13 @@ pub fn dup3(old: u64, new: u64, flags: u64) -> i64 {
 }
 
 pub fn dup2(old: u64, new: u64) -> i64 {
+    if reserved(old as i32) || reserved(new as i32) {
+        return -EBADF;
+    }
     if old == new {
         return if unsafe { libc::fcntl(old as i32, libc::F_GETFD) } < 0 { -last_errno() } else { new as i64 };
     }
+    crate::spawn::before_fd_change(new as i32);
     forget_dir(new as i32);
     ret(unsafe { libc::dup2(old as i32, new as i32) } as isize)
 }
@@ -200,11 +279,21 @@ pub fn unlinkat(fd: u64, p: u64, flags: u64) -> i64 {
     ret(unsafe { libc::unlinkat(dirfd(fd), p.as_ptr(), f) } as isize)
 }
 
+/// renameat2(old dir, old path, new dir, new path, flags). RENAME_NOREPLACE refuses an existing
+/// target; RENAME_EXCHANGE and RENAME_WHITEOUT are not offered (EINVAL, which `mv` handles).
 pub fn renameat(ofd: u64, op: u64, nfd: u64, np: u64, flags: u64) -> i64 {
-    if flags != 0 {
+    const RENAME_NOREPLACE: u64 = 1;
+    if flags & !RENAME_NOREPLACE != 0 {
         return -EINVAL;
     }
     let (o, n) = (p!(op), p!(np));
+    if flags & RENAME_NOREPLACE != 0 {
+        // Not atomic: another process could create the target in between.
+        let mut st: libc::stat = unsafe { core::mem::zeroed() };
+        if unsafe { libc::fstatat(dirfd(nfd), n.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+            return -EEXIST;
+        }
+    }
     ret(unsafe { libc::renameat(dirfd(ofd), o.as_ptr(), dirfd(nfd), n.as_ptr()) } as isize)
 }
 
@@ -215,7 +304,12 @@ pub fn linkat(ofd: u64, op: u64, nfd: u64, np: u64, flags: u64) -> i64 {
 }
 
 pub fn symlinkat(target: u64, fd: u64, p: u64) -> i64 {
-    let (t, p) = (p!(target), p!(p));
+    // The link holds the target as the program wrote it.
+    let t = match cstr(target) {
+        Ok(t) => t,
+        Err(e) => return -e,
+    };
+    let p = p!(p);
     ret(unsafe { libc::symlinkat(t.as_ptr(), dirfd(fd), p.as_ptr()) } as isize)
 }
 
@@ -258,23 +352,39 @@ pub fn utimensat(fd: u64, p: u64, times: u64, flags: u64) -> i64 {
     ret(unsafe { libc::utimensat(dirfd(fd), p.as_ptr(), t.as_ptr(), f) } as isize)
 }
 
+/// getcwd: the working directory as the Linux program names it (src/session.rs, `linux_view`).
 pub fn getcwd(buf: u64, size: u64) -> i64 {
     if !user_ok(buf, size) {
         return -EFAULT;
     }
-    let r = unsafe { libc::getcwd(buf as *mut libc::c_char, size as usize) };
+    let mut native = vec![0u8; 4096];
+    let r = unsafe { libc::getcwd(native.as_mut_ptr().cast(), native.len()) };
     if r.is_null() {
         return -last_errno();
     }
-    (unsafe { libc::strlen(r) } + 1) as i64
+    let n = native.iter().position(|&b| b == 0).unwrap_or(0);
+    let view = crate::session::linux_view(&native[..n]);
+    if view.len() + 1 > size as usize {
+        return -ERANGE;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(view.as_ptr(), buf as *mut u8, view.len());
+        *((buf + view.len() as u64) as *mut u8) = 0;
+    }
+    (view.len() + 1) as i64
 }
 
 pub fn chdir(p: u64) -> i64 {
     let p = p!(p);
+    crate::spawn::before_chdir();
     ret(unsafe { libc::chdir(p.as_ptr()) } as isize)
 }
 
 pub fn fchdir(fd: u64) -> i64 {
+    if reserved(fd as i32) {
+        return -EBADF;
+    }
+    crate::spawn::before_chdir();
     ret(unsafe { libc::fchdir(fd as i32) } as isize)
 }
 
@@ -476,10 +586,14 @@ pub fn exe_alias(p: &CString) -> Option<CString> {
     own.then(|| crate::syscall::EXE.get().cloned()).flatten()
 }
 
-/// /etc/passwd and /etc/group in Linux's format, for a read-only open: FerrionOS writes them with
-/// `;` and another field order (redox_users), which Linux programs reject. The converted text is
-/// served from an unlinked file of the caller's own in /tmp; the native files are only read.
+/// Outside a session only (a session writes its own /etc): /etc/passwd and /etc/group in
+/// Linux's format, for a read-only open. FerrionOS writes them with `;` and another field order
+/// (redox_users), which Linux programs reject. The converted text is served from an unlinked
+/// file of the caller's own in /tmp; the native files are only read.
 pub fn etc_view(p: &CString, cloexec: bool) -> Option<i64> {
+    if crate::session::active() {
+        return None;
+    }
     let passwd = match p.as_bytes() {
         b"/etc/passwd" => true,
         b"/etc/group" => false,
@@ -513,5 +627,5 @@ pub fn etc_view(p: &CString, cloexec: bool) -> Option<i64> {
         libc::write(fd, out.as_ptr().cast(), out.len());
         libc::lseek(fd, 0, libc::SEEK_SET);
     }
-    Some(fd as i64)
+    Some(new_fd(fd as i64))
 }

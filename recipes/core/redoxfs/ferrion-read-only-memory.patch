@@ -1,0 +1,327 @@
+FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc after ferrion-passphrase-wipe.patch, ferrion-key-slots.patch and ferrion-mkfs-clear-ring.patch, for the Linux layer's sessions (LC3):
+- `redoxfs --read-only IMAGE NAME` serves an image without writing to it: the image is opened for reading only, FileSystem::tx drops transactions instead of committing them (no access time is written), and the scheme answers every change (an open for writing, creating or truncating, unlink, write, chmod, chown, truncate, times, links, renames, a shared writable mapping, a received file) with EROFS.
+- `redoxfs --memory MIB NAME` serves a new, empty file system held in memory, whose root directory has mode 1777, as /tmp has; it is gone when the daemon exits.
+
+diff -ruN a/src/bin/mount.rs b/src/bin/mount.rs
+--- a/src/bin/mount.rs
++++ b/src/bin/mount.rs
+@@ -162,15 +162,69 @@
+ 
+ fn usage() {
+     eprintln!(
+-        "redoxfs [--no-daemon|-d] [--key-file PATH] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
++        "redoxfs [--no-daemon|-d] [--key-file PATH] [--read-only] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
+     );
++    eprintln!("redoxfs [--no-daemon|-d] --memory MIB [mountpoint]");
+ }
+ 
+ enum DiskId {
+     Path(String),
+     Uuid(Uuid),
++    /// An image served without writing to it (FerrionOS, the Linux layer's root).
++    ReadOnly(String),
++    /// A new file system of this many bytes in memory, gone when the daemon exits.
++    Memory(u64),
+ }
+ 
++/// Opens the image at `path` for reading only. The disk is never written: transactions are
++/// dropped instead of committed and the scheme refuses every change with EROFS.
++fn filesystem_read_only(path: &str) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
++    let disk: Box<dyn Disk> = match DiskFile::open_read_only(path) {
++        Ok(disk) => Box::new(disk),
++        Err(err) => {
++            log::error!("failed to open image {} for reading: {}", path, err);
++            return None;
++        }
++    };
++    match redoxfs::FileSystem::open(DiskCache::new(disk), None, None, false) {
++        Ok(mut filesystem) => {
++            filesystem.read_only = true;
++            Some((path.to_string(), filesystem))
++        }
++        Err(err) => {
++            log::error!("failed to open filesystem {}: {}", path, err);
++            None
++        }
++    }
++}
++
++/// Creates an empty file system of `size` bytes in memory whose root directory anyone may write
++/// to, with the sticky bit, as `/tmp`.
++fn filesystem_in_memory(size: u64) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
++    let disk: Box<dyn Disk> = Box::new(redoxfs::DiskMemory::new(size));
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .unwrap_or_default();
++    let mut filesystem =
++        match redoxfs::FileSystem::create(DiskCache::new(disk), None, now.as_secs(), now.subsec_nanos()) {
++            Ok(filesystem) => filesystem,
++            Err(err) => {
++                log::error!("failed to create a file system in memory: {}", err);
++                return None;
++            }
++        };
++    let opened = filesystem.tx(|tx| {
++        let mut root = tx.read_tree(redoxfs::TreePtr::<redoxfs::Node>::root())?;
++        root.data_mut().set_mode(redoxfs::Node::MODE_DIR | 0o1777);
++        tx.sync_tree(root)
++    });
++    if let Err(err) = opened {
++        log::error!("failed to open the root of the file system in memory: {}", err);
++        return None;
++    }
++    Some((format!("memory:{size}"), filesystem))
++}
++
+ fn filesystem_by_path(
+     path: &str,
+     block_opt: Option<u64>,
+@@ -370,6 +424,8 @@
+     let filesystem_opt = match *disk_id {
+         DiskId::Path(ref path) => filesystem_by_path(path, block_opt, true, boot_password_opt),
+         DiskId::Uuid(ref uuid) => filesystem_by_uuid(uuid, block_opt, boot_password_opt),
++        DiskId::ReadOnly(ref path) => filesystem_read_only(path),
++        DiskId::Memory(size) => filesystem_in_memory(size),
+     };
+     drop(boot_password);
+ 
+@@ -403,6 +459,12 @@
+         DiskId::Uuid(ref uuid) => {
+             log::error!("not able to mount uuid {}", uuid.hyphenated());
+         }
++        DiskId::ReadOnly(ref path) => {
++            log::error!("not able to mount path {} for reading", path);
++        }
++        DiskId::Memory(size) => {
++            log::error!("not able to mount {} bytes of memory", size);
++        }
+     }
+ 
+     if let Some(ref mut write) = write {
+@@ -429,10 +491,20 @@
+     let mut mountpoint: Option<String> = None;
+     let mut block_opt: Option<u64> = None;
+     let mut key_file = None;
++    let mut read_only = false;
+ 
+     while let Some(arg) = args.next() {
+         match arg.as_str() {
+             "--no-daemon" | "-d" => daemonise = false,
++            "--read-only" => read_only = true,
++            "--memory" if disk_id.is_none() => {
++                let mib = args
++                    .next()
++                    .and_then(|mib| mib.parse::<u64>().ok())
++                    .filter(|&mib| (1..=4096).contains(&mib))
++                    .unwrap_or_else(|| print_err_exit("--memory needs a size in MiB, 1 to 4096"));
++                disk_id = Some(DiskId::Memory(mib << 20));
++            }
+             "--key-file" => {
+                 key_file = Some(
+                     args.next()
+@@ -465,8 +537,11 @@
+         }
+     }
+ 
+-    let Some(disk_id) = disk_id else {
+-        print_err_exit("no disk provided");
++    let disk_id = match disk_id {
++        Some(DiskId::Path(path)) if read_only => DiskId::ReadOnly(path),
++        Some(_) if read_only => print_err_exit("--read-only takes an image path"),
++        Some(disk_id) => disk_id,
++        None => print_err_exit("no disk provided"),
+     };
+ 
+     let Some(mountpoint) = mountpoint else {
+diff -ruN a/src/disk/file.rs b/src/disk/file.rs
+--- a/src/disk/file.rs
++++ b/src/disk/file.rs
+@@ -51,6 +51,12 @@
+         Ok(DiskFile { file })
+     }
+ 
++    /// Opens an image that is never written; a write fails with EIO.
++    pub fn open_read_only(path: impl AsRef<Path>) -> Result<DiskFile> {
++        let file = OpenOptions::new().read(true).open(path).or_eio()?;
++        Ok(DiskFile { file })
++    }
++
+     pub fn create(path: impl AsRef<Path>, size: u64) -> Result<DiskFile> {
+         let file = OpenOptions::new()
+             .read(true)
+diff -ruN a/src/filesystem.rs b/src/filesystem.rs
+--- a/src/filesystem.rs
++++ b/src/filesystem.rs
+@@ -29,6 +29,9 @@
+     pub(crate) cipher_opt: Option<Xts128<Aes128>>,
+     pub(crate) compress_cache: Vec<u8>,
+     pub node_usages: BTreeMap<u32, u64>,
++    /// A file system that is only read: transactions are dropped instead of committed, so that
++    /// nothing (an access time included) is written to the disk. Set after `open`.
++    pub read_only: bool,
+ }
+ 
+ impl<D: Disk> FileSystem<D> {
+@@ -125,6 +128,7 @@
+                 cipher_opt,
+                 compress_cache: compress_cache(),
+                 node_usages: BTreeMap::new(),
++                read_only: false,
+             };
+ 
+             unsafe { fs.reset_allocator()? };
+@@ -219,6 +223,7 @@
+             cipher_opt,
+             compress_cache: compress_cache(),
+             node_usages: BTreeMap::new(),
++            read_only: false,
+         };
+ 
+         // Write header generation zero
+@@ -281,9 +286,12 @@
+ 
+     /// start a filesystem transaction, required for making any changes
+     pub fn tx<F: FnOnce(&mut Transaction<D>) -> Result<T>, T>(&mut self, f: F) -> Result<T> {
++        let read_only = self.read_only;
+         let mut tx = Transaction::new(self);
+         let t = f(&mut tx)?;
+-        tx.commit(false)?;
++        if !read_only {
++            tx.commit(false)?;
++        }
+         Ok(t)
+     }
+ 
+diff -ruN a/src/mount/redox/scheme.rs b/src/mount/redox/scheme.rs
+--- a/src/mount/redox/scheme.rs
++++ b/src/mount/redox/scheme.rs
+@@ -18,7 +18,7 @@
+ use syscall::dirent::DirentBuf;
+ use syscall::error::{
+     EACCES, EBADF, EBUSY, EEXIST, EINVAL, EIO, EISDIR, ELOOP, ENOENT, ENOTDIR, ENOTEMPTY,
+-    EOPNOTSUPP, EPERM, EXDEV, Error, Result,
++    EOPNOTSUPP, EPERM, EROFS, EXDEV, Error, Result,
+ };
+ use syscall::flag::{
+     EventFlags, MapFlags, O_ACCMODE, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_RDWR,
+@@ -126,6 +126,15 @@
+         })
+     }
+ 
++    /// EROFS when the file system is served read-only (`redoxfs --read-only`).
++    fn writable(&self) -> Result<()> {
++        if self.fs.read_only {
++            Err(Error::new(EROFS))
++        } else {
++            Ok(())
++        }
++    }
++
+     /// Resolve a symbolic link of given `node`. `full_path` must be non-canonicalized path from root node.
+     fn resolve_symlink<'a>(
+         scheme_name: &RedoxScheme<'sock>,
+@@ -895,6 +904,9 @@
+         _fcntl_flags: u32,
+         ctx: &CallerCtx,
+     ) -> Result<OpenResult> {
++        if flags & (O_CREAT | O_TRUNC) != 0 || flags & O_WRONLY == O_WRONLY {
++            self.writable()?;
++        }
+         let path = RedoxReference::new(path).ok_or(Error::new(EINVAL))?;
+         let path_to_open = match Handle::get_resource_or(self.handles.get(&dirfd))? {
+             // If pathname is absolute, then dirfd is ignored.
+@@ -905,6 +917,7 @@
+     }
+ 
+     fn unlinkat(&mut self, dirfd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<()> {
++        self.writable()?;
+         let (_pid, uid, gid) = get_uid_gid_from_pid(&self.proc_creds_capability, ctx.pid)?;
+         let path = RedoxReference::new(path).ok_or(Error::new(EINVAL))?;
+         let path = match Handle::get_resource_or(self.handles.get(&dirfd))? {
+@@ -940,6 +953,7 @@
+         _ctx: &CallerCtx,
+     ) -> Result<usize> {
+         // println!("Write {}, {:X} {}", id, buf.as_ptr() as usize, buf.len());
++        self.writable()?;
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+         self.fs.tx(|tx| file.write(&mut self.fmap, buf, offset, tx))
+     }
+@@ -951,11 +965,13 @@
+     }
+ 
+     fn fchmod(&mut self, id: usize, mode: u16, _ctx: &CallerCtx) -> Result<()> {
++        self.writable()?;
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+         self.fs.tx(|tx| file.fchmod(mode, tx))
+     }
+ 
+     fn fchown(&mut self, id: usize, new_uid: u32, new_gid: u32, _ctx: &CallerCtx) -> Result<()> {
++        self.writable()?;
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+         self.fs.tx(|tx| file.fchown(new_uid, new_gid, tx))
+     }
+@@ -1003,6 +1019,7 @@
+     }
+ 
+     fn flink(&mut self, id: usize, url: &str, ctx: &CallerCtx) -> Result<usize> {
++        self.writable()?;
+         self.flink_internal(id, TreePtr::root(), url, 0, ctx.uid, ctx.gid)
+     }
+ 
+@@ -1014,6 +1031,7 @@
+         flags: u32,
+         ctx: &CallerCtx,
+     ) -> Result<usize> {
++        self.writable()?;
+         let dir_ptr = match Handle::get_resource_or(self.handles.get(&dirid))? {
+             Some(res) => res.node_ptr(),
+             None => TreePtr::root(),
+@@ -1023,6 +1041,7 @@
+     }
+ 
+     fn frename(&mut self, id: usize, url: &str, ctx: &CallerCtx) -> Result<usize> {
++        self.writable()?;
+         let file = Handle::get_resource(self.handles.get(&id))?;
+         let old_path = file.path().to_string();
+         self.frename_internal(
+@@ -1045,6 +1064,7 @@
+         flags: u32,
+         ctx: &CallerCtx,
+     ) -> Result<usize> {
++        self.writable()?;
+         let old_dir_ptr = match Handle::get_resource_or(self.handles.get(&old_dir))? {
+             Some(res) => res.node_ptr(),
+             None => TreePtr::root(),
+@@ -1094,12 +1114,14 @@
+ 
+     fn ftruncate(&mut self, id: usize, len: u64, _ctx: &CallerCtx) -> Result<()> {
+         // println!("Ftruncate {}, {}", id, len);
++        self.writable()?;
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+         self.fs.tx(|tx| file.truncate(len, tx))
+     }
+ 
+     fn futimens(&mut self, id: usize, times: &[TimeSpec], _ctx: &CallerCtx) -> Result<()> {
+         // println!("Futimens {}, {}", id, times.len());
++        self.writable()?;
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+         self.fs.tx(|tx| file.utimens(times, tx))
+     }
+@@ -1122,6 +1144,9 @@
+         flags: MapFlags,
+         _ctx: &CallerCtx,
+     ) -> Result<usize> {
++        if flags.contains(MapFlags::MAP_SHARED) && flags.contains(MapFlags::PROT_WRITE) {
++            self.writable()?;
++        }
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+         let fmaps = &mut self.fmap;
+ 
+@@ -1178,6 +1203,7 @@
+         let uid = ctx.uid;
+         let gid = ctx.gid;
+ 
++        self.writable()?;
+         let parent_resource = Handle::get_resource(self.handles.get(&sendfd_request.id()))?;
+ 
+         let mut other_scheme_fd = usize::MAX;

@@ -60,6 +60,10 @@ schemes = [
   "timerfd",
   "uds_stream",
   "uds_dgram",
+  # Widened access (Linux layer LC3): linux-sessiond, the root service that gives a
+  # `linux-run --session` the read-only Debian root and a capped memory file system. Absent
+  # from an image without the service.
+  "linux-session",
   # File schemes
   "file",
   # Display schemes
