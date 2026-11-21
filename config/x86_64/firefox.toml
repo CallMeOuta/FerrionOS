@@ -28,3 +28,5 @@ dlopen-ctor = "source"
 dlopen-tls = "source"
 # Condition-variable clock regression: scripts/vm-test.py cond-clock --config firefox.
 cond-clock-probe = "source"
+fork-wake-probe = "source"
+ipc-fd-probe = "source"

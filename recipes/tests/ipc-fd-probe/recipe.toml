@@ -1,0 +1,10 @@
+[package]
+description = "Checks shared memory and descriptor passing the way Firefox's IPC uses them"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/ipc-fd-probe" "${COOKBOOK_RECIPE}/ipc-fd-probe.c" ${LDFLAGS}
+"""

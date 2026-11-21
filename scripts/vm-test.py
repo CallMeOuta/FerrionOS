@@ -930,6 +930,40 @@ def test_cond_clock(vm, args):
     return True, "realtime and monotonic condition deadlines both waited for their signals"
 
 
+def user_probe(vm, args, probe, passes, timeout=60):
+    """Logs in as `user` on the serial console and runs `probe`; passes when it exits 0, prints
+    `<probe>: PASS` and `<probe>: pass <name>` for each name in `passes`, and no FAIL line."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type(f"bash -c '{probe}; echo {probe}-exit-$?'\n")
+    found = vm.wait_serial(rf"(?s)\n(.*?){probe}-exit-(\d+)\s", timeout, since)
+    output = found.group(1) if found else vm.text(since)
+    status = int(found.group(2)) if found else None
+    log = vm.out / f"{probe}.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    if status is None:
+        return False, f"{probe} did not exit within {timeout}s; see {log}"
+    missing = [name for name in passes if f"{probe}: pass {name}" not in output]
+    if status != 0 or f"{probe}: FAIL" in output or missing or not re.search(rf"{probe}: PASS\r?\n", output):
+        return False, f"{probe} failed (exit {status}, missing {missing}); see {log}"
+    return True, None
+
+
+def test_fork_wake(vm, args):
+    """Threads blocked on a mutex and on a condition variable before fork() are woken by the parent afterwards (use --config firefox)."""
+    ok, note = user_probe(vm, args, "fork-wake-probe", ("mutex", "cond"))
+    return ok, note or "mutex and condition waiters blocked before fork() were woken"
+
+
+def test_ipc_fd(vm, args):
+    """Firefox's IPC primitives: shm_open with a read-only reopen, posix_fallocate, socketpair, SCM_RIGHTS that copy descriptors, MSG_CMSG_CLOEXEC, epoll, and fork+exec with shared memory mapped (use --config firefox)."""
+    ok, note = user_probe(vm, args, "ipc-fd-probe", ())
+    return ok, note or "shared memory, descriptor passing, epoll and fork+exec checks passed"
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -4146,6 +4180,8 @@ TESTS["cli-tools"] = test_cli_tools
 TESTS["dlopen-ctor"] = test_dlopen_ctor
 TESTS["dlopen-tls"] = test_dlopen_tls
 TESTS["cond-clock"] = test_cond_clock
+TESTS["fork-wake"] = test_fork_wake
+TESTS["ipc-fd"] = test_ipc_fd
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
 TESTS["linux-hello"] = test_linux_hello

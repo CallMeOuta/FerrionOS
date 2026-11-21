@@ -1,0 +1,18 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the patches before it in the recipe's list applied:
+- `PTHREAD_STACK_MIN` is 16384, glibc's x86_64 value, instead of 65536, so `pthread_attr_setstacksize` accepts the small stacks other platforms accept. Rust's standard library takes its floor from the libc crate (4096 for this target) and failed to start any thread asked for under 64 KiB, such as Firefox's 40 KiB WebRender SwComposite thread.
+
+diff --git a/src/header/limits/mod.rs b/src/header/limits/mod.rs
+index 19df8d4d..43e2a451 100644
+--- a/src/header/limits/mod.rs
++++ b/src/header/limits/mod.rs
+@@ -162,7 +162,9 @@ pub const POSIX_ALLOC_SIZE_MIN: c_long = 4096;
+ // PTHREAD_DESTRUCTOR_ITERATIONS defined in bits file
+ // TODO: What should this limit be? Both glibc and musl have it as 1024
+ pub const PTHREAD_KEYS_MAX: c_long = 4096 * 32;
+-pub const PTHREAD_STACK_MIN: c_long = 65536;
++// glibc's x86_64 value. A thread's TCB is allocated apart from its stack, so the stack needs room
++// only for the thread's own frames and a signal frame.
++pub const PTHREAD_STACK_MIN: c_long = 16384;
+ /// Maximum number of symbolic links that can be reliably traversed in the
+ /// resolution of a pathname in the absence of a loop.
+ pub const SYMLOOP_MAX: c_long = 64;

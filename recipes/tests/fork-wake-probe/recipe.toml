@@ -1,0 +1,10 @@
+[package]
+description = "Checks that threads blocked before a fork are woken afterwards"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/fork-wake-probe" "${COOKBOOK_RECIPE}/fork-wake-probe.c" ${LDFLAGS} -lpthread
+"""

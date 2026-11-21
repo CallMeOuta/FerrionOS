@@ -1,0 +1,113 @@
+FerrionOS change to the Redox kernel (MIT license, kept), made against upstream commit e7f1d4231d0f4b55fbef229d9cd9459302c101f4 with the patches before it in the recipe's list applied:
+- a futex word in private memory (`Provider::Allocated`) is keyed by its address space and virtual address instead of its physical address. A thread already waiting when another thread of its process forks is then still woken: the waker's first write after the fork breaks copy-on-write and moves the word to a new frame, which left the waiter keyed by the old frame forever. Futexes in memory shared between address spaces stay keyed by physical address.
+
+diff --git a/src/syscall/futex.rs b/src/syscall/futex.rs
+index 65047d81..1a7fbdb2 100644
+--- a/src/syscall/futex.rs
++++ b/src/syscall/futex.rs
+@@ -32,9 +32,23 @@ use crate::syscall::{
+ 
+ use super::usercopy::UserSlice;
+ 
+-// Physical address used as key, required if synchronizing across address spaces
+-// (necessitates MAP_SHARED since CoW would invalidate this address).
+-type FutexList = HashMap<PhysicalAddress, Vec<FutexEntry>>;
++/// Where a futex word lives, as waiters and wakers must agree on it.
++#[derive(Clone, Copy, Eq, Hash, PartialEq)]
++enum FutexKey {
++    /// Memory private to one address space (`Provider::Allocated`): keyed by the address space
++    /// and the virtual address. Its physical frame is not stable: after a fork the first write
++    /// breaks copy-on-write and gives the writer a new frame, which would strand a thread that
++    /// was already waiting on the old one.
++    Private {
++        addr_space: usize,
++        addr: VirtualAddress,
++    },
++    /// Memory that stays shared between address spaces: keyed by physical address, so that
++    /// waiters in other address spaces meet.
++    Shared(PhysicalAddress),
++}
++
++type FutexList = HashMap<FutexKey, Vec<FutexEntry>>;
+ 
+ pub struct FutexEntry {
+     // Context to wake up, and compare address spaces.
+@@ -118,6 +132,15 @@ pub fn futex(
+ 
+     let target_physaddr = validate_and_translate_virt(&addr_space_guard, target_virtaddr)
+         .ok_or(Error::new(EFAULT))?;
++    // `needs_correction` holds exactly for private (`Provider::Allocated`) memory.
++    let key = if needs_correction {
++        FutexKey::Private {
++            addr_space: Arc::as_ptr(&current_addrsp) as usize,
++            addr: target_virtaddr,
++        }
++    } else {
++        FutexKey::Shared(target_physaddr)
++    };
+ 
+     match op {
+         // TODO: FUTEX_WAIT_MULTIPLE?
+@@ -149,11 +172,10 @@ pub fn futex(
+                     // Do not return early until rollback handled
+                 }
+ 
+-                // Target target_physaddr
+                 let futexes = FUTEXES.lock(token.token());
+                 let (mut futexes, mut lock_token) = futexes.into_split();
+                 futexes
+-                    .entry(target_physaddr)
++                    .entry(key)
+                     .or_insert_with(Vec::new)
+                     .push(FutexEntry {
+                         context_lock: Arc::downgrade(&context_lock),
+@@ -208,12 +230,17 @@ pub fn futex(
+ 
+                 drop(addr_space_guard);
+ 
+-                if new_target_physaddr.is_none_or(|new| new != target_physaddr)
+-                    || fetched != expected
+-                {
++                // A shared word must still be in the frame it is keyed by; a private one is keyed
++                // by its virtual address, and its value was just read from wherever it is now.
++                let moved = match key {
++                    FutexKey::Shared(_) => {
++                        new_target_physaddr.is_none_or(|new| new != target_physaddr)
++                    }
++                    FutexKey::Private { .. } => new_target_physaddr.is_none(),
++                };
++                if moved || fetched != expected {
+                     // The value or physical address is changed before switching, rollback
+-                    // TODO: Changing physical address should still be allowed, but our futex can't handle remap
+-                    if let Entry::Occupied(futexes_entry) = futexes.entry(target_physaddr) {
++                    if let Entry::Occupied(futexes_entry) = futexes.entry(key) {
+                         if let Some(futex) = remove_futex_entry(futexes_entry) {
+                             drop(futexes);
+                             if let Some(ctx) = futex.context_lock.upgrade() {
+@@ -239,7 +266,7 @@ pub fn futex(
+             let mut futexes_lock = FUTEXES.lock(token.token());
+             let (futexes_map, _) = futexes_lock.token_split();
+ 
+-            let Entry::Occupied(futexes) = futexes_map.entry(target_physaddr) else {
++            let Entry::Occupied(futexes) = futexes_map.entry(key) else {
+                 return Ok(0);
+             };
+             if remove_futex_entry(futexes).is_none() {
+@@ -266,7 +293,7 @@ pub fn futex(
+                 let mut futexes_map = FUTEXES.lock(token.token());
+                 let (futexes_map, mut token) = futexes_map.token_split();
+ 
+-                if let Entry::Occupied(mut futexes_entry) = futexes_map.entry(target_physaddr) {
++                if let Entry::Occupied(mut futexes_entry) = futexes_map.entry(key) {
+                     let futexes = futexes_entry.get_mut();
+                     let mut i = 0;
+                     // TODO: Use something like retain, once it is possible to tell it when to stop iterating...
+@@ -291,7 +318,7 @@ pub fn futex(
+ }
+ 
+ fn remove_futex_entry(
+-    mut futexes_entry: OccupiedEntry<'_, PhysicalAddress, Vec<FutexEntry>>,
++    mut futexes_entry: OccupiedEntry<'_, FutexKey, Vec<FutexEntry>>,
+ ) -> Option<FutexEntry> {
+     let current_lock = context::current();
+     let futexes = futexes_entry.get_mut();
