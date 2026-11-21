@@ -1,18 +1,15 @@
-#TODO not compiled or tested
-#TODO maybe missing dependencies, see https://github.com/zed-industries/zed/blob/main/script/linux#L15
-#TODO build the gui ("zed" package) once we have gpu drivers to render vulkan at decent fps
+#TODO not compiled or tested; cargo check for the target fails in path (Path::is_empty is unstable in the prefix's rustc 1.98.0-dev, Zed pins 1.98.1), ipc-channel 0.19 (no backend for the target), util (nix::sys::resource) and cli (Detect only for Linux, FreeBSD, macOS, Windows)
+#TODO the editor ("zed" package) needs a GPUI platform backend for Orbital; X11 stays off
+# Only zstd is linked from the system: SQLite is bundled, git is run as a program, TLS is rustls
 # build instructions - https://zed.dev/docs/development/linux
 [source]
 git = "https://github.com/zed-industries/zed"
+# release v1.29.3
+rev = "d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7"
 [build]
 template = "custom"
 dependencies = [
-    "fontconfig",
-    "libxkbcommon",
-    "openssl3",
     "zstd",
-    "libgit2",
-    "sqlite3",
 ]
 script = """
 cookbook_cargo_packages cli
