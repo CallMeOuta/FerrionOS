@@ -1,0 +1,41 @@
+FerrionOS change to the Khronos Vulkan loader (Apache-2.0 licence, kept), made against upstream tag vulkan-sdk-1.4.350.1 (commit a9e72c6):
+- CMakeLists.txt accepts the Redox target (the cookbook's cross file names the system UnixPaths), with no window-system platform;
+- loader/vk_loader_platform.h treats __redox__ as a common Unix platform, and returns no executable path there.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4622e0a..10fd6c3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -150,6 +150,9 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "QNX")
+     message(FATAL_ERROR "See BUILD.md for QNX build")
+ elseif(CMAKE_SYSTEM_NAME MATCHES "Fuchsia")
+     message(FATAL_ERROR "Fuchsia uses Chromium build. See BUILD.gn")
++elseif(CMAKE_SYSTEM_NAME MATCHES "Redox|UnixPaths")
++    # Redox and its derivatives (the Redox cookbook's cross file names the system UnixPaths).
++    # No window-system platform: Orbital has no Vulkan surface extension.
+ else()
+     message(FATAL_ERROR "Unsupported Platform!")
+ endif()
+diff --git a/loader/vk_loader_platform.h b/loader/vk_loader_platform.h
+index e02d99e..5bcbaa8 100644
+--- a/loader/vk_loader_platform.h
++++ b/loader/vk_loader_platform.h
+@@ -44,7 +44,8 @@
+ 
+ // Set of platforms with a common set of functionality which is queried throughout the program
+ #if defined(__linux__) || defined(__APPLE__) || defined(__Fuchsia__) || defined(__QNX__) || defined(__FreeBSD__) || \
+-    defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__GNU__) || defined(__CYGWIN__)
++    defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__GNU__) || defined(__CYGWIN__) || \
++    defined(__redox__)
+ #define COMMON_UNIX_PLATFORMS 1
+ #else
+ #define COMMON_UNIX_PLATFORMS 0
+@@ -357,7 +358,7 @@ static inline char *loader_platform_executable_path(char *buffer, size_t size) {
+ 
+     return buffer;
+ }
+-#elif defined(__Fuchsia__) || defined(__OpenBSD__)
++#elif defined(__Fuchsia__) || defined(__OpenBSD__) || defined(__redox__)
+ static inline char *loader_platform_executable_path(char *buffer, size_t size) { return NULL; }
+ #elif defined(__QNX__)
+ 

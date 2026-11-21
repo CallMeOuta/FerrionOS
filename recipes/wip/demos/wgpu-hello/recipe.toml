@@ -1,0 +1,18 @@
+#TODO compiled but not tested
+# The smallest wgpu check for FerrionOS (product roadmap R0): wgpu-hello-headless renders a
+# triangle through Vulkan to a PNG, and wgpu-hello-window shows it turning in a winit window.
+# The crate lives in crate/ beside this file.
+[package]
+description = "wgpu triangle, headless to a PNG and in a winit window, on Mesa's CPU Vulkan driver"
+dependencies = [
+    "libvulkan",
+    "mesa",
+]
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""
