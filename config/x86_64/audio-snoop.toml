@@ -1,0 +1,12 @@
+# Hearing refused by default (plans/audio.md AU3); run scripts/vm-test.py audio-snoop --config audio-snoop.
+# Test images only: this file widens access. It gives ferrion-audiod a loopback input, which root
+# feeds through /scheme/audio/loopback, and a microphone grant for the factories root makes on the
+# serial console with the session `serial-console`. No other config may carry it.
+include = ["desktop.toml"]
+
+[[files]]
+path = "/etc/ferrion-audiod/test.conf"
+data = """
+loopback
+microphone session:serial-console
+"""

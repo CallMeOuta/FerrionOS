@@ -1,7 +1,8 @@
 # Test tools for the sound path of plans/audio.md. `audio-probe ring-churn N`, run as root, opens a
 # playback handle under `audiohw` and the shared ring on it, then closes both, N times, and prints
-# each result. The crate lives in crate/ beside this file. config/x86_64/desktop.toml installs it;
-# `scripts/vm-test.py audio-ring` runs it.
+# each result. Its record, tap, loopback and grant commands are AU3's. The crate lives in crate/
+# beside this file. config/x86_64/desktop.toml installs it; `scripts/vm-test.py audio-ring`,
+# `audio-apps` and `audio-snoop` run it.
 [package]
 description = "Test tools for FerrionOS's sound path"
 

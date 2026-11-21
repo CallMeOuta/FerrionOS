@@ -93,6 +93,10 @@
 #           volume 100; passes when every round opens the ring, ihdad's descriptor
 #           count in /scheme/sys/iostat returns, the signal is exact in one piece and
 #           the console answers (x86_64 desktop)
+#   audio-snoop  the same sound device, image of --config audio-snoop: without a grant a
+#           record stream gets zeros and no error; with the test grant it hears the
+#           loopback input's 440 Hz and none of another program's 880 Hz; a tap hears
+#           that program only while a capture-service grant names it
 # --check-wav FILE boots nothing: it runs the same checker on a recording of the
 # rig's counter signal (plans/audio.md, "The rig"), or of the seq bytes with
 # --signal seq, and exits 0 only when the signal is exact in one piece.
@@ -4005,6 +4009,102 @@ def test_audio_apps(args, out):
                           "legacy PCM/tone, independent gains, readable volume, and flat 10,000-stream churn") + f"; see {out}"
 
 
+def heard(text):
+    """The numbers of audio-probe's `heard:` line, or None."""
+    found = re.search(r"audio-probe: heard: frames=(\d+) nonzero=(\d+) peak=(\S+) crossings_per_second=(\S+) "
+                      r"level_440=(\S+) level_880=(\S+)", text)
+    if not found:
+        return None
+    keys = ("frames", "nonzero", "peak", "crossings_per_second", "level_440", "level_880")
+    return {key: (int if key in ("frames", "nonzero") else float)(value) for key, value in zip(keys, found.groups())}
+
+
+def test_audio_snoop(args, out):
+    """AU3: hearing is refused by default. Boots the audio-snoop config (its server has a loopback input and a microphone grant for the session `serial-console`) with the sound device of the other audio checks. As root on the serial console, a 440 Hz tone plays into the loopback input and a program `tone-c` plays 880 Hz. Passes when a record stream without a grant opens, reads and exits 0 with zeros only; one in the session `serial-console` hears the tone (zero crossings within 2 percent of 880 a second) and nothing of 880 Hz; a tap on `tone-c` is zeros without a grant, zeros with a grant naming another program, the 880 Hz tone with a grant naming `tone-c`, and zeros again once the process holding the capture service's handle is killed (x86_64, --config audio-snoop)."""
+    wav = out / "audio.wav"
+    wav.unlink(missing_ok=True)
+    results, problems = {}, []
+    probe_seconds = 3
+    frames = probe_seconds * AUDIO_RATE
+
+    def run(name, line, timeout=60):
+        status, text = run_status(vm, line, timeout)
+        (out / f"{name}.txt").write_text(text)
+        results[name] = {"status": status, "heard": heard(text), "errors": re.findall(r"audio-probe: FAIL .*", text)}
+        return results[name]
+
+    def silent(name, result):
+        numbers = result["heard"]
+        if result["status"] != 0 or result["errors"]:
+            problems.append(f"{name}: exit {result['status']}, {result['errors'] or 'no output'} (zeros were due, without an error)")
+        elif not numbers or numbers["frames"] != frames or numbers["nonzero"]:
+            problems.append(f"{name}: not {frames:,} frames of zeros: {numbers}")
+
+    def tone(name, result, hz, absent):
+        numbers = result["heard"]
+        if result["status"] != 0 or not numbers:
+            problems.append(f"{name}: exit {result['status']}, {result['errors'] or 'no output'}")
+            return
+        crossings = 2 * hz
+        if abs(numbers["crossings_per_second"] - crossings) > 0.02 * crossings:
+            problems.append(f"{name}: {numbers['crossings_per_second']} zero crossings a second, not within 2% of {crossings}")
+        # The probe plays 0.25 full scale; the other tone must stay 60 dB below that.
+        if numbers[f"level_{hz}"] < 0.2 or numbers[f"level_{absent}"] > 0.25e-3:
+            problems.append(f"{name}: level at {hz} Hz {numbers[f'level_{hz}']}, at {absent} Hz {numbers[f'level_{absent}']}")
+
+    vm = audio_vm(args, out, wav)
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, "no root serial login"
+        # Both play for longer than the steps below take.
+        run("start", "bash -c 'audio-probe loopback 440 90 > /tmp/loopback.txt 2>&1 & "
+                     "audio-probe stream tone-c 880 90 > /tmp/tone-c.txt 2>&1 &'")
+        time.sleep(2)
+        result = run("record-no-grant", f"audio-probe record snoop audio-probe {probe_seconds}")
+        if result["errors"] and "openat record" in result["errors"][0]:
+            problems.append(f"no record handle: {result['errors'][0]}")
+            return False, "; ".join(problems) + f"; see {out}"
+        silent("record-no-grant", result)
+        tone("record-test-grant", run("record-test-grant", f"audio-probe record listener serial-console {probe_seconds}"), 440, 880)
+        silent("tap-no-grant", run("tap-no-grant", f"audio-probe tap listener serial-console tone-c {probe_seconds}"))
+        def hold(name, target):
+            """Starts `audio-probe grant` for a tap on `target` and waits until it holds the handle."""
+            run(name, f"bash -c 'audio-probe grant 600 \"tap session:serial-console {target}\" "
+                      f"> /tmp/{name}.txt 2>&1 & echo $! > /tmp/{name}.pid'")
+            for _ in range(30):
+                status, text = run_status(vm, f"cat /tmp/{name}.txt")
+                if "audio-probe: grants:" in text or "audio-probe: FAIL" in text:
+                    break
+                time.sleep(1)
+            if '"lease":"capture"' not in text or f'"target":"{target}"' not in text:
+                problems.append(f"{name}: the capture handle's grant was not listed: {text.strip()[-300:]}")
+
+        def release(name):
+            """Ends the holder of the capture handle; its grants must end with the handle."""
+            run(f"{name}-end", f"bash -c 'kill $(cat /tmp/{name}.pid)'")
+            for _ in range(30):
+                status, text = run_status(vm, "cat /scheme/audio/stats; echo")
+                if re.search(r'"grants":1\b', text):
+                    return
+                time.sleep(1)
+            problems.append(f"{name}: its grant outlived the capture handle: {text.strip()[-300:]}")
+
+        hold("grant-d", "tone-d")
+        silent("tap-grant-names-other", run("tap-grant-names-other", f"audio-probe tap listener serial-console tone-c {probe_seconds}"))
+        release("grant-d")
+        hold("grant-c", "tone-c")
+        tone("tap-grant-names-it", run("tap-grant-names-it", f"audio-probe tap listener serial-console tone-c {probe_seconds}"), 880, 440)
+        release("grant-c")
+        silent("tap-after-release", run("tap-after-release", f"audio-probe tap listener serial-console tone-c {probe_seconds}"))
+        run("stats", "cat /scheme/audio/stats; echo")
+    finally:
+        vm.close()
+    (out / "audio-snoop.json").write_text(json.dumps(results, indent=2) + "\n")
+    return not problems, ("; ".join(problems) if problems else
+                          "zeros without a grant and no error; the test grant hears 440 Hz and no 880 Hz; "
+                          "a tap hears tone-c only while a grant names it") + f"; see {out}"
+
+
 def test_mesa_cpu(vm, args):
     """Mesa 26.3.1 CPU GL and Vulkan reproduce the exact triangle (use --config mesa-cpu on x86_64)."""
     if not root_shell(vm, args.timeout):
@@ -4068,6 +4168,7 @@ OWN_IMAGE["net-calls"] = test_net_calls
 OWN_IMAGE["audio-baseline"] = test_audio_baseline
 OWN_IMAGE["audio-ring"] = test_audio_ring
 OWN_IMAGE["audio-apps"] = test_audio_apps
+OWN_IMAGE["audio-snoop"] = test_audio_snoop
 TESTS.update(OWN_IMAGE)
 
 

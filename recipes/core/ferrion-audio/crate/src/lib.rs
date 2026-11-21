@@ -2,6 +2,8 @@
 //! Stream, application and session gains are amplitude decibels: 0 is unity,
 //! negative values attenuate, and negative infinity mutes. Legacy master volume
 //! is an integer percentage with the server's cubic response.
+//! Record streams and taps deliver zeros unless a grant from the capture service's
+//! `Grants` handle, or a test image's configuration, names their holder.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -126,6 +128,139 @@ impl Stream {
 
     pub fn gain_db(&self) -> io::Result<f32> {
         read_gain(child(self.file.as_fd(), c"gain", libc::O_RDONLY)?)
+    }
+}
+
+/// A record stream: interleaved stereo f32 frames from the input device, or from one program's
+/// streams for a tap. Without a grant it delivers zeros, never an error.
+pub struct Record {
+    file: File,
+}
+
+impl Record {
+    /// Record the input device as the caller's process and user.
+    pub fn open() -> io::Result<Self> {
+        Ok(Self {
+            file: File::open("/scheme/audio/record")?,
+        })
+    }
+
+    /// Record the input device as the factory's identity and session.
+    pub fn from_factory(factory: BorrowedFd<'_>) -> io::Result<Self> {
+        Ok(Self {
+            file: child(factory, c"record", libc::O_RDONLY)?,
+        })
+    }
+
+    /// Hear the streams of program `target`, as the factory's identity and session. Only a grant
+    /// that names `target` lets anything but zeros through.
+    pub fn tap_from_factory(factory: BorrowedFd<'_>, target: &str) -> io::Result<Self> {
+        if !valid_identity(target) {
+            return Err(invalid("Invalid audio identity"));
+        }
+        let path = std::ffi::CString::new(format!("tap/{target}"))
+            .map_err(|_| invalid("Invalid audio identity"))?;
+        Ok(Self {
+            file: child(factory, &path, libc::O_RDONLY)?,
+        })
+    }
+
+    /// Fill `frames` completely, blocking until the server has delivered them.
+    pub fn read_frames(&mut self, frames: &mut [[f32; CHANNELS]]) -> io::Result<()> {
+        // Every bit pattern is a valid f32, and the bytes borrow the frames mutably for this call only.
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                frames.as_mut_ptr().cast::<u8>(),
+                std::mem::size_of_val(frames),
+            )
+        };
+        self.file.read_exact(bytes)?;
+        #[cfg(target_endian = "big")]
+        for frame in frames.iter_mut() {
+            for sample in frame {
+                *sample = f32::from_le_bytes(sample.to_ne_bytes());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Who a grant is for: a program identity or a session, as factories name them.
+#[derive(Clone, Copy)]
+pub enum Holder<'a> {
+    Program(&'a str),
+    Session(&'a str),
+}
+
+impl std::fmt::Display for Holder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Program(id) => write!(f, "program:{id}"),
+            Self::Session(id) => write!(f, "session:{id}"),
+        }
+    }
+}
+
+/// The capture service's handle (root only, one holder at a time). Its grants last while it
+/// stays open: dropping it ends every grant it issued.
+pub struct Grants {
+    file: File,
+}
+
+impl Grants {
+    pub fn open() -> io::Result<Self> {
+        Ok(Self {
+            file: OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/scheme/audio/grants")?,
+        })
+    }
+
+    fn line(&mut self, verb: &str, holder: Holder<'_>, target: Option<&str>) -> io::Result<()> {
+        let (Holder::Program(id) | Holder::Session(id)) = holder;
+        if !valid_identity(id) || !target.is_none_or(valid_identity) {
+            return Err(invalid("Invalid audio identity or session"));
+        }
+        let line = match target {
+            Some(target) => format!("{verb} {holder} {target}\n"),
+            None => format!("{verb} {holder}\n"),
+        };
+        self.file.write_all(line.as_bytes())
+    }
+
+    /// Let `holder`'s record streams hear the input device.
+    pub fn microphone(&mut self, holder: Holder<'_>) -> io::Result<()> {
+        self.line("microphone", holder, None)
+    }
+
+    /// Let `holder`'s taps on program `target` hear its streams.
+    pub fn tap(&mut self, holder: Holder<'_>, target: &str) -> io::Result<()> {
+        self.line("tap", holder, Some(target))
+    }
+
+    pub fn revoke_microphone(&mut self, holder: Holder<'_>) -> io::Result<()> {
+        self.line("revoke microphone", holder, None)
+    }
+
+    pub fn revoke_tap(&mut self, holder: Holder<'_>, target: &str) -> io::Result<()> {
+        self.line("revoke tap", holder, Some(target))
+    }
+
+    /// Every grant in force, as JSON: holder, hearing, target and lease.
+    pub fn json(&self) -> io::Result<String> {
+        use std::os::unix::fs::FileExt;
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let count = self.file.read_at(&mut buffer, bytes.len() as u64)?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        String::from_utf8(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid grants record"))
     }
 }
 

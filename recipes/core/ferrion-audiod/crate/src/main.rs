@@ -20,7 +20,21 @@ fn run(daemon: SchemeDaemon) -> anyhow::Result<()> {
     let pid = libredox::call::getpid()?;
     let hardware = Fd::open("/scheme/audiohw", flag::O_WRONLY | flag::O_CLOEXEC, 0)?;
     let socket = Socket::create()?;
-    let state = Arc::new(Mutex::new(scheme::State::new()));
+    let test = match std::fs::read_to_string(scheme::TEST_CONFIG) {
+        Ok(text) => Some(
+            scheme::TestConfig::parse(&text)
+                .map_err(|line| anyhow::anyhow!("{}: {line}", scheme::TEST_CONFIG))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(anyhow::anyhow!("{}: {error}", scheme::TEST_CONFIG)),
+    };
+    if test.is_some() {
+        eprintln!(
+            "ferrion-audiod: test configuration {} applies",
+            scheme::TEST_CONFIG
+        );
+    }
+    let state = Arc::new(Mutex::new(scheme::State::new(test)));
     let mut scheme = scheme::AudioScheme(state.clone());
     daemon.ready_sync_scheme(&socket, &mut scheme)?;
     let namespace = libredox::call::mkns(&[IoSlice::new(b"memory"), IoSlice::new(b"rand")])?;
