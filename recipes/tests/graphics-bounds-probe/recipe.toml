@@ -1,0 +1,14 @@
+# Run as `user`, graphics-bounds-probe asks the display driver for mappings past the end of a dumb
+# buffer, for buffers beyond the driver's limits and for a buffer number no handle created, and
+# passes when each is refused while the driver keeps answering (base
+# ferrion-graphics-bounds.patch). The crate lives in crate/ beside this file.
+# config/x86_64/desktop.toml installs it; `scripts/vm-test.py graphics-bounds` runs it.
+[package]
+description = "Checks that the display driver refuses dumb-buffer requests outside their buffer or its limits"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

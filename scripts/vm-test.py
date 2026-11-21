@@ -42,6 +42,10 @@
 #   nsmgr-bounds  logs in as `user` on the serial console and runs
 #           nsmgr-bounds-probe: fork requests whose name length runs past their
 #           end get EINVAL and the namespace manager keeps answering (x86_64 desktop)
+#   graphics-bounds  logs in as `user` on the serial console and runs
+#           graphics-bounds-probe: dumb-buffer mappings past a buffer's end, sizes
+#           beyond the display driver's limits and an unknown buffer number are
+#           refused, and the driver still answers a fresh handle (x86_64 desktop)
 #   desktop-regions  compares the settled desktop with the flat first-run target's region probes
 #   cli-tools  checks sed, awk and gzip tar creation/extraction with -C on the desktop
 #   sudo-notty  logs in as `user` on the serial console and runs sudo with no
@@ -499,6 +503,31 @@ def test_nsmgr_bounds(vm, args):
         return False, f"probe exit {results['probe'][0]}: {detail}; see {vm.out / 'nsmgr-bounds.txt'}"
     if results["after"][0] != 0:
         return False, f"the shell could not run `ls /` afterwards (exit {results['after'][0]}); see {vm.out}"
+    return True, detail
+
+
+def test_graphics_bounds(vm, args):
+    """Logs in as `user` on the serial console and runs graphics-bounds-probe: mappings past the end of a dumb buffer, buffers beyond the display driver's limits and an unknown buffer number are refused, a fresh display handle still creates and maps a buffer, and the display scheme is still listed afterwards."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    results = {}
+    probe = " ".join(["graphics-bounds-probe", *args.display])
+    for tag, line in (("probe", probe), ("after", 'ls /scheme | grep -q "^display[.]"')):
+        since = vm.mark()
+        # The status is echoed inside bash: `user`'s login shell is not POSIX.
+        vm.type(f"bash -c '{line}; echo gb-end-{tag}-$?'\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)gb-end-{tag}-(\d+)", 120, since)
+        results[tag] = (int(found.group(2)) if found else None, found.group(1) if found else vm.text(since))
+    (vm.out / "graphics-bounds.txt").write_text("".join(f"[{tag}] exit {status}\n{output}\n"
+                                                        for tag, (status, output) in results.items()))
+    lines = re.findall(r"graphics-bounds-probe: (?:pass|FAIL) .*", results["probe"][1])
+    detail = "; ".join(line.strip() for line in lines) or "no result line"
+    if results["probe"][0] != 0:
+        return False, f"probe exit {results['probe'][0]}: {detail}; see {vm.out / 'graphics-bounds.txt'}"
+    if results["after"][0] != 0:
+        return False, f"no display scheme in /scheme afterwards (exit {results['after'][0]}); see {vm.out}"
     return True, detail
 
 
@@ -1947,6 +1976,7 @@ TESTS["ferrion-cli"] = test_ferrion_cli
 TESTS["driver-namespaces"] = test_driver_namespaces
 TESTS["scheme-create"] = test_scheme_create
 TESTS["nsmgr-bounds"] = test_nsmgr_bounds
+TESTS["graphics-bounds"] = test_graphics_bounds
 TESTS["sudo-notty"] = test_sudo_notty
 TESTS["desktop-regions"] = test_desktop_regions
 TESTS["resolver"] = test_resolver
@@ -1969,6 +1999,8 @@ def main():
     parser.add_argument("--out", type=Path, default=None, help="default: build/vm-test/<arch>/<config>")
     parser.add_argument("--make", action="append", default=[], metavar="VAR=VALUE",
                         help="extra make variable for `make qemu`, such as net=no; repeatable")
+    parser.add_argument("--display", action="append", default=[], metavar="SCHEME",
+                        help="graphics-bounds: check only this display scheme, such as display.virtio-gpu; repeatable")
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(2)

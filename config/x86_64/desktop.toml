@@ -41,6 +41,9 @@ signal-handle-probe = {}
 # Run as `user`, it checks that the namespace manager refuses fork requests whose lengths run
 # past their end and keeps working; scripts/vm-test.py nsmgr-bounds runs it.
 nsmgr-bounds-probe = {}
+# Run as `user`, it checks that the display driver refuses dumb-buffer mappings and sizes outside
+# a buffer or the driver's limits and keeps working; scripts/vm-test.py graphics-bounds runs it.
+graphics-bounds-probe = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
 # ferrion-run check uses to show that a profile alone withholds the network.

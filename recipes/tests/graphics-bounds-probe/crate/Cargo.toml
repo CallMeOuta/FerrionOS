@@ -1,0 +1,10 @@
+[package]
+name = "graphics-bounds-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Checks that the display driver refuses dumb-buffer requests outside their buffer or its limits"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
