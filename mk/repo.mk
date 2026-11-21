@@ -1,4 +1,3 @@
-# Configuration file for recipe commands
 
 $(REPO_TAG): prefix $(FILESYSTEM_CONFIG) | $(FSTOOLS) $(FSTOOLS_TAG) $(CONTAINER_TAG)
 	$(MAKE) cook
@@ -295,7 +294,6 @@ ifeq ($(PODMAN_BUILD),1)
 	$(PODMAN_RUN) make $@
 else
 ifeq ($(REPO_BINARY),0)
-# if explicitly set REPO_BINARY=0 (as opposed to leave it empty), this prevent dependencies to update
 	$(REPO_BIN) change-rule-local --set-rule=binary $(foreach f,$(subst $(comma), ,$*),$(f))
 else
 	$(REPO_BIN) change-rule --set-rule=binary $(foreach f,$(subst $(comma), ,$*),$(f)) --with-package-deps
@@ -308,7 +306,6 @@ ifeq ($(PODMAN_BUILD),1)
 	$(PODMAN_RUN) make $@
 else
 ifeq ($(REPO_BINARY),1)
-# if explicitly set REPO_BINARY=1, this prevent dependencies to update
 	$(REPO_BIN) change-rule-local --set-rule=source $(foreach f,$(subst $(comma), ,$*),$(f))
 else
 	$(REPO_BIN) change-rule --set-rule=source $(foreach f,$(subst $(comma), ,$*),$(f)) --with-package-deps
@@ -396,13 +393,11 @@ endif
 repo-rollback.%: $(FSTOOLS_TAG) FORCE
 ifeq ($(PODMAN_BUILD),1)
 	$(PODMAN_RUN) make $@
-# have to be done otherwise podman will rebuild
 	touch $(CONTAINER_TAG)
 else
 	git checkout $*
 	$(REPO_BIN) capture-rev $(COOKBOOK_OPTS) --rollback --with-package-deps
 endif
-# have to be done otherwise cookbook will rebuild
 	touch $(FSTOOLS_TAG)
 
 export DEBUG_BIN?=

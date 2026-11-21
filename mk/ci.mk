@@ -1,4 +1,3 @@
-# Configuration file of the build system commands for the build server
 
 IMG_TAG?=$(shell git describe --tags)
 IMG_SEPARATOR?=_

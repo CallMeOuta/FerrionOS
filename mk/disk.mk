@@ -1,6 +1,4 @@
-# Configuration file with the commands configuration of the FerrionOS image
 
-# Signs a harddrive.img for verified boot; the image's path follows
 VERIFIED_BOOT_SIGN=INSTALLER='$(INSTALLER)' FILESYSTEM_CONFIG='$(FILESYSTEM_CONFIG)' VERIFIED_BOOT_SIGNER='$(VERIFIED_BOOT_SIGNER)' scripts/verified-boot-sign.sh $(REDOXFS) $(VERIFIED_BOOT_KEYS)
 
 $(BUILD)/harddrive.img: $(FSTOOLS) $(REPO_TAG)

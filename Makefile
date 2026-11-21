@@ -1,8 +1,5 @@
-# This file contains the build system commands configuration
-# and environment variables
 include mk/config.mk
 
-# Build system dependencies
 include mk/depends.mk
 
 all: $(BUILD)/harddrive.img
@@ -28,8 +25,6 @@ rebuild:
 	rm -rf $(BUILD)/repo.tag $(BUILD)/harddrive.img $(BUILD)/redox-live.iso
 	$(MAKE) all
 
-# To tell that it's not safe
-# to execute the cookbook binary
 NOT_ON_PODMAN?=0
 
 clean:
@@ -39,17 +34,17 @@ ifneq ("$(wildcard $(CONTAINER_TAG))","")
 else
 	$(info will not run cookbook clean as container is not built)
 	$(MAKE) clean PODMAN_BUILD=0 NOT_ON_PODMAN=1 SKIP_CHECK_TOOLS=1
-endif # CONTAINER_TAG
+endif
 else
 ifneq ($(NOT_ON_PODMAN),1)
 	$(MAKE) repo_clean
 	-$(FUMOUNT) $(BUILD)/filesystem/ || true
 	-$(FUMOUNT) /tmp/redox_installer/ || true
-endif # NOT_ON_PODMAN
+endif
 	rm -rf repo
 	rm -rf $(BUILD) $(PREFIX)
 	$(MAKE) fstools_clean
-endif # PODMAN_BUILD
+endif
 
 distclean:
 ifeq ($(PODMAN_BUILD),1)
@@ -58,13 +53,13 @@ ifneq ("$(wildcard $(CONTAINER_TAG))","")
 else
 	$(info will not run cookbook unfetch as container is not built)
 	$(MAKE) distclean PODMAN_BUILD=0 NOT_ON_PODMAN=1 SKIP_CHECK_TOOLS=1
-endif # CONTAINER_TAG
+endif
 else
 ifneq ($(NOT_ON_PODMAN),1)
 	$(MAKE) fetch_clean
-endif # NOT_ON_PODMAN
+endif
 	$(MAKE) clean NOT_ON_PODMAN=1
-endif # PODMAN_BUILD
+endif
 
 pull:
 	git pull
@@ -80,28 +75,21 @@ repo_clean: c.--all
 
 fetch_clean: u.--all
 
-# Podman build recipes and vars
 include mk/podman.mk
 
-# Disk Imaging and Cookbook tools
 include mk/fstools.mk
 
-# Cross compiler recipes
 include mk/prefix.mk
 
-# Repository maintenance
 include mk/repo.mk
 
-# Disk images
 include mk/disk.mk
 
-# Emulation recipes
 include mk/virtiofs.mk
 include mk/qemu.mk
 include mk/virtualbox.mk
 include mk/ch.mk
 
-# CI
 include mk/ci.mk
 
 env: prefix FORCE $(CONTAINER_TAG)
@@ -146,12 +134,8 @@ KPROF_OUTPUT_TXT?=$(BUILD)/filesystem/home/root/kprof.txt
 KPROF_PERF_SVG?=$(BUILD)/flamegraph/kflamegraph.svg
 KPROF_PROCESSED_OUTPUT?=$(BUILD)/flamegraph/processed.txt
 KPROF_COLLAPSED_OUTPUT?=$(BUILD)/flamegraph/collapsed.txt
-# XXX: This assumes the TSC is invariant, that the value for cpu0 is the same as for all other CPUs, and that the value from ACPI actually reflects the TSC rate. It also only works on Linux.
 KPROF_CPU_GHZ?=$(shell (cat /sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq || echo 3400) | xargs echo "0.001 *" | bc)
-# The option letters are listed in src/main.rs of the kprofiling component (recipes/wip/dev/perf/redox-kprofiling)
-# Set e.g. to "xo" to show individual instruction offsets
 KPROF_OPTIONS?=u
-# for example, set --reverse to get a reverse flamegraph
 KPROF_FLAMEGRAPH_OPTIONS?=
 
 .PHONY: flamegraph rotate-flamegraph differential-flamegraph acid-output rotate-acid-output compare-acid-output

@@ -1,4 +1,3 @@
-# Configuration file for VirtualBox, it creates a VirtualBox virtual machine
 
 virtualbox: $(BUILD)/harddrive.img
 	echo "Delete VM"
@@ -28,7 +27,7 @@ virtualbox: $(BUILD)/harddrive.img
 	fi
 	$(VBM) modifyvm FerrionOS --uart1 0x3F8 4
 	$(VBM) modifyvm FerrionOS --uartmode1 file "$(ROOT)/$(BUILD)/serial.log"
-	$(VBM) modifyvm FerrionOS --usb off # on
+	$(VBM) modifyvm FerrionOS --usb off
 	$(VBM) modifyvm FerrionOS --keyboard ps2
 	$(VBM) modifyvm FerrionOS --mouse ps2
 	$(VBM) modifyvm FerrionOS --audio-driver $(VB_AUDIO)

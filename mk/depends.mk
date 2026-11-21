@@ -1,6 +1,4 @@
-# Configuration file for the build system dependencies
 
-# don't check for compile tools, used when tools are managed externally, like in nix or CI
 ifneq ($(SKIP_CHECK_TOOLS),1)
 ifeq ($(shell which rustup),)
 $(error rustup not found, install from "https://rustup.rs/")

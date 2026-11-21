@@ -32,16 +32,12 @@
 # scripts/ch-tap-setup.sh (firewalld only) creates it and makes the host
 # the guest's DHCP server and NAT gateway.
 
-# Pinned releases. To update one, change its version and the sha256 of its
-# assets, which GitHub shows next to each file on the release page. Every
-# version is downloaded into its own directory.
 CH_VERSION=v54.0
 CH_FIRMWARE_VERSION=ch-97eeb7b09
 CH_URL=https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$(CH_VERSION)
 CH_FIRMWARE_URL=https://github.com/cloud-hypervisor/edk2/releases/download/$(CH_FIRMWARE_VERSION)
 CH_DIR=build/cloud-hypervisor/$(ARCH)
 
-# Release assets and their sha256, per ARCH
 CH_ASSET_x86_64=cloud-hypervisor-static
 CH_SHA256_x86_64=4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b
 CH_REMOTE_ASSET_x86_64=ch-remote-static
@@ -58,7 +54,6 @@ endif
 CH?=$(CH_PINNED)
 CH_REMOTE?=$(CH_REMOTE_PINNED)
 CH_FIRMWARE?=$(CH_FIRMWARE_PINNED)
-# Only the pinned files in use are downloaded.
 CH_DOWNLOADS=$(filter $(CH_PINNED) $(CH_REMOTE_PINNED) $(CH_FIRMWARE_PINNED),$(CH) $(CH_REMOTE) $(CH_FIRMWARE))
 
 CH_SMP?=4
@@ -67,7 +62,6 @@ CH_API_SOCK?=$(BUILD)/ch.sock
 CH_LOG?=$(BUILD)/ch.log
 CH_TAP?=redox0
 CH_MAC?=52:54:00:12:34:56
-# Not in $(BUILD): SELinux limits passt to $XDG_RUNTIME_DIR and /tmp.
 CH_PASST_SOCK?=$(or $(XDG_RUNTIME_DIR),/tmp)/redox-passt-$(ARCH)-$(CONFIG_NAME).sock
 CH_PASST_FLAGS?=
 CHFLAGS?=-v --log-file $(CH_LOG)
@@ -83,7 +77,6 @@ CHFLAGS+= \
 PASST_RUN=
 
 ifeq ($(net),tap)
-	# The FerrionOS virtio-net driver only acknowledges VIRTIO_NET_F_MAC at the moment.
 	CHFLAGS+=--net tap=$(CH_TAP),mac=$(CH_MAC),offload_tso=off,offload_ufo=off,offload_csum=off
 else ifneq ($(net),no)
 	CHFLAGS+=--net vhost_user=true,socket=$(CH_PASST_SOCK),mac=$(CH_MAC)
@@ -92,7 +85,6 @@ endif
 
 ch_tap_found=$(shell ip link show "$(CH_TAP)" >/dev/null 2>&1 && echo yes)
 
-# vhost-user backends (virtiofsd, passt) need shared guest RAM.
 ifneq ($(strip $(share))$(PASST_RUN),)
 	CHFLAGS+=--memory size=$(CH_MEM)M,shared=on
 else
@@ -103,8 +95,6 @@ ifneq ($(strip $(share)),)
 	CHFLAGS+=$(foreach i,$(share_idx),--fs tag=$(call vfs_tag,$(i)),socket=$(call vfs_sock,$(i)))
 endif
 
-# $(1): CH, CH_REMOTE or CH_FIRMWARE. When it is set to something other than
-# the pinned download, it must be an existing file or a command in PATH.
 ch_check_set=$(if $(filter-out $($(1)_PINNED),$($(1))),$(if $(or $(wildcard $($(1))),$(shell command -v $($(1)))),,$(error $(1)=$($(1)) not found. Leave $(1) unset to use the pinned download)))
 
 .PHONY: ch ch-check ch-deps ch-fetch ch-shutdown
@@ -130,17 +120,13 @@ endif
 		echo "ch: a VM is already running on $(CH_API_SOCK); stop it with make ch-shutdown" >&2; \
 		exit 1; \
 	fi
-# A leftover socket file makes Cloud Hypervisor fail with "Address in use".
 	rm -f "$(CH_API_SOCK)"
 	$(VIRTIOFS_RUN) $(PASST_RUN) $(CH) $(CHFLAGS)
 
 ch-shutdown: $(filter $(CH_REMOTE_PINNED),$(CH_REMOTE))
 	$(call ch_check_set,CH_REMOTE)
-# shutdown alone would leave Cloud Hypervisor running.
 	$(CH_REMOTE) --api-socket "$(CH_API_SOCK)" shutdown-vmm
 
-# Downloads $(1) to $@ if its sha256 is $(2), and sets mode $(3) if given.
-# It goes through $@.partial, so $@ only ever holds a checked download.
 define ch_download
 	mkdir -p "$(@D)"
 	curl -fL --retry 3 --retry-delay 1 -o "$@.partial" "$(1)"

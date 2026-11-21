@@ -24,12 +24,6 @@
 # build/virtiofsd/$(HOST_ARCH) (make virtiofsd-fetch does only that). Other
 # hosts must install virtiofsd, e.g. from their distribution (the package is
 # virtiofsd on Fedora, Arch and recent Debian/Ubuntu).
-#
-# TODO: the download is the CI build of upstream's main branch, so it is
-# neither pinned nor checked: virtiofsd releases do not ship binaries or
-# checksums yet (their CI only builds main, and those artifacts expire). Once
-# they do, pin it to a release and check its sha256 like Cloud Hypervisor in
-# mk/ch.mk.
 
 share?=
 share_tag?=host
@@ -48,7 +42,6 @@ ifneq ($(strip $(share)),)
 		share_list:=$(share_norm)
 		share_bare:=$(foreach s,$(share_list),$(if $(findstring =,$(s)),,$(s)))
 		ifneq ($(strip $(share_bare)),)
-			# Keep the next line free of leading tabs: make would read it as a recipe.
 $(error share: every entry must be tag=dir when sharing several directories (bad: $(share_bare)); directories containing spaces are not supported)
 		endif
 	endif

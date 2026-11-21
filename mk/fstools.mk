@@ -1,4 +1,3 @@
-# Configuration file for redox-installer, Cookbook and RedoxFS FUSE
 
 fstools: $(FSTOOLS_TAG) $(FSTOOLS)
 
@@ -18,7 +17,6 @@ else
 	ln -s ../../recipes $@.partial/recipes
 	$(MAKE) fstools_fetch PODMAN_BUILD=$(GOING_TO_PODMAN_AGAIN)
 
-	# Compile installer and redoxfs for host (may be outside of podman container)
 	cd $@.partial && \
 		export CARGO_TARGET_DIR=../$@-target && \
 		$(HOST_CARGO) install --root . --path recipes/core/installer/source --locked $(INSTALLER_FEATURES) && \

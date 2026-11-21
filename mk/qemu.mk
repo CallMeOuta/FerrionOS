@@ -1,4 +1,3 @@
-# Configuration file for QEMU
 
 QEMU?=qemu-system-$(QEMU_ARCH)
 QEMUFLAGS?=-d guest_errors -name "FerrionOS $(ARCH)"
@@ -14,7 +13,6 @@ QEMU_VK_DRIVER_FILES?=$(VK_DRIVER_FILES)
 netboot?=no
 redoxer?=no
 VGA_SUPPORTED=no
-# for qemu-relative firmware search
 QEMU_PATH?=$(shell command -v $(QEMU))
 QEMU_BASE_DIR?=$(shell if [ $(QEMU_PATH) ]; then realpath $$(dirname $(QEMU_PATH))/..; fi)
 
@@ -44,8 +42,6 @@ ifeq ($(ARCH),x86_64)
 		QEMUFLAGS+=-device qemu-xhci
 	endif
 else ifeq ($(ARCH),aarch64)
-	# Default to UEFI as U-Boot doesn't set up a framebuffer for us and we don't yet support
-	# setting up a framebuffer ourself.
 	uefi?=yes
 	live?=yes
 	gpu?=ramfb
@@ -87,7 +83,6 @@ else ifeq ($(ARCH),aarch64)
 		endif
 	endif
 
-	# Default to using HVF when host is MacOS Silicon
 	ifeq ($(HOST_ARCH),arm64)
 		kvm?=yes
 	endif
@@ -99,9 +94,6 @@ else ifeq ($(ARCH),riscv64gc)
 	QEMU_ARCH=riscv64
 	# QEMU_MACHINE=virt  for ACPI mode instead of DTB
 	QEMU_MACHINE=virt,acpi=off
-#	QEMU_MACHINE:=${QEMU_MACHINE},aclint=on
-#	QEMU_MACHINE:=${QEMU_MACHINE},aia=aplic
-#	QEMU_MACHINE:=${QEMU_MACHINE},aia=aplic-imsic
 	QEMU_SMP?=4
 	QEMU_MEM?=2048
 	QEMU_CPU=max
@@ -128,13 +120,10 @@ endif
 
 QEMUFLAGS+=-smp $(QEMU_SMP) -m $(QEMU_MEM)
 
-# If host and target arch do not match, disable kvm
-# (unless overridden above or by environment)
 ifneq ($(ARCH),$(HOST_ARCH))
 	kvm?=no
 endif
 
-# wsl2: run qemu on windows instead
 ifeq ($(QEMU_ON_WINDOWS),1)
 	QEMU:=$(QEMU).exe
 	WINDOWS_DISK=/mnt/c/ProgramData/redox.img
@@ -167,7 +156,6 @@ else
 	QEMUFLAGS+=-serial chardev:debug -mon chardev=debug
 endif
 
-# redoxer exit code: 51 => success, 53 => failure
 ifeq ($(redoxer),yes)
 ifeq ($(ARCH),x86_64)
 	QEMUFLAGS+=-device isa-debug-exit
@@ -189,9 +177,6 @@ endif
 
 # virtio-fs shares (share=...): the list is parsed in mk/virtiofs.mk.
 ifneq ($(strip $(share) $(filter venus,$(gpu))),)
-	# Venus and vhost-user need guest RAM to be shared with the host renderer or virtiofsd, and
-	# the NUMA memdev must be exactly as large as -m. One backend serves all
-	# shares.
 	ifeq ($(UNAME),Linux)
 		QEMUFLAGS+=-object memory-backend-memfd,id=mem,size=$(QEMU_MEM)M,share=on
 	else
@@ -204,21 +189,18 @@ ifneq ($(strip $(share)),)
 endif
 
 ifeq ($(audio),no)
-	# No audio
 else ifeq ($(audio),ac97)
-	# AC'97
 	QEMUFLAGS+=-device AC97
 else
-	# Intel High Definition Audio
 	QEMUFLAGS+=-device ich9-intel-hda -device hda-output
 endif
 
 ifeq ($(net),no)
 	QEMUFLAGS+=-net none
 else
-	ifeq ($(net),rtl8139) # RTL8139
+	ifeq ($(net),rtl8139)
 		QEMUFLAGS+=-device rtl8139,netdev=net0
-	else ifeq ($(net),virtio) # virtio-net
+	else ifeq ($(net),virtio)
 		QEMUFLAGS+=-device virtio-net,netdev=net0
 	else ifeq ($(net),usb-net)
 		QEMUFLAGS+=-device usb-net,netdev=net0
@@ -235,9 +217,6 @@ else
 	ifneq ($(bridge),)
 		QEMUFLAGS+=-netdev bridge,br=$(bridge),id=net0
 	else ifeq ($(net),redir)
-		# port 8022 - ssh
-		# port 8080-8083 - webservers
-		# port 64126 - our gdbserver implementation
 		FWD_PORTS := 8081 8082 8083 64126
 		FWD_FLAGS := hostfwd=tcp::8022-:22,hostfwd=tcp::8080-:80
 		FWD_FLAGS2 := $(foreach p,$(FWD_PORTS),,hostfwd=tcp::$(p)-:$(p))
@@ -300,7 +279,6 @@ endif
 EXTRA_DISK=$(BUILD)/extra.img
 disk?=nvme
 ifeq ($(disk),ata)
-	# For aarch64 and x86_64, ata will use ahcid
 	QEMUFLAGS+= \
 		-drive file=$(DISK),format=raw \
 		-drive file=$(EXTRA_DISK),format=raw
@@ -329,7 +307,6 @@ endif
 ifeq ($(gdb),yes)
 	QEMUFLAGS+=-d cpu_reset -s -S
 else ifeq ($(gdb),nonblock)
-	# Allow attaching gdb, but don't block for it
 	QEMUFLAGS+=-d cpu_reset -s
 endif
 
