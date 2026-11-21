@@ -1,0 +1,20 @@
+#TODO promote; host tool verified by the Firefox cook
+[package]
+description = "Node.js LTS for Linux x86_64 build hosts"
+
+[source]
+tar = "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz"
+blake3 = "c7c67aafc4d8d4156c8de14a26dfca63ce5d8965293d8b6a355305c8aa38f9f7"
+# Verified against https://nodejs.org/dist/v24.22.3/SHASUMS256.txt:
+# sha256 4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb
+
+[build]
+template = "custom"
+script = """
+if [ "${TARGET}" != "x86_64-unknown-linux-gnu" ]; then
+    echo "nodejs-host requires a Linux x86_64 host build" >&2
+    exit 1
+fi
+install -Dm755 "${COOKBOOK_SOURCE}/bin/node" "${COOKBOOK_STAGE}/usr/bin/node"
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/nodejs-host/LICENSE"
+"""

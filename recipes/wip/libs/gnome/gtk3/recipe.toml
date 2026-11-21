@@ -2,7 +2,9 @@
 [source]
 git = "https://gitlab.redox-os.org/redox-os/gtk"
 branch = "redox-3.24.43"
+rev = "401ce6cc09b6527cd6057454d8acf856eb454ab0"
 shallow_clone = true
+patches = ["ferrion-mount-lookup.patch"]
 
 [build]
 dependencies = [

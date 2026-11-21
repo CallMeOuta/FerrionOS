@@ -1,0 +1,64 @@
+diff --git a/third_party/wayland-proxy/wayland-proxy.cpp b/third_party/wayland-proxy/wayland-proxy.cpp
+index f6fef1c9260..90c6216f340 100644
+--- a/third_party/wayland-proxy/wayland-proxy.cpp
++++ b/third_party/wayland-proxy/wayland-proxy.cpp
+@@ -25,7 +25,6 @@
+ #include <memory>
+ #include <cassert>
+ #include <pthread.h>
+-#include <sched.h>
+ #include <fstream>
+ #include <ctime>
+ 
+@@ -819,8 +818,24 @@ bool WaylandProxy::PollConnections() {
+   // Create a new connection if there's a new client waiting
+   if (addNewConnection && (loadedPollfd->revents & POLLIN)) {
+     Info("new child connection\n");
++#ifdef __redox__
++    int applicationSocket = accept(loadedPollfd->fd, nullptr, nullptr);
++    if (applicationSocket != -1) {
++      int flags = fcntl(applicationSocket, F_GETFL);
++      if (flags == -1 ||
++          fcntl(applicationSocket, F_SETFL, flags | O_NONBLOCK) == -1 ||
++          fcntl(applicationSocket, F_SETFD, FD_CLOEXEC) == -1) {
++        int savedErrno = errno;
++        close(applicationSocket);
++        errno = savedErrno;
++        Error("Failed to configure application socket");
++        return false;
++      }
++    }
++#else
+     int applicationSocket = accept4(loadedPollfd->fd, nullptr, nullptr,
+                                     SOCK_NONBLOCK | SOCK_CLOEXEC);
++#endif
+     if (applicationSocket == -1) {
+       switch (errno) {
+         case EAGAIN:
+@@ -940,18 +955,6 @@ bool WaylandProxy::RunChildApplication(char* argv[]) {
+ }
+ 
+ bool WaylandProxy::RunThread() {
+-  pthread_attr_t attr;
+-  if (pthread_attr_init(&attr) != 0) {
+-    ErrorPlain("WaylandProxy::RunThread(): pthread_attr_init() failed\n");
+-    return false;
+-  }
+-
+-  sched_param param;
+-  if (pthread_attr_getschedparam(&attr, &param) == 0) {
+-    param.sched_priority = sched_get_priority_min(SCHED_FIFO);
+-    pthread_attr_setschedparam(&attr, &param);
+-  }
+-
+   SetWaylandProxyDisplay();
+ 
+   mThreadRunning = pthread_create(&mThread, nullptr, (void* (*)(void*))RunProxyThread, this) == 0;
+@@ -962,7 +965,6 @@ bool WaylandProxy::RunThread() {
+     WaylandProxy::AddState(WAYLAND_PROXY_RUN_FAILED);
+   }
+ 
+-  pthread_attr_destroy(&attr);
+   return mThreadRunning;
+ }
+ 

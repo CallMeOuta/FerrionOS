@@ -1,0 +1,44 @@
+diff --git a/toolkit/components/remote/moz.build b/toolkit/components/remote/moz.build
+index 4230dfeac47..af63409352f 100644
+--- a/toolkit/components/remote/moz.build
++++ b/toolkit/components/remote/moz.build
+@@ -38,7 +38,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+             "RemoteUtils.h",
+         ]
+         CXXFLAGS += CONFIG["MOZ_DBUS_CFLAGS"]
+-    else:
++    elif CONFIG["MOZ_X11"]:
+         SOURCES += [
+             "nsGTKRemoteServer.cpp",
+             "nsXRemoteClient.cpp",
+diff --git a/toolkit/components/remote/nsRemoteService.cpp b/toolkit/components/remote/nsRemoteService.cpp
+index 46860f6768d..794e771d684 100644
+--- a/toolkit/components/remote/nsRemoteService.cpp
++++ b/toolkit/components/remote/nsRemoteService.cpp
+@@ -6,7 +6,7 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "nsRemoteClient.h"
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) && (defined(MOZ_ENABLE_DBUS) || defined(MOZ_X11))
+ #  ifdef MOZ_ENABLE_DBUS
+ #    include "nsDBusRemoteServer.h"
+ #    include "nsDBusRemoteClient.h"
+@@ -195,7 +195,7 @@ nsresult nsRemoteService::SendCommandLine(const nsACString& aProfile,
+   }
+ 
+   UniquePtr<nsRemoteClient> client;
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) && (defined(MOZ_ENABLE_DBUS) || defined(MOZ_X11))
+ #  if defined(MOZ_ENABLE_DBUS)
+   client = MakeUnique<nsDBusRemoteClient>(mStartupToken);
+ #  else
+@@ -257,7 +257,7 @@ void nsRemoteService::StartupServer() {
+     return;
+   }
+ 
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) && (defined(MOZ_ENABLE_DBUS) || defined(MOZ_X11))
+ #  if defined(MOZ_ENABLE_DBUS)
+   mRemoteServer = MakeUnique<nsDBusRemoteServer>();
+ #  else

@@ -2,12 +2,17 @@
 # mach: https://firefox-source-docs.mozilla.org/setup/linux_build.html
 # dependencies: https://packages.gentoo.org/packages/www-client/firefox/dependencies
 # feature flags: https://wiki.gentoo.org/wiki/Firefox#USE_flags
+# Fork of Firefox 150.0.4 (release, upstream commit 2a775683d38643e7d7372faec42b865c8a3c4d68)
+# with eight porting commits on top; see plans/firefox.md.
 [source]
 git = "https://github.com/willnode/firefox"
 branch = "redox-150"
+rev = "9bf8f0abb65ac35fff3dfd5bf9aef395e4e5497e"
 shallow_clone = true
+patches = ["ferrion-wayland-proxy.patch", "ferrion-remote-backend.patch"]
 [build]
 template = "custom"
+dev-dependencies = ["host:nodejs-host"]
 dependencies = [
     "libffi",
     "freetype2",
@@ -16,6 +21,8 @@ dependencies = [
     "libxkbcommon",
     "libwayland",
     "mesa",
+    # mozconfig passes --with-system-icu (Firefox 150 needs ICU 78.1 or newer)
+    "libicu",
     "nspr",
 # TODO: Should separate clang library and runtime 
     "clang21",

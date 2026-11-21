@@ -5,7 +5,9 @@ description = "Libraries and tools for LLVM generic compiler backend, version 21
 git = "https://gitlab.redox-os.org/redox-os/llvm-project.git"
 upstream = "https://github.com/rust-lang/llvm-project.git"
 branch = "redox-2025-10-03"
-shallow_clone = true
+rev = "9c9daa44c511740a37eff408c46c2553885625ca"
+# Fetch all objects up front: the server times out on the treeless checkout's blob request.
+shallow_clone = false
 
 [build]
 template = "custom"

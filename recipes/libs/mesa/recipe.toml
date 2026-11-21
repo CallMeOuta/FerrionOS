@@ -5,6 +5,7 @@ description = "OpenGL and Vulkan CPU and GPU drivers, and also drivers for other
 git = "https://gitlab.redox-os.org/redox-os/mesa.git"
 upstream = "https://gitlab.freedesktop.org/mesa/mesa"
 branch = "redox-24.0"
+rev = "9850ea1ad7d687240757ebf9a73760ceb4ba28a9"
 shallow_clone = true
 [build]
 template = "custom"

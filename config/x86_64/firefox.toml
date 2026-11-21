@@ -1,0 +1,28 @@
+# Test image, not for daily use: the x86_64 desktop plus Firefox, so that
+# `scripts/vm-test.py firefox-headless` can render a local page and an HTTPS
+# page with `firefox --headless --screenshot`. Headless mode draws without a
+# display server, so this needs neither Orbital nor a Wayland compositor.
+# See plans/firefox.md.
+#
+# Build and check it:
+#   CI=1 COOKBOOK_LOGS=true make r.firefox
+#   make all ARCH=x86_64 CONFIG_NAME=firefox
+#   scripts/vm-test.py firefox-headless --config firefox --timeout 120 --make QEMU_MEM=4096
+
+include = ["desktop.toml"]
+
+[general]
+# Filesystem size in MiB: Firefox and the GTK stack add an amount not yet measured, and a
+# profile and two screenshots go on top.
+filesystem_size = 2048
+
+[packages]
+# From source, with X11 disabled: upstream's prebuilt packages of these link
+# X11 libraries (the same list as config/wayland.toml, plus Firefox).
+cairo = "source"
+gtk3 = "source"
+firefox = "source"
+# Constructor reentry regression: scripts/vm-test.py dlopen-ctor --config firefox.
+dlopen-ctor = "source"
+# Post-dlopen thread TLS regression: scripts/vm-test.py dlopen-tls --config firefox.
+dlopen-tls = "source"

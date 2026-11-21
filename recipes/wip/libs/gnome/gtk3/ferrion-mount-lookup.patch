@@ -1,0 +1,13 @@
+diff --git a/gtk/meson.build b/gtk/meson.build
+index 66b114172..c7721ac1b 100644
+--- a/gtk/meson.build
++++ b/gtk/meson.build
+@@ -924,7 +924,7 @@ if x11_enabled or wayland_enabled
+   gtk_deps += pangoft_dep
+ endif
+ 
+-if not (x11_enabled or win32_enabled or orbital_enabled or quartz_enabled)
++if not (x11_enabled or win32_enabled or quartz_enabled)
+   gtk_sources += gtk_stub_sources
+ endif
+ 
