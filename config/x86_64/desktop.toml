@@ -55,6 +55,9 @@ event-poll-probe = {}
 # keeps working; as root with `mac`, that network drivers refuse reads past their `mac`;
 # scripts/vm-test.py net-calls and net-hardening run it.
 net-call-probe = {}
+# Run as root, it opens and closes the sound driver's shared ring N times (plans/audio.md AU1,
+# issue #8); scripts/vm-test.py audio-ring runs it.
+audio-probe = {}
 # The Linux layer's LC1 (plans/linux-compat.md): linux-run starts a static Linux program as the
 # calling user, in the caller's namespace, adding no right; it relies on the kernel's
 # foreign-call hook. foreign-call-probe checks the hook and the crossing, and linux-hello-fixtures

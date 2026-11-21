@@ -1,0 +1,10 @@
+[package]
+name = "audio-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Test tools for FerrionOS's sound path (plans/audio.md AU1)"
+publish = false
+
+[dependencies]
+libredox = "0.2.0"

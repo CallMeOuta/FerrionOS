@@ -54,3 +54,22 @@ On aarch64 no PCI disk driver brought up the root filesystem: the virtio drivers
 - `recipes/wip/demos/wgpu-hello` is a new crate beside its recipe: `wgpu-hello-headless` renders a triangle through wgpu's Vulkan backend into a texture and writes a 256x256 PNG; `wgpu-hello-window` opens a winit window and shows the triangle turning, rendered by wgpu into a texture and copied to the window with softbuffer. On the Linux build machine (Intel GPU, Mesa 26.2) the headless binary wrote the expected triangle. Not yet cooked or run on FerrionOS.
 - Mesa's prebuilt package has lavapipe (`/usr/lib/libvulkan_lvp.so` and `/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`, Vulkan 1.1.274), but no FerrionOS package had a Vulkan loader, and lavapipe exports only the ICD entry points (`vk_icd*`), not `vkGetInstanceProcAddr`, so wgpu cannot load it directly. `recipes/wip/libs/graphics/libvulkan` (Khronos loader `vulkan-sdk-1.4.350.1`) stopped at CMake with "Unsupported Platform!"; with `ferrion-redox-platform.patch` it cooks and installs `libvulkan.so.1`. Not yet proven from a clean fetch or run.
 - Expected for the window: Mesa's Vulkan has no Orbital surface extension, so `wgpu-hello-window` only tries `create_surface` and prints its result; presenting goes through softbuffer `[INFERENCE]`.
+
+## Sound (AU0), 2026-11-21
+
+What the x86_64 desktop image plays, recorded by QEMU's `wav` backend and compared with its source frame by frame. `scripts/vm-test.py audio-baseline` boots four times with `audio=no` and its own `-audiodev wav,id=snd0,path=<file> -device ich9-intel-hda -device hda-output,audiodev=snd0`, logs in as root on the serial console, makes 6 s of 16-bit stereo at 44.1 kHz with `seq 100000 251201 | head -c 1058400` and writes it to `/scheme/audio` with `dd bs=4096`. The host builds the same bytes and runs the checker, which `scripts/vm-test.py --check-wav` also runs on its own: it passes E1, a recording of a Linux guest playing a 6-second counter signal through virtio-sound on the same QEMU, kept on the build host in `build/audio-rig/e1.wav` (264,600 of 264,600 frames exact in one piece) and fails it with one bit of frame 100,000 changed (264,599 exact, one foreign frame, a break at 2.268 s).
+
+- Host: QEMU 11.1.3 with KVM, while other builds ran; the load average over one minute is given per run. Guest: `make qemu`'s 4 CPUs and 2,048 MiB.
+- Volume 100 is audiod's gain of 1; the default volume is 50, which audiod plays as each sample times 0.125, truncated, and the checker expects exactly that.
+- Load is two `bash` busy loops per guest CPU, started half a second before the write.
+- "Exact" counts source frames that some piece of the recording holds unchanged; "pieces" counts runs that continue the source, so silence inserted into the stream splits a piece without losing a frame; "repeated" counts frames played twice. No run had more than 5 foreign frames.
+
+|Run|Image|Host load|Volume 100|Default volume|Volume 100, load|Default volume, load|
+|---|---|---|---|---|---|---|
+|1|The day's image|15|264,600 exact, 1 piece|264,600 exact, 1 piece|264,600 exact, 192 pieces, 9,989 repeated|264,600 exact, 11 pieces|
+|2|With `ferrion-ihdad-ring.patch`|23|264,600 exact, 1 piece|264,600 exact, 1 piece|264,142 exact (458 lost), 23 pieces|257,803 exact (6,797 lost), 79 pieces|
+|3|The same|47|249,833 exact (14,767 lost), 39 pieces|264,600 exact, 1 piece|264,526 exact (74 lost), 12 pieces|264,579 exact (21 lost), 10 pieces|
+|4|The same|41|264,600 exact, 1 piece|264,600 exact, 1 piece|264,600 exact, 14 pieces|263,502 exact (1,098 lost), 37 pieces|
+|5|The same|30|264,600 exact, 1 piece|262,552 exact (2,048 lost), 2 pieces|264,539 exact (61 lost), 10 pieces|264,098 exact (502 lost), 19 pieces|
+
+Without load the stream is exact in one piece in 8 of 10 recordings; the other two lost 2,048 frames in one gap, or 14,767 in 39 pieces on the most loaded host. A first trial run on the day's image also lost 2,048 frames in one gap at 3.8 s. With two busy loops per CPU no recording was in one piece: silence is inserted, frames repeat, and up to 6,797 are lost. The patch touches only the ring path, which these runs do not use. For comparison, a Linux guest playing through ALSA on the same QEMU stayed in one exact piece with two busy loops per CPU at buffers of 512 to 2,048 frames.

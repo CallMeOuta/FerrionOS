@@ -82,6 +82,20 @@
 #           whose sizes run past them are refused or cut to fit, and a lookup and a TCP
 #           connection leave the guest before and after it (card from --make net=;
 #           x86_64 desktop)
+#   audio-baseline  boots four times with Intel HDA recorded by QEMU's wav backend
+#           (make's own sound device off with audio=no), logs in as root and writes
+#           6 s of 16-bit stereo made by `seq` to /scheme/audio at volume 100 and at
+#           the default volume, each without and with two busy loops per CPU; the
+#           host compares each recording with the same bytes frame by frame and
+#           writes the numbers to audio-baseline.json
+#   audio-ring  the same sound device: as root, `audio-probe ring-churn 20` opens
+#           and closes the driver's shared ring 20 times, then the signal plays at
+#           volume 100; passes when every round opens the ring, ihdad's descriptor
+#           count in /scheme/sys/iostat returns, the signal is exact in one piece and
+#           the console answers (x86_64 desktop)
+# --check-wav FILE boots nothing: it runs the same checker on a recording of the
+# rig's counter signal (plans/audio.md, "The rig"), or of the seq bytes with
+# --signal seq, and exits 0 only when the signal is exact in one piece.
 # Every run boots with -snapshot, so the image is never changed (disk-keys and
 # disk-install boot copies in a temporary directory instead), and `make` is
 # told the image is up to date, so a run never starts a build. Screenshots
@@ -1776,6 +1790,35 @@ IOSTAT_FD = re.compile(r"^(U)?\s+(\d+):\s+(\d+)\s+(\d+)\s+[0-9A-F]+: (.*)$")
 NAMESPACE_REPORT = re.compile(r"^namespace:hardware=([01]);schemes=([^;]*);$")
 
 
+def read_iostat(vm, tag="iostat"):
+    """Reads /scheme/sys/iostat in a root shell; returns its text, or None."""
+    # cat of /scheme/sys/iostat sometimes faults; the copy in /tmp is read once it is whole.
+    for attempt in range(3):
+        since = vm.mark()
+        vm.type(f"cat /scheme/sys/iostat > /tmp/iostat.txt && cat /tmp/iostat.txt; echo {tag}-{attempt}-$((40+2))\n")
+        found = vm.wait_serial(rf"(?s)\n(.*){tag}-{attempt}-42", 120, since)
+        if found and re.search(r"(?m)^\d+: \S+$", found.group(1)):
+            return found.group(1)
+    return None
+
+
+def iostat_processes(iostat):
+    """Maps each process basename in an iostat text to a list of (pid, [(fd, scheme id, fpath)])."""
+    processes = {}
+    current = None
+    for line in iostat.splitlines():
+        line = line.rstrip()
+        header = IOSTAT_PROCESS.match(line)
+        if header:
+            current = []
+            processes.setdefault(header.group(2).rsplit("/", 1)[-1], []).append((header.group(1), current))
+            continue
+        row = IOSTAT_FD.match(line)
+        if row and current is not None:
+            current.append(((row.group(1) or "") + row.group(2), row.group(3), row.group(5)))
+    return processes
+
+
 def test_driver_namespaces(vm, args):
     """Every namespace handle a running driver holds names only memory and pipe (audiod: memory and rand), read from /scheme/sys/iostat; Enter on the login screen still reaches the desktop."""
     kind = None
@@ -1801,31 +1844,11 @@ def test_driver_namespaces(vm, args):
     vm.type("password\n")
     time.sleep(3)
 
-    # cat of /scheme/sys/iostat sometimes faults; the copy in /tmp is read once it is whole.
-    iostat = None
-    for attempt in range(3):
-        since = vm.mark()
-        vm.type(f"cat /scheme/sys/iostat > /tmp/iostat.txt && cat /tmp/iostat.txt; echo iostat-{attempt}-$((40+2))\n")
-        found = vm.wait_serial(rf"(?s)\n(.*)iostat-{attempt}-42", 120, since)
-        if found and re.search(r"(?m)^\d+: \S+$", found.group(1)):
-            iostat = found.group(1)
-            break
+    iostat = read_iostat(vm)
     if iostat is None:
         return False, "/scheme/sys/iostat printed no process"
     (vm.out / "iostat.txt").write_text(iostat)
-
-    processes = {}  # basename -> list of (pid, [(fd, scheme id, fpath)])
-    current = None
-    for line in iostat.splitlines():
-        line = line.rstrip()
-        header = IOSTAT_PROCESS.match(line)
-        if header:
-            current = []
-            processes.setdefault(header.group(2).rsplit("/", 1)[-1], []).append((header.group(1), current))
-            continue
-        row = IOSTAT_FD.match(line)
-        if row and current is not None:
-            current.append(((row.group(1) or "") + row.group(2), row.group(3), row.group(5)))
+    processes = iostat_processes(iostat)
     namespace_ids = {scheme for threads in processes.values() for _, rows in threads
                      for _, scheme, path in rows if path.startswith("namespace:")}
     if not namespace_ids:
@@ -3563,6 +3586,222 @@ def test_dso_atexit(vm, args):
     return True, "; ".join(results) + "; callback once, at exit when kept open and at dlclose when closed"
 
 
+# The rig of plans/audio.md: QEMU's `wav` backend records what the guest's sound device plays,
+# and the checker compares the recording with its source frame by frame. QEMU leaves the header's
+# lengths at 0 when the guest powers off, so every sample past the 44-byte header is read.
+WAV_HEADER = 44
+AUDIO_FRAME = 4  # 16-bit stereo
+AUDIO_RATE = 44100
+AUDIO_FRAMES = 6 * AUDIO_RATE
+AUDIO_MATCH = 8  # consecutive frames that occur only once in either signal
+AUDIO_SILENCE = bytes(AUDIO_FRAME)
+# `seq` from here prints 7-byte lines, so 8 frames always hold a whole, unique number.
+SEQ_FIRST = 100000
+AUDIOD_DEFAULT_VOLUME = 50  # audiod's volume at start (audiod/src/scheme.rs)
+
+
+def rig_signal(frames=AUDIO_FRAMES):
+    """The rig's signal: frame n has n mod 65,536 on the left and bits 8 to 23 of a linear congruential sequence on the right."""
+    out = bytearray()
+    x = 12345
+    for n in range(frames):
+        out += struct.pack("<HH", n & 0xFFFF, (x >> 8) & 0xFFFF)
+        x = (1103515245 * x + 12345) % (1 << 31)
+    return bytes(out)
+
+
+def seq_signal(frames=AUDIO_FRAMES):
+    """AU0's signal, made in the guest without a cook: `seq SEQ_FIRST <last> | head -c <bytes>`. Returns (bytes, last)."""
+    size = frames * AUDIO_FRAME
+    last = SEQ_FIRST + size // 7 + 1
+    return b"".join(b"%d\n" % n for n in range(SEQ_FIRST, last + 1))[:size], last
+
+
+def audiod_gain(source, volume):
+    """The source as audiod's mixer sends it at `volume`: each sample times (volume/100)^3, truncated toward zero."""
+    factor = (volume / 100) ** 3
+    samples = struct.unpack(f"<{len(source) // 2}h", source)
+    return struct.pack(f"<{len(samples)}h", *(int(sample * factor) for sample in samples))
+
+
+def check_wav(source, recording):
+    """Compares a recording from QEMU's wav backend with its 16-bit stereo source, frame by frame.
+
+    A piece is a run of recorded frames that continues the source from some frame; it starts where
+    AUDIO_MATCH recorded frames occur once in the source. Frames of zeros outside a piece are
+    silence, anything else is foreign. Exact frames are the source frames some piece holds.
+    """
+    frames = [source[i:i + AUDIO_FRAME] for i in range(0, len(source) // AUDIO_FRAME * AUDIO_FRAME, AUDIO_FRAME)]
+    data = recording[WAV_HEADER:]
+    recorded = [data[i:i + AUDIO_FRAME] for i in range(0, len(data) // AUDIO_FRAME * AUDIO_FRAME, AUDIO_FRAME)]
+    starts = {}
+    for i in range(len(frames) - AUDIO_MATCH + 1):
+        starts.setdefault(b"".join(frames[i:i + AUDIO_MATCH]), []).append(i)
+    pieces, silence, foreign, held = [], 0, 0, bytearray(len(frames))
+    j = 0
+    while j < len(recorded):
+        found = starts.get(b"".join(recorded[j:j + AUDIO_MATCH]))
+        if found and len(found) == 1:
+            start, length = found[0], 0
+            while j + length < len(recorded) and start + length < len(frames) \
+                    and recorded[j + length] == frames[start + length]:
+                length += 1
+            pieces.append((j, start, length))
+            held[start:start + length] = b"\x01" * length
+            j += length
+            continue
+        if recorded[j] == AUDIO_SILENCE:
+            silence += 1
+        else:
+            foreign += 1
+        j += 1
+    exact = held.count(1)
+    return {"source_frames": len(frames), "recorded_frames": len(recorded), "exact": exact,
+            "lost": len(frames) - exact, "repeated": sum(piece[2] for piece in pieces) - exact,
+            "silence": silence, "foreign": foreign, "pieces": pieces,
+            "one_piece": len(pieces) == 1 and pieces[0][1] == 0 and pieces[0][2] == len(frames)}
+
+
+def wav_summary(report):
+    """One line: exact frames, pieces, and where the source breaks."""
+    text = (f"{report['exact']:,} of {report['source_frames']:,} frames exact in {len(report['pieces'])} "
+            f"piece{'s' * (len(report['pieces']) != 1)}; lost {report['lost']:,}, repeated {report['repeated']:,}, "
+            f"silence {report['silence']:,}, foreign {report['foreign']:,}")
+    breaks = [f"source frame {piece[1] + piece[2]:,} ({(piece[1] + piece[2]) / AUDIO_RATE:.3f} s)"
+              for piece in report["pieces"][:-1]]
+    if breaks:
+        text += "; breaks after " + ", ".join(breaks[:5]) + (" …" if len(breaks) > 5 else "")
+    return text
+
+
+def audio_vm(args, out, wav):
+    """Boots with the rig's sound device: Intel HDA recorded by QEMU's wav backend at 44.1 kHz.
+
+    `make qemu` adds no sound device (audio=no): a second -audiodev beside its own makes QEMU exit.
+    """
+    flags = (f"-audiodev wav,id=snd0,path={shlex.quote(str(wav.resolve()))} "
+             "-device ich9-intel-hda -device hda-output,audiodev=snd0")
+    return VM(args, out, qemu_flags=flags, make=("audio=no",))
+
+
+def play_seq(vm, timeout, last, volume=None, loops=0):
+    """In a root shell: makes AU0's signal with `seq`, sets the volume, starts `loops` busy loops per CPU, and writes the signal to /scheme/audio in whole frames. Returns a problem or None."""
+    status, _ = run_status(vm, f"seq {SEQ_FIRST} {last} | head -c {AUDIO_FRAMES * AUDIO_FRAME} > /tmp/signal")
+    if status != 0:
+        return f"making /tmp/signal with seq failed (status {status})"
+    if volume is not None:
+        status, _ = run_status(vm, f"echo {volume} > /scheme/audio/volume")
+        if status != 0:
+            return f"setting /scheme/audio/volume to {volume} failed (status {status})"
+    if loops:
+        cpus = len(re.findall(r"CPU #\d+", vm.command("info cpus")))
+        status, _ = run_status(vm, f"bash -c 'for i in $(seq {loops * cpus}); do (while :; do :; done) & done'")
+        if status != 0:
+            return f"starting {loops * cpus} busy loops failed (status {status})"
+        time.sleep(0.5)
+    # 4,096 bytes are 1,024 whole frames; a write shorter than a frame would return 0.
+    wait = max(timeout, 120)
+    status, output = run_status(vm, "dd if=/tmp/signal of=/scheme/audio bs=4096", wait)
+    if status is None:
+        return f"dd to /scheme/audio did not finish within {wait:.0f} s"
+    if status != 0:
+        return f"dd to /scheme/audio failed (status {status}): {output.strip()[-200:]}"
+    # What audiod and the driver still hold, at most 4,096 frames, leaves the device in 0.1 s.
+    time.sleep(1)
+    return None
+
+
+def test_audio_baseline(args, out):
+    """AU0: boots four times with Intel HDA recorded by QEMU's wav backend, logs in as root on the serial console and writes 6 s of 16-bit stereo made by `seq` to /scheme/audio: at volume 100 and at the default volume, each without and with two busy loops per CPU; the host compares each recording with the same bytes. Passes when every recording holds the signal, at the gain audiod applies; the numbers are the result."""
+    source, last = seq_signal()
+    gains = {100: source, AUDIOD_DEFAULT_VOLUME: audiod_gain(source, AUDIOD_DEFAULT_VOLUME)}
+    cases = [("volume-100", 100, 0), ("volume-default", None, 0),
+             ("volume-100-load", 100, 2), ("volume-default-load", None, 2)]
+    results, problems = {}, []
+    for name, volume, loops in cases:
+        case_out = out / name
+        case_out.mkdir(parents=True, exist_ok=True)
+        wav = case_out / "audio.wav"
+        wav.unlink(missing_ok=True)
+        host_load = Path("/proc/loadavg").read_text().split()[:3]
+        vm = audio_vm(args, case_out, wav)
+        try:
+            problem = "no root serial login" if not root_shell(vm, args.timeout) else \
+                play_seq(vm, args.timeout, last, volume, loops)
+        finally:
+            vm.close()
+        report = check_wav(gains[volume or AUDIOD_DEFAULT_VOLUME], wav.read_bytes()) if wav.exists() else None
+        results[name] = {"volume": volume or AUDIOD_DEFAULT_VOLUME, "busy_loops_per_cpu": loops,
+                         "host_loadavg": host_load, "problem": problem,
+                         "summary": wav_summary(report) if report else None, **(report or {})}
+        if problem:
+            problems.append(f"{name}: {problem}")
+        elif not report or not report["exact"]:
+            problems.append(f"{name}: the recording holds none of the signal")
+    (out / "audio-baseline.json").write_text(json.dumps(results, indent=2) + "\n")
+    note = "; ".join(f"{name}: {result['summary']}" for name, result in results.items() if result["summary"])
+    if problems:
+        return False, "; ".join(problems) + f"; {note}; see {out}"
+    return True, f"{note}; see {out}"
+
+
+def ihdad_descriptors(vm, tag):
+    """The number of descriptors ihdad holds, from /scheme/sys/iostat, or None."""
+    iostat = read_iostat(vm, tag)
+    if iostat is None:
+        return None
+    (vm.out / f"{tag}.txt").write_text(iostat)
+    threads = iostat_processes(iostat).get("ihdad")
+    return sum(len(rows) for _, rows in threads) if threads else None
+
+
+def test_audio_ring(args, out):
+    """AU1, issue #8: boots with Intel HDA recorded by QEMU's wav backend, logs in as root on the serial console and runs `audio-probe ring-churn 20` (opens and closes the driver's shared ring 20 times), then writes AU0's signal to /scheme/audio at volume 100 and checks the console still answers. Passes when every round opens the ring, ihdad's descriptor count in /scheme/sys/iostat is back where it started, the signal is exact in one piece and the console answers (x86_64 desktop)."""
+    source, last = seq_signal()
+    wav = out / "audio.wav"
+    wav.unlink(missing_ok=True)
+    problems, notes = [], []
+    vm = audio_vm(args, out, wav)
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, "no root serial login"
+        before = ihdad_descriptors(vm, "iostat-before")
+        since = vm.mark()
+        vm.type("audio-probe ring-churn 20; echo churn-exit-$?\n")
+        found = vm.wait_serial(r"\nchurn-exit-(\d+)", 60, since)
+        (out / "ring-churn.txt").write_text(vm.text(since))
+        rounds = re.findall(r"audio-probe: round (\d+): (ok|FAIL .*)", vm.text(since))
+        failed = [f"round {n}: {result.strip()}" for n, result in rounds if result != "ok"]
+        notes.append(f"{len(rounds) - len(failed)} of 20 rounds opened the ring")
+        if failed:
+            problems.append("first failure " + failed[0])
+        if not found:
+            problems.append("ring-churn did not finish within 60 s")
+            return False, "; ".join(problems + notes) + f"; see {out}"
+        if found.group(1) != "0":
+            problems.append(f"ring-churn exited {found.group(1)}")
+        after = ihdad_descriptors(vm, "iostat-after")
+        notes.append(f"ihdad descriptors {before} before, {after} after")
+        if before is None or after != before:
+            problems.append("ihdad's descriptor count did not return to its start")
+        problem = play_seq(vm, args.timeout, last, volume=100)
+        if problem:
+            problems.append(problem)
+        since = vm.mark()
+        vm.type("echo console-$((40+2))\n")
+        if not vm.wait_serial(r"\nconsole-42", 10, since):
+            problems.append("the serial console did not answer within 10 s")
+    finally:
+        vm.close()
+    report = check_wav(source, wav.read_bytes()) if wav.exists() else None
+    notes.append("signal: " + (wav_summary(report) if report else "no recording"))
+    if not report or not report["one_piece"] or report["foreign"]:
+        problems.append("the signal is not exact in one piece")
+    if problems:
+        return False, "; ".join(problems + notes) + f"; see {out}"
+    return True, "; ".join(notes) + f"; see {out}"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -3599,6 +3838,9 @@ OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
 OWN_IMAGE["net-hardening"] = test_net_hardening
 OWN_IMAGE["net-calls"] = test_net_calls
+# These boot with their own sound device, recorded by QEMU's wav backend.
+OWN_IMAGE["audio-baseline"] = test_audio_baseline
+OWN_IMAGE["audio-ring"] = test_audio_ring
 TESTS.update(OWN_IMAGE)
 
 
@@ -3606,7 +3848,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Boot a FerrionOS image in QEMU and check it from the outside.",
         epilog="tests: " + "; ".join(f"{name}: {fn.__doc__}" for name, fn in TESTS.items()))
-    parser.add_argument("tests", nargs="+", choices=TESTS, metavar="test")
+    parser.add_argument("tests", nargs="*", metavar="test", help="one or more of the tests below")
     parser.add_argument("--arch", default="x86_64")
     parser.add_argument("--config", default="desktop")
     parser.add_argument("--repeat", type=int, default=1, help="boot this many times per test")
@@ -3618,10 +3860,23 @@ def main():
                         help="enable a QEMU trace event or pattern, such as virtio_gpu_*; repeatable")
     parser.add_argument("--display", action="append", default=[], metavar="SCHEME",
                         help="graphics-bounds: check only this display scheme, such as display.virtio-gpu; repeatable")
+    parser.add_argument("--check-wav", type=Path, metavar="WAV",
+                        help="boot nothing: compare a recording from QEMU's wav backend with --signal and print the "
+                             "checker's verdict; exit 0 only when the signal is exact in one piece")
+    parser.add_argument("--signal", choices=("rig", "seq"), default="rig",
+                        help="--check-wav: the rig's counter signal (plans/audio.md) or audio-baseline's seq bytes")
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(2)
     args = parser.parse_args()
+    if args.check_wav:
+        report = check_wav(rig_signal() if args.signal == "rig" else seq_signal()[0], args.check_wav.read_bytes())
+        print(f"{'EXACT' if report['one_piece'] and not report['foreign'] else 'NOT EXACT'} "
+              f"{args.check_wav}: {wav_summary(report)}")
+        sys.exit(0 if report["one_piece"] and not report["foreign"] else 1)
+    unknown = [name for name in args.tests if name not in TESTS]
+    if unknown or not args.tests:
+        parser.error(f"unknown tests {unknown}" if unknown else "name a test, or --check-wav")
     if "rand-seed" in args.tests and args.arch != "x86_64":
         parser.error("rand-seed requires x86_64 with KVM and a host CPU RNG")
     for assignment in args.make:
