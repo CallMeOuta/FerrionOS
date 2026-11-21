@@ -24,6 +24,20 @@ Read the matching guide before starting:
 
 Documentation is split by genre. `agents/skills/` holds task procedure and `docs/` holds reference on how the build system is shaped; both are for anyone working on the codebase. The roadmaps in `plans/` stay local to the maintainer's machine. User documentation is the FerrionOS Book in `book/` (mdBook, published at https://callmeouta.github.io/FerrionOS/), and it follows the same naming rule.
 
+# Agent skills
+
+## Issue tracker
+
+Local Markdown files under `.scratch/`, kept out of git. See `docs/agents/issue-tracker.md`.
+
+## Triage labels
+
+The five default triage roles, each written as its own name on an issue's `Status:` line. See `docs/agents/triage-labels.md`.
+
+## Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repository root. See `docs/agents/domain.md`.
+
 # Rules
 
 - The code in this repository is the source of truth. The book in `book/` lags behind it: where they disagree, follow the code.
