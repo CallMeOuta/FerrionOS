@@ -33,6 +33,11 @@ pub struct Cond {
     prev: AtomicUint,
 }
 
+// Keep pthread_cond_t's two-word ABI: prev holds the clock in its top bit,
+// leaving 31 bits for the condition sequence in cur and prev.
+const MONOTONIC_BIT: u32 = 1 << 31;
+const SEQUENCE_MASK: u32 = !MONOTONIC_BIT;
+
 type Result<T, E = Errno> = core::result::Result<T, E>;
 
 impl Default for Cond {
@@ -43,15 +48,31 @@ impl Default for Cond {
 
 impl Cond {
     pub fn new() -> Self {
+        Self::with_clock(CLOCK_REALTIME)
+    }
+    pub fn with_clock(clock: clockid_t) -> Self {
+        let clock_bit = if clock == CLOCK_MONOTONIC {
+            MONOTONIC_BIT
+        } else {
+            0
+        };
         Self {
             cur: AtomicUint::new(0),
-            prev: AtomicUint::new(0),
+            prev: AtomicUint::new(clock_bit),
+        }
+    }
+    fn clock(&self) -> clockid_t {
+        if self.prev.load(Ordering::Relaxed) & MONOTONIC_BIT != 0 {
+            CLOCK_MONOTONIC
+        } else {
+            CLOCK_REALTIME
         }
     }
     fn wake(&self, count: i32) -> Result<(), Errno> {
-        // This is formally correct as long as we don't have more than u32::MAX threads.
-        let prev = self.prev.load(Ordering::Relaxed);
-        self.cur.store(prev.wrapping_add(1), Ordering::Relaxed);
+        // This is formally correct as long as we don't have more than SEQUENCE_MASK threads.
+        let prev = self.prev.load(Ordering::Relaxed) & SEQUENCE_MASK;
+        self.cur
+            .store(prev.wrapping_add(1) & SEQUENCE_MASK, Ordering::Relaxed);
 
         crate::sync::futex_wake(&self.cur, count);
         Ok(())
@@ -79,8 +100,7 @@ impl Cond {
         self.wait_inner(mutex, Some(&relative))
     }
     pub fn timedwait(&self, mutex: &RlctMutex, timeout: &timespec) -> Result<(), Errno> {
-        // TODO: The clock can be other than CLOCK_REALTIME depends on CondAttr
-        self.clockwait(mutex, timeout, CLOCK_REALTIME)
+        self.clockwait(mutex, timeout, self.clock())
     }
     fn wait_inner(&self, mutex: &RlctMutex, timeout: Option<&timespec>) -> Result<(), Errno> {
         self.wait_inner_generic(|| mutex.unlock(), || mutex.lock(), timeout)
@@ -115,7 +135,10 @@ impl Cond {
         // TODO: Error checking for certain types (i.e. robust and errorcheck) of mutexes, e.g. if the
         // mutex is not locked.
         let current = self.cur.load(Ordering::Relaxed);
-        self.prev.store(current, Ordering::Relaxed);
+        self.prev.store(
+            current | (self.prev.load(Ordering::Relaxed) & MONOTONIC_BIT),
+            Ordering::Relaxed,
+        );
 
         unlock()?;
         let futex_r = crate::sync::futex_wait(&self.cur, current, deadline);
