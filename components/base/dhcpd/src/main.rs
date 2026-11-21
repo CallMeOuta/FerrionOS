@@ -98,6 +98,14 @@ impl MacAddr {
     }
 }
 
+fn first_dns_server(data: &[u8]) -> Option<[u8; 4]> {
+    // Option 6 contains one or more IPv4 addresses in preference order.
+    if data.is_empty() || data.len() % 4 != 0 {
+        return None;
+    }
+    Some([data[0], data[1], data[2], data[3]])
+}
+
 fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
     let current_mac = MacAddr::from_str(get_iface_cfg_value(iface, "mac")?.trim());
 
@@ -243,8 +251,8 @@ fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
                                 if verbose {
                                     println!("DHCP: Domain Name Server: {data:?}");
                                 }
-                                if data.len() == 4 && dns_option.is_none() {
-                                    dns_option = Some(Vec::from(data));
+                                if dns_option.is_none() {
+                                    dns_option = first_dns_server(data);
                                 }
                             }
                             51 => {
@@ -322,31 +330,22 @@ fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
             println!("DHCP: No router");
         }
 
-        if let Some(mut dns) = dns_option {
-            if dns[0] == 127 {
-                let quad9 = [9, 9, 9, 9].to_vec();
-                if verbose {
-                    println!(
-                        "DHCP: Received sarcastic DNS suggestion {}.{}.{}.{}, using {}.{}.{}.{} instead",
-                        dns[0], dns[1], dns[2], dns[3], quad9[0], quad9[1], quad9[2], quad9[3]
-                    );
-                }
-                dns = quad9;
-            }
+        let dns = dns_option.unwrap_or([9, 9, 9, 9]);
+        let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
 
-            let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+        try_fmt!(
+            set_cfg_value("resolv/nameserver", &nameserver),
+            "failed to set name server"
+        );
+        // User namespaces cannot open netcfg. Publish the same server through
+        // the resolver's existing, world-readable configuration file.
+        try_fmt!(
+            std::fs::write("/etc/net/dns", &nameserver),
+            "failed to publish name server"
+        );
 
-            try_fmt!(
-                set_cfg_value("resolv/nameserver", &nameserver),
-                "failed to set name server"
-            );
-
-            if verbose {
-                let new_dns = try_fmt!(get_cfg_value("resolv/nameserver"), "failed to get dns");
-                println!("DHCP: New DNS: {}", new_dns.trim());
-            }
-        } else {
-            println!("DHCP: No DNS resolver");
+        if verbose {
+            println!("DHCP: New DNS: {nameserver}");
         }
     }
 
