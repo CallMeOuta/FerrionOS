@@ -1,0 +1,134 @@
+FerrionOS change to the Redox installer (MIT license, kept), made against upstream commit 16d39fe1f20f15fc97fa3aaa216ac7e449637d41 (security roadmap S13, lockdown):
+- the fast install clones the live disk from lived's read-only view of the boot image, /scheme/disk.live/1 (base's ferrion-live-disk-view.patch), instead of mapping it from physical memory, which only drivers may open. Like the old clone it copies the image as booted, without what the live session wrote.
+- it is tried when the disk.live scheme exists instead of when the bootloader's DISK_LIVE_* variables are in the environment, which a login shell does not have.
+- installer_tui and installer-gui leave the disk.live scheme out of the target disks; the gui skipped a stale name, disk/live.
+
+diff --git a/gui/src/sys/redox.rs b/gui/src/sys/redox.rs
+index 6d086bf..96be66d 100644
+--- a/gui/src/sys/redox.rs
++++ b/gui/src/sys/redox.rs
+@@ -40,8 +40,8 @@ pub fn disk_paths() -> Result<Vec<(String, bool, u64)>, String> {
+                     if let Ok(path_str) = path.into_os_string().into_string() {
+                         let scheme = path_str.trim_start_matches("/scheme/").trim_matches('/');
+                         if scheme.starts_with("disk") {
+-                            if scheme == "disk/live" {
+-                                // Skip live disks
++                            if scheme == "disk.live" {
++                                // Skip live disks (FerrionOS: lived names its scheme disk.live)
+                                 continue;
+                             }
+ 
+diff --git a/src/bin/installer_tui.rs b/src/bin/installer_tui.rs
+index 1a717e3..76458ee 100644
+--- a/src/bin/installer_tui.rs
++++ b/src/bin/installer_tui.rs
+@@ -28,7 +28,8 @@ fn disk_paths(paths: &mut Vec<(PathBuf, u64)>) {
+             for entry_res in entries {
+                 if let Ok(entry) = entry_res {
+                     if let Ok(file_name) = entry.file_name().into_string() {
+-                        if file_name.starts_with("disk") {
++                        // FerrionOS: lived's disk.live is the installer's source, never a target.
++                        if file_name.starts_with("disk") && file_name != "disk.live" {
+                             schemes.push(entry.path());
+                         }
+                     }
+diff --git a/src/installer.rs b/src/installer.rs
+index 60928da..93de28b 100644
+--- a/src/installer.rs
++++ b/src/installer.rs
+@@ -769,62 +769,40 @@ pub fn try_fast_install<D: redoxfs::Disk, F: FnMut(u64, u64)>(
+     Ok(false)
+ }
+ 
+-/// Try fast install using live disk memory
++/// Try fast install by cloning the live disk, which lived serves as /scheme/disk.live
+ #[cfg(target_os = "redox")]
+ pub fn try_fast_install<D: redoxfs::Disk, F: FnMut(u64, u64)>(
+     fs: &mut redoxfs::FileSystem<D>,
+     mut progress: F,
+ ) -> Result<bool> {
+-    use libredox::{call::MmapArgs, flag};
+-    use std::os::fd::AsRawFd;
+-    use syscall::PAGE_SIZE;
+-
+-    let phys = env::var("DISK_LIVE_ADDR")
+-        .ok()
+-        .and_then(|x| usize::from_str_radix(&x, 16).ok())
+-        .unwrap_or(0);
+-    let size = env::var("DISK_LIVE_SIZE")
+-        .ok()
+-        .and_then(|x| usize::from_str_radix(&x, 16).ok())
+-        .unwrap_or(0);
+-    if phys == 0 || size == 0 {
++    use std::os::unix::fs::FileExt;
++
++    // FerrionOS lockdown: physical memory is only open to drivers, so the installer clones the
++    // boot image through lived's read-only view, /scheme/disk.live/1 (base's
++    // ferrion-live-disk-view.patch). Disk 0 is not usable: the live root filesystem holds its
++    // only handle. lived serves the scheme only when the bootloader booted a live disk; the
++    // bootloader's DISK_LIVE_* variables are in /scheme/sys/env, not in a login shell's
++    // environment.
++    if !Path::new("/scheme/disk.live").exists() {
+         return Ok(false);
+     }
+-
+-    let start = (phys / PAGE_SIZE) * PAGE_SIZE;
+-    let end = phys
+-        .checked_add(size)
+-        .context("phys + size overflow")?
+-        .next_multiple_of(PAGE_SIZE);
+-    let size = end - start;
+-
+-    let original = unsafe {
+-        //TODO: unmap this memory
+-        let file = fs::File::open("/scheme/memory/physical")?;
+-        let base = libredox::call::mmap(MmapArgs {
+-            fd: file.as_raw_fd() as usize,
+-            addr: core::ptr::null_mut(),
+-            offset: start as u64,
+-            length: size,
+-            prot: flag::PROT_READ,
+-            flags: flag::MAP_SHARED,
+-        })
+-        .map_err(|err| anyhow::anyhow!("failed to mmap livedisk: {}", err))?;
+-
+-        std::slice::from_raw_parts(base as *const u8, size)
+-    };
++    let file = fs::File::open("/scheme/disk.live/1").context("failed to open the live disk")?;
++    let size = file.metadata()?.len();
+ 
+     struct DiskLive {
+-        original: &'static [u8],
++        file: fs::File,
++        size: u64,
+     }
+ 
+     impl redoxfs::Disk for DiskLive {
+         unsafe fn read_at(&mut self, block: u64, buffer: &mut [u8]) -> syscall::Result<usize> {
+-            let offset = (block * redoxfs::BLOCK_SIZE) as usize;
+-            if offset + buffer.len() > self.original.len() {
++            let offset = block * redoxfs::BLOCK_SIZE;
++            if offset + buffer.len() as u64 > self.size {
+                 return Err(syscall::Error::new(syscall::EINVAL));
+             }
+-            buffer.copy_from_slice(&self.original[offset..offset + buffer.len()]);
++            self.file
++                .read_exact_at(buffer, offset)
++                .map_err(|_| syscall::Error::new(syscall::EIO))?;
+             Ok(buffer.len())
+         }
+ 
+@@ -833,11 +811,11 @@ pub fn try_fast_install<D: redoxfs::Disk, F: FnMut(u64, u64)>(
+         }
+ 
+         fn size(&mut self) -> syscall::Result<u64> {
+-            Ok(self.original.len() as u64)
++            Ok(self.size)
+         }
+     }
+ 
+-    let mut fs_old = redoxfs::FileSystem::open(DiskLive { original }, None, None, false)?;
++    let mut fs_old = redoxfs::FileSystem::open(DiskLive { file, size }, None, None, false)?;
+     let size_old = fs_old.header.size();
+     let free_old = fs_old.allocator().free() * redoxfs::BLOCK_SIZE;
+     let used_old = size_old - free_old;
