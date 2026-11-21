@@ -18,7 +18,9 @@ include = ["../desktop.toml"]
 
 [packages]
 bash = {}
-fish-shell = {}
+# From source: the recipe sets the paths fish looks for its scripts in, which
+# the prebuilt package lacks.
+fish-shell = "source"
 ion = {}
 nushell = {}
 zsh = {}
