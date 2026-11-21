@@ -30,9 +30,22 @@ fish-shell = "source"
 ion = {}
 nushell = {}
 zsh = {}
+# The program launcher of security roadmap S12: `ferrion-run --no-network PROGRAM`.
+# It only takes access away (the network schemes, the sudo scheme, inherited descriptors)
+# and is not setuid; scripts/vm-test.py ferrion-run checks it.
+ferrion-run = {}
 # Run as `user`, it checks that the namespace manager refuses fork requests whose lengths run
 # past their end and keeps working; scripts/vm-test.py nsmgr-bounds runs it.
 nsmgr-bounds-probe = {}
+
+# A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
+# ferrion-run check uses to show that a profile alone withholds the network.
+[[files]]
+path = "/etc/ferrion-run/ferrion-run-probe.toml"
+data = """
+version = 1
+network = false
+"""
 
 # The login shells a user may pick.
 [[files]]

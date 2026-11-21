@@ -1,0 +1,29 @@
+[package]
+name = "ferrion-run"
+description = "FerrionOS program launcher that withholds the network"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "ferrion-run"
+path = "src/bin/ferrion-run.rs"
+
+[[bin]]
+name = "ferrion-run-probe"
+path = "src/bin/ferrion-run-probe.rs"
+
+# Option and profile parsing, the standard-descriptor rule and the descriptor bookkeeping in
+# src/lib.rs have no OS code, so their tests run on the build machine with `cargo test --lib`;
+# the launch itself (src/launch.rs) runs on FerrionOS only.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[target.'cfg(target_os = "redox")'.dependencies]
+# mkns, setns and getns are relibc's namespace calls; the pinned relibc
+# (recipes/core/relibc/recipe.toml) exports the versions libredox 0.2.0 links against.
+libredox = { version = "0.2.0", features = ["mkns"] }
+ioslice = "0.6"
+redox_syscall = { version = "0.9.5", features = ["std"] }
