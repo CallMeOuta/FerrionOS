@@ -1,0 +1,26 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with the patches listed before it in recipes/core/base/recipe.toml applied. The drivers take the crate redox-ioctl from relibc's source, ../../relibc/source/redox-ioctl from base's, with FerrionOS's patches to it, in place of upstream's repository: the path override that Cargo.toml carried as a comment is turned on, and Cargo.lock names the crate without a source. relibc and the drivers then compile the same wire types.
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -131,8 +131,10 @@
+ precedence = "deny"
+ unused_io_amount = "warn" #TODO: have an abstraction to irq file read/write, then set to deny
+ 
++# redox-ioctl from relibc's source as FerrionOS patches it, so that the drivers and relibc
++# compile the same wire types.
+ [patch."https://gitlab.redox-os.org/redox-os/relibc.git"]
+-#redox-ioctl = { path = "../../relibc/source/redox-ioctl" }
++redox-ioctl = { path = "../../relibc/source/redox-ioctl" }
+ 
+ # smoltcp 0.14.0 with a hook for TCP initial sequence numbers, unpacked and patched into
+ # vendor/smoltcp by the FerrionOS recipe.
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1945,7 +1945,6 @@
+ [[package]]
+ name = "redox-ioctl"
+ version = "0.1.0"
+-source = "git+https://gitlab.redox-os.org/redox-os/relibc.git#06a7b25d1874bdf0e4c6783fc5a84062d60aebad"
+ dependencies = [
+  "drm-sys",
+  "redox_syscall 0.9.5",
