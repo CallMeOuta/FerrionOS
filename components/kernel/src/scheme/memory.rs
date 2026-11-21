@@ -5,6 +5,7 @@ use rmm::PhysicalAddress;
 
 use crate::{
     context::{
+        self,
         file::InternalFlags,
         memory::{handle_notify_files, AddrSpace, AddrSpaceWrapper, Grant, PageSpan, UnmapVec},
     },
@@ -29,6 +30,8 @@ enum HandleTy {
     Allocated = 0,
     PhysBorrow = 1,
     Translation = 2,
+    /// A call on it lets the calling thread use I/O ports.
+    PortIo = 3,
 }
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +55,7 @@ fn from_raw(raw: u32) -> Option<(HandleTy, MemoryType, HandleFlags)> {
             0 => HandleTy::Allocated,
             1 => HandleTy::PhysBorrow,
             2 => HandleTy::Translation,
+            3 => HandleTy::PortIo,
 
             _ => return None,
         },
@@ -189,7 +193,12 @@ impl MemoryScheme {
     }
 }
 
+/// The root the kernel hands the boot process. Only it opens physical memory, memory with another
+/// type or physically contiguous memory, address translation and port I/O.
 const SCHEME_ROOT_ID: usize = usize::MAX;
+/// The root the namespace manager gives processes without the hardware right: ordinary
+/// write-back memory only (FerrionOS lockdown, S13).
+const RESTRICTED_ROOT_ID: usize = usize::MAX - 1;
 
 impl KernelScheme for MemoryScheme {
     fn scheme_root(&self, _token: &mut CleanLockToken) -> Result<usize> {
@@ -204,9 +213,11 @@ impl KernelScheme for MemoryScheme {
         ctx: CallerCtx,
         _token: &mut CleanLockToken,
     ) -> Result<OpenResult> {
-        if id != SCHEME_ROOT_ID {
-            return Err(Error::new(EACCES));
-        }
+        let privileged = match id {
+            SCHEME_ROOT_ID => true,
+            RESTRICTED_ROOT_ID => false,
+            _ => return Err(Error::new(EACCES)),
+        };
         let path = user_buf.as_str().or(Err(Error::new(EINVAL)))?;
         if path.len() > 64 {
             return Err(Error::new(ENOENT));
@@ -220,9 +231,11 @@ impl KernelScheme for MemoryScheme {
             "" | "zeroed" => HandleTy::Allocated,
             "physical" => HandleTy::PhysBorrow,
             "translation" => HandleTy::Translation,
-            "scheme-root" => {
+            "port-io" if cfg!(any(target_arch = "x86", target_arch = "x86_64")) => HandleTy::PortIo,
+            "scheme-root" => return Ok(OpenResult::SchemeLocal(id, InternalFlags::empty())),
+            "restricted-root" => {
                 return Ok(OpenResult::SchemeLocal(
-                    SCHEME_ROOT_ID,
+                    RESTRICTED_ROOT_ID,
                     InternalFlags::empty(),
                 ))
             }
@@ -250,13 +263,19 @@ impl KernelScheme for MemoryScheme {
             .ok_or(Error::new(ENOENT))?;
 
         // TODO: Support arches with other default memory types?
-        if ctx.uid != 0
+        if (!privileged || ctx.uid != 0)
             && (!flags.is_empty()
                 || !matches!(
                     (handle_ty, mem_ty),
                     (HandleTy::Allocated, MemoryType::Writeback)
                 ))
         {
+            if !privileged {
+                info!(
+                    "memory: pid {} lacks the hardware right for {:?} (FerrionOS lockdown)",
+                    ctx.pid, path
+                );
+            }
             return Err(Error::new(EACCES));
         }
 
@@ -302,6 +321,12 @@ impl KernelScheme for MemoryScheme {
                 // patterns reserved for error codes
                 Ok(0)
             }
+            HandleTy::PortIo => {
+                context::current()
+                    .write(token.token())
+                    .set_userspace_io_allowed(true);
+                Ok(0)
+            }
             HandleTy::Allocated | HandleTy::PhysBorrow => Err(Error::new(EOPNOTSUPP)),
         }
     }
@@ -328,7 +353,7 @@ impl KernelScheme for MemoryScheme {
                 token,
             ),
             HandleTy::PhysBorrow => Self::physmap(map.offset, map.size, map.flags, mem_ty, token),
-            HandleTy::Translation => Err(Error::new(EOPNOTSUPP)),
+            HandleTy::Translation | HandleTy::PortIo => Err(Error::new(EOPNOTSUPP)),
         }
     }
     fn kfpath(&self, _id: usize, buf: UserSliceWo, _token: &mut CleanLockToken) -> Result<usize> {

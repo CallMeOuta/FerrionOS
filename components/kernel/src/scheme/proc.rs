@@ -1618,13 +1618,13 @@ impl ContextHandle {
                     .map_err(|_| Error::new(EINVAL))?;
                 let verb = ProcSchemeVerb::try_from_raw(verb).ok_or(Error::new(EINVAL))?;
 
-                match verb {
-                    ProcSchemeVerb::Iopl => context::current()
-                        .write(token.token())
-                        .set_userspace_io_allowed(true),
-                    _ => return Err(Error::new(EINVAL)),
-                }
-                Ok(0)
+                // FerrionOS lockdown (S13): any thread could raise its I/O privilege here. Port
+                // I/O now comes from the memory scheme's `port-io` handle, which only a process
+                // holding the hardware right reaches.
+                Err(Error::new(match verb {
+                    ProcSchemeVerb::Iopl => EPERM,
+                    _ => EINVAL,
+                }))
             }
             ContextHandle::Filetable {
                 filetable,
