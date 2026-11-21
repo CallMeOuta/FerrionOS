@@ -1,0 +1,27 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d:
+- the x86_64 signal entry keeps the interrupted code's rcx: it computes the index into the signal action table in rdi, whose interrupted value it has already saved, instead of in rcx, which it saves afterwards.
+- before, every signal delivered to a running thread replaced its rcx with the signal's number minus one, so a loop that keeps its count in rcx could run past its end (seen as `ls` faulting in the dynamic linker's memcpy when its shell sent SIGCONT; issue #4).
+
+diff --git a/redox-rt/src/arch/x86_64.rs b/redox-rt/src/arch/x86_64.rs
+index 56dd14a3..6cf8833d 100644
+--- a/redox-rt/src/arch/x86_64.rs
++++ b/redox-rt/src/arch/x86_64.rs
+@@ -338,12 +338,14 @@ asmfunction!(__relibc_internal_sigentry: ["
+     // skip the sigaltstack logic.
+     lea rdx, [rip + {pctl} + {pctl_off_actions}]
+ 
+-    mov ecx, eax
+-    and ecx, 63
++    // FerrionOS: index with rdi, whose interrupted value is already saved in sa_tmp_rdi. rcx
++    // still holds the interrupted code's value and is pushed as it is below.
++    mov edi, eax
++    and edi, 63
+ 
+     // LEA doesn't support 16x, so just do two x8s.
+-    lea rdx, [rdx + 8 * rcx]
+-    lea rdx, [rdx + 8 * rcx]
++    lea rdx, [rdx + 8 * rdi]
++    lea rdx, [rdx + 8 * rdi]
+ 
+     bt qword ptr [rdx], {SA_ONSTACK_BIT}
+     jnc 4f

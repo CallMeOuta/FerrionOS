@@ -3,6 +3,8 @@ description = "FerrionOS POSIX/C Standard Library"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/relibc.git"
+rev = "74b5e7e315043a21b599f271d5692727aa54f64d"
+patches = ["ferrion-sigentry-rcx.patch"]
 
 [build]
 template = "custom"
