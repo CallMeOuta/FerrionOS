@@ -12,6 +12,6 @@ dependencies = [
 template = "custom"
 script = """
 DYNAMIC_INIT
-export RUSTFLAGS="${RUSTFLAGS} -lffi"
+export "${REDOXER_RUSTFLAGS_KEY}=${!REDOXER_RUSTFLAGS_KEY} -lffi"
 cookbook_cargo_examples animation rectangle winit
 """

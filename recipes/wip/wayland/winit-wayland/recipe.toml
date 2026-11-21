@@ -10,6 +10,6 @@ dependencies = [
 template = "custom"
 script = """
 DYNAMIC_INIT
-export RUSTFLAGS="${RUSTFLAGS} -lffi"
+export "${REDOXER_RUSTFLAGS_KEY}=${!REDOXER_RUSTFLAGS_KEY} -lffi"
 cookbook_cargo_examples child_window control_flow pump_events window
 """
