@@ -1,4 +1,4 @@
-#TODO: compile error on redox, need patches
+#TODO: compile error on FerrionOS, need patches
 # Also see https://github.com/protocolbuffers/protobuf/blob/main/cmake/README.md
 [source]
 git = "https://github.com/abseil/abseil-cpp"

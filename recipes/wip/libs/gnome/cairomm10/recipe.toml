@@ -1,4 +1,4 @@
-#TODO can't recognize redox target
+#TODO cannot recognize the FerrionOS target
 [source]
 tar = "https://www.cairographics.org/releases/cairomm-1.15.5.tar.gz"
 [build]

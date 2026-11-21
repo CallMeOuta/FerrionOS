@@ -1,4 +1,4 @@
-#TODO protobuf in redox
+#TODO protobuf in FerrionOS
 [source]
 git = "https://github.com/mobile-shell/mosh"
 rev = "mosh-1.4.0"

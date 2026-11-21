@@ -1,4 +1,4 @@
-#TODO port to redox
+#TODO port to FerrionOS
 #TODO maybe missing dependencies
 #TODO required host dependencies - https://github.com/google/crosvm/blob/main/tools/install-deps
 # feature flags - https://crosvm.dev/doc/crosvm/#feature-flags

@@ -1,4 +1,4 @@
-#TODO fs_at crate error: add a redox cfg to avoid openat64 linux syscall being used
+#TODO fs_at crate error: add a `target_os = "redox"` cfg to avoid using the Linux openat64 syscall
 [source]
 git = "https://github.com/rust-lang/rustup"
 shallow_clone = true

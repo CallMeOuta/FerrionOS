@@ -1,4 +1,4 @@
-#TODO can't recognize redox target
+#TODO cannot recognize the FerrionOS target
 # bsd build instructions: https://github.com/vergoh/vnstat/blob/master/INSTALL_BSD.md
 # linux build instructions: https://github.com/vergoh/vnstat/blob/master/INSTALL.md
 [source]

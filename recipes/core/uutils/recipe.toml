@@ -38,7 +38,7 @@ BINS=(
     cut
     date
     dd
-    #df not working, use redox coreutils
+    #df not working, use FerrionOS coreutils
     dir
     dircolors
     dirname

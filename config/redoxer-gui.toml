@@ -1,4 +1,4 @@
-# Configuration for the Redoxer GUI image
+# Configuration for the FerrionOS `redoxer` GUI image
 
 include = ["redoxer.toml"]
 

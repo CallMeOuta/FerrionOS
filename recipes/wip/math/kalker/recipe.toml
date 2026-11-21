@@ -1,4 +1,4 @@
-#TODO gmp-mpfr-sys crate error: redox unsupported
+#TODO gmp-mpfr-sys crate error: FerrionOS unsupported
 [source]
 git = "https://github.com/PaddiM8/kalker"
 shallow_clone = true

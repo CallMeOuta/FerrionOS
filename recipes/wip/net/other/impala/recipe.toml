@@ -1,4 +1,4 @@
-#TODO port to redox
+#TODO port to FerrionOS
 [source]
 git = "https://github.com/pythops/impala"
 [build]

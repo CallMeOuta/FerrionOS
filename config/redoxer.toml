@@ -1,4 +1,4 @@
-# Configuration for the Redoxer image
+# Configuration for the FerrionOS `redoxer` image
 
 include = ["base.toml", "dev-accounts.toml"]
 

@@ -1,4 +1,4 @@
-#TODO can't recognize redox
+#TODO cannot recognize the FerrionOS target
 [source]
 tar = "https://sourceforge.net/projects/mad/files/libmad/0.15.1b/libmad-0.15.1b.tar.gz/download"
 [build]

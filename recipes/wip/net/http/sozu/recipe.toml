@@ -1,4 +1,4 @@
-#TODO jemalloc-sys crate don't support redox target
+#TODO jemalloc-sys crate does not support the FerrionOS target
 [source]
 git = "https://github.com/sozu-proxy/sozu"
 shallow_clone = true

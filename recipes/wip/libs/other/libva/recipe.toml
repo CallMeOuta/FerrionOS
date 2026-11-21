@@ -1,4 +1,4 @@
-#TODO can't recognize the redox target
+#TODO cannot recognize the FerrionOS target
 # probably require libdrm
 [source]
 tar = "https://github.com/intel/libva/releases/download/2.19.0/libva-2.19.0.tar.bz2"

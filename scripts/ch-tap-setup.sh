@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host setup for `make ch net=tap`: tap redox0, IPv4 forwarding, firewalld NAT
+# Host setup for `make ch net=tap`: tap `redox0`, IPv4 forwarding, firewalld NAT
 # and dnsmasq DHCP/DNS. Needs firewalld and dnsmasq. Re-run after a reboot.
 # As root without sudo, set TAP_USER=<user>.
 
@@ -124,7 +124,7 @@ dnsmasq_pids() {
     pgrep -f "(^|/)dnsmasq .*--interface=${TAP}( |$)" || true
 }
 
-# dnsmasq binds DHCP to 0.0.0.0%redox0:67 but DNS to 192.168.249.1:53.
+# dnsmasq binds DHCP to `0.0.0.0%redox0:67` but DNS to `192.168.249.1:53`.
 dhcp_listening() {
     ss -H -uln | awk -v t="${TAP}" '$4 ~ ("%" t ":67$") { f = 1 } END { exit !f }'
 }

@@ -1,4 +1,4 @@
-#TODO can't recognize redox target
+#TODO cannot recognize the FerrionOS target
 # build instructions: https://github.com/fltk/fltk/blob/master/README.Unix.txt
 # commented out dependencies are optional but recommended, needs to be determined
 [source]

@@ -16,7 +16,7 @@ COOKBOOK_CARGO_FLAGS+=(
         --no-default-features --features "c-allocator,std,gz,gzprintf"
 )
 
-# NOTE: relocation-model=pic is the default on linux and redox,
+# NOTE: relocation-model=pic is the default on Linux and FerrionOS,
 # it is required by libz-sys as zlib statically linked there
 "${COOKBOOK_CARGO}" build \
         --manifest-path "${COOKBOOK_SOURCE}/Cargo.toml" \

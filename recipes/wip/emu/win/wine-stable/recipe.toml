@@ -1,4 +1,4 @@
-#TODO port to redox
+#TODO port to FerrionOS
 #build instructions: https://gitlab.winehq.org/wine/wine/-/wikis/Building-Wine
 [source]
 git = "https://gitlab.winehq.org/wine/wine"

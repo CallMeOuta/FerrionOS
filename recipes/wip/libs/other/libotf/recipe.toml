@@ -1,4 +1,4 @@
-#TODO can't recognize redox target
+#TODO cannot recognize the FerrionOS target
 [source]
 tar = "https://download.savannah.nongnu.org/releases/m17n/libotf-0.9.16.tar.gz"
 [build]

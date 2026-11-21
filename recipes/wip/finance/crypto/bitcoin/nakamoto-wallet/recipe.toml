@@ -1,4 +1,4 @@
-#TODO hidapi crate error - redox not supported (after cargo update)
+#TODO hidapi crate error - FerrionOS is not supported (after cargo update)
 [source]
 git = "https://github.com/cloudhead/nakamoto"
 [build]
