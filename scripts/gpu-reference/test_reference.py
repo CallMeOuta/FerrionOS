@@ -2,6 +2,7 @@
 # Host-only checks for the reference harness; no download, GPU, or guest needed.
 
 import importlib.util
+import shutil
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,20 @@ SPEC.loader.exec_module(reference)
 
 
 class ReferenceTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("bsdtar"), "bsdtar is needed to read RPM payloads")
+    def test_cpio_hardlink_data_on_last_member_is_preserved(self):
+        import stat
+        with tempfile.TemporaryDirectory(prefix="ferrion-gpu-reference-") as folder:
+            package = Path(folder) / "payload.cpio"
+            with package.open("wb") as stream:
+                for index, name in enumerate(("compiler", "compiler-link", "compiler-last")):
+                    reference.cpio_entry(stream, 1, name, stat.S_IFREG | 0o755,
+                                         b"payload" if index == 2 else b"", nlink=3)
+                reference.cpio_entry(stream, 2, "TRAILER!!!", 0)
+            with reference.rpm_tar(package) as (archive, read):
+                self.assertEqual({member.name: read(member) for member in archive},
+                                 {name: b"payload" for name in ("compiler", "compiler-link", "compiler-last")})
+
     def test_corrupted_cache_is_refused_without_network(self):
         with tempfile.TemporaryDirectory(prefix="ferrion-gpu-reference-") as folder:
             cache = Path(folder)
@@ -70,7 +85,7 @@ class ReferenceTests(unittest.TestCase):
         import io
         import json
         with tempfile.TemporaryDirectory(prefix="ferrion-gpu-reference-") as folder:
-            args = ["gpu-reference-guest.py", "--vk-driver", "fixture.json", "--out", folder, "--cache", folder]
+            args = ["gpu-reference-guest.py", "--variant", "all", "--vk-driver", "fixture.json", "--out", folder, "--cache", folder]
             with patch.object(sys, "argv", args), patch.object(reference, "host_info", return_value={"kernel": "6.12.0"}), \
                  patch.object(reference, "fetch") as download, contextlib.redirect_stdout(io.StringIO()), \
                  contextlib.redirect_stderr(io.StringIO()):

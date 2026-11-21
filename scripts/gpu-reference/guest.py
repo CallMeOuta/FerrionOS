@@ -17,6 +17,13 @@ BASE_ENV = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "XDG_RUNTIME_DIR": "/run",
             "LC_ALL": "C", "MESA_SHADER_CACHE_DISABLE": "true", "LP_NUM_THREADS": "2"}
 
 
+def icd(driver):
+    paths = sorted(ICDS.glob(driver + "_icd*.json"))
+    if len(paths) != 1:
+        raise RuntimeError(f"Expected one {driver} ICD, found {len(paths)}")
+    return str(paths[0])
+
+
 def run(command, env=None, timeout=35):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout,
@@ -56,7 +63,9 @@ def gl_test(name, env):
         passed = False
     if name == "virgl" and match and "virgl" not in match[1].lower():
         passed = False
-    if name == "zink-venus" and match and "zink" not in match[1].lower():
+    if name.startswith("zink-") and match and "zink" not in match[1].lower():
+        passed = False
+    if name == "intel-native" and match and ("intel" not in match[1].lower() or "virgl" in match[1].lower()):
         passed = False
     if name == "llvmpipe" and match and "llvmpipe" not in match[1].lower():
         passed = False
@@ -64,8 +73,8 @@ def gl_test(name, env):
     return result
 
 
-def vulkan_test(name, filename):
-    output = run(["/tmp/probe", "vulkan"], {"VK_DRIVER_FILES": str(ICDS / filename)})
+def vulkan_test(name, driver):
+    output = run(["/tmp/probe", "vulkan"], {"VK_DRIVER_FILES": icd(driver)})
     devices = []
     for line in output["stdout"].splitlines():
         fields = line.split("\t")
@@ -106,24 +115,29 @@ def main():
             data = bytes.fromhex(fields[1])
             result["venus_capset"] = {"id": 4, "version": 0, "size": len(data), "bytes_hex": data.hex(),
                                        "sha256": hashlib.sha256(data).hexdigest()}
-    result["gl"].append(gl_test("virgl", {"GALLIUM_DRIVER": "virgl"}))
+    result["gl"].append(gl_test("virgl", {"MESA_LOADER_DRIVER_OVERRIDE": "virtio_gpu", "GALLIUM_DRIVER": "virgl"}))
     result["gl"].append(gl_test("llvmpipe", {"LIBGL_ALWAYS_SOFTWARE": "1", "GALLIUM_DRIVER": "llvmpipe"}))
-    result["vulkan"].append(vulkan_test("venus", "virtio_icd.json"))
+    result["vulkan"].append(vulkan_test("venus", "virtio"))
     if venus:
         result["gl"].append(gl_test("zink-venus", {"MESA_LOADER_DRIVER_OVERRIDE": "zink", "GALLIUM_DRIVER": "zink",
-                                                  "VK_DRIVER_FILES": str(ICDS / "virtio_icd.json")}))
+                                                  "VK_DRIVER_FILES": icd("virtio")}))
     if "gpu_reference=native" in Path("/proc/cmdline").read_text():
-        native = vulkan_test("intel-native", "intel_icd.json")
+        native = vulkan_test("intel-native", "intel")
         result["vulkan"].append(native)
+        result["gl"].append(gl_test("intel-native", {"MESA_LOADER_DRIVER_OVERRIDE": "iris", "GALLIUM_DRIVER": "iris"}))
+        result["gl"].append(gl_test("zink-native", {"MESA_LOADER_DRIVER_OVERRIDE": "zink", "GALLIUM_DRIVER": "zink",
+                                                   "VK_DRIVER_FILES": icd("intel")}))
         if native["devices"]:
             result["native_context"] = {"status": "AVAILABLE"}
-            result["gl"].append(gl_test("intel-native", {"MESA_LOADER_DRIVER_OVERRIDE": "iris", "GALLIUM_DRIVER": "iris"}))
-            result["gl"].append(gl_test("zink-native", {"MESA_LOADER_DRIVER_OVERRIDE": "zink", "GALLIUM_DRIVER": "zink",
-                                                       "VK_DRIVER_FILES": str(ICDS / "intel_icd.json")}))
         else:
-            result["native_context"] = {"status": "UNSUPPORTED",
-                "reason": "No Intel native Vulkan device. The pinned kernel is below QEMU's 6.14 guest floor; Intel also needs Mesa 26.1 or newer."}
-    good = all(g["status"] == "PASS" for g in result["gl"])
+            result["native_context"] = {"status": "UNAVAILABLE",
+                "reason": "Capset 6 is offered by the host; Fedora Mesa is built without intel-virtio-experimental."}
+            for gl in result["gl"]:
+                if gl["name"] in ("intel-native", "zink-native"):
+                    gl["probe_status"] = gl["status"]
+                    gl["status"] = "UNAVAILABLE"
+    # Native contexts are a recorded experiment, outside the Venus baseline.
+    good = all(g["status"] == "PASS" for g in result["gl"] if g["name"] in ("virgl", "llvmpipe", "zink-venus"))
     devices = result["vulkan"][0]["devices"]
     mode = re.search(r"gpu_reference=(\w+)", Path("/proc/cmdline").read_text())[1]
     expected = {1, 2} if mode == "virgl" else {1, 2, 4}

@@ -4,6 +4,7 @@
 
 import argparse
 import concurrent.futures
+import contextlib
 import gzip
 import hashlib
 import io
@@ -25,179 +26,173 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = ROOT / "scripts/gpu-reference"
-SNAPSHOT = "20260913T000000Z"
-INDEX_SHA256 = "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498"
-RELEASE_SHA256 = "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675"
-KERNEL = "6.12.107+deb13-amd64"
-MESA = "25.0.7-2+deb13u1"
-CURRENT_SNAPSHOT = "20261121T000000Z"
-CURRENT_INDEX_SHA256 = "5fbf6c2463072d01ea1f26b346aca503bfc0e4a5ec8ff7c6bfd6d6000d9d7b15"
-CURRENT_RELEASE_SHA256 = "6e8a85389997ac42de32f929b69157a53bb230f183ff0ddbf645ec70010374e4"
-CURRENT_MESA = "26.2.6-1"
-CURRENT_GLIBC = "2.43-7"
-CURRENT_LLVM = "1:22.1.8-4"
-# Minimal runtime upgrades required by the six Mesa packages, from the signed
-# unstable index above. The kernel and compiler remain from the Debian 13 pin.
-CURRENT_PINS = """
-8abae40b5e2bfca58fbc838329b48f525c98463e930b8d3ed075d0c9e960a57a pool/main/g/glibc/libc-gconv-modules-extra_2.43-7_amd64.deb
-5c71715c51103beb4fbba9fe9f8dff604af6610dfa71c70bff342f54a7860803 pool/main/g/glibc/libc6_2.43-7_amd64.deb
-dfc160ad29f280ec15fea4d3d61536d2b477b37288b53276bbd121a185d801d6 pool/main/libd/libdisplay-info/libdisplay-info3_0.3.0-1+b1_amd64.deb
-b7282a3422545c6cb488c3f4f5740844ad06c31030e7b9600700342a807ff519 pool/main/libd/libdrm/libdrm-amdgpu1_2.4.134-3_amd64.deb
-89127ee70fd643f0f1c1fe294bfda51315ea4e92234500211f9956351706363f pool/main/libd/libdrm/libdrm-common_2.4.134-3_all.deb
-f9ebd503a2e98d26a2936a4c875370260531a702e2c44aa5d6348a4c2b212b4b pool/main/libd/libdrm/libdrm-intel1_2.4.134-3_amd64.deb
-e1a841ed70c7b7bbd9a03f41c781101d668db0d35b4eee58d7705a6c32b88aaa pool/main/libd/libdrm/libdrm2_2.4.134-3_amd64.deb
-5ae16aef5adc19aad87dcd4e0b19010a5802d4cc6e5f826e8990ad3dbca0105d pool/main/m/mesa/libegl-mesa0_26.2.6-1_amd64.deb
-fdd7d975841d9d73380649f4bb5840073e38435701af9a97d5cc57c871d93daa pool/main/m/mesa/libgbm1_26.2.6-1_amd64.deb
-5ccd9e530adb132ad91cf768ea186c523e6dcef4f7245bac935091469912fa60 pool/main/m/mesa/libgl1-mesa-dri_26.2.6-1_amd64.deb
-85a66b48749c68b8d28ac2dc1282a71d35bfcc510c0ee42bb2c9e9ffe197df80 pool/main/m/mesa/libglx-mesa0_26.2.6-1_amd64.deb
-3bf498e61dbbef0cfd6bbdb97f4530f96f59806739d5964733d8a55e93d68f89 pool/main/l/llvm-toolchain-22/libllvm22_22.1.8-4_amd64.deb
-fe67acf1d02f21062c0b75cfe3299191b38967d89cfd5cab3a831e2e4b695d05 pool/main/libp/libpng1.6/libpng16-16t64_1.6.59-1_amd64.deb
-b432b1d30319f371efe776209e36143a23289285dd26d41751e89ad4a88b2c33 pool/main/w/wayland/libwayland-client0_1.26.0-1_amd64.deb
-f2b4d9acff743ff71f5409ae301452ebbb37d0d8709cf46fc9ec755d7df803ff pool/main/libx/libxml2/libxml2-16_2.15.4+dfsg-1+b1_amd64.deb
-d7819525795c50645f4dd08fa53c75258a6ae433bb7ddaa13059af9bb609abfe pool/main/m/mesa/mesa-libgallium_26.2.6-1_amd64.deb
-fe78bf25497ad1a7afae87cc59838fe86344d811e2e87d6f8047612fae521711 pool/main/m/mesa/mesa-vulkan-drivers_26.2.6-1_amd64.deb
-"""
-SCENE_HASH = "47972063c7a47bfb"
-# From the signed trixie main/binary-amd64 index above, including the compiler
-# used inside the guest. No package maintainer scripts execute on the host.
+KERNEL = "7.3.5-300.fc45.x86_64"
+MESA = "26.2.7-1.fc45"
+CURRENT_MESA = "26.3.1-1.fc46"
+FEDORA_KEYS = {
+    "45": "4F50A6114CD5C6976A7F1179655A4B02F577861E",
+    "46": "D924B10D3E810DABDD8B56B596E7E91491211FCE",
+}
+# Fingerprints published at https://fedoraproject.org/security/.
+# Each pin was authenticated through its RPM RSA header signature and the
+# signed header's SHA-256 of the compressed payload. No scriptlets execute.
+# The archive paths name exact builds, not a changing Fedora mirror.
+KOJI = "https://kojipkgs.fedoraproject.org/packages/"
 PACKAGE_PINS = """
-6bc08c02539ba53b5e748142397144c499f9b20b5fa9bb56431545db124addeb pool/main/b/binutils/binutils_2.44-3_amd64.deb
-002da5d23f8757dee97a2c0a40e0e1d4d85a43da094488ee2ee7068d4d3691f9 pool/main/b/binutils/binutils-common_2.44-3_amd64.deb
-e6741ce95ff0f7a131c8d9faa3528ccbbc453078bbc62a97da81340ed7462c53 pool/main/b/binutils/binutils-x86-64-linux-gnu_2.44-3_amd64.deb
-598a3fd92bdafc34cd81196b2952ad36e910e47a4ecf162f8ce5e8e262598e53 pool/main/b/busybox/busybox-static_1.37.0-6+b9_amd64.deb
-a6ba40550aadec80437813e0fce5516574945ff40e72306a5b378c03af3a6544 pool/main/g/gcc-defaults/cpp_14.2.0-1_amd64.deb
-3bae5fe03c56c6d021900ab4fb79e35c6f75eee72a73fccc6f28a39db559d6a0 pool/main/g/gcc-14/cpp-14_14.2.0-19_amd64.deb
-ef274b5379f5f97fc71619d39ecc84d039d3e184570d207b909c90afaa5d79e0 pool/main/g/gcc-14/cpp-14-x86-64-linux-gnu_14.2.0-19_amd64.deb
-d902f484e38bce59e82efc0df2fe20139a0932ca759ecafdfe6e5b6c72238eb8 pool/main/g/gcc-defaults/cpp-x86-64-linux-gnu_14.2.0-1_amd64.deb
-1ddc7e6c5925f748eefb7ca811d98e049f18c158bb21fbc7e122262ce6011e49 pool/main/d/debconf/debconf_1.5.91_all.deb
-3e800c6d75e8e709007ed1c356e5fa8509a75c1694fb0a1183709abc9cfdc1f3 pool/main/d/dpkg/dpkg_1.22.22_amd64.deb
-eee65c41a441c57c05f754ced1b9d093956966a1c7da9938c3ec00d3dc2f905d pool/main/g/gcc-defaults/gcc_14.2.0-1_amd64.deb
-21500408b5019d8d29f70ce58488e2eea469a1adb4b5fd7db45e819b5efcac4e pool/main/g/gcc-14/gcc-14_14.2.0-19_amd64.deb
-5b6825de4263824b78c4c51f6476414f3b4e89c2ab63e81dc8b9b5501e867cf6 pool/main/g/gcc-14/gcc-14-base_14.2.0-19_amd64.deb
-a17ef039f1ba482051c3efb5c2c24070002e60dd0bd09fd456ec31481a11b725 pool/main/g/gcc-14/gcc-14-x86-64-linux-gnu_14.2.0-19_amd64.deb
-04c28c2760b0094b3d7758154ac095303dd00599b63ebad4086a325b607308b7 pool/main/g/gcc-defaults/gcc-x86-64-linux-gnu_14.2.0-1_amd64.deb
-08074f01e384bc07c0c2d79a58cf4a6523f71cf75d1808101c79617656c9a39d pool/main/a/acl/libacl1_2.3.2-2+b1_amd64.deb
-771899ade7310fe31aa538a509354c33d62bbe4e408b4e5fc1e513988dc42645 pool/main/g/gcc-14/libasan8_14.2.0-19_amd64.deb
-212b399aae2f7299203d261a57e49372e09565a9a5ea971905f94a3960366c05 pool/main/g/gcc-14/libatomic1_14.2.0-19_amd64.deb
-4f4664c8a8f0ad0c8631c39fab02e3d8d86ccc6f4436a1d59f059dbcb0492679 pool/main/b/binutils/libbinutils_2.44-3_amd64.deb
-e5a85986fa6bec3307ab1bc860736b478b331882bc45e17675a7bdf88eecb43a pool/main/libb/libbsd/libbsd0_0.12.2-2_amd64.deb
-cba4cda04244b5e481bb15524bc3c983a7d1b6f330013b9b381706a2fcb65310 pool/main/b/bzip2/libbz2-1.0_1.0.8-6_amd64.deb
-2c21175d6a8283ed566d154c0c0bc06f60836e53b0b9e1f74c14eac586b68c24 pool/main/g/glibc/libc-dev-bin_2.41-12+deb13u4_amd64.deb
-967aa62605721081c3eb2a17650611a792aa802d76a6511d1840242623d204c9 pool/main/g/glibc/libc6_2.41-12+deb13u4_amd64.deb
-1fda734dabcd80b77266a09ab62b0f1e3e16d8091db62899890b2200745632a2 pool/main/g/glibc/libc6-dev_2.41-12+deb13u4_amd64.deb
-2d587e3bfba4aec701946b7ba0c1640b97b6d8dd0a34ba1c70ae85261ecedefa pool/main/g/gcc-14/libcc1-0_14.2.0-19_amd64.deb
-98e2333aea8d64ca68f9b75c16256d3a05492fd8f9e6dba96adbc6f19e4f5a09 pool/main/libx/libxcrypt/libcrypt-dev_4.4.38-1_amd64.deb
-0ebc144d662e3197982d1bf3a7b8b35ca845e54c68811de0328b1f0d7c67585c pool/main/libx/libxcrypt/libcrypt1_4.4.38-1_amd64.deb
-e280b2be3db6e584500e865c251605b95c346767d87ccb2524e44992048fc657 pool/main/b/binutils/libctf-nobfd0_2.44-3_amd64.deb
-120cafcd93132a276fa92a8fb4cf39b23d14e5a3e348f4f5580638d71ca95ac5 pool/main/b/binutils/libctf0_2.44-3_amd64.deb
-18d02510ee78b67e4504ba050176797a200ff24214a7cd318082ab60ad7bf3fc pool/main/d/db5.3/libdb5.3t64_5.3.28+dfsg2-9_amd64.deb
-c1d97a5e32e2bc68e833b8abeae026b6306198e87ee4396a7ffecd4779caefbf pool/main/libd/libdrm/libdrm-amdgpu1_2.4.124-2_amd64.deb
-9a8a6c65c165e9964f106fb4ac710959b5d33e0790227e3ab6b27c4742d1254a pool/main/libd/libdrm/libdrm-common_2.4.124-2_all.deb
-83b84b1207c4dda3d64ebad7725a7ad237c69c870668db3b01eabad1052f0dcb pool/main/libd/libdrm/libdrm-dev_2.4.124-2_amd64.deb
-188ab1fd74c838b3c8055d62107351e16a4bb7a25d39c30bbb9aac30ddd37238 pool/main/libd/libdrm/libdrm-intel1_2.4.124-2_amd64.deb
-634dcb46487fb2ca267850261291463845ada90b81d16a926ca40d333ce57180 pool/main/libd/libdrm/libdrm-nouveau2_2.4.124-2_amd64.deb
-7a82b1c88b45235e314a15b71781b47ed472dafbbf697481ec8427079840fc32 pool/main/libd/libdrm/libdrm-radeon1_2.4.124-2_amd64.deb
-fe2276901c7cd7b8079de63072d37fe1cbeb4eb001a3bc1f1d662ad89aa0890e pool/main/libd/libdrm/libdrm2_2.4.124-2_amd64.deb
-b002ea172b9c1e34a67bc497c523c67bb74c3f0a4e98113cb083990a1f1d3bfe pool/main/libe/libedit/libedit2_3.1-20250104-1_amd64.deb
-97fcfff08a5de0a510066d55260a30fbd3ccbd87da6c2f317e6efe17566b9f5a pool/main/libg/libglvnd/libegl-dev_1.7.0-1+b2_amd64.deb
-0ddebd7e91b048aac812611d6bd008343386cb140b51e5e66df74c6b6263be65 pool/main/m/mesa/libegl-mesa0_25.0.7-2+deb13u1_amd64.deb
-62e7bc8ccd47a60e55aad17f83d8d474310d782eb8589bbce2ab714c31712406 pool/main/libg/libglvnd/libegl1_1.7.0-1+b2_amd64.deb
-94497b7e17b6f574a0605b380d454e20d3f01a9c63b70c2a2263f679d30053e1 pool/main/e/elfutils/libelf1t64_0.192-4_amd64.deb
-38abe0e710a07688e9c149d74536e67cfee0364bdb64dd6d644c32a1cfad389f pool/main/e/expat/libexpat1_2.8.3-1~deb13u1_amd64.deb
-0ebdc340de33333639c3c63874cd4b15ac2e83dfa1ef3053b7eefaf4919f4f68 pool/main/libf/libffi/libffi8_3.4.8-2_amd64.deb
-31fb6d76b9ceaf13848fa617df53f85f62626b4fe7464a93811c720af6d5f2dd pool/main/m/mesa/libgbm1_25.0.7-2+deb13u1_amd64.deb
-ca6f2d36d96b19b3eb71405b0b80134d8c89380b02204a2512e5c58ceb090628 pool/main/g/gcc-14/libgcc-14-dev_14.2.0-19_amd64.deb
-3c71917b490d1a17aed43196a2787a256ecf060526cdb20216a74bedc061b150 pool/main/g/gcc-14/libgcc-s1_14.2.0-19_amd64.deb
-2c5044a44bc7cd7a196d554ca6ff78ae0358fbb98b7d2cce49176bdc6a816fe4 pool/main/libg/libglvnd/libgl-dev_1.7.0-1+b2_amd64.deb
-87fa2f6e5abaed4ed385fac879c8dd735af719ee2300222d901793c66e041678 pool/main/libg/libglvnd/libgl1_1.7.0-1+b2_amd64.deb
-722fad9944bdfd29eb6421576331a2697f83bc4b3551d693edb7aefdde6bb198 pool/main/m/mesa/libgl1-mesa-dri_25.0.7-2+deb13u1_amd64.deb
-87af52464cb40d54e78ecf2046db019bf1ab19a8bed7511ab282be623d1216de pool/main/libg/libglvnd/libgles-dev_1.7.0-1+b2_amd64.deb
-ef909f784ed99a849bfdf69abaa0747cf842abbb6d3f4f119481a2f9e3431284 pool/main/libg/libglvnd/libgles1_1.7.0-1+b2_amd64.deb
-e12c18aa77939d122ee1dea520ba0440b97dc19200b7396e03dff03a3ece74c1 pool/main/libg/libglvnd/libgles2_1.7.0-1+b2_amd64.deb
-887f74008166549ce9e100c906aa937e95d6e5ce1c8d86efe8c95fd953359b9c pool/main/libg/libglvnd/libglvnd0_1.7.0-1+b2_amd64.deb
-93d456321c07009491b942783db8c57065b616db713ef5f6a0c629ca078c4ea0 pool/main/libg/libglvnd/libglx-dev_1.7.0-1+b2_amd64.deb
-2e6ab57de9931e890621d3ade04213b06e7142a4ae8a72a1756c44d0271aaeb7 pool/main/m/mesa/libglx-mesa0_25.0.7-2+deb13u1_amd64.deb
-2721fdca0fe3bd963cb39482eabc253af52b88f4a7f6dbb69e475549daf5af3b pool/main/libg/libglvnd/libglx0_1.7.0-1+b2_amd64.deb
-d0d0265eb01770f17afd0f7c8c0622f80479dcfbbe13653a0debeec61464e622 pool/main/g/gmp/libgmp10_6.3.0+dfsg-3_amd64.deb
-72b7a1a33c48f3195efeb044111b34ae684b1e640bb6495c832443b798601cd5 pool/main/g/gcc-14/libgomp1_14.2.0-19_amd64.deb
-0d36d0bde85c467ac6735dded08e19dd30ae1369e3908b9eb48ccc0d6ff66648 pool/main/b/binutils/libgprofng0_2.44-3_amd64.deb
-2cdaf797cad8ac30a964ab081370682dd065ae1b0305a0be9d8e0e14cd0657d7 pool/main/g/gcc-14/libhwasan0_14.2.0-19_amd64.deb
-ac8518042e81c00de1effb72bba7e88ac4ecd488f7ea8b9e3ebc63159cb53b35 pool/main/i/isl/libisl23_0.27-1_amd64.deb
-febdb3c528cde1a3abe952e17a1d3cfa7ccaca5b6f506d983d34385dad199490 pool/main/g/gcc-14/libitm1_14.2.0-19_amd64.deb
-60707a62fe6c1228c3389b12a13ca4efd76defc5532473e547a29e99cf7d2a6e pool/main/j/jansson/libjansson4_2.14-2+b3_amd64.deb
-db0d614d61345ca710fb73e75105f1ec6e38898fa7b3aa99fa7eb7d8b0a11d57 pool/main/l/llvm-toolchain-19/libllvm19_19.1.7-3+b1_amd64.deb
-a0df07da76287a45e665d584363dc2a6a1c4e240aee41b8bbc0f67cdff97cd68 pool/main/g/gcc-14/liblsan0_14.2.0-19_amd64.deb
-1cfcc6e0dc36f438a79b6e2189facdb9d150b08f57d190a60e01c98075c7f896 pool/main/x/xz-utils/liblzma5_5.8.1-1+deb13u1_amd64.deb
-7244ec3839b61fac0c1884fe08aaa040f26e8f1f35f1f5d3482eacefd30d1b44 pool/main/libm/libmd/libmd0_1.1.0-2+b1_amd64.deb
-2af0a5c128e03694a41c0b011bd8a958b7297436cdb3a15ddad7866dae8c300b pool/main/m/mpclib3/libmpc3_1.3.1-1+b3_amd64.deb
-75dddce11dabc7fc543712c33dc27b7f2ee66a111763eb5eac654d010b42cd92 pool/main/m/mpfr4/libmpfr6_4.2.2-1_amd64.deb
-47baa2e11579583654583a066b69bd5a5d2f22423081f707ed6c0c3ba6d538b7 pool/main/n/ncurses/libncursesw6_6.5+20250216-2_amd64.deb
-dfaa687d4ccb943f5b222261a11a1678992bc499abe472d539aa59c4787a0c33 pool/main/libp/libpciaccess/libpciaccess-dev_0.17-3+b3_amd64.deb
-d9a0091071635a84e837051e4813005ac445071731becea28fba4d9806df5252 pool/main/libp/libpciaccess/libpciaccess0_0.17-3+b3_amd64.deb
-1252b96a5bc44bb5db982bef8eb18e54f5047cede2aff641bce4f8e1edb91c3e pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_amd64.deb
-7e142ed64a81ccdd39714f213467bd365736ef341adb2be11be981f638b9175f pool/main/p/python3-defaults/libpython3-stdlib_3.13.5-1_amd64.deb
-a4aa6a9a8c77f87bfe545e1d14ec42c001d189ace90e3aa75deec882b39dee49 pool/main/p/python3.13/libpython3.13-minimal_3.13.5-2+deb13u5_amd64.deb
-db161322a3481d2c0c3b9a3b9a03c3ab0e2b1718f54b88755fb4a3f939165b84 pool/main/p/python3.13/libpython3.13-stdlib_3.13.5-2+deb13u5_amd64.deb
-f5b51cf0ece3ec3bb7494d0cdbff3ce715ae00cfb2b6ed787f7db91319d64a7b pool/main/g/gcc-14/libquadmath0_14.2.0-19_amd64.deb
-eeadf2b5e755c9f183883feea2d9b5b28560284275d5f54d3e55d0923b1d0967 pool/main/r/readline/libreadline8t64_8.2-6_amd64.deb
-68bb8d32bd8d6d7d2f5952a169db03d1484b46ae1e52abccdec42a19dccea5d5 pool/main/libs/libselinux/libselinux1_3.8.1-1_amd64.deb
-3056da80c7d963af795dab480ab6f6f4b154ad4ac39f522dc52d17c834fea253 pool/main/l/lm-sensors/libsensors-config_3.6.2-2_all.deb
-f0a994a6d7cfa695dea5343d0d1ba7eed796c0ad920c7282998b95f60049c4f6 pool/main/l/lm-sensors/libsensors5_3.6.2-2_amd64.deb
-38f625dfdc582717029ac3a3e97c51d994ec2e7a0e9b230c6b44e40d1276311f pool/main/b/binutils/libsframe1_2.44-3_amd64.deb
-0a459adaffd901109f7811ab65f58e7a957b4907d05539cf3d1184efdcde0468 pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_amd64.deb
-916f7f40b34a06e6ebfaefcdab331bff458328411da672598f126a760472467d pool/main/o/openssl/libssl3t64_3.5.7-1~deb13u2_amd64.deb
-ab1fa05837aa7a92aae748fd07a18a35f7d18bb4a71c4724fe2bbf0e32089de0 pool/main/g/gcc-14/libstdc++6_14.2.0-19_amd64.deb
-8b9f6a7983e9418564e48a627518de4c03917b56efe68d7f3e93bd8fffa1cc10 pool/main/n/ncurses/libtinfo6_6.5+20250216-2_amd64.deb
-529d7f68227d16975076c5f842e8b687faea1b5df8e0dcf62e436d5402844ca5 pool/main/g/gcc-14/libtsan2_14.2.0-19_amd64.deb
-9205a1bef7d6a52ffc06548e0cde169ff303e688c12d9be3a98f734449077e22 pool/main/g/gcc-14/libubsan1_14.2.0-19_amd64.deb
-c1bf4c4c3ff48c57fabf93307dfb56996b60cfa33927afc4158b5db36fb2721e pool/main/u/util-linux/libuuid1_2.41.5-0+deb13u1_amd64.deb
-8d329d465e16168afff58b1bd0dd6db46aac2cc3f56054a481b25a04e90b345a pool/main/v/vulkan-loader/libvulkan-dev_1.4.309.0-1_amd64.deb
-f47da79cd140264fe21cceb08bc87a71bc7fec05819e4a421f3f518d21101a37 pool/main/v/vulkan-loader/libvulkan1_1.4.309.0-1_amd64.deb
-d1607e1db1a7c5378a2e5c6ae7b20f64dc6acf134f953d84a7f5204b74339f33 pool/main/w/wayland/libwayland-client0_1.23.1-3_amd64.deb
-2967212bd582e0dffca443fdc44f4c660e7368d41f7ee3a7f6314e0c3abfe9ea pool/main/w/wayland/libwayland-server0_1.23.1-3_amd64.deb
-b5a3fd3bf8c8fd0364bfb9bea00dcba7fc301229bd02dded084632d31f5b0fb3 pool/main/libx/libx11/libx11-6_1.8.12-1_amd64.deb
-c54f87069888f80ba4da586da6147d74c7598ccdd8b90906dbc4271fa414c738 pool/main/libx/libx11/libx11-data_1.8.12-1_all.deb
-530de60c9c6dadd997ae7d74eca2a41b25e849373a5ad5dcdb619aa05713d6e0 pool/main/libx/libx11/libx11-dev_1.8.12-1_amd64.deb
-e05f94d21a932fba5b09b9b13d99df776b155d3bc792c0e294451df9ffe1ba25 pool/main/libx/libx11/libx11-xcb1_1.8.12-1_amd64.deb
-1e29410af794a3d3790aab9fa0c1b0ec9324697502e982fce4dcdd4610ce3e8a pool/main/libx/libxau/libxau-dev_1.0.11-1_amd64.deb
-689a9f0e0ba3e2c65431f864871e303ee904de69dd28abfc462663fae030227f pool/main/libx/libxau/libxau6_1.0.11-1_amd64.deb
-f446d42fb5fcebbb3e347368ba83616769fdb271d85b2f49048e337f3163d267 pool/main/libx/libxcb/libxcb-dri3-0_1.17.0-2+b1_amd64.deb
-cc59a3fa1c4ce376c3a32798179950810bd7b9be9a35bc76de1f5b5e7cc3925e pool/main/libx/libxcb/libxcb-glx0_1.17.0-2+b1_amd64.deb
-db95ea4630c55bd7f3281cb60ccf75b1627ef2f4399e1939f8f6161e584a92fb pool/main/libx/libxcb/libxcb-present0_1.17.0-2+b1_amd64.deb
-f5d9fe5fdf797918f81f0abf6cfd4270bd54659540cddb4da709ab7154523214 pool/main/libx/libxcb/libxcb-randr0_1.17.0-2+b1_amd64.deb
-d1777a813f484e89f3dcaadd1d5f2b1a13e9313b6bf70eded16d8ce743208fef pool/main/libx/libxcb/libxcb-shm0_1.17.0-2+b1_amd64.deb
-0ce4770ed1505be9ddc6473045e4662d062aff2f3077ee684265f01cfb543559 pool/main/libx/libxcb/libxcb-sync1_1.17.0-2+b1_amd64.deb
-f9c1aafc18bf9e4662e34bbaf3bb00f1f4e8c2fc1dd786fdfb6cb9cb6c64fae7 pool/main/libx/libxcb/libxcb-xfixes0_1.17.0-2+b1_amd64.deb
-5c222a72d11b866447da31693254f738430726e3e065a384e82687b2fd2f978b pool/main/libx/libxcb/libxcb1_1.17.0-2+b1_amd64.deb
-669949f8d5dff76616630d839b9047b76af553c62c376458094bd759f8fdb903 pool/main/libx/libxcb/libxcb1-dev_1.17.0-2+b1_amd64.deb
-bc845297d20cf63388c6b248d9ee169a3890347cb1c29bcd9f771684bf17b528 pool/main/libx/libxdmcp/libxdmcp-dev_1.1.5-1_amd64.deb
-0740dc760916b2008b45417a42a8fd7dd5de370fb57d31373f15034cda8acf0b pool/main/libx/libxdmcp/libxdmcp6_1.1.5-1_amd64.deb
-fc618ec40465e5ce48622606299cb47833efc3fb235ba15543b81f850722f443 pool/main/libx/libxext/libxext6_1.3.4-1+b3_amd64.deb
-e0c6b63ce4602a036a526f60fe5e6c1586710688058d98fc1001b9b3147b7efd pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3_amd64.deb
-7b339e9e5b2349723d35af4df89bcc7aa456bbdf8ba1754358f9b44c3fe1f964 pool/main/libx/libxshmfence/libxshmfence1_1.3.3-1_amd64.deb
-f9f8487e536293e7ecf91fe7feb14e97e02a3aa652e207c661442dce775d3b14 pool/main/libx/libxxf86vm/libxxf86vm1_1.1.4-1+b4_amd64.deb
-71383373523ef62d47eccf660cf6535c3febcbb3f88e54cb7a43124014b57359 pool/main/z/z3/libz3-4_4.13.3-1_amd64.deb
-2f6a2aeacfc925eba8b00ac9139bc4bfccf8cacb09eb93de067074b26948eef9 pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-1_amd64.deb
-7794643cf4560de2a7e3b069e8ca8511ad2a568d652ea285f0fe051f79bc9e99 pool/main/l/linux-signed-amd64/linux-image-6.12.107+deb13-amd64_6.12.107-1_amd64.deb
-dc68dd53c7356598d005866da0d19d7bd33af2a62971aced624cdf04492902b4 pool/main/l/linux/linux-libc-dev_6.12.107-1_all.deb
-0788e4b0b72db1bcf74a19cb24c3511e7770ad0b341f0f30e361701c3072f53e pool/main/m/media-types/media-types_13.0.0_all.deb
-3e610f29321cdcc61337c86e6b4031ff60f0c9915fe19e6a862ac06480620ff4 pool/main/m/mesa/mesa-libgallium_25.0.7-2+deb13u1_amd64.deb
-caf2f7d296b7522efe74e40a74bce762a3ce84c33b53b5e54e1248ac2e0a13a5 pool/main/m/mesa/mesa-vulkan-drivers_25.0.7-2+deb13u1_amd64.deb
-76bafa92947ebd37b0a6f9ec6570412041f56edebc1c66d323731216d318471e pool/main/n/netbase/netbase_6.5_all.deb
-f155c8191ae6d41da73d792f4182680aeafeb85c3dd223934ee9fdd115c4f1fa pool/main/o/openssl/openssl-provider-legacy_3.5.7-1~deb13u2_amd64.deb
-c1388174dc7140e6c19a6dd39f8a0dcb38a835cd66c65644e0dded43d5223cb0 pool/main/p/python3-defaults/python3_3.13.5-1_amd64.deb
-a5d2371bebf3689f676e3f3bae800371bcc4392a8a51269e23d528249b399615 pool/main/p/python3-defaults/python3-minimal_3.13.5-1_amd64.deb
-460c1fd72845516ac3ce9d1686916f3ab2e4c86f8a9746e14d26243a47e2b98d pool/main/p/python3.13/python3.13_3.13.5-2+deb13u5_amd64.deb
-c1fda9e7b1bf15b2fa75a238d8a8710e142fe14c722fc650c5fc614f078c9073 pool/main/p/python3.13/python3.13-minimal_3.13.5-2+deb13u5_amd64.deb
-f77e8aa0bf0de618f11cb0b21658a4ed60f177d63b3cf26d7fc3706b6d0eaaa9 pool/main/r/readline/readline-common_8.2-6_all.deb
-32ac0692694f8a34cc90c895f4fc739680fb2ef0e2d4870a68833682bf1c81a3 pool/main/r/rpcsvc-proto/rpcsvc-proto_1.4.3-1_amd64.deb
-214c02e1aa291076a3147b8a4c4cae02fadf4c67df629186e3e313726faef1de pool/main/t/tar/tar_1.35+dfsg-3.1_amd64.deb
-813b9bbbe14ccda2b24617b8bade0ade4d745957e75921766c153d249886bd4c pool/main/t/tzdata/tzdata_2026c-0+deb13u1_all.deb
-6a6764500eb8171d3cd6d793c09902974f8ea87bd20c68d9eac5f1eeaf3fc407 pool/main/x/xorgproto/x11proto-dev_2024.1-1_all.deb
-168345058319094e475a87ace66f5fb6ae802109650ea8434d672117982b5d0a pool/main/x/xorg-sgml-doctools/xorg-sgml-doctools_1.11-1.1_all.deb
-9ce1af9464faee0c679348dd11cdf63934c12e734a64e0903692b0cb5af38e06 pool/main/x/xtrans/xtrans-dev_1.4.0-1_all.deb
-015be740d6236ad114582dea500c1d907f29e16d6db00566ca32fb68d71ac90d pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1+b1_amd64.deb
+9a3060e6686dd00a239a86e95140816968fa68a782cb385613dea620676c1dfb binutils/2.47/1.fc45/data/signed/f577861e/x86_64/binutils-2.47-1.fc45.x86_64.rpm
+5b296721618dda3f2f794705d79b30fac2c5acd4998d82fb6a5137d4022fef29 busybox/1.37.0/9.fc45/data/signed/f577861e/x86_64/busybox-1.37.0-9.fc45.x86_64.rpm
+0c4338556b818394570eef963fd183ab2bde7babe277de146f355c7595d36d8a bzip2/1.0.8/24.fc45/data/signed/f577861e/x86_64/bzip2-libs-1.0.8-24.fc45.x86_64.rpm
+66fe200396e674df921ed78d496a6179d3ff2f586dcfb2b013cf4749155cd84b gcc/16.2.1/3.fc45/data/signed/f577861e/x86_64/cpp-16.2.1-3.fc45.x86_64.rpm
+ca81198634a5f7909e7347feafb08fed68e549f311a2a936a00a6160f0694152 cyrus-sasl/2.1.28/37.fc45/data/signed/f577861e/x86_64/cyrus-sasl-lib-2.1.28-37.fc45.x86_64.rpm
+86ca56dc35a1ca90a60ae458f627dbb3f440425ac8d80fa185bb6ebb8ce249df elfutils/0.197/1.fc45/data/signed/f577861e/x86_64/elfutils-debuginfod-client-0.197-1.fc45.x86_64.rpm
+c74c8a9b5e0b9b4f7a07e0cada0be8fdddabf3718d50f2496f90a00f0f8748bd elfutils/0.197/1.fc45/data/signed/f577861e/x86_64/elfutils-libelf-0.197-1.fc45.x86_64.rpm
+4a1196bc36a8ddae162d17d8158c52c137a027e7811d643b31da64ab04354bda elfutils/0.197/1.fc45/data/signed/f577861e/x86_64/elfutils-libs-0.197-1.fc45.x86_64.rpm
+8e94a14880241d9eff840418124dcee0f862bd18356c85a5212fea4abed93773 expat/2.9.0/1.fc45/data/signed/f577861e/x86_64/expat-2.9.0-1.fc45.x86_64.rpm
+333f2654a9c0ea00187df206f52640c9e8d2ae0b3b678438ec5f1dfc9bfdcb0a gcc/16.2.1/3.fc45/data/signed/f577861e/x86_64/gcc-16.2.1-3.fc45.x86_64.rpm
+59e0f495ad41dee439f4cbaf192d00a195aead6cfc4ff2524730fec050f7c46e gdbm/1.23/12.fc45/data/signed/f577861e/x86_64/gdbm-libs-1.23-12.fc45.x86_64.rpm
+8d6ec366a92f423acdc112c722b6ee9f81723fbcc6d60615401a09ec7fd0b007 glibc/2.44/2.fc45/data/signed/f577861e/x86_64/glibc-2.44-2.fc45.x86_64.rpm
+6be4a896d3b9ff68884de273758d0ee66a0c5bf46677fbac2d7f5945bc8db203 glibc/2.44/2.fc45/data/signed/f577861e/x86_64/glibc-devel-2.44-2.fc45.x86_64.rpm
+434884021f2e95f464950b6af962c79e7b3e9f3a89a17bc6a3e6307a555746f7 gmp/6.3.0/6.fc45/data/signed/f577861e/x86_64/gmp-6.3.0-6.fc45.x86_64.rpm
+d393130f4ee3fbad5cf67182f1df314db098806613efbac52af17d73ed0414ae jansson/2.14/5.fc45/data/signed/f577861e/x86_64/jansson-2.14-5.fc45.x86_64.rpm
+c55efa43359d11e4d987819a6a2c52032b35c1a4d56b97c9e251f211ed5205ad json-c/0.18/9.fc45/data/signed/f577861e/x86_64/json-c-0.18-9.fc45.x86_64.rpm
+1bfb9cb805c20db34f1456a18a6cec9784afd5ea9b2343134600dcd2bfd479b1 kernel/7.3.5/300.fc45/data/signed/f577861e/x86_64/kernel-core-7.3.5-300.fc45.x86_64.rpm
+d9c0f2177d23394dbb3733b55f175da61c2ef4c77bdbb737fd16fa0d7bd07646 kernel-headers/7.3.3/300.fc45/data/signed/f577861e/x86_64/kernel-headers-7.3.3-300.fc45.x86_64.rpm
+3c5491fbf4fd5888b14da7f44063591210a0f3b89b0e3e5eedc9914777d12404 kernel/7.3.5/300.fc45/data/signed/f577861e/x86_64/kernel-modules-7.3.5-300.fc45.x86_64.rpm
+a9836a038d848b388ad97ab1f6a5b144def9dedc609747e012524dadcbe0a7a5 kernel/7.3.5/300.fc45/data/signed/f577861e/x86_64/kernel-modules-core-7.3.5-300.fc45.x86_64.rpm
+37c056b41062fa9b62355a03ac63cf923776625410f98b81a62ecef7f68b8037 keyutils/1.6.3/8.fc45/data/signed/f577861e/x86_64/keyutils-libs-1.6.3-8.fc45.x86_64.rpm
+f3516bdce9ab3a99c9d8eafe9ca347ccbf922283e2d975549c27f96965139fde krb5/1.22.2/11.fc45/data/signed/f577861e/x86_64/krb5-libs-1.22.2-11.fc45.x86_64.rpm
+b810820916a0008209a061b22e7369f7ef1d12ac7fa1c729399b5683b0194076 libX11/1.8.13/3.fc45/data/signed/f577861e/x86_64/libX11-1.8.13-3.fc45.x86_64.rpm
+1f2b1b7f8fa4103c60887965d642ffe40fd88d2cdccd7da0ce4ef237e916a5b8 libX11/1.8.13/3.fc45/data/signed/f577861e/x86_64/libX11-xcb-1.8.13-3.fc45.x86_64.rpm
+288187ea953c9f0f7443b3f310dea7af7643d6b7042055be519e459280c6a0ca libXau/1.0.12/5.fc45/data/signed/f577861e/x86_64/libXau-1.0.12-5.fc45.x86_64.rpm
+598de1986395e8b81dcd1f8606c4698e4a306152e606959ed62beaa8b9fca4a3 libXext/1.3.6/6.fc45/data/signed/f577861e/x86_64/libXext-1.3.6-6.fc45.x86_64.rpm
+1ceebf857628c48f053519f60b9073788729ef24626a2d2ee7f0fb6bb781f9dc libXxf86vm/1.1.6/5.fc45/data/signed/f577861e/x86_64/libXxf86vm-1.1.6-5.fc45.x86_64.rpm
+64d2ee40ee5adebde915d36e9d4a17f1ddb93a638e52b38ff060235191fd3155 gcc/16.2.1/3.fc45/data/signed/f577861e/x86_64/libatomic-16.2.1-3.fc45.x86_64.rpm
+ab95c31b5c0d88605b0d03fe78663d8521524d078f12fba1d9ef260a4febdf75 brotli/1.2.1/1.fc45/data/signed/f577861e/x86_64/libbrotli-1.2.1-1.fc45.x86_64.rpm
+4aa0a66958124359269063f7268a1b5741ee1c6332b2078f5930a6b5a1686e8c libcbor/0.14.0/3.fc45/data/signed/f577861e/x86_64/libcbor-0.14.0-3.fc45.x86_64.rpm
+95fde4bcc30c61dd5474687e2d27bb3deb4ad072dbc31581ef9f2b95df023532 e2fsprogs/1.47.4/2.fc45/data/signed/f577861e/x86_64/libcom_err-1.47.4-2.fc45.x86_64.rpm
+43dca97dff92a063c1b9f3975bba37852369f84d42f1c171887a9ef016cf0b5b curl/8.21.0/9.fc45/data/signed/f577861e/x86_64/libcurl-8.21.0-9.fc45.x86_64.rpm
+3c40d7f5be5c6679d31fdb9cd453e22b941a83bdb030311606e09e7a1ed1859d libdisplay-info/0.3.0/2.fc45/data/signed/f577861e/x86_64/libdisplay-info-0.3.0-2.fc45.x86_64.rpm
+b6b6575c734d899dd25c2c6af93ce14195f2143467973f4544865371b6fc74f9 libdrm/2.4.134/2.fc45/data/signed/f577861e/x86_64/libdrm-2.4.134-2.fc45.x86_64.rpm
+dbf5dc81b086a4fb6c96c73535620f19f6da4a51b351746e17e14bb1f6038e36 libdrm/2.4.134/2.fc45/data/signed/f577861e/x86_64/libdrm-devel-2.4.134-2.fc45.x86_64.rpm
+90141313c7c0d632574ac138786c2a1fff7d9bbe70e881ff3ea858b58511fcbe libedit/3.1/60.20260512cvs.fc45/data/signed/f577861e/x86_64/libedit-3.1-60.20260512cvs.fc45.x86_64.rpm
+c39698953327e53a5de2f703d4c6d8063e3580cc74dee3e14125319bfc204c6b libevent/2.1.13/1.fc45/data/signed/f577861e/x86_64/libevent-2.1.13-1.fc45.x86_64.rpm
+e8c4cf4b1747f677b98e9f195c14c6abc8d70f1154d0d03f4d5cdeb110a77698 libffi/3.5.2/3.fc45/data/signed/f577861e/x86_64/libffi-3.5.2-3.fc45.x86_64.rpm
+89eeea9bbd12ae8f45f37ccfc09fbc55fc7aff3a7fcea28de89e1933e0510762 libfido2/1.17.0/6.fc45/data/signed/f577861e/x86_64/libfido2-1.17.0-6.fc45.x86_64.rpm
+57fc410c4b5939d5f85d42f90c5f0ab3514dbb74c965de1de7e3ac0d1374d606 gcc/16.2.1/3.fc45/data/signed/f577861e/x86_64/libgcc-16.2.1-3.fc45.x86_64.rpm
+8d055193c8a2da0d04a7ae2d858333bfe46fd573f7483cfab732c75ed1cac256 libglvnd/1.7.0/10.fc45/data/signed/f577861e/x86_64/libglvnd-1.7.0-10.fc45.x86_64.rpm
+b07312160cc0c894ddd870ecadf1aba88a37338fe3bdcae81d37146377ed1869 libglvnd/1.7.0/10.fc45/data/signed/f577861e/x86_64/libglvnd-core-devel-1.7.0-10.fc45.x86_64.rpm
+622fca5b44d3296ae0e42a146ef71db878ae033fe68f995057fc291746bc28f6 libglvnd/1.7.0/10.fc45/data/signed/f577861e/x86_64/libglvnd-devel-1.7.0-10.fc45.x86_64.rpm
+b44aed3592d9b767f02b02912b35454236527c12b14df2c359601aeb2c4f2e79 libglvnd/1.7.0/10.fc45/data/signed/f577861e/x86_64/libglvnd-egl-1.7.0-10.fc45.x86_64.rpm
+4b1d802457bcee155a812ab64ebdf254c23f8e1eb1074428dd07e531ddca972e libglvnd/1.7.0/10.fc45/data/signed/f577861e/x86_64/libglvnd-gles-1.7.0-10.fc45.x86_64.rpm
+352aa61d8b1f88cc4a61f2cfec06e4454c3bd7129b112785eeef6da019cf30c9 libglvnd/1.7.0/10.fc45/data/signed/f577861e/x86_64/libglvnd-glx-1.7.0-10.fc45.x86_64.rpm
+99fbd1f1a250ef137687e3c20f8bf49c2ac772a36cefea17bfbf63bb2657a9ce libglvnd/1.7.0/10.fc45/data/signed/f577861e/x86_64/libglvnd-opengl-1.7.0-10.fc45.x86_64.rpm
+33fb75d8b41fe17386154e07ce4e1d181ef16ea59edef254e90a69ecfaf911e1 gcc/16.2.1/3.fc45/data/signed/f577861e/x86_64/libgomp-16.2.1-3.fc45.x86_64.rpm
+292b62009f71cc0bebfd8f1087397d507a4932ae3d081d8a1fb1b79f34705569 libidn2/2.3.8/4.fc45/data/signed/f577861e/x86_64/libidn2-2.3.8-4.fc45.x86_64.rpm
+471e69c1cd9be651804a376ecee3cc3e1140da0c71ace50d4b5ab436a1f2923f libmpc/1.4.1/2.fc45/data/signed/f577861e/x86_64/libmpc-1.4.1-2.fc45.x86_64.rpm
+4ad405fa966df0d1ba6602d4a7d205b9bbf0e54d369a9b96ce26d45c0a91e168 nghttp2/1.69.0/6.fc45/data/signed/f577861e/x86_64/libnghttp2-1.69.0-6.fc45.x86_64.rpm
+310e0375cab96d116afdc61f8b425233c799dbedd36dc903f5fc3e188095f3ff nghttp3/1.19.0/1.fc45/data/signed/f577861e/x86_64/libnghttp3-1.19.0-1.fc45.x86_64.rpm
+1992e2f0336e4c3b9b7d7f442b58ea527fc9d65d879b18790d58206fe5e2c49b libpciaccess/0.16/18.fc45/data/signed/f577861e/x86_64/libpciaccess-0.16-18.fc45.x86_64.rpm
+82762074632ee1e59a01ebd14ca1ab9afbebeae8167b50350eebcccebbaffabc libpsl/0.23.1/1.fc45/data/signed/f577861e/x86_64/libpsl-0.23.1-1.fc45.x86_64.rpm
+6420804a2eea7da60854ae14098c1b5c76bb44cda550abe2cf7962208097f23b libselinux/3.11/5.fc45/data/signed/f577861e/x86_64/libselinux-3.11-5.fc45.x86_64.rpm
+cefb9aefcfb623b82e9d52f81d077f8b87bbed2897bcead7a7829355a1b66e7c libssh/0.12.2/1.fc45/data/signed/f577861e/x86_64/libssh-0.12.2-1.fc45.x86_64.rpm
+c4256a01fab863cecadd3aaf24b015902ac4f3b841924550d788017e28aa2d9a gcc/16.2.1/3.fc45/data/signed/f577861e/x86_64/libstdc++-16.2.1-3.fc45.x86_64.rpm
+606fc1533a11b9afa0a6cbcf08dac877921047eb3802d7cef58da2371ef770ef libtool/2.5.4/11.fc45/data/signed/f577861e/x86_64/libtool-ltdl-2.5.4-11.fc45.x86_64.rpm
+6b59f73f3bb61694af9009c8925324b82dba7f957937eeadf6ed4ea58fc376a9 libunistring/1.1/12.fc45/data/signed/f577861e/x86_64/libunistring-1.1-12.fc45.x86_64.rpm
+402222d9876b2dbebeffc85c995ce06669c70d1a12082cd67003e17ace1ddf5a util-linux/2.42.4/1.fc45/data/signed/f577861e/x86_64/libuuid-2.42.4-1.fc45.x86_64.rpm
+ca11dc4d365f61ec2cc5a463b629311c0f58f97903497c9f760e0b410f96fbc8 libverto/0.3.2/13.fc45/data/signed/f577861e/x86_64/libverto-0.3.2-13.fc45.x86_64.rpm
+aafd3738215ce5bbc66b1f9866cb790a494044e5aeb6c165b5d7e0a4e080e89e wayland/1.26.0/3.fc45/data/signed/f577861e/x86_64/libwayland-client-1.26.0-3.fc45.x86_64.rpm
+200d8970f468df1c3867e4273343d83958c0e8592f663e777bdc572e9257f725 libxcb/1.17.0/8.fc45/data/signed/f577861e/x86_64/libxcb-1.17.0-8.fc45.x86_64.rpm
+e1734d4aa06b440582bcca6f6f6769f0ac303d3ac59eee4bcc7ec3414c60de98 libxcrypt/4.5.2/4.fc45/data/signed/f577861e/x86_64/libxcrypt-4.5.2-4.fc45.x86_64.rpm
+7c21dbf8e1dde792c35687b9a340b398b4640b1e2633a87cf6026975fd659456 libxml2/2.15.4/1.fc45/data/signed/f577861e/x86_64/libxml2-2.15.4-1.fc45.x86_64.rpm
+31c2eb73ba93fe602eb9a90a8ff8f1278419c7f26d7d98b7d38a512f8b93f0a6 libxshmfence/1.3.2/9.fc45/data/signed/f577861e/x86_64/libxshmfence-1.3.2-9.fc45.x86_64.rpm
+d637ecf99fffca9746ffe29a8b5f9db56a16a86dff6d637365e072f460f364a7 zstd/1.5.7/6.fc45/data/signed/f577861e/x86_64/libzstd-1.5.7-6.fc45.x86_64.rpm
+352aacac2343474811146df7f7090c4334ec08ca72186987b46decd4aa7ccc81 llvm/23.1.5/2.fc45/data/signed/f577861e/x86_64/llvm-libs-23.1.5-2.fc45.x86_64.rpm
+a4f6ce4dbb0285a234d3830a6f6d7e442b1b701f410c096bc8045d902314d21b lm_sensors/3.6.0/25.fc45/data/signed/f577861e/x86_64/lm_sensors-libs-3.6.0-25.fc45.x86_64.rpm
+65e2787b78689ec2b2d88542d2355106f50795afdacb3bc975749889acf6238f mesa/26.2.7/1.fc45/data/signed/f577861e/x86_64/mesa-dri-drivers-26.2.7-1.fc45.x86_64.rpm
+b8426c978be557473a3b1da150381b7f4d981a8f321863a16140dc5375a35a5e mesa/26.2.7/1.fc45/data/signed/f577861e/x86_64/mesa-filesystem-26.2.7-1.fc45.x86_64.rpm
+a03a69a954fa86e7caeac20530c94a76eb743f3380d4171e7b6c31a5bc55ee2a mesa/26.2.7/1.fc45/data/signed/f577861e/x86_64/mesa-libEGL-26.2.7-1.fc45.x86_64.rpm
+ca2ae8fdf36db645f08d2ba096e0f730ebdff53b0d6b113128f153ebc089c9f5 mesa/26.2.7/1.fc45/data/signed/f577861e/x86_64/mesa-libGL-26.2.7-1.fc45.x86_64.rpm
+4df3cd9776644e2958a18bb725bd0e042e5825c9676be236a3ec9604c12231d0 mesa/26.2.7/1.fc45/data/signed/f577861e/x86_64/mesa-libgbm-26.2.7-1.fc45.x86_64.rpm
+e644e5d7a4b6a80d38756e27add2b0416232fc794f9b25fafa94749eaac1442a mesa/26.2.7/1.fc45/data/signed/f577861e/x86_64/mesa-vulkan-drivers-26.2.7-1.fc45.x86_64.rpm
+27d5661e3734dde39a290698b56b510d8d03bf632585864f1c2f47c7a7f52d10 mpdecimal/4.0.1/4.fc45/data/signed/f577861e/x86_64/mpdecimal-4.0.1-4.fc45.x86_64.rpm
+5ce38596ccbbc9e761d613916f0c8f767db431274e84e05786d18d74f7f28975 mpfr/4.2.2/4.fc45/data/signed/f577861e/x86_64/mpfr-4.2.2-4.fc45.x86_64.rpm
+bc8d79cdd67d96248c93bd1a3eec1e499ec2d1f96cb6922a709df6df06d5cd38 ncurses/6.6/3.fc45/data/signed/f577861e/x86_64/ncurses-libs-6.6-3.fc45.x86_64.rpm
+a21c80bb88fbe95320028e486019b3ad998b0ded2320b3ccc458773b4b07a93c ngtcp2/1.22.1/3.fc45/data/signed/f577861e/x86_64/ngtcp2-1.22.1-3.fc45.x86_64.rpm
+9306e5a00e6b6ec0f1ca0ccdc5914f4c89eb5625e68bb748fc2735051961f145 ngtcp2/1.22.1/3.fc45/data/signed/f577861e/x86_64/ngtcp2-crypto-ossl-1.22.1-3.fc45.x86_64.rpm
+e7b345286682ed6836c10164b9a7f629823f2860c25cf810d07b33ce75c1694a openldap/2.6.16/1.fc45/data/signed/f577861e/x86_64/openldap-2.6.16-1.fc45.x86_64.rpm
+4f8ece27fdbdbf94ced234b088e1f9eb6f1e60cf6732a898c2d8ad156dbc86ae openssl/4.0.3/1.fc45/data/signed/f577861e/x86_64/openssl-libs-4.0.3-1.fc45.x86_64.rpm
+178b22ce6b2215257854742b8de5c37d78f50aa4db364d7088a3fc6dd3fbdc7d pcre2/10.49/1.fc45/data/signed/f577861e/x86_64/pcre2-10.49-1.fc45.x86_64.rpm
+95c4a51c0e68cebadc5905ecf684eafb1f2c357615e5a37bc903cec414458709 python3.15/3.15.2/1.fc45/data/signed/f577861e/x86_64/python3-3.15.2-1.fc45.x86_64.rpm
+cf21fa8f6d54c0d596fb973b0e810b7147de4e6864a721f96e74c0e5fa3dc6d2 python3.15/3.15.2/1.fc45/data/signed/f577861e/x86_64/python3-libs-3.15.2-1.fc45.x86_64.rpm
+f47c0a94e9f775fa5711bada265880af7dc7d3de6404b817c94bc4bf9a8522ea readline/8.3/6.fc45/data/signed/f577861e/x86_64/readline-8.3-6.fc45.x86_64.rpm
+ad5a47c05d8c45968188b48df729de143ab689b07bc65500fd3917db609eb578 spirv-tools/2026.2/3.fc45/data/signed/f577861e/x86_64/spirv-tools-libs-2026.2-3.fc45.x86_64.rpm
+5bc6fb8d9a70a52c4392c95e0f4f47ad900c03260e6437230ccb8d56605be17b sqlite/3.54.1/2.fc45/data/signed/f577861e/x86_64/sqlite-libs-3.54.1-2.fc45.x86_64.rpm
+c1af6d9a736f0337e14e219cff0f8fb9ed8a282bcf658c62efe6e8061f8692ab systemd/262.1/1.fc45/data/signed/f577861e/x86_64/systemd-libs-262.1-1.fc45.x86_64.rpm
+ce6fd06b9a5aa01648824d814c1d9bfe42a613ce447dbd2a2deecfecbe1e5d90 vulkan-headers/1.4.350.0/4.fc45/data/signed/f577861e/noarch/vulkan-headers-1.4.350.0-4.fc45.noarch.rpm
+1ae19395817707c550cb2652cf98b3fdf84511ac175619e4f376035ee6518925 vulkan-loader/1.4.350.0/2.fc45/data/signed/f577861e/x86_64/vulkan-loader-1.4.350.0-2.fc45.x86_64.rpm
+e32f87eee997ffb44b2045b56ac7c5b9c0393e239edda9171e5dd350cb5413fa vulkan-loader/1.4.350.0/2.fc45/data/signed/f577861e/x86_64/vulkan-loader-devel-1.4.350.0-2.fc45.x86_64.rpm
+587c17c60ddb7fb1553064c2533cf80a7ff1d7b2ad215cefe6e7d587a21109a5 xz/5.8.3/2.fc45/data/signed/f577861e/x86_64/xz-libs-5.8.3-2.fc45.x86_64.rpm
+1bab05fecdd71fc4a946852d83405f238c89cccb63987c0941c7f2f0184a99e2 zlib-ng/2.3.3/6.fc45/data/signed/f577861e/x86_64/zlib-ng-compat-2.3.3-6.fc45.x86_64.rpm
 """
+# Fedora 45 plus rawhide Mesa and its required glibc runtime upgrade.
+CURRENT_PINS = """
+f5da12a56dfb8b97a853877cca9d7c0f2e4f5ae66ab1054a0e77f55e52a08b53 glibc/2.44.9000/7.fc46/data/signed/91211fce/x86_64/glibc-2.44.9000-7.fc46.x86_64.rpm
+0ada7c1087c3904750e90f84a060f07e2637cd83436026e4a29186675b2defcc mesa/26.3.1/1.fc46/data/signed/91211fce/x86_64/mesa-dri-drivers-26.3.1-1.fc46.x86_64.rpm
+0ed1cd9d94cdd548e148f8cf3d53df4fc8f5a40a0f5c12e6dcbd2d98ba288fea mesa/26.3.1/1.fc46/data/signed/91211fce/x86_64/mesa-filesystem-26.3.1-1.fc46.x86_64.rpm
+547e4ff68be1596fb806b76af5875f5eacfc9a8a629d575fcfc4d3297c13ad1a mesa/26.3.1/1.fc46/data/signed/91211fce/x86_64/mesa-libEGL-26.3.1-1.fc46.x86_64.rpm
+078b31e508a0eed0d67abde2fd547a3a0ddb056d216e9e6628134e131224c5bf mesa/26.3.1/1.fc46/data/signed/91211fce/x86_64/mesa-libGL-26.3.1-1.fc46.x86_64.rpm
+ca708259d6471ad9ccbe223714021391a58d297f42bf845fbf9cd15d09fe3fbe mesa/26.3.1/1.fc46/data/signed/91211fce/x86_64/mesa-libgbm-26.3.1-1.fc46.x86_64.rpm
+fbb28a8b65280ad4ffcddc864e109be76dfd0544e9d014c2bf6fc4b782cef7b4 mesa/26.3.1/1.fc46/data/signed/91211fce/x86_64/mesa-vulkan-drivers-26.3.1-1.fc46.x86_64.rpm
+"""
+NATIVE_EVIDENCE = {'26.2.7': {'build_log_url': 'https://kojipkgs.fedoraproject.org/packages/mesa/26.2.7/1.fc45/data/logs/x86_64/build.log',
+            'build_log_sha256': '94e95117548b4df4ca738992068eecdd41c332e2b200e517cf6c7376e0f1dd36',
+            'meson_setup_line': 190,
+            'meson_setup_command': '+ /usr/bin/meson setup --buildtype=plain --prefix=/usr '
+                                   '--libdir=/usr/lib64 --libexecdir=/usr/libexec --bindir=/usr/bin '
+                                   '--sbindir=/usr/bin --includedir=/usr/include --datadir=/usr/share '
+                                   '--mandir=/usr/share/man --infodir=/usr/share/info '
+                                   '--localedir=/usr/share/locale --sysconfdir=/etc --localstatedir=/var '
+                                   '--sharedstatedir=/var/lib --wrap-mode=nodownload --auto-features=enabled '
+                                   '. redhat-linux-build -Dplatforms=x11,wayland '
+                                   '-Dgallium-drivers=llvmpipe,virgl,nouveau,r300,crocus,i915,iris,svga,radeonsi,r600,asahi,freedreno,etnaviv,tegra,vc4,v3d,lima,panfrost,zink,d3d12,ethosu,rocket '
+                                   '-Dgallium-va=enabled -Dgallium-mediafoundation=disabled -Dteflon=true '
+                                   '-Dgallium-rusticl=true '
+                                   '-Dvulkan-drivers=swrast,amd,intel,intel_hasvk,asahi,broadcom,freedreno,panfrost,imagination,nouveau,virtio,microsoft-experimental '
+                                   '-Dvulkan-layers=device-select,anti-lag -Dgles1=enabled -Dgles2=enabled '
+                                   '-Dopengl=true -Dgbm=enabled -Dglx=dri -Degl=enabled -Dglvnd=enabled '
+                                   '-Dintel-rt=enabled -Dmicrosoft-clc=disabled -Dllvm=enabled '
+                                   '-Dshared-llvm=enabled -Dvalgrind=enabled -Dbuild-tests=false '
+                                   '-Dandroid-libbacktrace=disabled -Dspirv-tools=enabled',
+            'intel_virtio_define_count': 0,
+            'icd_sha256': '10748bae30dc2449950a555a828632102543569d23fcb3231a58ad46947fa239',
+            'icd_virtio_string_count': 0,
+            'option_url': 'https://gitlab.freedesktop.org/mesa/mesa/-/raw/mesa-26.2.7/meson.options',
+            'option_default': 'false'},
+ '26.3.1': {'build_log_url': 'https://kojipkgs.fedoraproject.org/packages/mesa/26.3.1/1.fc46/data/logs/x86_64/build.log',
+            'build_log_sha256': '40c26fa4c654cbeabb9e7d35ab92dd4fac6b8cfa09b325dce9e19c814404a96a',
+            'meson_setup_line': 190,
+            'meson_setup_command': '+ /usr/bin/meson setup --buildtype=plain --prefix=/usr '
+                                   '--libdir=/usr/lib64 --libexecdir=/usr/libexec --bindir=/usr/bin '
+                                   '--sbindir=/usr/bin --includedir=/usr/include --datadir=/usr/share '
+                                   '--mandir=/usr/share/man --infodir=/usr/share/info '
+                                   '--localedir=/usr/share/locale --sysconfdir=/etc --localstatedir=/var '
+                                   '--sharedstatedir=/var/lib --wrap-mode=nodownload --auto-features=enabled '
+                                   '. redhat-linux-build -Dplatforms=x11,wayland '
+                                   '-Dgallium-drivers=llvmpipe,virgl,nouveau,r300,crocus,i915,iris,svga,radeonsi,r600,asahi,freedreno,etnaviv,tegra,vc4,v3d,lima,panfrost,zink,d3d12,ethosu,rocket '
+                                   '-Dgallium-va=enabled -Dgallium-mediafoundation=disabled -Dteflon=true '
+                                   '-Dgallium-rusticl=true '
+                                   '-Dvulkan-drivers=swrast,amd,intel,intel_hasvk,asahi,broadcom,freedreno,panfrost,imagination,nouveau,virtio,gfxstream,microsoft-experimental '
+                                   '-Dvulkan-layers=device-select -Dgles1=enabled -Dgles2=enabled '
+                                   '-Dopengl=true -Dgbm=enabled -Dglx=dri -Degl=enabled -Dglvnd=enabled '
+                                   '-Dintel-rt=enabled -Dmicrosoft-clc=disabled -Dllvm=enabled '
+                                   '-Dshared-llvm=enabled -Dvalgrind=enabled -Dbuild-tests=false '
+                                   '-Dandroid-libbacktrace=disabled -Dspirv-tools=enabled',
+            'intel_virtio_define_count': 0,
+            'icd_sha256': '5998cd7d42fc04c7a5f08c846bc3ffdd7e0460dab1188f6a6b3ad7390976a65c',
+            'icd_virtio_string_count': 0,
+            'option_url': 'https://gitlab.freedesktop.org/mesa/mesa/-/raw/mesa-26.3.1/meson.options',
+            'option_default': 'false'}}
+SCENE_HASH = "47972063c7a47bfb"
 DEVICES = {
     "virgl": "virtio-vga-gl",
     "venus": "virtio-vga-gl,hostmem=4G,blob=true,venus=true",
@@ -289,56 +284,64 @@ def preflight(args, host):
         raise Blocked("The selected host Vulkan ICD cannot create an instance; see host.runtime.vulkan.")
 
 
-def fetch(cache, digest, pool_path, snapshot=SNAPSHOT):
-    target = cache / Path(pool_path).name
+def fetch(cache, digest, archive_path):
+    target = cache / Path(archive_path).name
     if target.exists():
         if sha256(target) != digest:
             raise RuntimeError(f"Cached file fails SHA-256: {target}")
         return target
     partial = target.with_name(target.name + f".{os.getpid()}.partial")
-    urls = [f"https://deb.debian.org/debian/{pool_path}",
-            f"https://snapshot.debian.org/archive/debian/{snapshot}/{pool_path}"]
+    url = KOJI + archive_path
     failures = []
-    for url in urls:
-        for attempt in range(3):
-            try:
-                with urllib.request.urlopen(url, timeout=90) as response, partial.open("wb") as out:
-                    shutil.copyfileobj(response, out)
-                if sha256(partial) != digest:
-                    raise RuntimeError(f"Download fails pinned SHA-256: {url}")
-                partial.replace(target)
-                return target
-            except (OSError, urllib.error.URLError) as error:
-                failures.append(str(error))
-                time.sleep(attempt + 1)
-            finally:
-                partial.unlink(missing_ok=True)
-    raise RuntimeError(f"Cannot download {pool_path}: {'; '.join(failures)}")
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=90) as response, partial.open("wb") as out:
+                shutil.copyfileobj(response, out)
+            if sha256(partial) != digest:
+                raise RuntimeError(f"Download fails pinned SHA-256: {url}")
+            partial.replace(target)
+            return target
+        except (OSError, urllib.error.URLError) as error:
+            failures.append(str(error))
+            time.sleep(attempt + 1)
+        finally:
+            partial.unlink(missing_ok=True)
+    raise RuntimeError(f"Cannot download {archive_path}: {'; '.join(failures)}")
 
 
-def deb_tar(path):
-    """Read the data member of a Debian ar archive without invoking its code."""
-    with path.open("rb") as stream:
-        if stream.read(8) != b"!<arch>\n":
-            raise ValueError(f"Not a Debian ar archive: {path}")
-        while header := stream.read(60):
-            if len(header) != 60 or header[58:] != b"`\n":
-                raise ValueError("Invalid ar header")
-            size = int(header[48:58])
-            name = header[:16].decode().strip().rstrip("/")
-            data = stream.read(size)
-            if len(data) != size:
-                raise ValueError("Truncated ar member")
-            if size % 2:
-                stream.read(1)
-            if name.startswith("data.tar"):
-                return tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
-    raise ValueError(f"No data archive: {path}")
+@contextlib.contextmanager
+def rpm_tar(path):
+    """Use the host's libarchive to convert RPM data into an in-memory tar.
+
+    The @archive input copies archive members. It neither extracts them on
+    the host nor runs RPM scriptlets or any program from the package.
+    """
+    run = subprocess.run(["bsdtar", "-cf", "-", "--format=pax", "@" + str(path)],
+                         capture_output=True, check=True)
+    with tarfile.open(fileobj=io.BytesIO(run.stdout), mode="r:") as archive:
+        groups = {}
+        for member in archive:
+            if member.islnk():
+                groups.setdefault(member.linkname, [member.linkname]).append(member.name)
+        contents = {}
+        for target, names in groups.items():
+            if archive.getmember(target).size == 0:
+                # RPM's cpio can carry a hard-link group's data on its last
+                # member. A tar conversion makes that member a data-less link.
+                # Read the group from the original archive to retain its bytes.
+                contents[target] = subprocess.run(["bsdtar", "-xOf", str(path), *names],
+                                                  capture_output=True, check=True).stdout
+
+        def read(member):
+            target = member.linkname if member.islnk() else member.name
+            return contents[target] if target in contents else archive.extractfile(member).read()
+
+        yield archive, read
 
 
-def cpio_entry(out, inode, name, mode, data=b"", rdev=(0, 0)):
+def cpio_entry(out, inode, name, mode, data=b"", rdev=(0, 0), nlink=1):
     encoded = name.encode() + b"\0"
-    fields = [inode, mode, 0, 0, 1, 0, len(data), 0, 0, *rdev, len(encoded), 0]
+    fields = [inode, mode, 0, 0, nlink, 0, len(data), 0, 0, *rdev, len(encoded), 0]
     header = b"070701" + b"".join(f"{value:08x}".encode() for value in fields)
     out.write(header + encoded)
     out.write(b"\0" * (-(len(header) + len(encoded)) % 4))
@@ -367,26 +370,31 @@ def assemble(cache, packages):
     files = {}
     modules = {}
     for package in packages:
-        with deb_tar(package) as archive:
+        with rpm_tar(package) as (archive, read):
             for member in archive:
                 name = str(PurePosixPath(member.name))
                 if name == ".":
                     continue
                 if name.startswith("/") or ".." in PurePosixPath(name).parts:
                     raise ValueError(f"Unsafe archive path: {name}")
-                if name.startswith("boot/vmlinuz-"):
+                # RPMs can still name /lib64 while Fedora's filesystem aliases
+                # it into /usr. The kernel's cpio unpacker does not traverse
+                # those parent symlinks, so emit every child at its real path.
+                if name.split("/", 1)[0] in ("bin", "sbin", "lib", "lib64"):
+                    name = "usr/" + name
+                if name.startswith("boot/vmlinuz-") or name.endswith("/vmlinuz"):
                     partial_kernel = kernel.with_suffix(f".{os.getpid()}.partial")
-                    partial_kernel.write_bytes(archive.extractfile(member).read())
+                    partial_kernel.write_bytes(read(member))
                     partial_kernel.replace(kernel)
                     continue
                 if "/modules/" in name:
-                    if re.search(r"\.ko(?:\.xz)?$", name):
+                    if re.search(r"\.ko(?:\.(?:xz|zst))?$", name):
                         key = Path(name).name.split(".ko")[0].replace("-", "_")
-                        modules[key] = (name, archive.extractfile(member).read())
+                        modules[key] = (name, read(member))
                     continue
                 if name.startswith(("boot/", "usr/share/man/", "usr/share/locale/")):
                     continue
-                if name.startswith("usr/share/doc/") and not name.endswith("/copyright"):
+                if name.startswith("usr/share/doc/") and not name.endswith(("/copyright", "/LICENSE", "/COPYING")):
                     continue
                 # No package privilege bits are needed by this one-shot root init.
                 mode = member.mode & 0o777
@@ -395,7 +403,7 @@ def assemble(cache, packages):
                 elif member.issym():
                     files[name] = (stat.S_IFLNK | 0o777, member.linkname.encode())
                 elif member.isfile() or member.islnk():
-                    files[name] = (stat.S_IFREG | mode, archive.extractfile(member).read())
+                    files[name] = (stat.S_IFREG | mode, read(member))
     order = []
     visited = set()
 
@@ -407,6 +415,8 @@ def assemble(cache, packages):
         path, data = modules[name]
         if path.endswith(".xz"):
             data = lzma.decompress(data)
+        elif path.endswith(".zst"):
+            data = subprocess.run(["zstd", "-d", "-c"], input=data, capture_output=True, check=True).stdout
         match = re.search(rb"\x00depends=([^\x00]*)\x00", data)
         if match:
             for dependency in match[1].decode().split(","):
@@ -429,7 +439,9 @@ def assemble(cache, packages):
         if source.is_file():
             files["probe/" + source.name] = (stat.S_IFREG | 0o644, source.read_bytes())
     files["probe/modules.json"] = (stat.S_IFREG | 0o644, json.dumps(order).encode())
-    init = "#!/bin/sh\nexec /usr/bin/python3 /probe/guest.py\n"
+    # Retain a static PID 1 if the dynamic loader cannot start Python, so its
+    # diagnostic reaches the serial log instead of being lost in a panic.
+    init = "#!/bin/sh\n/usr/bin/python3 /probe/guest.py\n/bin/busybox sleep 1\n/bin/busybox poweroff -f\n"
     files["init"] = (stat.S_IFREG | 0o755, init.encode())
     # Directory records precede children, including the merged-/usr aliases.
     for name in list(files):
@@ -541,12 +553,12 @@ def main():
     parser.add_argument("--vk-driver", default=os.environ.get("VK_DRIVER_FILES", ""), help="Host Vulkan ICD JSON, or colon-separated ICD files")
     parser.add_argument("--render-node", default="/dev/dri/renderD128", help="Host EGL render node (recorded independently of the Vulkan ICD)")
     parser.add_argument("--out", type=Path, default=ROOT / "build/gpu-reference")
-    parser.add_argument("--cache", type=Path, default=ROOT / "build/gpu-reference/cache" / SNAPSHOT)
+    parser.add_argument("--cache", type=Path, default=ROOT / "build/gpu-reference/cache/fedora-koji")
     parser.add_argument("--repeat", type=int, default=2, help="Boots per device line; default 2 checks repeatability")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--fetch-only", action="store_true", help="Verify/download pinned inputs without booting")
-    parser.add_argument("--variant", choices=("all", "debian13", "mesa26"), default="all",
-                        help="Debian 13 baseline, newer Mesa runtime overlay, or both (default)")
+    parser.add_argument("--variant", choices=("all", "fedora45", "mesa263"), default="fedora45",
+                        help="Fedora 45 (default), Fedora 45 with rawhide Mesa 26.3.1, or both")
     args = parser.parse_args()
     if not args.fetch_only and not args.vk_driver:
         parser.error("choose --vk-driver or set VK_DRIVER_FILES; use --fetch-only to prepare the cache")
@@ -559,14 +571,14 @@ def main():
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_dir = args.out / f"run-{stamp}-{os.getpid()}"
     run_dir.mkdir()
-    variants = [("debian13", {"mesa": MESA, "glibc": "2.41-12+deb13u4", "llvm": "1:19.1.7-3+b1",
-                              "snapshot": SNAPSHOT, "kind": "Debian 13 baseline"}),
-                ("mesa26", {"mesa": CURRENT_MESA, "glibc": CURRENT_GLIBC, "llvm": CURRENT_LLVM,
-                            "snapshot": CURRENT_SNAPSHOT, "kind": "Debian 13 with minimal runtime overlay",
-                            "index_sha256": CURRENT_INDEX_SHA256, "inrelease_sha256": CURRENT_RELEASE_SHA256})]
-    record = {"schema_version": 2, "status": "FAIL", "started_utc": stamp,
-              "base_pin": {"snapshot": SNAPSHOT, "index_sha256": INDEX_SHA256,
-                           "inrelease_sha256": RELEASE_SHA256, "kernel": KERNEL},
+    variants = [("fedora45", {"mesa": MESA, "glibc": "2.44-2.fc45", "llvm": "23.1.5-2.fc45",
+                              "kind": "Fedora 45 release and updates"}),
+                ("mesa263", {"mesa": CURRENT_MESA, "glibc": "2.44.9000-7.fc46", "llvm": "23.1.5-2.fc45",
+                             "kind": "Fedora 45 with rawhide Mesa and its minimal runtime overlay"})]
+    record = {"schema_version": 3, "status": "FAIL", "started_utc": stamp,
+              "base_pin": {"distribution": "Fedora 45", "kernel": KERNEL},
+              "trust": {"method": "RPM header signatures and signed payload digests verified when pins were established",
+                        "key_fingerprints": FEDORA_KEYS, "archive": KOJI},
               "expected_scene_hash": SCENE_HASH,
               "variants": [{"name": name, "pin": pin, "runs": [], "status": "NOT_RUN"}
                            for name, pin in variants if args.variant in ("all", name)]}
@@ -574,8 +586,10 @@ def main():
         record["host"] = host_info(args)
         if not args.fetch_only:
             preflight(args, record["host"])
+            if not all(shutil.which(tool) for tool in ("bsdtar", "zstd")):
+                raise Blocked("The host needs bsdtar and zstd to read the pinned RPMs and kernel modules.")
         pins = [line.split() for line in PACKAGE_PINS.splitlines() if line.strip()]
-        print(f"Checking {len(pins)} pinned Debian packages", flush=True)
+        print(f"Checking {len(pins)} pinned Fedora 45 packages", flush=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             packages = list(pool.map(lambda pair: fetch(args.cache, *pair), pins))
         record["base_inputs"] = [{"filename": p.name, "sha256": digest} for p, (digest, _) in zip(packages, pins)]
@@ -583,13 +597,13 @@ def main():
             variant_name = variant["name"]
             variant["status"] = "FAIL"
             variant_packages = packages
-            if variant_name == "mesa26":
+            if variant_name == "mesa263":
                 overlay_pins = [line.split() for line in CURRENT_PINS.splitlines() if line.strip()]
-                overlay_cache = args.cache / CURRENT_SNAPSHOT
+                overlay_cache = args.cache
                 overlay_cache.mkdir(exist_ok=True)
                 print(f"Checking {len(overlay_pins)} pinned Mesa runtime overlay packages", flush=True)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                    overlay = list(pool.map(lambda pair: fetch(overlay_cache, *pair, snapshot=CURRENT_SNAPSHOT), overlay_pins))
+                    overlay = list(pool.map(lambda pair: fetch(overlay_cache, *pair), overlay_pins))
                 variant["overlay_inputs"] = [{"filename": p.name, "sha256": digest} for p, (digest, _) in zip(overlay, overlay_pins)]
                 variant_packages = packages + overlay
             if args.fetch_only:
@@ -604,6 +618,13 @@ def main():
                     result = run_guest(args, kernel, initrd, name, run_dir / f"{variant_name}-{name}-{repeat + 1}")
                     variant["runs"].append(result)
                     print(f"{result['status']} {variant_name}/{name}", flush=True)
+            native_runs = [r["guest"] for r in variant["runs"] if "native_context" in r.get("guest", {})]
+            if native_runs:
+                variant["native"] = {
+                    "status": "available" if all(g["native_context"]["status"] == "AVAILABLE" for g in native_runs) else "unavailable",
+                    "reason": native_runs[0]["native_context"].get("reason"),
+                    "evidence": NATIVE_EVIDENCE[variant["pin"]["mesa"].split("-", 1)[0]],
+                }
             variant["repeatability"] = repeatability(variant["runs"])
             statuses = [r["status"] for r in variant["runs"]] + [r["status"] for r in variant["repeatability"].values()]
             variant["status"] = "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "PASS"
@@ -614,7 +635,7 @@ def main():
         for variant in record["variants"]:
             if variant["status"] == "NOT_RUN":
                 variant.update(status="BLOCKED", error=str(error))
-    except (OSError, ValueError, RuntimeError, tarfile.TarError) as error:
+    except (OSError, ValueError, RuntimeError, tarfile.TarError, subprocess.SubprocessError) as error:
         record["error"] = str(error)
     except KeyboardInterrupt:
         record["error"] = "Interrupted; the guest process group was stopped."
