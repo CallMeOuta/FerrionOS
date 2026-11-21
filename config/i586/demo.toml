@@ -30,8 +30,9 @@ data = """
 #                                                                            #
 # FerrionOS is an operating system written in Rust, a language with focus on #
 # safety and high performance. FerrionOS, following the microkernel design,  #
-# aims to be secure, usable, and free. FerrionOS is inspired by previous     #
-# kernels and operating systems, such as SeL4, MINIX, Plan 9, and BSD.       #
+# aims to be secure, usable, and free. Its kernel and system design draw on  #
+# seL4, MINIX, Plan 9, Linux and BSD; its everyday experience draws on macOS #
+# and Windows.                                                               #
 #                                                                            #
 # FerrionOS _is not_ just a kernel, it's a full-featured Operating System,   #
 # providing packages (memory allocator, file system, display manager, core   #

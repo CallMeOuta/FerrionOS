@@ -2,9 +2,9 @@
 
 This repository is the build system for FerrionOS. FerrionOS began as a fork of Redox OS and is developed independently; it is not affiliated with or endorsed by the Redox OS project.
 
-FerrionOS is an open-source operating system written in Rust, a language with focus on safety, efficiency and high performance. FerrionOS uses a microkernel architecture, and aims to be reliable, secure, usable, correct, and free. It is inspired by previous operating systems, such as seL4, MINIX, Plan 9, Linux and BSD.
+FerrionOS is an open-source operating system written in Rust, a language with focus on safety, efficiency and high performance. FerrionOS uses a microkernel architecture, and aims to be reliable, secure, usable, correct, and free. Its kernel and system design draw on seL4, MINIX, Plan 9, Linux and BSD; its everyday experience draws on macOS and Windows.
 
-FerrionOS _is not_ just a kernel, it's a **full-featured operating system**, providing components (file system, display server, core utilities, etc.) that together make up a functional and convenient operating system. FerrionOS uses the COSMIC desktop apps, and provides source code compatibility with many Rust, Linux and BSD programs.
+FerrionOS _is not_ just a kernel: it is a **full-featured operating system**, providing components (file system, display server, core utilities, etc.) that together make up a functional and convenient operating system. It provides source code compatibility with many Rust, Linux and BSD programs. The desktop currently ships the COSMIC terminal, file manager and text editor; which desktop apps FerrionOS ships is not settled and may change.
 
 The build system is makefiles (`Makefile`, `mk/`), a Rust build tool called the cookbook (`src/`), package recipes (`recipes/`) and filesystem configs (`config/`). They fetch, cross-compile and package the system's components and assemble a bootable image.
 
