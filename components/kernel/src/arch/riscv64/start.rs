@@ -98,7 +98,7 @@ unsafe extern "C" fn start(args_ptr: *const KernelArgs) -> ! {
                 init_early(dtb);
             }
 
-            info!("Redox OS starting...");
+            info!("FerrionOS starting...");
             args.print();
 
             if let Ok((dtb, _)) = &dtb {

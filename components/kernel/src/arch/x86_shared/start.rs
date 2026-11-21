@@ -90,7 +90,7 @@ unsafe extern "C" fn start(args_ptr: *const KernelArgs, stack_end: usize) -> ! {
         // Set up graphical debug
         graphical_debug::init(args.env());
 
-        info!("Redox OS starting...");
+        info!("FerrionOS starting...");
         args.print();
 
         // Set up GDT
