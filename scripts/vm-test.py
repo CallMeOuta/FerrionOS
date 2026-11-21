@@ -3988,6 +3988,24 @@ def test_audio_apps(args, out):
                           "legacy PCM/tone, independent gains, readable volume, and flat 10,000-stream churn") + f"; see {out}"
 
 
+def test_mesa_cpu(vm, args):
+    """Mesa 26.3.1 CPU GL and Vulkan reproduce the exact triangle."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root shell"
+    since = vm.mark()
+    vm.type("bash -c 'gpu-probe mesa-cpu; echo MESA-CPU-EXIT-$?'\n")
+    finished = vm.wait_serial(r"MESA-CPU-EXIT-(\d+)", args.timeout, since)
+    output = vm.text(since)
+    (vm.out / "mesa-cpu.txt").write_text(output)
+    if not finished or finished.group(1) != "0":
+        return False, "CPU graphics probe failed; see mesa-cpu.txt"
+    for api in ("gl", "vulkan"):
+        expected = f"GPU_PIXELS api={api} triangle=17540 mismatches=0 hash=47972063c7a47bfb"
+        if expected not in output:
+            return False, f"missing exact {api} pixels; see mesa-cpu.txt"
+    return "GPU_MESA_CPU_OK" in output, "Mesa CPU versions and both exact frames checked"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -4015,6 +4033,7 @@ TESTS["linux-hello"] = test_linux_hello
 TESTS["linux-busybox"] = test_linux_busybox
 TESTS["linux-dynamic"] = test_linux_dynamic
 TESTS["dso-atexit"] = test_dso_atexit
+TESTS["mesa-cpu"] = test_mesa_cpu
 TESTS["gtk-window"] = test_gtk_window
 TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 # These boot copies of their own images instead of the shared one, and are called with (args, out).

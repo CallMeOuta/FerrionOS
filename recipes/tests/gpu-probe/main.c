@@ -23,7 +23,7 @@ static int64_t edge(int a, int b, int64_t x, int64_t y)
         - (y - corners[a][1]) * (corners[b][0] - corners[a][0]);
 }
 
-static int compare_pixels(const unsigned char *pixels)
+int compare_pixels(const char *api, const unsigned char *pixels)
 {
     uint64_t hash = UINT64_C(1469598103934665603);
     unsigned triangle = 0, mismatches = 0;
@@ -42,8 +42,8 @@ static int compare_pixels(const unsigned char *pixels)
             mismatches += memcmp(pixel, inside ? foreground : background, 4) != 0;
         }
     }
-    printf("GPU_PIXELS triangle=%u mismatches=%u hash=%016" PRIx64 "\n",
-           triangle, mismatches, hash);
+    printf("GPU_PIXELS api=%s triangle=%u mismatches=%u hash=%016" PRIx64 "\n",
+           api, triangle, mismatches, hash);
     return triangle == 17540 && mismatches == 0 && hash == UINT64_C(0x47972063c7a47bfb) ? 0 : 1;
 }
 
@@ -64,7 +64,7 @@ static GLuint shader(GLenum type, const char *source)
     return result;
 }
 
-static int egl_dispatch(void)
+static int egl_dispatch(int require_current)
 {
     EGLDisplay display = eglGetPlatformDisplay(EGL_PLATFORM_REDOX_EXT, EGL_DEFAULT_DISPLAY, NULL);
     if (display == EGL_NO_DISPLAY || !eglInitialize(display, NULL, NULL)) {
@@ -89,6 +89,9 @@ static int egl_dispatch(void)
         fputs("GPU_ERROR expected llvmpipe\n", stderr);
         return 1;
     }
+    int version_ok = !require_current || strstr((const char *)glGetString(GL_VERSION), "Mesa 26.3.1") != NULL;
+    if (!version_ok)
+        fputs("GPU_VERSION expected Mesa 26.3.1\n", stderr);
     GLuint texture, framebuffer;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -140,7 +143,7 @@ static int egl_dispatch(void)
         fputs("GPU_ERROR OpenGL draw or readback failed\n", stderr);
         return 1;
     }
-    int result = compare_pixels(pixels);
+    int result = compare_pixels("gl", pixels) || !version_ok;
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(display, context);
     eglTerminate(display);
@@ -148,15 +151,23 @@ static int egl_dispatch(void)
 }
 
 int sdl_lifecycle(void);
+int vulkan_cpu(void);
 
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "egl-dispatch") == 0) {
-        return egl_dispatch();
+        return egl_dispatch(0);
     }
     if (argc == 2 && strcmp(argv[1], "sdl-lifecycle") == 0) {
         return sdl_lifecycle();
     }
-    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle\n", stderr);
+    if (argc == 2 && strcmp(argv[1], "mesa-cpu") == 0) {
+        int gl = egl_dispatch(1);
+        int vk = vulkan_cpu();
+        if (!gl && !vk)
+            puts("GPU_MESA_CPU_OK");
+        return gl || vk;
+    }
+    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle|mesa-cpu\n", stderr);
     return 2;
 }
