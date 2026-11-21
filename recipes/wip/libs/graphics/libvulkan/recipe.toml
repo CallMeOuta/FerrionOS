@@ -4,7 +4,7 @@
 # build instructions: https://github.com/KhronosGroup/Vulkan-Loader/blob/main/BUILD.md
 [source]
 git = "https://github.com/KhronosGroup/Vulkan-Loader"
-rev = "vulkan-sdk-1.4.350.1"
+rev = "a9e72c66d5cb79911eb9a9063bf4016dd0a3a123"
 shallow_clone = true
 patches = ["ferrion-redox-platform.patch"]
 
