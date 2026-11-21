@@ -1,12 +1,19 @@
 use core::slice;
 
-use redox_ioctl::{IoctlData, drm::*};
+use redox_ioctl::{
+    IoctlData,
+    drm::*,
+    virtgpu::{self, GEM_CLOSE, VirtgpuContextInit, drm_gem_close, drm_virtgpu_context_set_param},
+};
 use syscall::flag::{F_SETFD, O_RDWR};
 
 use crate::{
     error::{Errno, Result},
-    header::{errno::EINVAL, fcntl::sys::FD_CLOEXEC},
-    platform::types::c_int,
+    header::{
+        errno::{EFAULT, EINVAL},
+        fcntl::sys::FD_CLOEXEC,
+    },
+    platform::{self, types::c_int},
 };
 
 use super::IoctlBuffer;
@@ -87,6 +94,61 @@ impl Dev {
         Ok(res as c_int)
     }
 
+    /// Context-init. The parameters are read from the caller's array and sent
+    /// by value, then the context's name: the string a `DEBUG_NAME` parameter
+    /// points at, or else the name the program runs under, as Linux names a
+    /// context after the process. See `VirtgpuContextInit`.
+    unsafe fn virtgpu_context_init(&self, buf: IoctlBuffer) -> Result<c_int> {
+        let init = unsafe { buf.read::<virtgpu::drm_virtgpu_context_init>() }?;
+        // Linux refuses more parameters than it knows before it reads any.
+        if init.num_params > virtgpu::CONTEXT_INIT_MAX_PARAMS {
+            return Err(Errno(EINVAL));
+        }
+        let count = init.num_params as usize;
+        if count != 0 && init.ctx_set_params == 0 {
+            return Err(Errno(EFAULT));
+        }
+        let array = init.ctx_set_params as usize as *const drm_virtgpu_context_set_param;
+        let mut params =
+            [drm_virtgpu_context_set_param::default(); virtgpu::CONTEXT_INIT_MAX_PARAMS as usize];
+        for (i, param) in params[..count].iter_mut().enumerate() {
+            *param = unsafe { array.add(i).read_unaligned() };
+        }
+        let params = &params[..count];
+
+        let mut name = [0u8; virtgpu::CONTEXT_NAME_MAX];
+        let source = match params
+            .iter()
+            .find(|param| param.param == virtgpu::VIRTGPU_CONTEXT_PARAM_DEBUG_NAME)
+        {
+            Some(param) if param.value == 0 => return Err(Errno(EFAULT)),
+            Some(param) => param.value as usize as *const u8,
+            None => unsafe { platform::program_invocation_short_name }
+                .cast_const()
+                .cast::<u8>(),
+        };
+        let mut len = 0;
+        if !source.is_null() {
+            while len < name.len() {
+                let byte = unsafe { source.add(len).read() };
+                if byte == 0 {
+                    break;
+                }
+                name[len] = byte;
+                len += 1;
+            }
+        }
+
+        let wire = VirtgpuContextInit::wire(init.pad, params, &name[..len]);
+        let res = redox_rt::sys::sys_call_wo(
+            self.fd as usize,
+            &wire,
+            syscall::CallFlags::empty(),
+            &[virtgpu::CONTEXT_INIT],
+        )?;
+        Ok(res as c_int)
+    }
+
     unsafe fn prime_handle_to_fd(&self, mut buf: IoctlBuffer) -> Result<c_int> {
         let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
         let writable = (data.flags & O_RDWR as u32) != 0;
@@ -124,10 +186,18 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
         0x00 => unsafe { dev.read_write_ioctl::<drm_version>(buf, VERSION) },
         0x01 => unsafe { dev.read_write_ioctl::<drm_unique>(buf, GET_UNIQUE) },
         0x07 => unsafe { dev.read_write_ioctl::<drm_set_version>(buf, SET_VERSION) },
+        0x09 => unsafe { dev.write_ioctl::<drm_gem_close>(buf, GEM_CLOSE) },
         0x0C => unsafe { dev.read_write_ioctl::<drm_get_cap>(buf, GET_CAP) },
         0x0D => unsafe { dev.write_ioctl::<drm_set_client_cap>(buf, SET_CLIENT_CAP) },
         0x2D => unsafe { dev.prime_handle_to_fd(buf) },
         0x2E => unsafe { dev.prime_fd_to_handle(buf) },
+        0x43 => unsafe {
+            dev.read_write_ioctl::<virtgpu::drm_virtgpu_getparam>(buf, virtgpu::GETPARAM)
+        },
+        0x49 => unsafe {
+            dev.read_write_ioctl::<virtgpu::drm_virtgpu_get_caps>(buf, virtgpu::GET_CAPS)
+        },
+        0x4B => unsafe { dev.virtgpu_context_init(buf) },
         0xA0 => unsafe { dev.read_write_ioctl::<drm_mode_card_res>(buf, MODE_CARD_RES) },
         0xA1 => unsafe { dev.read_write_ioctl::<drm_mode_crtc>(buf, MODE_GET_CRTC) },
         0xA2 => unsafe { dev.read_write_ioctl::<drm_mode_crtc>(buf, MODE_SET_CRTC) },

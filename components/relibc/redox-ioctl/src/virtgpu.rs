@@ -50,7 +50,7 @@ use core::{
     slice,
 };
 
-use crate::{IoctlData, WireField, WireLayout};
+use crate::{IoctlData, WireArray, WireDirection, WireField, WireLayout};
 
 /// `DRM_COMMAND_BASE` of Linux's `drm.h`: driver requests start here.
 pub const DRM_COMMAND_BASE: u64 = 0x40;
@@ -389,11 +389,127 @@ define_ioctl_data! {
     }
 }
 
-define_ioctl_data! {
-    struct drm_virtgpu_context_init, VirtgpuContextInit {
-        num_params: u32,
-        pad: u32,
-        ctx_set_params: u64 [in_array<drm_virtgpu_context_set_param, num_params>],
+/// The most parameters context-init takes: Linux refuses more before it reads
+/// any (`virtgpu_ioctl.c`, "Number of unique parameters supported at this
+/// time").
+pub const CONTEXT_INIT_MAX_PARAMS: u32 = 4;
+
+/// The longest name a context is given: the 64-byte name of virtio-gpu's
+/// context-create command less its terminating zero, as many as Linux's
+/// `strscpy` into that field leaves.
+pub const CONTEXT_NAME_MAX: usize = 63;
+
+#[repr(C)]
+pub struct __VirtgpuContextInitNoncounted {
+    num_params: u32,
+    pad: u32,
+}
+
+/// The payload of context-init: the structure without its pointer, the
+/// parameters `ctx_set_params` points at (sent, not copied back), then the
+/// context's name, which Linux's structure does not hold.
+///
+/// A `DEBUG_NAME` parameter holds the address of a string inside an array
+/// element, which no payload can carry. So relibc reads that string itself and
+/// sends its bytes after the parameters, at most `CONTEXT_NAME_MAX` of them and
+/// without a terminating zero. When the program gives no name, as Mesa's Venus
+/// driver does not, relibc sends the name the program runs under, which is what
+/// Linux names a context after. The `DEBUG_NAME` parameter itself still arrives,
+/// its value being the caller's address, which means nothing to the driver.
+/// This payload is written by hand for that name; its `LAYOUT` describes the
+/// part Linux's structure has.
+pub struct VirtgpuContextInit<'a> {
+    num_params: u32,
+    params: &'a [u8],
+    name: &'a [u8],
+}
+
+impl<'a> VirtgpuContextInit<'a> {
+    pub const LAYOUT: WireLayout = WireLayout {
+        fixed_size: size_of::<__VirtgpuContextInitNoncounted>(),
+        fixed: &[
+            WireField {
+                name: "num_params",
+                offset: offset_of!(__VirtgpuContextInitNoncounted, num_params),
+                size: 4,
+            },
+            WireField {
+                name: "pad",
+                offset: offset_of!(__VirtgpuContextInitNoncounted, pad),
+                size: 4,
+            },
+        ],
+        arrays: &[WireArray {
+            pointer: "ctx_set_params",
+            count: "num_params",
+            element: "drm_virtgpu_context_set_param",
+            size: size_of::<drm_virtgpu_context_set_param>(),
+            align: align_of::<drm_virtgpu_context_set_param>(),
+            direction: WireDirection::In,
+        }],
+    };
+
+    /// The payload relibc sends: `pad` as the caller gave it, the parameters
+    /// read from the caller's array, then `name` cut to `CONTEXT_NAME_MAX`.
+    pub fn wire(pad: u32, params: &[drm_virtgpu_context_set_param], name: &[u8]) -> Vec<u8> {
+        let name = &name[..cmp::min(name.len(), CONTEXT_NAME_MAX)];
+        let mut data = Vec::with_capacity(
+            size_of::<__VirtgpuContextInitNoncounted>() + mem::size_of_val(params) + name.len(),
+        );
+        data.extend_from_slice(&(params.len() as u32).to_ne_bytes());
+        data.extend_from_slice(&pad.to_ne_bytes());
+        for param in params {
+            data.extend_from_slice(&param.param.to_ne_bytes());
+            data.extend_from_slice(&param.value.to_ne_bytes());
+        }
+        data.extend_from_slice(name);
+        data
+    }
+
+    /// Splits a payload the driver received. `EINVAL` when it holds fewer
+    /// parameters than `num_params` says, or a name longer than
+    /// `CONTEXT_NAME_MAX`. Reads every field by value, so the payload may have
+    /// any alignment.
+    pub fn with(
+        buf: &'a [u8],
+        f: impl FnOnce(VirtgpuContextInit<'a>) -> syscall::Result<usize>,
+    ) -> syscall::Result<usize> {
+        let invalid = || syscall::Error::new(syscall::EINVAL);
+        let (fixed, rest) = buf
+            .split_at_checked(size_of::<__VirtgpuContextInitNoncounted>())
+            .ok_or_else(invalid)?;
+        let num_params = u32::from_ne_bytes(fixed[..4].try_into().unwrap());
+        let len = (num_params as usize)
+            .checked_mul(size_of::<drm_virtgpu_context_set_param>())
+            .ok_or_else(invalid)?;
+        let (params, name) = rest.split_at_checked(len).ok_or_else(invalid)?;
+        if name.len() > CONTEXT_NAME_MAX {
+            return Err(invalid());
+        }
+        f(VirtgpuContextInit {
+            num_params,
+            params,
+            name,
+        })
+    }
+
+    pub fn num_params(&self) -> u32 {
+        self.num_params
+    }
+
+    pub fn params(&self) -> impl Iterator<Item = drm_virtgpu_context_set_param> + 'a {
+        self.params
+            .chunks_exact(size_of::<drm_virtgpu_context_set_param>())
+            .map(|param| drm_virtgpu_context_set_param {
+                param: u64::from_ne_bytes(param[..8].try_into().unwrap()),
+                value: u64::from_ne_bytes(param[8..].try_into().unwrap()),
+            })
+    }
+
+    /// The bytes relibc sent as the context's name, untrusted: any bytes, at
+    /// most `CONTEXT_NAME_MAX` of them.
+    pub fn name(&self) -> &'a [u8] {
+        self.name
     }
 }
 
