@@ -177,6 +177,16 @@ impl<D: Disk> FileSystem<D> {
             }
         }
 
+        // Zero the whole header ring first, so no header left by an older
+        // volume on this disk can carry a higher generation than the new one
+        let zero = [0; BLOCK_SIZE as usize];
+        for block in block_offset..block_offset + HEADER_RING {
+            let count = unsafe { disk.write_at(block, &zero)? };
+            if count != zero.len() {
+                return Err(Error::new(syscall::error::EIO));
+            }
+        }
+
         let mut header = Header::new(fs_blocks * BLOCK_SIZE);
 
         let cipher_opt = match password_opt {
