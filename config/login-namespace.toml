@@ -1,22 +1,10 @@
-# Login namespace check (security roadmap S12).
-#
-# Adds `netless`, an account with a password whose entry in
-# /etc/login_schemes.toml leaves out the network schemes (ip, icmp, tcp, udp).
-# `login` must enter that namespace for an account with a password just as it
-# does for one without (recipes/core/userutils/ferrion-login-namespace.patch).
-#
-# Checked by `scripts/vm-test.py login-namespace --config login-namespace`.
 
 include = ["minimal.toml"]
 
-# Test credential for this check only: an image built from this config never
-# leaves the build machine.
 [users.netless]
 password = "netless-test"
 shell = "/usr/bin/ion"
 
-# Replaces base.toml's file whole: `root` and `user` keep base.toml's lists, and
-# `netless` gets `user`'s list without the network schemes.
 [[files]]
 path = "/etc/login_schemes.toml"
 data = """

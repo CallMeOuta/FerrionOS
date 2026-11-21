@@ -1,8 +1,6 @@
-# Configuration for the FerrionOS `redoxer` image
 
 include = ["base.toml", "dev-accounts.toml"]
 
-# Package settings
 [packages]
 bash = {}
 ca-certificates = {}
@@ -15,7 +13,6 @@ pkgutils = {}
 relibc = {}
 sed = {}
 
-# Override to not background dhcpd
 [[files]]
 path = "/usr/lib/init.d/10_dhcpd.service"
 data = """
@@ -30,8 +27,6 @@ cmd = "dhcpd"
 type = "oneshot"
 """
 
-# A service and not a script: redoxerd ends QEMU through its exit port, which needs the hardware
-# right; redoxerd starts the command under test without it.
 [[files]]
 path = "/usr/lib/init.d/30_redoxer.service"
 data = """

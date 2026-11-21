@@ -1,15 +1,10 @@
-# Configuration for the FerrionOS `redoxer` GUI image
 
 include = ["redoxer.toml"]
 
-# Package settings
 [packages]
 orbdata = {}
 orbital = {}
 
-# Override to run inside of orbital; after 30_console.target, as in
-# desktop-minimal.toml, so that orbital gets VT 3. orbital holds the hardware
-# right only to pass it to redoxerd (see redoxer.toml).
 [[files]]
 path = "/usr/lib/init.d/30_redoxer.service"
 data = """

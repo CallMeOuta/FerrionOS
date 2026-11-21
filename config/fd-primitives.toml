@@ -1,4 +1,3 @@
-# Native descriptor contracts; run scripts/vm-test.py fd-primitives --config fd-primitives.
 include = ["desktop.toml"]
 
 [packages]

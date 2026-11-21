@@ -1,12 +1,5 @@
-# Build in a lane worktree, then run:
-#   CI=1 COOKBOOK_LOGS=true make r.gtk-window-probe ARCH=x86_64 CONFIG_NAME=firefox-window
-#   CI=1 COOKBOOK_LOGS=true make all ARCH=x86_64 CONFIG_NAME=firefox-window -o build/x86_64/firefox-window/repo.tag
-#   python3 scripts/vm-test.py gtk-window --config firefox-window --timeout 120
-# This tests GTK independently of Firefox startup, using the already cooked
-# Firefox package rather than rebuilding the browser in the display lane.
 include = ["firefox.toml"]
 
 [packages]
 gtk-window-probe = "source"
-# The Linux ABI fixture is not used by this display check.
 linux-busybox-fixtures = "ignore"

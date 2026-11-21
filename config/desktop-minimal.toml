@@ -1,25 +1,15 @@
-# Minimal desktop configuration
 
 include = ["minimal.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 256
 
-# Package settings
 [packages]
-# From source: orbdata's recipe lays FerrionOS's login background, wallpaper,
-# launcher button and window-server background over upstream's, and orbutils
-# carries a patch that draws the login box in FerrionOS's colors; the package
-# server's builds have neither.
 orbdata = "source"
 orbital = {}
 orbterm = {}
 orbutils = "source"
 
-# The orbutils package's launcher entry for the image viewer, with a description
-# that names no OS; written after the packages (postinstall) so that it wins.
 [[files]]
 path = "/usr/share/ui/apps/60_viewer"
 data = """
@@ -37,9 +27,6 @@ description=Image viewer
 """
 postinstall = true
 
-# inputd numbers virtual terminals in the order they open: 1 for the boot log,
-# then 2, 3, ... Orbital switches to the number in VT, so it starts after
-# 30_console.target, whose fbcond@2 has taken VT 2 by the time init moves on.
 [[files]]
 path = "/usr/lib/init.d/20_orbital"
 data = """
@@ -47,7 +34,6 @@ requires_weak 10_net.target 20_audiod.service 30_console.target
 nowait VT=3 orbital orblogin launcher
 """
 
-# Override console config to not switch to VT 2, which is fbcond's text console
 [[files]]
 path = "/usr/lib/init.d/30_console_switch"
 data = """

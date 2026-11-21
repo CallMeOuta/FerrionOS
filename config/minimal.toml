@@ -1,17 +1,12 @@
-# Minimal configuration
 
 include = ["base.toml", "dev-accounts.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 196
 
-# Package settings
 [packages]
 ca-certificates = {}
 coreutils = {}
-# Carries the tar gzip and -C fixes in ferrion-tar-options.patch.
 extrautils = "source"
 ion = {}
 pkgutils = {}

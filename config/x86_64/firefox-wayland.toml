@@ -1,12 +1,6 @@
-# Nested Wayland route for Firefox's Wayland-only GTK toolkit.
-# Cook the probe, compositor and icons, then assemble from cooked packages:
-#   CI=1 COOKBOOK_LOGS=true make r.gtk-window-probe r.cosmic-comp r.adwaita-icon-theme ARCH=x86_64
-#   CI=1 COOKBOOK_LOGS=true make all ARCH=x86_64 CONFIG_NAME=firefox-wayland -o build/x86_64/firefox-wayland/repo.tag
-#   python3 scripts/vm-test.py gtk-window-wayland --config firefox-wayland --timeout 120
 include = ["firefox-window.toml", "../wayland.toml"]
 
 [packages]
-# This session exercises GTK, not the other Wayland toolkit demo programs.
 cosmic-app-library = "ignore"
 libcosmic-wayland = "ignore"
 iced-wayland = "ignore"

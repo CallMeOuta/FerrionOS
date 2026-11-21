@@ -1,37 +1,26 @@
-# Configuration for server stack demonstration
 
 include = ["../server.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 4096
 
-# Package settings
 [packages]
-# Daemons
 openssh = {}
 nginx = {}
 rustysd = {}
 
-# Backends
 php84 = {}
 composer = {}
 luajit = {}
 python312 = {}
-# go = {}
-# zig = {}
 
-# Tools
 nano = {}
 neovim = {}
 rsync = {}
 vim = {}
 sqlite3 = {}
-# tmux = {}
 htop = {}
 
-# Content
 website = {}
 
 
@@ -256,11 +245,11 @@ Subsystem	sftp	/usr/libexec/sftp-server
 
 [users.nobody]
 password = ""
-shell = "/usr/bin/ion" #TODO: nologin?
+shell = "/usr/bin/ion"
 
 [users.nginx]
 password = ""
-shell = "/usr/bin/ion" #TODO: nologin?
+shell = "/usr/bin/ion"
 
 [[files]]
 path = "/root/keygen.sh"

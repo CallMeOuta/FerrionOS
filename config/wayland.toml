@@ -1,18 +1,11 @@
-# Wayland configuration
 
 include = ["desktop.toml"]
 
-# Override the default settings here
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 2048
 
-# Package settings
 [packages]
-# From source, with X11 disabled: upstream's prebuilt packages of these link
-# X11 libraries.
 cairo = "source"
 adwaita-icon-theme = {}
 bash = {}
@@ -26,12 +19,9 @@ mesa = {}
 smallvil = {}
 softbuffer-wayland = {}
 wayland-rs = {}
-#webkitgtk3 = {}
 winit-wayland = {}
 xkeyboard-config = {}
 
-# Overridden to launch wayland compositor instead of orblogin; after
-# 30_console.target, as in desktop-minimal.toml, so that orbital gets VT 3
 [[files]]
 path = "/usr/lib/init.d/20_orbital"
 data = """

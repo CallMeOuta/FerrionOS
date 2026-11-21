@@ -1,4 +1,3 @@
-# Exit callbacks of a closed shared object; run scripts/vm-test.py dso-atexit --config dso-atexit.
 include = ["desktop.toml"]
 
 [packages]

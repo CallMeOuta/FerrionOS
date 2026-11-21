@@ -1,19 +1,13 @@
-# Configuration for automated self-hosted system compilation testing
 
 include = ["server.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 10000
 
-# Package settings
 [packages]
 cookbook = {}
 bottom = "ignore"
 kibi = "ignore"
-# From source, with X11 disabled: upstream's prebuilt packages of these link
-# X11 libraries.
 cairo = "source"
 gtk3 = "source"
 qemu = "source"

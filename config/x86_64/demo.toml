@@ -1,30 +1,21 @@
-# Configuration for demonstration
 
 include = ["../desktop.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 3000
 
-# Package settings
 [packages]
-# From source, with X11 disabled: upstream's prebuilt packages of these link
-# X11 libraries. gtk3 and webkitgtk3 below are set the same way.
 cairo = "source"
 gstreamer = "source"
 
-# GUI Apps
 cosmic-monitor = {}
 cosmic-reader = {}
 periodictable = {}
 servo = {}
 webkitgtk3 = "source"
 
-# GUI Data
 intel-one-mono = {}
 
-# Terminal Apps
 gawk = {}
 gnu-grep = {}
 htop = {}
@@ -33,12 +24,10 @@ terminfo = {}
 vim = {}
 wget = {}
 
-# Emulators
 dosbox = {}
 mednafen = {}
 flycast = {}
 
-# Games
 freedoom = {}
 neverball = {}
 prboom = {}
@@ -46,7 +35,6 @@ redox-games = {}
 sopwith = {}
 syobonaction = {}
 
-# Demos
 gtk3 = "source"
 nushell = {}
 orbclient = {}
@@ -58,7 +46,6 @@ iced = {}
 ratatui = {}
 softbuffer = {}
 
-# MIDI
 freepats = {}
 
 [[files]]

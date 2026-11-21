@@ -1,13 +1,9 @@
-# Configuration for "acid" testing
 
 include = ["base.toml", "dev-accounts.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 1024
 
-# Package settings
 [packages]
 acid = {}
 coreutils = {}

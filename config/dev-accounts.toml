@@ -1,12 +1,4 @@
-# Dev accounts: login accounts with known credentials, for building and booting
-# in QEMU. `root` has the password `password` and `user` has none and is in
-# group `sudo`. Every config meant for development includes this file
-# (minimal.toml, and the configs that include base.toml directly); a config
-# that leaves it out has no login accounts. An image that leaves the build
-# machine carries its own accounts instead.
 
-# Console greeting: the FerrionOS mark (branding/mark.txt) above a box that
-# names the accounts below.
 [[files]]
 path = "/etc/issue"
 data = """
@@ -26,7 +18,6 @@ data = """
  
 """
 
-# User settings
 [users.root]
 password = "password"
 uid = 0
@@ -34,11 +25,9 @@ gid = 0
 shell = "/usr/bin/ion"
 
 [users.user]
-# Password is unset
 password = ""
 shell = "/usr/bin/ion"
 
-# Group settings
 [groups.sudo]
 gid = 1
 members = ["user"]

@@ -1,15 +1,9 @@
-# Default build system configuration
 
-# desktop-minimal.toml comes last so that its override of minimal.toml's
-# 30_console_switch wins over the copy server.toml brings in again.
 include = ["server.toml", "desktop-minimal.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 650
 
-# Package settings
 [packages]
 cosmic-edit = {}
 cosmic-files = {}
@@ -20,18 +14,13 @@ file = {}
 freefont = {}
 hicolor-icon-theme = {}
 installer-gui = {}
-# From source: the cosmic apps need it, and upstream's prebuilt package also
-# carries the X11 part; the recipe builds it with X11 disabled.
 libxkbcommon = "source"
 netsurf = {}
 patchelf = {}
 pop-icon-theme = {}
 shared-mime-info = {}
-# orbterm from desktop-minimal should be ignored
 orbterm = "ignore"
 
-# Launcher entries of the netsurf and installer-gui packages, with descriptions
-# that name FerrionOS; written after the packages (postinstall) so that they win.
 [[files]]
 path = "/usr/share/ui/apps/00_netsurf"
 data = """

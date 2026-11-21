@@ -1,14 +1,9 @@
-# Configuration for automated testing of essential test suites
-# Smaller test suites are executed first to catch possible bugs or regressions faster
 
 include = ["base.toml", "dev-accounts.toml"]
 
-# General settings
 [general]
-# Filesystem size in MiB
 filesystem_size = 1024
 
-# Package settings
 [packages]
 auto-test = {}
 

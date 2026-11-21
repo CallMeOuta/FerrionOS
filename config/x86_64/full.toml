@@ -1,13 +1,9 @@
 include = [ "../base.toml", "../dev-accounts.toml", "ci.toml" ]
 
-# General settings
 [general]
 filesystem_size = 8192
 
-# Package settings
 [packages]
-# From source, with X11 disabled: upstream's prebuilt packages of these link
-# X11 libraries.
 cairo = "source"
 firefox = "source"
 gstreamer = "source"
