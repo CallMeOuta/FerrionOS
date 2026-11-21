@@ -1,0 +1,29 @@
+5
+LINE4
+LINE3
+L0
+L1
+L2
+L3
+L4
+f
+g
+f
+g
+k
+2
+f
+g
+30
+date ok
+uid ok
+Linux
+x86_64
+sub
+rc=3
+CAPTURED
+here 5 CAPTURED
+got USR1
+bg rc=0
+killed rc=143
+busybox script done

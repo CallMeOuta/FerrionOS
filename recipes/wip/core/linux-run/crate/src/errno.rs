@@ -4,6 +4,7 @@
 
 pub const EPERM: i64 = 1;
 pub const ESRCH: i64 = 3;
+pub const EINTR: i64 = 4;
 pub const EAGAIN: i64 = 11;
 pub const ENOMEM: i64 = 12;
 pub const EFAULT: i64 = 14;

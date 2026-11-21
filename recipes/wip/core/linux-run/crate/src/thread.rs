@@ -1,7 +1,7 @@
 //! Linux threads: the per-thread crossing page, the kernel registration, entering Linux code and
 //! `clone`.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{LINUX_TOP, NATIVE_END, errno::*, mem::user_ok};
@@ -40,12 +40,19 @@ const D_LINUX_FS: usize = 16;
 const D_NATIVE_FS: usize = 24;
 const D_HANDLER: usize = 32;
 const D_THREAD: usize = 48;
+const D_SIGCONTROL: usize = 56;
+const D_NATIVE_SIGENTRY: usize = 64;
+const D_NATIVE_EXCPENTRY: usize = 72;
+const D_INTERRUPT: usize = 80;
+const D_FAULT: usize = 88;
 const D_XSAVE: usize = PAGE;
 
 unsafe extern "C" {
     static lr_stub_start: u8;
     static lr_stub_exit: u8;
     static lr_stub_end: u8;
+    static lr_sig_entry: u8;
+    static lr_excp_entry: u8;
     fn redox_cur_thrfd_v0() -> usize;
     fn redox_dup_v1(fd: usize, buf: *const u8, len: usize) -> usize;
     fn redox_write_v1(fd: usize, buf: *const u8, len: usize) -> usize;
@@ -56,7 +63,8 @@ core::arch::global_asm!(include_str!("entry.S"));
 /// Runtime state of one Linux thread. THREADS holds one reference and the thread's data page
 /// another (taken with `Arc::into_raw`), which `exit_thread` gives back.
 pub struct Thread {
-    pub tid: i32,
+    /// Linux thread id; a forked child's thread takes the child's process id.
+    pub tid: AtomicI32,
     /// Code page of this thread's stub copy; the data page follows it.
     pub area: usize,
     /// Linux signal mask.
@@ -67,9 +75,16 @@ pub struct Thread {
     pub altstack: Mutex<(u64, i32, u64)>,
     pub clear_tid: AtomicU64,
     pub robust_list: AtomicU64,
+    /// The mask rt_sigsuspend replaced, which the next handler frame restores.
+    pub suspended_mask: Mutex<Option<u64>>,
+    /// The native thread, for waking it with the runtime's kick signal.
+    pub native: usize,
 }
 
 impl Thread {
+    pub fn tid(&self) -> i32 {
+        self.tid.load(Ordering::Relaxed)
+    }
     pub fn data(&self) -> usize {
         self.area + PAGE
     }
@@ -144,13 +159,15 @@ pub fn new_thread(tid: i32, mask: u64) -> &'static Thread {
     }
     let stack = map_native(NATIVE_STACK, libc::PROT_READ | libc::PROT_WRITE);
     let thread = Arc::new(Thread {
-        tid,
+        tid: AtomicI32::new(tid),
         area,
         mask: AtomicU64::new(mask),
         pending: AtomicU64::new(0),
         altstack: Mutex::new((0, 2 /* SS_DISABLE */, 0)),
         clear_tid: AtomicU64::new(0),
         robust_list: AtomicU64::new(0),
+        suspended_mask: Mutex::new(None),
+        native: unsafe { libc::pthread_self() } as usize,
     });
     let data = area + PAGE;
     unsafe {
@@ -159,6 +176,8 @@ pub fn new_thread(tid: i32, mask: u64) -> &'static Thread {
         w(D_NATIVE_FS, crate::cpu::rdfsbase());
         w(D_HANDLER, crate::syscall::lr_dispatch as *const () as u64);
         w(D_THREAD, Arc::into_raw(Arc::clone(&thread)) as u64);
+        w(D_INTERRUPT, crate::signal::lr_interrupt as *const () as u64);
+        w(D_FAULT, crate::signal::lr_fault as *const () as u64);
         // XRSTOR loads MXCSR even for an image in its initial state: mask every exception, as
         // Linux starts a program.
         *((data + D_XSAVE + 24) as *mut u32) = 0x1f80;
@@ -187,6 +206,54 @@ pub fn register(area: usize) {
             "the kernel has no foreign-call hook for this thread (needs ferrion-foreign-call.patch)",
         );
     }
+    register_sighandler(area);
+}
+
+/// relibc's SetSighandlerData (redox_syscall's data.rs).
+#[repr(C)]
+struct SetSighandlerData {
+    user_handler: usize,
+    excp_handler: usize,
+    thread_control_addr: usize,
+    proc_control_addr: usize,
+}
+
+// relibc's `redox_rt::signal::current_setsighandler_struct`, a Rust function whose mangled name
+// build.rs finds in the libc.a this binary links (relibc exports no C name for it).
+include!(concat!(env!("OUT_DIR"), "/sighandler_symbol.rs"));
+
+/// Makes the runtime's entries this thread's signal and exception entries, keeping relibc's
+/// control blocks and its entries for signals and faults that arrive in native code.
+fn register_sighandler(area: usize) {
+    let mut data = unsafe { relibc_setsighandler_struct() };
+    let base = area + PAGE;
+    let entry = |sym: &u8| area + (sym as *const u8 as usize - unsafe { &lr_stub_start } as *const u8 as usize);
+    unsafe {
+        let w = |off: usize, v: usize| *((base + off) as *mut usize) = v;
+        w(D_SIGCONTROL, data.thread_control_addr);
+        w(D_NATIVE_SIGENTRY, data.user_handler);
+        w(D_NATIVE_EXCPENTRY, data.excp_handler);
+        data.user_handler = entry(&lr_sig_entry);
+        data.excp_handler = entry(&lr_excp_entry);
+    }
+    let ok = unsafe {
+        let fd = redox_dup_v1(redox_cur_thrfd_v0(), b"sighandler".as_ptr(), 10);
+        if fd > usize::MAX - 4096 {
+            false
+        } else {
+            let r = redox_write_v1(fd, (&data as *const SetSighandlerData).cast(), size_of::<SetSighandlerData>());
+            redox_close_v1(fd);
+            r == size_of::<SetSighandlerData>()
+        }
+    };
+    if !ok {
+        crate::fatal("could not register the runtime's signal entry for this thread");
+    }
+}
+
+/// The Sigcontrol of the thread whose data page is `data`.
+pub fn sigcontrol(data: usize) -> usize {
+    unsafe { *((data + D_SIGCONTROL) as *const usize) }
 }
 
 /// Sets the address space's mmap-min-addr, through the current thread's handle.
@@ -255,14 +322,19 @@ const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 const CLONE_CHILD_SETTID: u64 = 0x1000000;
 
 /// clone(flags, stack, parent_tid, child_tid, tls).
-pub fn clone(thread: &Thread, frame: &Frame) -> i64 {
+pub fn clone(thread: &Thread, frame: &mut Frame) -> i64 {
     let (flags, stack, ptid, ctid, tls) = (frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
-    if flags & CLONE_VM == 0 {
-        return fork(thread, flags, ctid);
+    if flags & CLONE_THREAD == 0 {
+        // A new process. Without CLONE_VM it is a fork; with CLONE_VM (vfork, posix_spawn) the
+        // child gets a copy of the address space too, not the parent's memory, and the parent
+        // waits, as with vfork, until the child execs or exits (plans/linux-compat.md, Processes
+        // and threads). A child that reports through shared memory (glibc's posix_spawn after a
+        // failed exec) is not served by the copy: LC3.
+        let hold = flags & (CLONE_VM | CLONE_VFORK) != 0;
+        return fork(thread, frame, flags, stack, ptid, ctid, hold);
     }
-    if flags & CLONE_THREAD == 0 || flags & CLONE_VFORK != 0 {
-        // A process sharing memory (vfork, posix_spawn) is LC3's.
-        return -ENOSYS;
+    if flags & CLONE_VM == 0 {
+        return -EINVAL;
     }
     if (flags & CLONE_PARENT_SETTID != 0 && !user_ok(ptid, 4))
         || (flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID) != 0 && !user_ok(ctid, 4))
@@ -308,24 +380,64 @@ pub fn clone(thread: &Thread, frame: &Frame) -> i64 {
     tid as i64
 }
 
-/// A new process (fork, or clone with only a signal number): relibc's fork copies the address
-/// space, the runtime included; the child's thread is a new kernel context, so it registers again.
-fn fork(thread: &Thread, flags: u64, ctid: u64) -> i64 {
+/// A new process: relibc's fork copies the address space, the runtime included; the child's
+/// thread is a new kernel context, so it registers again, and it is the child's only thread.
+/// With `hold`, the parent returns only once the child has exec'd or exited: the child keeps the
+/// write end of a close-on-exec pipe, whose end the parent waits for.
+fn fork(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, ptid: u64, ctid: u64, hold: bool) -> i64 {
+    if (flags & CLONE_PARENT_SETTID != 0 && !user_ok(ptid, 4))
+        || (flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID) != 0 && !user_ok(ctid, 4))
+    {
+        return -EFAULT;
+    }
+    let mut gate = [-1i32; 2];
+    if hold && unsafe { libc::pipe2(gate.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return -last_errno();
+    }
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        return -last_errno();
+        let e = -last_errno();
+        if hold {
+            unsafe {
+                libc::close(gate[0]);
+                libc::close(gate[1]);
+            }
+        }
+        return e;
     }
     if pid == 0 {
         crate::syscall::refresh_pid();
         register(thread.area);
         let tid = crate::syscall::pid();
-        if flags & CLONE_CHILD_SETTID != 0 && user_ok(ctid, 4) {
+        thread.tid.store(tid, Ordering::Relaxed);
+        THREADS.lock().unwrap().retain(|(_, t)| core::ptr::eq(&**t, thread));
+        if let Some(entry) = THREADS.lock().unwrap().first_mut() {
+            entry.0 = tid;
+        }
+        if flags & CLONE_CHILD_SETTID != 0 {
             unsafe { *(ctid as *mut i32) = tid }
         }
-        if flags & CLONE_CHILD_CLEARTID != 0 {
-            thread.clear_tid.store(ctid, Ordering::Relaxed);
+        thread.clear_tid.store(if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 }, Ordering::Relaxed);
+        if hold {
+            unsafe { libc::close(gate[0]) };
+        }
+        if stack != 0 {
+            frame.rsp = stack;
         }
         return 0;
+    }
+    if flags & CLONE_PARENT_SETTID != 0 {
+        unsafe { *(ptid as *mut i32) = pid }
+    }
+    if hold {
+        unsafe {
+            libc::close(gate[1]);
+            let mut b = 0u8;
+            while libc::read(gate[0], (&mut b as *mut u8).cast(), 1) < 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+            {}
+            libc::close(gate[0]);
+        }
     }
     pid as i64
 }
@@ -335,7 +447,7 @@ pub fn exit_thread(thread: &Thread, status: i32) -> ! {
     THREADS
         .lock()
         .unwrap()
-        .retain(|&(tid, _)| tid != thread.tid);
+        .retain(|&(tid, _)| tid != thread.tid());
     if THREADS.lock().unwrap().is_empty() {
         crate::syscall::exit_group(status);
     }

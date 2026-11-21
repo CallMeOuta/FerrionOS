@@ -1,0 +1,7 @@
+busybox: /usr/bin/busybox from Debian's busybox-static 1:1.37.0-6+b9 (amd64), the package LC0's
+signed index lists (plans/linux-compat/lc0/metadata/Packages.xz, snapshot 20260913T000000Z):
+  Filename pool/main/b/busybox/busybox-static_1.37.0-6+b9_amd64.deb
+  SHA256   598a3fd92bdafc34cd81196b2952ad36e910e47a4ecf162f8ce5e8e262598e53
+expected.*: `busybox sh lc2.sh` with stdin /dev/null and EXPECT_UID set to the caller's id, run
+on the build host in the pinned debian:trixie image (51e269e6af18), as the host user mapped in
+(--userns=keep-id) and as root, with the same output.

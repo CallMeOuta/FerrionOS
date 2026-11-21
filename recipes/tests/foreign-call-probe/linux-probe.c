@@ -8,6 +8,12 @@
  * and its exit clears the child-tid word; and it prints the cost of a cached call (getpid) and
  * of one that leaves the runtime (getppid). Lines read `linux-probe: pass NAME` or
  * `linux-probe: FAIL NAME`; the exit status is the number of failures.
+ *
+ * `linux-probe lc2` runs LC2's cases instead: a signal from another process reaches a thread
+ * spinning in Linux code and one blocked in a call (EINTR without SA_RESTART, restarted with
+ * it); tgkill reaches a spinning sibling thread; a fault becomes SIGSEGV with si_addr and
+ * si_code and the handler can resume elsewhere; fork, vfork, wait4 statuses (exit and signal),
+ * execve of /proc/self/exe, pipe2 and dup2.
  */
 typedef unsigned long u64;
 typedef long i64;
@@ -29,6 +35,15 @@ typedef long i64;
 #define SYS_clock_gettime 228
 #define SYS_exit_group 231
 #define SYS_tgkill 234
+#define SYS_read 0
+#define SYS_close 3
+#define SYS_nanosleep 35
+#define SYS_dup2 33
+#define SYS_fork 57
+#define SYS_vfork 58
+#define SYS_execve 59
+#define SYS_wait4 61
+#define SYS_pipe2 293
 
 static inline i64 sc6(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
     register i64 r10 __asm__("r10") = d;
@@ -210,4 +225,173 @@ void probe_main(void) {
     sc(SYS_exit_group, failures, 0, 0);
 }
 
-__asm__(".text\n .globl _start\n _start:\n xor %rbp, %rbp\n and $-16, %rsp\n call probe_main\n hlt\n");
+/* LC2 cases. */
+#define SA_RESTART 0x10000000
+#define SIGSEGV 11
+#define SIGTERM 15
+static volatile int flag1, flag2;
+static void set_flag1(int sig) { (void)sig; flag1 = 1; }
+static void set_flag2(int sig) { (void)sig; flag2 = 1; }
+static void sleep_ms(long ms) { i64 ts[2] = {ms / 1000, (ms % 1000) * 1000000}; sc(SYS_nanosleep, ts, 0, 0); }
+static i64 waitchild(i64 pid, int *status) { return sc6(SYS_wait4, pid, (i64)status, 0, 0, 0, 0); }
+
+static volatile u64 segv_addr;
+static volatile int segv_code;
+extern char fault_insn[], fault_resume[];
+__asm__(".text\n fault_try:\n mov $0x1000, %rax\n fault_insn:\n mov (%rax), %rax\n fault_resume:\n ret\n");
+extern void fault_try(void);
+static void segv_handler(int sig, void *info, void *ucv) {
+    (void)sig;
+    u64 *uc = ucv;
+    segv_addr = *(u64 *)((char *)info + 16);
+    segv_code = ((int *)info)[2];
+    uc[5 + 16] = (u64)fault_resume; /* resume after the faulting load */
+}
+
+static volatile int spin_flag, spin_ready;
+static volatile int spin_tid_word = 1;
+static char spin_stack[16384] __attribute__((aligned(16)));
+static char tls_spin[64];
+static void spin_main(void) {
+    spin_ready = 1;
+    for (u64 i = 0; i < 20000000000ul && !flag1; i++) __asm__ volatile("" ::: "memory");
+    spin_flag = flag1;
+    sc(SYS_exit, 0, 0, 0);
+}
+static i64 clone_spin(void) {
+    u64 flags = 0x100 | 0x200 | 0x400 | 0x800 | 0x10000 | 0x80000 | 0x200000;
+    register i64 r10 __asm__("r10") = (i64)&spin_tid_word;
+    register i64 r8 __asm__("r8") = (i64)tls_spin;
+    i64 r;
+    __asm__ volatile("syscall\n test %%rax, %%rax\n jnz 1f\n call *%[fn]\n hlt\n 1:\n"
+                     : "=a"(r)
+                     : "a"(SYS_clone), "D"(flags), "S"(spin_stack + sizeof spin_stack), "d"(0), "r"(r10), "r"(r8),
+                       [fn] "r"(spin_main)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
+static void lc2(char *self) {
+    puts1("linux-probe lc2\n");
+    i64 me = sc(SYS_getpid, 0, 0, 0);
+    int st;
+
+    /* A signal from another process reaches this thread while it spins without calls. */
+    struct ksigaction a1 = {set_flag1, SA_RESTORER, restore_rt, 0};
+    sc6(SYS_rt_sigaction, SIGUSR1, (i64)&a1, 0, 8, 0, 0);
+    flag1 = 0;
+    i64 c = sc(SYS_fork, 0, 0, 0);
+    if (c == 0) { sleep_ms(100); sc(SYS_kill, me, SIGUSR1, 0); sc(SYS_exit_group, 0, 0, 0); }
+    for (u64 i = 0; i < 20000000000ul && !flag1; i++) __asm__ volatile("" ::: "memory");
+    report(flag1 == 1, "async-spinning");
+    waitchild(c, &st);
+
+    /* ... and one blocked in read: EINTR without SA_RESTART. */
+    int p[2];
+    report(sc(SYS_pipe2, p, 0, 0) == 0, "pipe2");
+    struct ksigaction a2 = {set_flag2, SA_RESTORER, restore_rt, 0};
+    sc6(SYS_rt_sigaction, SIGUSR2, (i64)&a2, 0, 8, 0, 0);
+    flag2 = 0;
+    c = sc(SYS_fork, 0, 0, 0);
+    if (c == 0) { sleep_ms(100); sc(SYS_kill, me, SIGUSR2, 0); sleep_ms(200); sc(SYS_exit_group, 0, 0, 0); }
+    char b = 0;
+    i64 r = sc(SYS_read, p[0], &b, 1);
+    report(r == -4 && flag2 == 1, "async-blocked-eintr");
+    waitchild(c, &st);
+
+    /* With SA_RESTART the read goes on and gets the byte written later. */
+    struct ksigaction a3 = {set_flag2, SA_RESTORER | SA_RESTART, restore_rt, 0};
+    sc6(SYS_rt_sigaction, SIGUSR2, (i64)&a3, 0, 8, 0, 0);
+    flag2 = 0;
+    c = sc(SYS_fork, 0, 0, 0);
+    if (c == 0) {
+        sleep_ms(100); sc(SYS_kill, me, SIGUSR2, 0); sleep_ms(100);
+        sc(SYS_write, p[1], "x", 1); sc(SYS_exit_group, 0, 0, 0);
+    }
+    r = sc(SYS_read, p[0], &b, 1);
+    report(r == 1 && b == 'x' && flag2 == 1, "async-blocked-restart");
+    waitchild(c, &st);
+
+    /* tgkill reaches a sibling thread spinning in Linux code. */
+    flag1 = 0;
+    i64 tid = clone_spin();
+    while (!spin_ready) __asm__ volatile("" ::: "memory");
+    sleep_ms(20);
+    sc(SYS_tgkill, me, tid, SIGUSR1);
+    for (int i = 0; i < 500 && spin_tid_word != 0; i++) {
+        i64 ts[2] = {0, 10000000};
+        sc6(SYS_futex, (i64)&spin_tid_word, 0, spin_tid_word, (i64)ts, 0, 0);
+    }
+    report(tid > 0 && spin_flag == 1 && spin_tid_word == 0, "tgkill-spinning-thread");
+
+    /* A fault in Linux code becomes SIGSEGV with a frame. */
+    struct ksigaction a4 = {segv_handler, SA_SIGINFO | SA_RESTORER, restore_rt, 0};
+    sc6(SYS_rt_sigaction, SIGSEGV, (i64)&a4, 0, 8, 0, 0);
+    fault_try();
+    report(segv_addr == 0x1000 && segv_code == 1 /* SEGV_MAPERR */, "fault-sigsegv");
+
+    /* Without a handler the fault ends the process by SIGSEGV. */
+    c = sc(SYS_fork, 0, 0, 0);
+    if (c == 0) {
+        struct ksigaction dfl = {0, SA_RESTORER, restore_rt, 0};
+        sc6(SYS_rt_sigaction, SIGSEGV, (i64)&dfl, 0, 8, 0, 0);
+        *(volatile int *)0x1000 = 1;
+        sc(SYS_exit_group, 0, 0, 0);
+    }
+    st = 0;
+    r = waitchild(c, &st);
+    report(r == c && (st & 0x7f) == SIGSEGV, "fault-default-kills");
+
+    /* wait4 statuses: an exit code, and a default SIGTERM. */
+    c = sc(SYS_fork, 0, 0, 0);
+    if (c == 0) sc(SYS_exit_group, 42, 0, 0);
+    st = 0;
+    r = waitchild(c, &st);
+    report(r == c && (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 42, "fork-wait4-exit");
+    c = sc(SYS_fork, 0, 0, 0);
+    if (c == 0) { sc(SYS_kill, sc(SYS_getpid, 0, 0, 0), SIGTERM, 0); sleep_ms(2000); sc(SYS_exit_group, 1, 0, 0); }
+    st = 0;
+    r = waitchild(c, &st);
+    report(r == c && (st & 0x7f) == SIGTERM, "kill-default-sigterm");
+
+    /* vfork: the parent resumes once the child has exited. */
+    c = sc(SYS_vfork, 0, 0, 0);
+    if (c == 0) sc(SYS_exit_group, 7, 0, 0);
+    st = 0;
+    r = waitchild(c, &st);
+    report(c > 0 && r == c && ((st >> 8) & 0xff) == 7, "vfork");
+
+    /* execve of /proc/self/exe with an argument the new image answers with its status. */
+    c = sc(SYS_fork, 0, 0, 0);
+    if (c == 0) {
+        char *argv[] = {self, "exec-child", 0};
+        char *envp[] = {0};
+        sc(SYS_execve, "/proc/self/exe", argv, envp);
+        sc(SYS_exit_group, 99, 0, 0);
+    }
+    st = 0;
+    r = waitchild(c, &st);
+    report(r == c && ((st >> 8) & 0xff) == 33, "execve-self");
+
+    /* dup2 onto a pipe end. */
+    sc(SYS_dup2, p[1], 100, 0);
+    sc(SYS_write, 100, "y", 1);
+    b = 0;
+    r = sc(SYS_read, p[0], &b, 1);
+    report(r == 1 && b == 'y', "dup2");
+
+    puts1(failures ? "linux-probe: FAIL\n" : "linux-probe: PASS\n");
+    sc(SYS_exit_group, failures, 0, 0);
+}
+
+static int streq(const char *a, const char *b) { while (*a && *a == *b) a++, b++; return *a == *b; }
+
+void probe_start(u64 *sp) {
+    u64 argc = sp[0];
+    char **argv = (char **)(sp + 1);
+    if (argc > 1 && streq(argv[1], "exec-child")) sc(SYS_exit_group, 33, 0, 0);
+    if (argc > 1 && streq(argv[1], "lc2")) lc2(argv[0]);
+    probe_main();
+}
+
+__asm__(".text\n .globl _start\n _start:\n xor %rbp, %rbp\n mov %rsp, %rdi\n and $-16, %rsp\n call probe_start\n hlt\n");

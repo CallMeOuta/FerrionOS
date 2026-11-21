@@ -62,6 +62,9 @@ net-call-probe = {}
 linux-run = {}
 foreign-call-probe = {}
 linux-hello-fixtures = {}
+# LC2: Debian's static busybox, the shell script and the output Linux gave for it;
+# scripts/vm-test.py linux-busybox runs it under linux-run.
+linux-busybox-fixtures = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
 # ferrion-run check uses to show that a profile alone withholds the network.

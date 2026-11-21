@@ -17,6 +17,8 @@ use crate::{
 };
 
 static PID: AtomicI32 = AtomicI32::new(0);
+/// Linux's AT_FDCWD as a call argument.
+const AT_FDCWD_U: u64 = -100i64 as u64;
 pub static TRACE: AtomicBool = AtomicBool::new(false);
 /// The Linux program's path, for /proc/self/exe.
 pub static EXE: OnceLock<CString> = OnceLock::new();
@@ -52,14 +54,34 @@ pub unsafe fn futex_wake(addr: *mut u32, n: u32) -> usize {
 pub extern "C" fn lr_dispatch(frame: *mut Frame, data: usize) {
     let frame = unsafe { &mut *frame };
     let thread = thread::current(data);
+    let number = frame.rax;
     if let Some(r) = call(thread, frame) {
-        frame.rax = r as u64;
+        if r == -EINTR && number != 34 && number != 130 && signal::restart_after_eintr(thread) {
+            // Restarted as Linux does: back over the two-byte `syscall` with the call number,
+            // after any handler that runs first.
+            frame.rax = number;
+            frame.rip -= 2;
+        } else {
+            frame.rax = r as u64;
+        }
     }
     signal::deliver(thread, frame);
 }
 
+/// Says once on standard error, with LINUX_RUN_TRACE set, that something is not answered.
+pub fn log_once(what: &str) {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if TRACE.load(Ordering::Relaxed) {
+        let mut seen = SEEN.lock().unwrap();
+        if !seen.iter().any(|s| s == what) {
+            eprintln!("linux-run: {what}");
+            seen.push(what.to_string());
+        }
+    }
+}
+
 /// Reads a NUL-terminated Linux string.
-fn path(p: u64) -> Result<CString, i64> {
+pub fn path(p: u64) -> Result<CString, i64> {
     if !user_ok(p, 1) {
         return Err(EFAULT);
     }
@@ -252,9 +274,9 @@ fn futex(frame: &Frame) -> i64 {
     }
 }
 
-fn execve(frame: &Frame) -> i64 {
+fn execve(thread: &Thread, frame: &Frame) -> i64 {
     let file = match path(frame.rdi) {
-        Ok(p) => p,
+        Ok(p) => crate::files::exe_alias(&p).unwrap_or(p),
         Err(e) => return -e,
     };
     let list = |p: u64| -> Result<Vec<CString>, i64> {
@@ -307,8 +329,12 @@ fn execve(frame: &Frame) -> i64 {
     a.push(core::ptr::null());
     let mut e: Vec<*const libc::c_char> = envp.iter().map(|s| s.as_ptr()).collect();
     e.push(core::ptr::null());
+    // The Linux mask crosses execve as the native one (src/signal.rs, init).
+    signal::mask_for_exec(thread.mask.load(Ordering::Relaxed));
     unsafe { libc::execve(a[0], a.as_ptr(), e.as_ptr()) };
-    -last_errno()
+    let err = last_errno();
+    signal::unmask_after_exec();
+    -err
 }
 
 fn uname(buf: u64) -> i64 {
@@ -356,7 +382,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             }
             ret(unsafe { libc::write(a as i32, b as *const _, c as usize) })
         }
-        3 => ret(unsafe { libc::close(a as i32) } as isize),
+        3 => crate::files::close(a),
         5 => {
             let mut st: libc::stat = unsafe { core::mem::zeroed() };
             if unsafe { libc::fstat(a as i32, &mut st) } != 0 {
@@ -364,7 +390,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             }
             write_stat(&st, b)
         }
-        8 => ret(unsafe { libc::lseek(a as i32, b as libc::off_t, c as i32) } as isize),
+        8 => crate::files::lseek(a, b, c),
         9 => mem::mmap(a, b, c, d, f.r8 as i64, f.r9),
         10 => mem::mprotect(a, b, c),
         11 => mem::munmap(a, b),
@@ -377,7 +403,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             }
             return None;
         }
-        16 => ioctl(a, b, c),
+        16 => crate::tty::ioctl(a, b, c),
         20 => {
             if c > 1024 {
                 return Some(-EINVAL);
@@ -411,12 +437,16 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         }
         39 => pid() as i64,
         56 => thread::clone(thread, f),
-        57 => {
-            let mut g = *f;
-            g.rdi = 17; // SIGCHLD
-            thread::clone(thread, &g)
+        57 | 58 => {
+            // fork, and vfork, which is fork-like here: the parent waits for exec or exit.
+            let rdi = f.rdi;
+            f.rdi = if f.rax == 58 { 0x4000 | 0x100 | 17 } else { 17 };
+            f.rsi = 0;
+            let r = thread::clone(thread, f);
+            f.rdi = rdi;
+            r
         }
-        59 => execve(f),
+        59 => execve(thread, f),
         60 => thread::exit_thread(thread, a as i32),
         62 => kill(a as i64, b),
         63 => uname(a),
@@ -428,8 +458,8 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         110 => unsafe { libc::getppid() as i64 },
         131 => signal::sigaltstack(thread, f, a, b),
         158 => arch_prctl(thread, a, b),
-        186 => thread.tid as i64,
-        200 => tgkill(pid() as i64, a as i64, b),
+        186 => thread.tid() as i64,
+        200 => tgkill(thread, pid() as i64, a as i64, b),
         202 => futex(f),
         204 => {
             if b < 8 {
@@ -447,7 +477,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         }
         218 => {
             thread.clear_tid.store(a, Ordering::Relaxed);
-            thread.tid as i64
+            thread.tid() as i64
         }
         228 | 229 => {
             let id = match clock(a) {
@@ -478,25 +508,37 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             0
         }
         231 => exit_group(a as i32),
-        234 => tgkill(a as i64, b as i64, c),
-        257 => {
+        234 => tgkill(thread, a as i64, b as i64, c),
+        2 | 257 => {
+            let (a, b, c, d) = if f.rax == 2 { (AT_FDCWD_U, a, b, c) } else { (a, b, c, d) };
             let p = match path(b) {
-                Ok(p) => p,
+                Ok(p) => crate::files::exe_alias(&p).unwrap_or(p),
                 Err(e) => return Some(-e),
             };
             let flags = match open_flags(c) {
                 Ok(o) => o,
                 Err(e) => return Some(-e),
             };
+            if c & 3 == 0 {
+                if let Some(r) = crate::files::etc_view(&p, c & 0x80000 != 0) {
+                    return Some(r);
+                }
+            }
             ret(unsafe { libc::openat(a as i32, p.as_ptr(), flags, d as libc::c_uint) } as isize)
         }
-        262 => {
+        4 | 6 | 262 => {
+            let (a, b, c, d) = match f.rax {
+                4 => (AT_FDCWD_U, a, b, 0),
+                6 => (AT_FDCWD_U, a, b, 0x100),
+                _ => (a, b, c, d),
+            };
             const AT_EMPTY_PATH: u64 = 0x1000;
             const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
             let p = match path(b) {
                 Ok(p) => p,
                 Err(e) => return Some(-e),
             };
+            let p = crate::files::exe_alias(&p).unwrap_or(p);
             let mut st: libc::stat = unsafe { core::mem::zeroed() };
             let r = if p.as_bytes().is_empty() && d & AT_EMPTY_PATH != 0 {
                 unsafe { libc::fstat(a as i32, &mut st) }
@@ -530,6 +572,164 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             fill_random(unsafe { core::slice::from_raw_parts_mut(a as *mut u8, n) });
             n as i64
         }
+        7 => crate::files::poll(a, b, c as i64),
+        17 => crate::files::pread(a, b, c, d, false),
+        18 => crate::files::pread(a, b, c, d, true),
+        19 => crate::files::readv(a, b, c),
+        21 => crate::files::faccessat(AT_FDCWD_U, a, b, 0),
+        22 => crate::files::pipe2(a, 0),
+        32 => ret(unsafe { libc::dup(a as i32) } as isize),
+        33 => crate::files::dup2(a, b),
+        34 => {
+            let mut none: libc::sigset_t = unsafe { core::mem::zeroed() };
+            unsafe { libc::sigemptyset(&mut none) };
+            while !signal::pending_for(thread) {
+                unsafe { crate::ffi::sigsuspend(&none) };
+            }
+            -EINTR
+        }
+        37 => unsafe { libc::alarm(a as u32) as i64 },
+        40 => crate::files::sendfile(a, b, c, d),
+        61 => crate::files::wait4(a, b, c, d),
+        76 => crate::files::truncate(a, b),
+        77 => ret(unsafe { libc::ftruncate(a as i32, b as libc::off_t) } as isize),
+        79 => crate::files::getcwd(a, b),
+        80 => crate::files::chdir(a),
+        81 => crate::files::fchdir(a),
+        82 => crate::files::renameat(AT_FDCWD_U, a, AT_FDCWD_U, b, 0),
+        83 => crate::files::mkdirat(AT_FDCWD_U, a, b),
+        84 => crate::files::unlinkat(AT_FDCWD_U, a, 0x200),
+        86 => crate::files::linkat(AT_FDCWD_U, a, AT_FDCWD_U, b, 0),
+        87 => crate::files::unlinkat(AT_FDCWD_U, a, 0),
+        88 => crate::files::symlinkat(a, AT_FDCWD_U, b),
+        89 => readlinkat(AT_FDCWD_U, a, b, c),
+        90 => crate::files::fchmodat(AT_FDCWD_U, a, b),
+        91 => ret(unsafe { libc::fchmod(a as i32, b as libc::mode_t) } as isize),
+        92 => crate::files::fchownat(AT_FDCWD_U, a, b, c, 0),
+        93 => ret(unsafe { libc::fchown(a as i32, b as u32, c as u32) } as isize),
+        94 => crate::files::fchownat(AT_FDCWD_U, a, b, c, 0x100),
+        95 => unsafe { libc::umask(a as libc::mode_t) as i64 },
+        96 => {
+            if a != 0 {
+                if !user_ok(a, 16) {
+                    return Some(-EFAULT);
+                }
+                let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+                unsafe { *(a as *mut [i64; 2]) = [ts.tv_sec, ts.tv_nsec as i64 / 1000] };
+            }
+            if b != 0 && user_ok(b, 8) {
+                unsafe { *(b as *mut [i32; 2]) = [0, 0] };
+            }
+            0
+        }
+        97 => prlimit(0, a, 0, b),
+        160 => prlimit(0, a, b, 0),
+        98 => {
+            if !user_ok(b, 144) {
+                return Some(-EFAULT);
+            }
+            unsafe { core::ptr::write_bytes(b as *mut u8, 0, 144) };
+            0
+        }
+        100 => {
+            if a != 0 {
+                if !user_ok(a, 32) {
+                    return Some(-EFAULT);
+                }
+                unsafe { *(a as *mut [i64; 4]) = [0; 4] };
+            }
+            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+            ts.tv_sec * 100 + ts.tv_nsec as i64 / 10_000_000
+        }
+        105 => ret(unsafe { libc::setuid(a as u32) } as isize),
+        106 => ret(unsafe { libc::setgid(a as u32) } as isize),
+        109 => ret(unsafe { libc::setpgid(a as i32, b as i32) } as isize),
+        111 => ret(unsafe { libc::getpgrp() } as isize),
+        112 => ret(unsafe { libc::setsid() } as isize),
+        113 => ret(unsafe { libc::setreuid(a as u32, b as u32) } as isize),
+        114 => ret(unsafe { libc::setregid(a as u32, b as u32) } as isize),
+        115 => crate::files::getgroups(a, b),
+        116 => -EPERM,
+        117 | 119 => {
+            // setresuid/setresgid: -1 keeps an id; the process manager's rule decides the rest.
+            let keep = |v: u64| v as u32 == u32::MAX;
+            let r = unsafe {
+                if f.rax == 117 {
+                    libc::setreuid(if keep(a) { u32::MAX } else { a as u32 }, if keep(b) { u32::MAX } else { b as u32 })
+                } else {
+                    libc::setregid(if keep(a) { u32::MAX } else { a as u32 }, if keep(b) { u32::MAX } else { b as u32 })
+                }
+            };
+            ret(r as isize)
+        }
+        118 => unsafe { crate::files::getres([libc::getuid(), libc::geteuid(), libc::geteuid()], [a, b, c]) },
+        120 => unsafe { crate::files::getres([libc::getgid(), libc::getegid(), libc::getegid()], [a, b, c]) },
+        121 => ret(unsafe { libc::getpgid(a as i32) } as isize),
+        124 => ret(unsafe { crate::ffi::getsid(a as i32) } as isize),
+        127 => signal::rt_sigpending(thread, a, b),
+        130 => signal::sigsuspend(thread, a, b),
+        157 => crate::files::prctl(a, b),
+        201 => {
+            let t = unsafe { libc::time(core::ptr::null_mut()) } as i64;
+            if a != 0 {
+                if !user_ok(a, 8) {
+                    return Some(-EFAULT);
+                }
+                unsafe { *(a as *mut i64) = t };
+            }
+            t
+        }
+        217 => crate::files::getdents64(a, b, c),
+        230 => {
+            // clock_nanosleep(clock, flags, request, remain); TIMER_ABSTIME is 1.
+            let id = match clock(a) {
+                Ok(id) => id,
+                Err(e) => return Some(-e),
+            };
+            if !user_ok(c, 16) || (d != 0 && !user_ok(d, 16)) {
+                return Some(-EFAULT);
+            }
+            // relibc has no clock_nanosleep: an absolute time becomes the interval from now.
+            let mut req = unsafe { *(c as *const libc::timespec) };
+            if b & 1 != 0 {
+                let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                unsafe { libc::clock_gettime(id, &mut now) };
+                let ns = (req.tv_sec - now.tv_sec) * 1_000_000_000 + (req.tv_nsec - now.tv_nsec) as i64;
+                let ns = ns.max(0);
+                req = libc::timespec { tv_sec: ns / 1_000_000_000, tv_nsec: (ns % 1_000_000_000) as _ };
+            }
+            let rem = if b & 1 == 0 { d } else { 0 };
+            ret(unsafe { libc::nanosleep(&req, rem as *mut libc::timespec) } as isize)
+        }
+        258 => crate::files::mkdirat(a, b, c),
+        260 => crate::files::fchownat(a, b, c, d, f.r8),
+        263 => crate::files::unlinkat(a, b, c),
+        264 => crate::files::renameat(a, b, c, d, 0),
+        316 => crate::files::renameat(a, b, c, d, f.r8),
+        265 => crate::files::linkat(a, b, c, d, f.r8),
+        266 => crate::files::symlinkat(a, b, c),
+        268 => crate::files::fchmodat(a, b, c),
+        269 => crate::files::faccessat(a, b, c, 0),
+        439 => crate::files::faccessat(a, b, c, d),
+        280 => crate::files::utimensat(a, b, c, d),
+        292 => crate::files::dup3(a, b, c),
+        293 => crate::files::pipe2(a, b),
+        436 => {
+            // close_range(first, last, flags): CLOSE_RANGE_CLOEXEC is 4.
+            if a > b {
+                return Some(-EINVAL);
+            }
+            for fd in a..=b.min(4095) {
+                if c & 4 != 0 {
+                    unsafe { libc::fcntl(fd as i32, libc::F_SETFD, libc::FD_CLOEXEC) };
+                } else {
+                    crate::files::close(fd);
+                }
+            }
+            0
+        }
         // rseq: glibc carries on without it. clone3: glibc falls back to clone.
         334 | 435 => -ENOSYS,
         n => {
@@ -540,36 +740,6 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         }
     };
     Some(r)
-}
-
-fn ioctl(fd: u64, req: u64, arg: u64) -> i64 {
-    const TCGETS: u64 = 0x5401;
-    const TIOCGWINSZ: u64 = 0x5413;
-    match req {
-        TIOCGWINSZ => {
-            if !user_ok(arg, 8) {
-                return -EFAULT;
-            }
-            let mut ws = [0u16; 4];
-            if unsafe { libc::ioctl(fd as i32, libc::TIOCGWINSZ, ws.as_mut_ptr()) } != 0 {
-                return -last_errno();
-            }
-            unsafe { *(arg as *mut [u16; 4]) = ws };
-            0
-        }
-        TCGETS => {
-            if unsafe { libc::isatty(fd as i32) } == 0 {
-                return -ENOTTY;
-            }
-            // Terminal attributes need flag tables between relibc and Linux: LC2 (busybox sh).
-            static ONCE: AtomicBool = AtomicBool::new(false);
-            if !ONCE.swap(true, Ordering::Relaxed) && TRACE.load(Ordering::Relaxed) {
-                eprintln!("linux-run: TCGETS on a terminal is not converted yet (EINVAL)");
-            }
-            -EINVAL
-        }
-        _ => -ENOTTY,
-    }
 }
 
 fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
@@ -651,11 +821,14 @@ fn kill(target: i64, sig: u64) -> i64 {
     if sig > 64 {
         return -EINVAL;
     }
-    if target == pid() as i64 || target == 0 {
-        if sig != 0 {
+    if target == pid() as i64 && sig != 0 {
+        // To itself: a handled signal (or one without a native number) is queued here and
+        // delivered before kill returns; otherwise the native default or ignore applies.
+        let h = signal::handler_of(sig);
+        if sig > 31 || (h != 0 && h != 1) {
             signal::send_process(sig);
+            return 0;
         }
-        return 0;
     }
     if sig > 31 {
         return -EINVAL;
@@ -663,17 +836,21 @@ fn kill(target: i64, sig: u64) -> i64 {
     ret(unsafe { libc::kill(target as i32, sig as i32) } as isize)
 }
 
-fn tgkill(tgid: i64, tid: i64, sig: u64) -> i64 {
+fn tgkill(caller: &Thread, tgid: i64, tid: i64, sig: u64) -> i64 {
     if sig > 64 || tid <= 0 {
         return -EINVAL;
     }
     if tgid != pid() as i64 {
+        if tgid > 0 && tid == tgid && sig <= 31 {
+            // Another process's main thread: the process-directed native signal.
+            return ret(unsafe { libc::kill(tgid as i32, sig as i32) } as isize);
+        }
         return -ESRCH;
     }
     match thread::find(tid as i32) {
         Some(t) => {
             if sig != 0 {
-                signal::send_thread(&t, sig);
+                signal::send_thread(&t, sig, caller);
             }
             0
         }
@@ -681,7 +858,7 @@ fn tgkill(tgid: i64, tid: i64, sig: u64) -> i64 {
     }
 }
 
-fn readlinkat(dirfd: u64, p: u64, buf: u64, size: u64) -> i64 {
+pub fn readlinkat(dirfd: u64, p: u64, buf: u64, size: u64) -> i64 {
     let p = match path(p) {
         Ok(p) => p,
         Err(e) => return -e,
@@ -692,8 +869,8 @@ fn readlinkat(dirfd: u64, p: u64, buf: u64, size: u64) -> i64 {
     if !user_ok(buf, size) {
         return -EFAULT;
     }
-    if p.as_bytes() == b"/proc/self/exe" {
-        let exe = EXE.get().map(|e| e.as_bytes()).unwrap_or(b"");
+    if let Some(exe) = crate::files::exe_alias(&p) {
+        let exe = exe.as_bytes();
         let n = exe.len().min(size as usize);
         unsafe { core::ptr::copy_nonoverlapping(exe.as_ptr(), buf as *mut u8, n) };
         return n as i64;

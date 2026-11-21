@@ -1,0 +1,21 @@
+# The Linux layer's LC2 fixture (plans/linux-compat.md): Debian's static busybox from the pinned
+# root of LC0, the LC2 script and the output Linux gave for it (files/SOURCE says where each
+# comes from). Kept as files because no FerrionOS recipe can build Linux programs yet; the script
+# refuses any file whose SHA-256 differs from files/SHA256SUMS. They are Linux files, so they go
+# under usr/share/linux-busybox, which the cookbook does not strip. `scripts/vm-test.py
+# linux-busybox` runs the script under linux-run.
+[package]
+description = "Static Linux busybox and the Linux layer's shell script check"
+
+[build]
+template = "custom"
+script = """
+dest="${COOKBOOK_STAGE}/usr/share/linux-busybox"
+mkdir -pv "${dest}"
+cd "${COOKBOOK_RECIPE}/files"
+sha256sum -c SHA256SUMS
+cp -v busybox lc2.sh tty.sh expected.stdout expected.stderr expected.status SHA256SUMS SOURCE "${dest}/"
+chmod 0755 "${dest}/busybox"
+cd "${dest}"
+sha256sum -c SHA256SUMS
+"""

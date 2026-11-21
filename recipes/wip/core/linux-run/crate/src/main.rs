@@ -13,11 +13,13 @@
 mod cpu;
 mod elf;
 mod errno;
+mod files;
 mod mem;
 mod signal;
 mod stack;
 mod syscall;
 mod thread;
+mod tty;
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -27,6 +29,14 @@ use std::sync::atomic::Ordering;
 pub const LINUX_TOP: usize = 0x7000_0000_0000;
 /// End of user memory on x86_64 (the kernel's USER_END_OFFSET).
 pub const NATIVE_END: usize = 1 << 47;
+
+// relibc functions the libc crate does not declare for this target.
+pub mod ffi {
+    unsafe extern "C" {
+        pub fn sigsuspend(mask: *const libc::sigset_t) -> i32;
+        pub fn getsid(pid: libc::pid_t) -> libc::pid_t;
+    }
+}
 
 pub fn fatal(why: &str) -> ! {
     eprintln!("linux-run: {why}");
@@ -115,8 +125,8 @@ fn main() {
     syscall::EXE.set(CString::new(exe).unwrap()).ok();
 
     syscall::refresh_pid();
-    signal::block_native();
-    let main_thread = thread::new_thread(thread::next_tid(), 0);
+    let mask = signal::init();
+    let main_thread = thread::new_thread(thread::next_tid(), mask);
 
     let loaded = match elf::load(&file) {
         Ok(l) => l,

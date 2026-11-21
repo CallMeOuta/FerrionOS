@@ -10,5 +10,11 @@ description = "Runs static Linux x86-64 programs on FerrionOS"
 template = "custom"
 script = """
 COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+# relibc's current_setsighandler_struct has only a mangled Rust name; crate/build.rs needs it.
+cc="${CC##* }"
+libc_a="$("${cc}" -print-file-name=libc.a)"
+export LINUX_RUN_SIGHANDLER_SYMBOL="$("${cc%gcc}nm" -g --defined-only "${libc_a}" \
+    | awk '$3 ~ /redox_rt6signal28current_setsighandler_struct$/ { print $3; exit }')"
+[ -n "${LINUX_RUN_SIGHANDLER_SYMBOL}" ] || { echo "no current_setsighandler_struct in ${libc_a}" >&2; exit 1; }
 cookbook_cargo
 """

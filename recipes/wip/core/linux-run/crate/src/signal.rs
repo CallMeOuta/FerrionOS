@@ -1,16 +1,19 @@
-//! Linux signals. The runtime keeps the Linux actions and masks itself; every native signal stays
-//! blocked in a Linux process, because relibc's signal entry writes through FS, which belongs to
-//! the Linux C library while Linux code runs. Signals reach a thread when it crosses into the
-//! runtime: those sent with kill to this process or with tgkill to the thread, and those another
-//! process sent, which wait natively until a crossing takes them. A handler gets Linux's frame
-//! (siginfo, ucontext with every register, the XSAVE image) and rt_sigreturn resumes from it.
+//! Linux signals. The runtime keeps the Linux actions and masks itself and owns delivery
+//! (plans/linux-compat.md, Signals). Native signals mirror the Linux actions: a signal the
+//! program handles has a native recorder, one it ignores is ignored natively, and one left at its
+//! default keeps the native default, so the process manager stops, ignores or ends the process
+//! as Linux would, with the same status for the parent.
 //!
-//! What LC1 does not do (plans/linux-compat.md, Signals): a signal reaches a thread only at its
-//! next system call, so a thread spinning in Linux code without calls never sees it, and a
-//! thread blocked in a call is not interrupted; a fault in Linux code ends the process instead of
-//! becoming SIGSEGV with a frame.
+//! The kernel enters the runtime's own signal entry (src/entry.S): a native signal that arrives
+//! while Linux code runs, spinning or not, brings the thread into the runtime, where relibc runs
+//! the recorder on the native stack and the runtime then builds the Linux frame; one that arrives
+//! in the runtime interrupts a blocking call (EINTR, restarted or not as SA_RESTART says) and is
+//! delivered when the call returns. Signals sent inside the process (kill to itself, tgkill)
+//! are queued here and the target thread is woken with a native kick signal. A fault in Linux
+//! code enters the runtime's exception entry and becomes SIGSEGV, SIGBUS, SIGFPE, SIGILL or
+//! SIGTRAP with Linux's siginfo and context, or ends the process by that signal.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::{
@@ -31,6 +34,7 @@ const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
 const SA_ONSTACK: u64 = 0x0800_0000;
 const SA_RESTORER: u64 = 0x0400_0000;
+const SA_RESTART: u64 = 0x1000_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
 const SA_RESETHAND: u64 = 0x8000_0000;
 const SIGKILL: u64 = 9;
@@ -49,18 +53,97 @@ static ACTIONS: Mutex<[Action; 65]> = Mutex::new(
 );
 /// Sent to the process with kill: (signal bits, sender pid of the last one).
 static PROCESS_PENDING: AtomicU64 = AtomicU64::new(0);
+/// Sender of the last pending signal of each number, for siginfo.
+static SENDER: [AtomicI32; 65] = [const { AtomicI32::new(0) }; 65];
+/// The native real-time signal that wakes a thread for a signal queued here.
+const KICK: i32 = 64;
 
 fn bit(sig: u64) -> u64 {
     1 << (sig - 1)
 }
 
-/// Blocks every native signal on the calling thread; threads created later inherit the mask.
-pub fn block_native() {
-    unsafe {
-        let mut all: libc::sigset_t = core::mem::zeroed();
-        libc::sigfillset(&mut all);
-        libc::sigprocmask(libc::SIG_SETMASK, &all, core::ptr::null_mut());
+extern "C" fn recorder(sig: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    if (1..=64).contains(&sig) {
+        let from = if info.is_null() { 0 } else { unsafe { (*info).si_pid() } };
+        SENDER[sig as usize].store(from, Ordering::Relaxed);
+        PROCESS_PENDING.fetch_or(bit(sig as u64), Ordering::SeqCst);
     }
+}
+
+extern "C" fn kicked(_: i32) {}
+
+/// Signals with a native counterpart: 1 to 31, less the two that cannot be caught.
+fn native(sig: u64) -> bool {
+    (1..=31).contains(&sig) && sig != SIGKILL && sig != SIGSTOP
+}
+
+/// Sets the native action that mirrors a Linux one.
+fn mirror(sig: u64, handler: u64) {
+    if !native(sig) {
+        return;
+    }
+    unsafe {
+        let mut sa: libc::sigaction = core::mem::zeroed();
+        sa.sa_sigaction = match handler {
+            SIG_DFL => libc::SIG_DFL,
+            SIG_IGN => libc::SIG_IGN,
+            _ => {
+                sa.sa_flags = libc::SA_SIGINFO;
+                recorder as *const () as usize
+            }
+        };
+        libc::sigfillset(&mut sa.sa_mask);
+        libc::sigaction(sig as i32, &sa, core::ptr::null_mut());
+    }
+}
+
+/// At start: signals the parent left ignored stay ignored (as across Linux's execve), the native
+/// mask the launcher inherited becomes the Linux thread's mask, and native signals are then
+/// unblocked, since the runtime's entry takes them. Returns the Linux mask.
+pub fn init() -> u64 {
+    let mut actions = ACTIONS.lock().unwrap();
+    for sig in 1..=31u64 {
+        if !native(sig) {
+            continue;
+        }
+        let mut old: libc::sigaction = unsafe { core::mem::zeroed() };
+        unsafe { libc::sigaction(sig as i32, core::ptr::null(), &mut old) };
+        if old.sa_sigaction == libc::SIG_IGN {
+            actions[sig as usize].handler = SIG_IGN;
+        } else {
+            mirror(sig, SIG_DFL);
+        }
+    }
+    drop(actions);
+    unsafe {
+        let mut sa: libc::sigaction = core::mem::zeroed();
+        sa.sa_sigaction = kicked as *const () as usize;
+        libc::sigaction(KICK, &sa, core::ptr::null_mut());
+        let mut old: libc::sigset_t = core::mem::zeroed();
+        let mut none: libc::sigset_t = core::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::sigprocmask(libc::SIG_SETMASK, &none, &mut old);
+        (1..=31u64).filter(|&s| libc::sigismember(&old, s as i32) == 1).fold(0, |m, s| m | bit(s)) & !UNBLOCKABLE
+    }
+}
+
+/// Before execve: the Linux mask becomes the native one, which the next linux-run reads back.
+pub fn mask_for_exec(mask: u64) {
+    unsafe {
+        let mut set: libc::sigset_t = core::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for sig in 1..=31u64 {
+            if mask & bit(sig) != 0 {
+                libc::sigaddset(&mut set, sig as i32);
+            }
+        }
+        libc::sigprocmask(libc::SIG_SETMASK, &set, core::ptr::null_mut());
+    }
+}
+
+/// After a failed execve: native signals open again.
+pub fn unmask_after_exec() {
+    mask_for_exec(0);
 }
 
 pub fn rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {
@@ -83,6 +166,7 @@ pub fn rt_sigaction(sig: u64, act: u64, oact: u64, size: u64) -> i64 {
             restorer: a[2],
             mask: a[3] & !UNBLOCKABLE,
         };
+        mirror(sig, a[0]);
     }
     if oact != 0 {
         let o = unsafe { core::slice::from_raw_parts_mut(oact as *mut u64, 4) };
@@ -163,12 +247,109 @@ pub fn sigaltstack(thread: &Thread, frame: &Frame, ss: u64, oss: u64) -> i64 {
     0
 }
 
-/// kill and tkill/tgkill aimed at this process.
-pub fn send_process(sig: u64) {
-    PROCESS_PENDING.fetch_or(bit(sig), Ordering::SeqCst);
+/// The Linux action's handler for a signal: SIG_DFL, SIG_IGN or an address.
+pub fn handler_of(sig: u64) -> u64 {
+    ACTIONS.lock().unwrap()[sig as usize].handler
 }
-pub fn send_thread(thread: &Thread, sig: u64) {
+
+/// kill aimed at this process, for a signal the program handles or one with no native number.
+pub fn send_process(sig: u64) {
+    SENDER[sig as usize].store(crate::syscall::pid(), Ordering::Relaxed);
+    PROCESS_PENDING.fetch_or(bit(sig), Ordering::SeqCst);
+    kick_others(None);
+}
+
+/// tkill/tgkill: queued for the thread, which is woken if it is not the caller.
+pub fn send_thread(thread: &Thread, sig: u64, caller: &Thread) {
     thread.pending.fetch_or(bit(sig), Ordering::SeqCst);
+    if !core::ptr::eq(thread, caller) {
+        kick(thread);
+    }
+}
+
+fn kick(thread: &Thread) {
+    unsafe { libc::pthread_kill(thread.native as libc::pthread_t, KICK) };
+}
+
+/// Wakes every thread but `except`, so that one with the signal unblocked takes it.
+fn kick_others(except: Option<&Thread>) {
+    let threads: Vec<_> = crate::thread::THREADS.lock().unwrap().iter().map(|(_, t)| std::sync::Arc::clone(t)).collect();
+    let me = unsafe { libc::pthread_self() };
+    for t in threads {
+        if except.is_some_and(|e| core::ptr::eq(e, &*t)) || unsafe { libc::pthread_equal(t.native as libc::pthread_t, me) } != 0 {
+            continue;
+        }
+        kick(&t);
+    }
+}
+
+/// Whether a call that returned EINTR is restarted: yes unless a handler without SA_RESTART is
+/// about to run (a signal that is ignored, defaulted or blocked does not interrupt on Linux).
+pub fn restart_after_eintr(thread: &Thread) -> bool {
+    let mask = thread.mask.load(Ordering::Relaxed);
+    let ready = (thread.pending.load(Ordering::SeqCst) | PROCESS_PENDING.load(Ordering::SeqCst)) & !mask;
+    if ready == 0 {
+        return true;
+    }
+    let sig = ready.trailing_zeros() as u64 + 1;
+    let a = ACTIONS.lock().unwrap()[sig as usize];
+    match a.handler {
+        SIG_DFL | SIG_IGN => true,
+        _ => a.flags & SA_RESTART != 0,
+    }
+}
+
+/// A signal is due for this thread (pending and not blocked).
+pub fn pending_for(thread: &Thread) -> bool {
+    (thread.pending.load(Ordering::SeqCst) | PROCESS_PENDING.load(Ordering::SeqCst))
+        & !thread.mask.load(Ordering::Relaxed)
+        != 0
+}
+
+pub fn rt_sigpending(thread: &Thread, set: u64, size: u64) -> i64 {
+    if size > 8 {
+        return -EINVAL;
+    }
+    if !user_ok(set, size) {
+        return -EFAULT;
+    }
+    let p = (thread.pending.load(Ordering::SeqCst) | PROCESS_PENDING.load(Ordering::SeqCst))
+        & thread.mask.load(Ordering::Relaxed);
+    unsafe { core::ptr::copy_nonoverlapping(p.to_ne_bytes().as_ptr(), set as *mut u8, size as usize) };
+    0
+}
+
+/// rt_sigsuspend: waits with `mask` until a handler is due; the handler's frame restores the
+/// old mask.
+pub fn sigsuspend(thread: &Thread, set: u64, size: u64) -> i64 {
+    if size != 8 {
+        return -EINVAL;
+    }
+    if !user_ok(set, 8) {
+        return -EFAULT;
+    }
+    let new = unsafe { *(set as *const u64) } & !UNBLOCKABLE;
+    let old = thread.mask.swap(new, Ordering::SeqCst);
+    *thread.suspended_mask.lock().unwrap() = Some(old);
+    unsafe {
+        let mut all: libc::sigset_t = core::mem::zeroed();
+        let mut none: libc::sigset_t = core::mem::zeroed();
+        libc::sigfillset(&mut all);
+        libc::sigemptyset(&mut none);
+        loop {
+            // Native signals are held while checking, then released atomically by the wait, so
+            // one that arrives in between still ends it.
+            libc::sigprocmask(libc::SIG_SETMASK, &all, core::ptr::null_mut());
+            let ready = (thread.pending.load(Ordering::SeqCst) | PROCESS_PENDING.load(Ordering::SeqCst)) & !new;
+            if ready != 0 {
+                libc::sigprocmask(libc::SIG_SETMASK, &none, core::ptr::null_mut());
+                break;
+            }
+            crate::ffi::sigsuspend(&none);
+            libc::sigprocmask(libc::SIG_SETMASK, &none, core::ptr::null_mut());
+        }
+    }
+    -EINTR
 }
 
 /// Bytes of a signal frame: rt_sigframe, the XSAVE image and its trailing magic, alignment.
@@ -201,28 +382,12 @@ fn take(thread: &Thread) -> Option<(u64, i32)> {
             return Some((sig, SI_USER));
         }
     }
-    // Signals other processes sent wait natively, blocked.
-    unsafe {
-        let mut pending: libc::sigset_t = core::mem::zeroed();
-        libc::sigpending(&mut pending);
-        for sig in 1..32u64 {
-            if mask & bit(sig) == 0 && libc::sigismember(&pending, sig as i32) == 1 {
-                let mut one: libc::sigset_t = core::mem::zeroed();
-                libc::sigaddset(&mut one, sig as i32);
-                let zero = libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                };
-                if libc::sigtimedwait(&one, core::ptr::null_mut(), &zero) == sig as i32 {
-                    return Some((sig, SI_USER));
-                }
-            }
-        }
-    }
     None
 }
 
-/// Default actions: ignore, or end the process by the signal itself.
+/// Default actions: ignore, stop, or end the process by the signal itself. The native action is
+/// the default (it mirrors the Linux one, or is reset here), so the process manager stops or ends
+/// the process and the parent sees the signal as the cause.
 pub fn default_action(sig: u64) {
     const IGNORED: [u64; 4] = [
         17, /* CHLD */
@@ -233,22 +398,22 @@ pub fn default_action(sig: u64) {
     if IGNORED.contains(&sig) {
         return;
     }
-    if (20..=22).contains(&sig) || sig == SIGSTOP {
-        // Job-control stops arrive with LC2's process groups.
-        return;
-    }
     if sig > 31 {
         // Real-time signals end the process; there is no native number to end it with.
         unsafe { libc::_exit(128 + sig as i32) }
     }
     unsafe {
         libc::signal(sig as i32, libc::SIG_DFL);
-        let mut one: libc::sigset_t = core::mem::zeroed();
-        libc::sigaddset(&mut one, sig as i32);
         libc::kill(libc::getpid(), sig as i32);
-        libc::sigprocmask(libc::SIG_UNBLOCK, &one, core::ptr::null_mut());
-        libc::_exit(128 + sig as i32);
     }
+    if (20..=22).contains(&sig) || sig == SIGSTOP {
+        return;
+    }
+    // The end arrives asynchronously from the process manager.
+    for _ in 0..200 {
+        unsafe { libc::usleep(10_000) };
+    }
+    unsafe { libc::_exit(128 + sig as i32) }
 }
 
 /// Runs at the end of every crossing: puts a handler frame on the Linux stack for one pending
@@ -256,6 +421,7 @@ pub fn default_action(sig: u64) {
 pub fn deliver(thread: &Thread, frame: &mut Frame) {
     loop {
         let Some((sig, code)) = take(thread) else {
+            *thread.suspended_mask.lock().unwrap() = None;
             return;
         };
         let action = ACTIONS.lock().unwrap()[sig as usize];
@@ -267,34 +433,94 @@ pub fn deliver(thread: &Thread, frame: &mut Frame) {
             }
             _ => {}
         }
-        if action.flags & SA_RESTORER == 0 {
-            // x86-64 Linux requires a restorer; without one the return has nowhere to go.
-            default_action(11);
-            return;
-        }
-        if push_frame(thread, frame, sig, code, &action).is_err() {
-            default_action(11);
-            return;
-        }
-        let mut mask = thread.mask.load(Ordering::Relaxed) | action.mask;
-        if action.flags & SA_NODEFER == 0 {
-            mask |= bit(sig);
-        }
-        thread.mask.store(mask & !UNBLOCKABLE, Ordering::Relaxed);
-        if action.flags & SA_RESETHAND != 0 {
-            ACTIONS.lock().unwrap()[sig as usize] = Action::default();
-        }
+        let from = SENDER[sig as usize].load(Ordering::Relaxed);
+        enter_handler(thread, frame, sig, &action, Info { code, pid: from, fault: None });
         return;
     }
+}
+
+struct Info {
+    code: i32,
+    pid: i32,
+    /// (address, error code, trap number) of a fault.
+    fault: Option<(u64, u64, u64)>,
+}
+
+fn enter_handler(thread: &Thread, frame: &mut Frame, sig: u64, action: &Action, info: Info) {
+    if action.flags & SA_RESTORER == 0 {
+        // x86-64 Linux requires a restorer; without one the return has nowhere to go.
+        default_action(11);
+        return;
+    }
+    if push_frame(thread, frame, sig, action, &info).is_err() {
+        default_action(11);
+        return;
+    }
+    let mut mask = thread.mask.load(Ordering::Relaxed) | action.mask;
+    if action.flags & SA_NODEFER == 0 {
+        mask |= bit(sig);
+    }
+    thread.mask.store(mask & !UNBLOCKABLE, Ordering::Relaxed);
+    if action.flags & SA_RESETHAND != 0 {
+        ACTIONS.lock().unwrap()[sig as usize] = Action::default();
+        mirror(sig, SIG_DFL);
+    }
+}
+
+/// Entered from src/entry.S when a native signal interrupted Linux code: relibc has run the
+/// recorder; deliver what is now due.
+pub extern "C" fn lr_interrupt(frame: *mut Frame, data: usize) {
+    let frame = unsafe { &mut *frame };
+    deliver(crate::thread::current(data), frame);
+}
+
+/// Entered from src/entry.S when Linux code faulted: the exception becomes a Linux signal.
+pub extern "C" fn lr_fault(frame: *mut Frame, data: usize) {
+    let frame = unsafe { &mut *frame };
+    let thread = crate::thread::current(data);
+    let ctl = crate::thread::sigcontrol(data);
+    let (packed, addr) = unsafe { (*((ctl + 296) as *const u64), *((ctl + 304) as *const u64)) };
+    // Delivery and further exceptions are allowed again (INHIBIT_DELIVERY | HANDLING_EXCEPTION).
+    unsafe { (*((ctl + 272) as *const AtomicU64)).fetch_and(!3, Ordering::SeqCst) };
+    let (kind, err) = (packed >> 32, packed & 0xffff_ffff);
+    // Linux's x86 traps: si_code values from its siginfo.h.
+    let (sig, code, si_addr) = match kind {
+        0 => (8, 1 /* FPE_INTDIV */, frame.rip),
+        1 | 3 => (5, 1 /* TRAP_BRKPT */, frame.rip),
+        4 => (11, 0x80 /* SI_KERNEL */, 0),
+        5 => (11, 0x80, 0),
+        6 => (4, 2 /* ILL_ILLOPN */, frame.rip),
+        7 => (8, 0x80, frame.rip),
+        13 => (11, 0x80, 0),
+        14 => (11, if err & 1 == 0 { 1 /* SEGV_MAPERR */ } else { 2 /* SEGV_ACCERR */ }, addr),
+        16 | 19 => (8, 0x80, frame.rip),
+        17 => (7, 1 /* BUS_ADRALN */, addr),
+        _ => (11, 0x80, 0),
+    };
+    let action = ACTIONS.lock().unwrap()[sig as usize];
+    let blocked = thread.mask.load(Ordering::Relaxed) & bit(sig) != 0;
+    if action.handler == SIG_DFL || action.handler == SIG_IGN || blocked {
+        // Linux forces the default action for a fault it cannot deliver.
+        default_action(sig);
+        unsafe { libc::_exit(128 + sig as i32) }
+    }
+    let trapno = kind;
+    enter_handler(thread, frame, sig, &action, Info { code, pid: 0, fault: Some((si_addr, err, trapno)) });
 }
 
 fn push_frame(
     thread: &Thread,
     frame: &mut Frame,
     sig: u64,
-    code: i32,
     action: &Action,
+    info: &Info,
 ) -> Result<(), ()> {
+    let old_mask = thread
+        .suspended_mask
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or_else(|| thread.mask.load(Ordering::Relaxed));
     let xsize = crate::cpu::xsave_size() as u64;
     let (alt_sp, alt_flags, alt_size) = *thread.altstack.lock().unwrap();
     let on = on_altstack(thread, frame.rsp);
@@ -313,7 +539,7 @@ fn push_frame(
         return Err(());
     }
     let uc = base + 8;
-    let info = uc + UC_SIZE;
+    let siginfo = uc + UC_SIZE;
     unsafe {
         core::ptr::write_bytes(base as *mut u8, 0, (fp - base) as usize);
         // The XSAVE image with Linux's software-reserved words.
@@ -352,21 +578,30 @@ fn push_frame(
             m.add(i).write(*r);
         }
         m.add(18).write(0x33 | 0x2b << 48);
-        m.add(21).write(thread.mask.load(Ordering::Relaxed));
+        if let Some((addr, err, trapno)) = info.fault {
+            m.add(19).write(err);
+            m.add(20).write(trapno);
+            m.add(22).write(addr);
+        }
+        m.add(21).write(old_mask);
         m.add(23).write(fp);
         // uc_sigmask
-        u.add(37).write(thread.mask.load(Ordering::Relaxed));
+        u.add(37).write(old_mask);
 
-        let si = info as *mut i32;
+        let si = siginfo as *mut i32;
         si.write(sig as i32);
-        si.add(2).write(code);
-        si.add(4).write(crate::syscall::pid());
-        si.add(5).write(libc::getuid() as i32);
+        si.add(2).write(info.code);
+        if let Some((addr, _, _)) = info.fault {
+            (si.add(4) as *mut u64).write(addr);
+        } else {
+            si.add(4).write(info.pid);
+            si.add(5).write(libc::getuid() as i32);
+        }
     }
     frame.rsp = base;
     frame.rip = action.handler;
     frame.rdi = sig;
-    frame.rsi = info;
+    frame.rsi = siginfo;
     frame.rdx = uc;
     frame.rax = 0;
     frame.rflags &= !(1 << 10 | 1 << 8); // DF, TF
