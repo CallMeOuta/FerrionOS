@@ -144,6 +144,12 @@ ifeq ($(ALLOW_FSTOOLS),1)
 		$(MAKE) unmount && rm -f $(MOUNTED_TAG); \
 	else echo "\033[0;33;49mNot unmounting by ourself, don't forget to do it\033[0m"; \
 	fi
+ifeq ($(VERIFIED_BOOT),1)
+	@if [ -d "$(MOUNT_DIR)" ]; then \
+		echo "\033[0;33;49mVerified boot: run make verified-boot-sign after unmounting, or the image refuses a pushed kernel or initfs\033[0m"; \
+	else $(MAKE) verified-boot-sign; \
+	fi
+endif
 endif
 
 # Show what to push
@@ -173,6 +179,12 @@ ifeq ($(ALLOW_FSTOOLS),1)
 		$(MAKE) unmount && rm -f $(MOUNTED_TAG); \
 	else echo "\033[1;33;49mNot unmounting by ourself, don't forget to do it\033[0m"; \
 	fi
+ifeq ($(VERIFIED_BOOT),1)
+	@if [ -d "$(MOUNT_DIR)" ]; then \
+		echo "\033[1;33;49mVerified boot: run make verified-boot-sign after unmounting, or the image refuses a pushed kernel or initfs\033[0m"; \
+	else $(MAKE) verified-boot-sign; \
+	fi
+endif
 endif
 
 # Rebuild and push all recipes specified by the filesystem config

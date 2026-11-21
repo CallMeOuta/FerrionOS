@@ -26,8 +26,9 @@ Usage: $0 [-o <out-dir>] [-k <key-dir>] [-t <seconds>] [-r <redoxfs>] <harddrive
 
   -o <out-dir>   results: <case>/serial.log, <case>/screen.png, summary.txt
                  (default: build/secure-boot-test)
-  -k <key-dir>   PK, KEK, db and other as <name>.key and <name>.crt; missing ones are
-                 generated (default: <out-dir>/keys)
+  -k <key-dir>   PK, KEK and db as <name>.key and <name>.crt, and owner.guid; missing ones are
+                 generated (default: <out-dir>/keys). The development keys of
+                 scripts/secure-boot-keys.sh (build/secure-boot-keys) work here too
   -t <seconds>   how long one boot may take to reach the login or the refusal (default: 120)
   -r <redoxfs>   the FUSE tool that mounts the image's filesystem, for the tamper cases of a
                  verified-boot image (default: build/fstools/bin/redoxfs)
@@ -62,22 +63,14 @@ IMAGE="$1"
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || usage
 KEYS="${KEYS:-$OUT/keys}"
 
-need() {
-    command -v "$1" >/dev/null || { echo "secure-boot-test: $1 is missing; install $2" >&2; exit 2; }
-}
-need qemu-system-x86_64 "QEMU"
-need openssl "OpenSSL"
-need mcopy "mtools"
-need python3 "Python 3"
-need virt-fw-vars "virt-firmware (Arch: pacman -S virt-firmware; elsewhere: pip install virt-firmware)"
-if command -v sbsign >/dev/null; then
-    SIGNER=sbsign
-elif command -v osslsigncode >/dev/null; then
-    SIGNER=osslsigncode
-else
-    echo "secure-boot-test: no signer; install sbsigntools (Arch, Fedora; sbsigntool on Debian and Ubuntu) or osslsigncode" >&2
-    exit 2
-fi
+BOOT_PROG=secure-boot-test
+. scripts/boot-signing-lib.sh
+boot_need qemu-system-x86_64 "QEMU"
+boot_need openssl "OpenSSL"
+boot_need mcopy "mtools"
+boot_need python3 "Python 3"
+boot_need virt-fw-vars "virt-firmware (Arch: pacman -S virt-firmware; elsewhere: pip install virt-firmware)"
+sb_find_signer
 
 find_firmware() {
     local name
@@ -94,29 +87,21 @@ fi
 
 mkdir -p "$OUT" "$KEYS"
 WORK="$(mktemp -d "$OUT/work.XXXXXX")"
+BOOT_WORK="$WORK"
 MOUNTED=0
-if command -v fusermount3 >/dev/null; then
-    FUMOUNT="fusermount3 -u"
-else
-    FUMOUNT="fusermount -u"
-fi
 cleanup() {
     if [ "$MOUNTED" = 1 ]; then
-        $FUMOUNT "$WORK/mnt" || true
+        $BOOT_FUMOUNT "$WORK/mnt" || true
     fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-# Test keys: self-signed RSA-2048 with SHA-256, the size every UEFI implementation must accept.
-for name in PK KEK db other; do
-    if [ ! -f "$KEYS/$name.key" ] || [ ! -f "$KEYS/$name.crt" ]; then
-        openssl req -quiet -new -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-            -subj "/CN=FerrionOS Secure Boot test $name/" \
-            -keyout "$KEYS/$name.key" -out "$KEYS/$name.crt" 2>"$WORK/openssl.log" \
-            || { cat "$WORK/openssl.log" >&2; exit 1; }
-    fi
+# Test keys, and one that is never enrolled, made fresh each run.
+for name in PK KEK db; do
+    sb_make_cert "$KEYS" "$name" "/CN=FerrionOS Secure Boot test $name/"
 done
+sb_make_cert "$WORK" other "/CN=FerrionOS Secure Boot test other/"
 [ -f "$KEYS/owner.guid" ] || python3 -c 'import uuid; print(uuid.uuid4())' > "$KEYS/owner.guid"
 OWNER="$(cat "$KEYS/owner.guid")"
 
@@ -126,45 +111,17 @@ virt-fw-vars --loglevel warning -i "$OVMF_VARS" -o "$VARS" \
     --set-pk "$OWNER" "$KEYS/PK.crt" --add-kek "$OWNER" "$KEYS/KEK.crt" \
     --add-db "$OWNER" "$KEYS/db.crt" --secure-boot
 
-# The EFI system partition's byte offset, from the GPT.
-ESP_OFFSET="$(python3 - "$IMAGE" <<'EOF'
-import struct, sys, uuid
-ESP = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
-with open(sys.argv[1], "rb") as f:
-    header = f.read(1024)[512:]
-    if header[:8] != b"EFI PART":
-        sys.exit("secure-boot-test: no GPT in the image")
-    lba, count, size = struct.unpack_from("<QII", header, 72)
-    f.seek(lba * 512)
-    table = f.read(count * size)
-for i in range(count):
-    entry = table[i * size:(i + 1) * size]
-    if uuid.UUID(bytes_le=entry[:16]) == ESP:
-        print(struct.unpack_from("<Q", entry, 32)[0] * 512)
-        break
-else:
-    sys.exit("secure-boot-test: no EFI system partition in the image")
-EOF
-)"
-BOOT_PATH=::/EFI/BOOT/BOOTX64.EFI
+ESP_RANGE="$(boot_esp_range "$IMAGE")"
+read -r ESP_OFFSET _ <<< "$ESP_RANGE"
+BOOT_PATH="$(boot_esp_loader "$IMAGE" "$ESP_OFFSET")"
 
 cp --reflink=auto "$IMAGE" "$WORK/harddrive.img"
 mcopy -n -i "$WORK/harddrive.img@@$ESP_OFFSET" "$BOOT_PATH" "$WORK/unsigned.efi"
+! sb_is_signed "$WORK/unsigned.efi" || boot_die "the bootloader of $IMAGE is already signed; test an image as built"
 
-sign() {
-    if [ "$SIGNER" = sbsign ]; then
-        sbsign --key "$KEYS/$1.key" --cert "$KEYS/$1.crt" --output "$2" "$WORK/unsigned.efi" 2>/dev/null
-    else
-        osslsigncode sign -certs "$KEYS/$1.crt" -key "$KEYS/$1.key" -h sha256 -in "$WORK/unsigned.efi" -out "$2" >/dev/null
-    fi
-}
-sign db "$WORK/signed.efi"
-sign other "$WORK/wrong-key.efi"
-if [ "$SIGNER" = sbsign ]; then
-    sbverify --cert "$KEYS/db.crt" "$WORK/signed.efi" >/dev/null
-else
-    osslsigncode verify -CAfile "$KEYS/db.crt" -in "$WORK/signed.efi" >/dev/null
-fi
+sb_sign_efi "$KEYS/db.key" "$KEYS/db.crt" "$WORK/unsigned.efi" "$WORK/signed.efi"
+sb_sign_efi "$WORK/other.key" "$WORK/other.crt" "$WORK/unsigned.efi" "$WORK/wrong-key.efi"
+sb_verify_efi "$KEYS/db.crt" "$WORK/signed.efi"
 
 KVM=0
 [ -w /dev/kvm ] && KVM=1
@@ -182,25 +139,19 @@ EOF
 tamper() {
     local name="$1"
     cp --reflink=auto "$WORK/harddrive.img" "$WORK/$name.img"
-    mkdir -p "$WORK/mnt"
-    "$REDOXFS_BIN" "$WORK/$name.img" "$WORK/mnt" >"$WORK/redoxfs.log" 2>&1 &
     MOUNTED=1
+    boot_mount "$REDOXFS_BIN" "$WORK/$name.img" "$WORK/mnt"
     local boot="$WORK/mnt/usr/lib/boot"
-    for _ in $(seq 100); do
-        [ -f "$boot/kernel" ] && break
-        sleep 0.1
-    done
-    [ -f "$boot/kernel" ] || { cat "$WORK/redoxfs.log" >&2; echo "secure-boot-test: could not mount $name.img" >&2; exit 1; }
     case "$name" in
         tamper-kernel) flip_byte "$boot/kernel" ;;
         tamper-initfs) flip_byte "$boot/initfs" ;;
         tamper-sig)
             openssl genpkey -algorithm ed25519 -out "$WORK/other-boot.key"
-            openssl pkeyutl -sign -rawin -inkey "$WORK/other-boot.key" -in "$boot/manifest" -out "$boot/manifest.sig"
+            boot_sign_manifest "$WORK/other-boot.key" "$boot/manifest" "$boot/manifest.sig"
             ;;
     esac
     sync
-    $FUMOUNT "$WORK/mnt"
+    $BOOT_FUMOUNT "$WORK/mnt"
     MOUNTED=0
 }
 
@@ -349,7 +300,7 @@ fi
 {
     echo "image: $IMAGE"
     echo "firmware: $OVMF_CODE, variables enrolled in $VARS"
-    echo "signer: $SIGNER; keys: $KEYS"
+    echo "signer: $SB_SIGNER; keys: $KEYS"
 } >> "$OUT/summary.txt"
 echo "results in $OUT: summary.txt, <case>/serial.log, <case>/screen.png"
 exit "$FAILED"

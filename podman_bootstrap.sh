@@ -178,7 +178,7 @@ freebsd()
 archLinux()
 {
     echo "Detected Arch Linux"
-    packages="git make curl fuse3 fuse-overlayfs slirp4netns podman gdb"
+    packages="git make curl fuse3 fuse-overlayfs slirp4netns podman gdb openssl python"
     if [ "$1" == "qemu" ]; then
         packages="$packages qemu-desktop qemu-system-arm qemu-system-riscv"
     elif [ "$1" == "virtualbox" ]; then
@@ -211,7 +211,7 @@ ubuntu()
     sudo "$2" update
     echo "Installing required packages..."
     sudo "$2" install \
-        podman curl git make pkg-config fuse3 libfuse3-dev fuse-overlayfs slirp4netns gdb-multiarch
+        podman curl git make pkg-config fuse3 libfuse3-dev fuse-overlayfs slirp4netns gdb-multiarch openssl python3
     if [ "$1" == "qemu" ]; then
         if [ -z "$(which qemu-system-x86_64)" ]; then
             echo "Installing QEMU..."
@@ -280,7 +280,7 @@ fedora()
     fi
 
     # Use rpm -q <package> to check if it's already installed
-    PKGS=$(for pkg in podman curl make fuse3 fuse3-devel fuse-overlayfs slirp4netns gdb; do rpm -q $pkg > /dev/null || echo $pkg; done)
+    PKGS=$(for pkg in podman curl make fuse3 fuse3-devel fuse-overlayfs slirp4netns gdb openssl python3; do rpm -q $pkg > /dev/null || echo $pkg; done)
     # If the list of packages is not empty, install missing
     COUNT=$(echo $PKGS | wc -w)
     if [ $COUNT -ne 0 ]; then
@@ -307,6 +307,8 @@ suse()
         "slirp4netns"
         "podman"
         "gdb-multiarch"
+        "openssl"
+        "python3"
     )
 
     if [ -z "$(which git)" ]; then
@@ -465,7 +467,7 @@ solus()
     echo "Installing necessary build tools..."
     # if guards are not necessary with eopkg since it does nothing if latest
     # version is already installed
-    sudo eopkg it fuse-devel git make fuse2-devel rsync
+    sudo eopkg it fuse-devel git make fuse2-devel rsync openssl python3
     if [ -z "$(which podman)" ]; then
         echo "Please install Podman"
         exit 1

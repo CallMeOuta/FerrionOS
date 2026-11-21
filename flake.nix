@@ -131,6 +131,7 @@
               meson
               nasm
               ninja
+              openssl
               perl
               perlPackages.HTMLParser
               perlPackages.Po4a

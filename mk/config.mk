@@ -45,10 +45,16 @@ HOST_CARGO=env -u RUSTUP_TOOLCHAIN -u CC -u TARGET cargo
 ## FILESYSTEM_SIZE?=$(shell $(INSTALLER) --filesystem-size -c $(FILESYSTEM_CONFIG))
 ## Flags to pass to redoxfs-mkfs. Add --encrypt to set up disk encryption
 REDOXFS_MKFS_FLAGS?=
-## Set to 1 for a verified-boot harddrive.img: its UEFI bootloader starts only the kernel and initfs signed with the development key in VERIFIED_BOOT_KEYS (made on first use; see scripts/verified-boot-sign.sh, which needs FUSE, OpenSSL 3 and python3). Not for live images
+## Verified boot for harddrive.img, 1 by default: its UEFI bootloader starts only the kernel and initfs signed with this build's key (scripts/verified-boot-sign.sh, which needs FUSE, OpenSSL 3 and python3). 0 builds an image whose bootloader verifies nothing and offers the boot environment editor. i586 boots through BIOS only, which cannot verify, so it defaults to 0. Not for live images
+ifeq ($(ARCH),i586)
 VERIFIED_BOOT?=0
-## Where the verified-boot development key pair is kept
+else
+VERIFIED_BOOT?=1
+endif
+## Where the verified-boot development key pair is kept, made on first use
 VERIFIED_BOOT_KEYS?=build/verified-boot
+## A PKCS#11 URI of an Ed25519 key on a hardware token, which then signs instead of the development key: release builds (see scripts/verified-boot-sign.sh)
+VERIFIED_BOOT_SIGNER?=
 ## Set to 1 to enable Podman build, any other value will disable it
 PODMAN_BUILD?=1
 ## Set to 1 to put filesystem tools inside podman, any other value will install it to host

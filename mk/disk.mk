@@ -1,9 +1,15 @@
 # Configuration file with the commands configuration of the FerrionOS image
 
+# Signs a harddrive.img for verified boot; the image's path follows
+VERIFIED_BOOT_SIGN=VERIFIED_BOOT_SIGNER='$(VERIFIED_BOOT_SIGNER)' scripts/verified-boot-sign.sh $(REDOXFS) $(VERIFIED_BOOT_KEYS)
+
 $(BUILD)/harddrive.img: $(FSTOOLS) $(REPO_TAG)
 ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
+ifeq ($(VERIFIED_BOOT)$(FSTOOLS_NO_MOUNT),11)
+	@echo "VERIFIED_BOOT=1 signs the image through a FUSE mount, which FSTOOLS_NO_MOUNT=1 leaves out; build with VERIFIED_BOOT=0 for an image whose bootloader verifies nothing" >&2 && exit 1
+endif
 	mkdir -p $(BUILD)
 	-$(FUMOUNT) $(MOUNT_DIR) || true
 	-$(FUMOUNT) /tmp/redox_installer || true
@@ -15,9 +21,18 @@ else
 	truncate -s "$$FILESYSTEM_SIZE"m $@.partial
 	umask 022 && $(INSTALLER) $(INSTALLER_OPTS) -c $(FILESYSTEM_CONFIG) $@.partial
 ifeq ($(VERIFIED_BOOT),1)
-	scripts/verified-boot-sign.sh $(REDOXFS) $(VERIFIED_BOOT_KEYS) $@.partial
+	$(VERIFIED_BOOT_SIGN) $@.partial
 endif
 	mv $@.partial $@
+endif
+
+# Signs harddrive.img for verified boot again, after a push changed its kernel or initfs.
+# p.<recipe> and push run it themselves when they unmounted the image
+verified-boot-sign: $(FSTOOLS) FORCE
+ifeq ($(FSTOOLS_IN_PODMAN),1)
+	$(PODMAN_RUN) make $@
+else
+	$(VERIFIED_BOOT_SIGN) $(BUILD)/harddrive.img
 endif
 
 $(BUILD)/redox-live.iso: $(FSTOOLS) $(REPO_TAG) redox.ipxe

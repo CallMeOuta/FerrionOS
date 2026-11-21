@@ -316,6 +316,7 @@ archLinux()
     make \
     meson \
     nasm \
+    openssl \
     patch \
     patchelf \
     perl \
@@ -422,6 +423,7 @@ ubuntu()
     meson \
     nasm \
     ninja-build \
+    openssl \
     patch \
     patchelf \
     perl \
@@ -560,6 +562,7 @@ fedora()
     meson \
     nasm \
     ninja-build \
+    openssl \
     patch \
     patchelf \
     perl \
@@ -621,6 +624,7 @@ suse()
     "meson"
     "nasm"
     "ninja"
+    "openssl"
     "patch"
     "patchelf"
     "perl"
@@ -815,6 +819,7 @@ solus()
     m4 \
     make \
     nasm \
+    openssl \
     patch \
     patchelf \
     perl-html-parser \
