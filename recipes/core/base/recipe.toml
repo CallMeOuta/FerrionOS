@@ -4,7 +4,21 @@ description = "Essential system components and drivers for FerrionOS"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/base.git"
 rev = "20f7573b4dc011ea5267189185edc0b2f12bab0f"
-patches = ["ferrion-boot-splash.patch", "ferrion-lockdown.patch", "ferrion-pty-hangup.patch", "ferrion-live-disk-view.patch", "ferrion-sigchld.patch", "ferrion-signal-handle-perm.patch", "ferrion-rand-seed.patch", "ferrion-driver-null-namespace.patch", "ferrion-scheme-create-fork.patch", "ferrion-nsmgr-request-bounds.patch", "ferrion-dhcp-dns.patch", "ferrion-graphics-bounds.patch", "ferrion-net-hardening.patch"]
+patches = ["ferrion-boot-splash.patch", "ferrion-lockdown.patch", "ferrion-pty-hangup.patch", "ferrion-live-disk-view.patch", "ferrion-sigchld.patch", "ferrion-signal-handle-perm.patch", "ferrion-rand-seed.patch", "ferrion-driver-null-namespace.patch", "ferrion-scheme-create-fork.patch", "ferrion-nsmgr-request-bounds.patch", "ferrion-dhcp-dns.patch", "ferrion-graphics-bounds.patch", "ferrion-net-hardening.patch", "ferrion-net-bounds.patch", "ferrion-tcp-isn.patch"]
+# ferrion-tcp-isn.patch builds netstack against vendor/smoltcp: smoltcp 0.14.0 from crates.io,
+# checked against the sha256 Cargo.lock records for it, with ferrion-smoltcp-isn.patch applied.
+# That patch is checked against its own sha256 here, so changing it changes this script and the
+# cookbook fetches the source again.
+script = """
+mkdir -p vendor/smoltcp
+curl -fL --retry 3 --retry-delay 1 -o vendor/smoltcp.crate https://static.crates.io/crates/smoltcp/smoltcp-0.14.0.crate
+echo "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f  vendor/smoltcp.crate" | sha256sum --check --quiet -
+smoltcp_patch="${COOKBOOK_ROOT}/recipes/core/base/ferrion-smoltcp-isn.patch"
+echo "68846035d2fdd567d7cefc7931fbdaf52f987cb0f74615200f92cd02d9dcafcb  ${smoltcp_patch}" | sha256sum --check --quiet -
+tar -xzf vendor/smoltcp.crate -C vendor/smoltcp --strip-components=1
+rm vendor/smoltcp.crate
+patch --directory=vendor/smoltcp --strip=1 < "${smoltcp_patch}"
+"""
 
 [build]
 template = "custom"

@@ -44,6 +44,10 @@ nsmgr-bounds-probe = {}
 # Run as `user`, it checks that the display driver refuses dumb-buffer mappings and sizes outside
 # a buffer or the driver's limits and keeps working; scripts/vm-test.py graphics-bounds runs it.
 graphics-bounds-probe = {}
+# Run as `user`, it checks that the network stack refuses calls whose buffers do not fit and
+# keeps working; as root with `mac`, that network drivers refuse reads past their `mac`;
+# scripts/vm-test.py net-calls and net-hardening run it.
+net-call-probe = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
 # ferrion-run check uses to show that a profile alone withholds the network.

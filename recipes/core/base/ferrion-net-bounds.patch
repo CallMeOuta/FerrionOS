@@ -1,0 +1,749 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with the patches listed before it in recipes/core/base/recipe.toml applied. Calls on network sockets and drivers stay inside their buffers:
+- netstack: a RecvMsg call on a tcp or udp socket gets EINVAL when its buffer is shorter than the three sizes it starts with, when the sizes add up to more than the buffer or than usize::MAX, and when the reply (the peer's path, then the payload) would not fit.
+- netstack: a datagram longer than the reader's buffer is cut to fit and the rest of it dropped, on read and on RecvMsg.
+- netstack: a datagram sent to the unspecified address gets EINVAL, one larger than the socket's send buffer EMSGSIZE, and one that fits once queued datagrams are sent waits for them.
+- netstack: fpath of a socket that is not yet bound or connected fills only the buffer it is given.
+- driver-network: a read of `mac` past its end gets EINVAL; at its end, 0 bytes.
+- ixgbed: a received frame longer than one receive buffer or than the reader's buffer is dropped and counted, and the next one is read.
+
+diff --git a/drivers/net/driver-network/src/lib.rs b/drivers/net/driver-network/src/lib.rs
+index 0df36f5a..71389e03 100644
+--- a/drivers/net/driver-network/src/lib.rs
++++ b/drivers/net/driver-network/src/lib.rs
+@@ -257,7 +257,12 @@ impl<T: NetworkAdapter> ResourceSync for Mac<T> {
+         offset: u64,
+         _fcntl_flags: u32,
+     ) -> Result<usize> {
+-        let data = &scheme_data.adapter.mac_address()[offset as usize..];
++        let mac = scheme_data.adapter.mac_address();
++        // Reading at the end gives 0 bytes; past it is refused.
++        let data = usize::try_from(offset)
++            .ok()
++            .and_then(|offset| mac.get(offset..))
++            .ok_or(Error::new(EINVAL))?;
+         let i = cmp::min(buf.len(), data.len());
+         buf[..i].copy_from_slice(&data[..i]);
+         Ok(i)
+@@ -284,3 +289,46 @@ impl<T: NetworkAdapter> ResourceSync for Mac<T> {
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
++
++    struct FakeAdapter;
++
++    impl NetworkAdapter for FakeAdapter {
++        fn mac_address(&mut self) -> [u8; 6] {
++            MAC
++        }
++
++        fn available_for_read(&mut self) -> usize {
++            0
++        }
++
++        fn read_packet(&mut self, _buf: &mut [u8]) -> Result<Option<usize>> {
++            Ok(None)
++        }
++
++        fn write_packet(&mut self, buf: &[u8]) -> Result<usize> {
++            Ok(buf.len())
++        }
++    }
++
++    #[test]
++    fn mac_reads_stop_at_its_end() {
++        let mut data = NetworkSchemeData::new(FakeAdapter);
++        let mut mac = Mac(PhantomData);
++        let mut buf = [0; 8];
++        assert_eq!(mac.read(&mut data, &mut buf, 0, 0).unwrap(), 6);
++        assert_eq!(buf[..6], MAC);
++        assert_eq!(mac.read(&mut data, &mut buf, 4, 0).unwrap(), 2);
++        assert_eq!(buf[..2], MAC[4..]);
++        assert_eq!(mac.read(&mut data, &mut buf, 6, 0).unwrap(), 0);
++        for offset in [7, 4096, u64::MAX] {
++            let err = mac.read(&mut data, &mut buf, offset, 0).unwrap_err();
++            assert_eq!(err.errno, EINVAL, "offset {offset}");
++        }
++    }
++}
+diff --git a/drivers/net/ixgbed/src/device.rs b/drivers/net/ixgbed/src/device.rs
+index 10725a22..471799b0 100644
+--- a/drivers/net/ixgbed/src/device.rs
++++ b/drivers/net/ixgbed/src/device.rs
+@@ -20,6 +20,10 @@ pub struct Intel8259x {
+     transmit_index: usize,
+     transmit_clean_index: usize,
+     mac_address: [u8; 6],
++    /// The current descriptor belongs to a frame longer than one receive buffer.
++    dropping_frame: bool,
++    /// Received frames dropped because they did not fit one receive buffer or the reader's.
++    oversized_frames: u64,
+ }
+ 
+ fn wrap_ring(index: usize, ring_size: usize) -> usize {
+@@ -35,35 +39,51 @@ impl NetworkAdapter for Intel8259x {
+         self.next_read()
+     }
+ 
++    /// A frame longer than one receive buffer or than `buf` is dropped and counted, and the
++    /// next one is read.
+     fn read_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>> {
+-        let desc = unsafe {
+-            &mut *(self.receive_ring.as_ptr().add(self.receive_index) as *mut ixgbe_adv_rx_desc)
+-        };
++        loop {
++            let desc = unsafe {
++                &mut *(self.receive_ring.as_ptr().add(self.receive_index) as *mut ixgbe_adv_rx_desc)
++            };
+ 
+-        let status = unsafe { desc.wb.upper.status_error };
++            let (status, length) =
++                unsafe { (desc.wb.upper.status_error, desc.wb.upper.length as usize) };
+ 
+-        if (status & IXGBE_RXDADV_STAT_DD) != 0 {
+-            if (status & IXGBE_RXDADV_STAT_EOP) == 0 {
+-                panic!("increase buffer size or decrease MTU")
++            if (status & IXGBE_RXDADV_STAT_DD) == 0 {
++                return Ok(None);
+             }
+ 
+-            let data = unsafe {
+-                &self.receive_buffer[self.receive_index][..desc.wb.upper.length as usize]
++            // A frame without end-of-packet continues in the next descriptors.
++            let copied = if (status & IXGBE_RXDADV_STAT_EOP) == 0 {
++                self.dropping_frame = true;
++                None
++            } else if std::mem::take(&mut self.dropping_frame) {
++                self.count_oversized_frame(buf.len());
++                None
++            } else {
++                match self.receive_buffer[self.receive_index].get(..length) {
++                    Some(data) if data.len() <= buf.len() => {
++                        buf[..data.len()].copy_from_slice(data);
++                        Some(data.len())
++                    }
++                    _ => {
++                        self.count_oversized_frame(buf.len());
++                        None
++                    }
++                }
+             };
+ 
+-            let i = cmp::min(buf.len(), data.len());
+-            buf[..i].copy_from_slice(&data[..i]);
+-
+             desc.read.pkt_addr = self.receive_buffer[self.receive_index].physical() as u64;
+             desc.read.hdr_addr = 0;
+ 
+             self.write_reg(IXGBE_RDT(0), self.receive_index as u32);
+             self.receive_index = wrap_ring(self.receive_index, self.receive_ring.len());
+ 
+-            return Ok(Some(i));
++            if copied.is_some() {
++                return Ok(copied);
++            }
+         }
+-
+-        Ok(None)
+     }
+ 
+     fn write_packet(&mut self, buf: &[u8]) -> Result<usize> {
+@@ -144,6 +164,8 @@ impl Intel8259x {
+             transmit_index: 0,
+             transmit_clean_index: 0,
+             mac_address: [0; 6],
++            dropping_frame: false,
++            oversized_frames: 0,
+         };
+ 
+         module.init();
+@@ -163,17 +185,26 @@ impl Intel8259x {
+ 
+         let status = unsafe { desc.wb.upper.status_error };
+ 
++        // A descriptor without end-of-packet counts too: reading drops its frame.
+         if (status & IXGBE_RXDADV_STAT_DD) != 0 {
+-            if (status & IXGBE_RXDADV_STAT_EOP) == 0 {
+-                panic!("increase buffer size or decrease MTU")
+-            }
+-
+             return unsafe { desc.wb.upper.length as usize };
+         }
+ 
+         0
+     }
+ 
++    fn count_oversized_frame(&mut self, read_buffer: usize) {
++        self.oversized_frames += 1;
++        if self.oversized_frames.is_power_of_two() {
++            eprintln!(
++                "ixgbed: dropped {} received frames longer than one {}-byte receive buffer or the {}-byte read buffer",
++                self.oversized_frames,
++                self.receive_buffer[0].len(),
++                read_buffer
++            );
++        }
++    }
++
+     /// Returns the mac address of this device.
+     pub fn get_mac_addr(&self) -> [u8; 6] {
+         let low = self.read_reg(IXGBE_RAL(0));
+diff --git a/netstack/src/scheme/mod.rs b/netstack/src/scheme/mod.rs
+index e25b7faf..64425d4a 100644
+--- a/netstack/src/scheme/mod.rs
++++ b/netstack/src/scheme/mod.rs
+@@ -37,8 +37,11 @@ use crate::scheme::socket::{Handle, SchemeSocket, SocketScheme};
+ mod icmp;
+ mod ip;
+ mod netcfg;
++mod recvmsg;
+ mod socket;
+ mod tcp;
++#[cfg(test)]
++mod tests;
+ mod udp;
+ 
+ type SocketSet = SmoltcpSocketSet<'static>;
+diff --git a/netstack/src/scheme/recvmsg.rs b/netstack/src/scheme/recvmsg.rs
+new file mode 100644
+index 00000000..f1465864
+--- /dev/null
++++ b/netstack/src/scheme/recvmsg.rs
+@@ -0,0 +1,103 @@
++//! The buffer of a RecvMsg call. The caller writes three sizes at its start: the room it
++//! has for the sender's name, for the payload and for ancillary data. The reply replaces
++//! them with the name's length and bytes, then the payload's length and bytes. Each length
++//! is a little-endian `usize`.
++
++use syscall::{Error, Result, EINVAL};
++
++const WORD: usize = size_of::<usize>();
++
++pub struct Request {
++    pub name_len: usize,
++    pub payload_len: usize,
++}
++
++impl Request {
++    /// EINVAL when the buffer is shorter than the three sizes or than they add up to.
++    pub fn parse(buf: &[u8]) -> Result<Self> {
++        let word = |index: usize| {
++            buf.get(index * WORD..(index + 1) * WORD)
++                .map(|bytes| usize::from_le_bytes(bytes.try_into().unwrap()))
++                .ok_or(Error::new(EINVAL))
++        };
++        let (name_len, payload_len, control_len) = (word(0)?, word(1)?, word(2)?);
++        let total = [name_len, payload_len, control_len]
++            .into_iter()
++            .try_fold(3 * WORD, usize::checked_add);
++        match total {
++            Some(total) if total <= buf.len() => Ok(Self {
++                name_len,
++                payload_len,
++            }),
++            _ => Err(Error::new(EINVAL)),
++        }
++    }
++}
++
++/// Writes the name's length and bytes and returns where a payload of `payload_len` bytes
++/// starts. EINVAL, with nothing written, when the reply would not fit in the buffer.
++pub fn write_name(buf: &mut [u8], name: &[u8], payload_len: usize) -> Result<usize> {
++    let start = 2 * WORD + name.len();
++    if start
++        .checked_add(payload_len)
++        .is_none_or(|end| end > buf.len())
++    {
++        return Err(Error::new(EINVAL));
++    }
++    buf[..WORD].copy_from_slice(&name.len().to_le_bytes());
++    buf[WORD..WORD + name.len()].copy_from_slice(name);
++    Ok(start)
++}
++
++/// Writes the payload's length in front of the payload that starts at `start`, as returned
++/// by [`write_name`].
++pub fn write_payload_len(buf: &mut [u8], start: usize, payload_len: usize) {
++    buf[start - WORD..start].copy_from_slice(&payload_len.to_le_bytes());
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn request(sizes: [usize; 3], len: usize) -> Vec<u8> {
++        let mut buf = vec![0; len];
++        for (index, size) in sizes.iter().enumerate() {
++            buf[index * WORD..(index + 1) * WORD].copy_from_slice(&size.to_le_bytes());
++        }
++        buf
++    }
++
++    #[test]
++    fn short_or_overflowing_requests_are_refused() {
++        for len in 0..3 * WORD {
++            assert!(Request::parse(&vec![0; len]).is_err(), "length {len}");
++        }
++        assert!(Request::parse(&request([1, 0, 0], 3 * WORD)).is_err());
++        assert!(Request::parse(&request([0, 100, 0], 3 * WORD + 99)).is_err());
++        // Sizes whose sum wraps around to a small number.
++        assert!(Request::parse(&request([usize::MAX - 8, 16, 0], 3 * WORD)).is_err());
++        assert!(Request::parse(&request([usize::MAX, usize::MAX, usize::MAX], 64)).is_err());
++    }
++
++    #[test]
++    fn a_request_that_fits_is_read() {
++        let parsed = Request::parse(&request([16, 100, 8], 3 * WORD + 124)).unwrap();
++        assert_eq!((parsed.name_len, parsed.payload_len), (16, 100));
++    }
++
++    #[test]
++    fn a_reply_is_written_only_when_it_fits() {
++        let name = b"/scheme/udp/127.0.0.1:50000";
++        let mut buf = request([0, 0, 0], 2 * WORD + name.len() + 9);
++        assert!(write_name(&mut buf, name, 10).is_err());
++        assert!(write_name(&mut buf, name, usize::MAX).is_err());
++        assert_eq!(&buf[..WORD], &0usize.to_le_bytes(), "nothing written");
++
++        let start = write_name(&mut buf, name, 9).unwrap();
++        assert_eq!(start, 2 * WORD + name.len());
++        write_payload_len(&mut buf, start, 9);
++        assert_eq!(&buf[..WORD], &name.len().to_le_bytes());
++        assert_eq!(&buf[WORD..WORD + name.len()], name);
++        assert_eq!(&buf[start - WORD..start], &9usize.to_le_bytes());
++    }
++}
+diff --git a/netstack/src/scheme/socket.rs b/netstack/src/scheme/socket.rs
+index 8b153f60..727a388b 100644
+--- a/netstack/src/scheme/socket.rs
++++ b/netstack/src/scheme/socket.rs
+@@ -909,9 +909,10 @@ where
+             }
+             Handle::Null(_) => {
+                 let path = SocketT::BASE_PATH.as_bytes();
+-                buf[0..path.len()].copy_from_slice(path);
++                let count = path.len().min(buf.len());
++                buf[..count].copy_from_slice(&path[..count]);
+ 
+-                Ok(path.len())
++                Ok(count)
+             }
+             _ => Err(SyscallError::new(syscall::EBADF)),
+         }
+diff --git a/netstack/src/scheme/tcp.rs b/netstack/src/scheme/tcp.rs
+index 8949b6d4..a813d581 100644
+--- a/netstack/src/scheme/tcp.rs
++++ b/netstack/src/scheme/tcp.rs
+@@ -8,7 +8,7 @@ use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
+ use syscall::{self, Error as SyscallError, Result as SyscallResult};
+ 
+ use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
+-use super::{parse_endpoint, SchemeWrapper, SocketSet};
++use super::{parse_endpoint, recvmsg, SchemeWrapper, SocketSet};
+ use crate::port_set::PortSet;
+ 
+ const SO_SNDBUF: usize = 7;
+@@ -316,48 +316,19 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
+         if !socket_file.read_enabled {
+             Ok(0)
+         } else if self.can_recv(&socket_file.data) {
+-            let usize_length = size_of::<usize>();
+-            let prepared_name_len = usize::from_le_bytes(
+-                how[0..usize_length]
+-                    .try_into()
+-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
+-            );
+-            let prepared_whole_iov_size = usize::from_le_bytes(
+-                how[usize_length..2 * usize_length]
+-                    .try_into()
+-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
+-            );
+-            let prepared_msg_controllen = usize::from_le_bytes(
+-                how[2 * usize_length..3 * usize_length]
+-                    .try_into()
+-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
+-            );
+-            if 3 * usize_length
+-                + prepared_name_len
+-                + prepared_msg_controllen
+-                + prepared_whole_iov_size
+-                > how.len()
+-            {
+-                //expected returned buffer size is larger than provided -> return invalid
+-                return Err(SyscallError::new(syscall::EINVAL));
+-            }
++            let request = recvmsg::Request::parse(how)?;
+             let address = match self.remote_endpoint() {
+                 Some(endpoint) => format!("{}{}:{}", Self::BASE_PATH, endpoint.addr, endpoint.port),
+                 None => format!("{}0.0.0.0:0", Self::BASE_PATH),
+             };
+ 
+-            how[..usize_length].copy_from_slice(&address.len().to_le_bytes());
+-            how[usize_length..address.len() + usize_length].copy_from_slice(address.as_bytes());
++            let start = recvmsg::write_name(how, address.as_bytes(), request.payload_len)?;
+             let payload_length = self
+-                .recv_slice(
+-                    &mut how[address.len() + 2 * usize_length
+-                        ..address.len() + 2 * usize_length + prepared_whole_iov_size],
+-                )
++                .recv_slice(&mut how[start..start + request.payload_len])
+                 .unwrap();
+-            how[address.len() + usize_length..address.len() + 2 * usize_length]
+-                .copy_from_slice(&payload_length.to_le_bytes());
++            recvmsg::write_payload_len(how, start, payload_length);
+ 
+-            Ok(address.len() + 2 * usize_length + prepared_whole_iov_size)
++            Ok(start + request.payload_len)
+         } else if socket_file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK
+             || flags & flag::MSG_DONTWAIT as usize != 0
+         {
+diff --git a/netstack/src/scheme/tests.rs b/netstack/src/scheme/tests.rs
+new file mode 100644
+index 00000000..e6c7868b
+--- /dev/null
++++ b/netstack/src/scheme/tests.rs
+@@ -0,0 +1,204 @@
++//! Calls a program can make on a `tcp` or `udp` socket with data waiting, over smoltcp's
++//! loopback device: each one either works or fails with an error, and the socket keeps
++//! working afterwards.
++
++use smoltcp::iface::{Config, Interface, SocketHandle};
++use smoltcp::phy::{Loopback, Medium};
++use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer as TcpSocketBuffer};
++use smoltcp::socket::udp::{
++    PacketBuffer as UdpSocketBuffer, PacketMetadata as UdpPacketMetadata, Socket as UdpSocket,
++};
++use smoltcp::time::Instant;
++use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint};
++use syscall::{EINVAL, EMSGSIZE};
++
++use super::socket::{SchemeFile, SchemeSocket, SocketFile};
++use super::SocketSet;
++
++const WORD: usize = size_of::<usize>();
++const LOCALHOST: IpAddress = IpAddress::v4(127, 0, 0, 1);
++
++struct Loop {
++    device: Loopback,
++    iface: Interface,
++    sockets: SocketSet,
++}
++
++impl Loop {
++    fn new() -> Self {
++        let mut device = Loopback::new(Medium::Ip);
++        let mut iface =
++            Interface::new(Config::new(HardwareAddress::Ip), &mut device, Instant::ZERO);
++        iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(LOCALHOST, 8)).unwrap());
++        Loop {
++            device,
++            iface,
++            sockets: SocketSet::new(vec![]),
++        }
++    }
++
++    fn poll(&mut self) {
++        for _ in 0..8 {
++            self.iface
++                .poll(Instant::ZERO, &mut self.device, &mut self.sockets);
++        }
++    }
++
++    fn udp(&mut self, port: u16) -> SocketHandle {
++        let buffer = || UdpSocketBuffer::new(vec![UdpPacketMetadata::EMPTY; 4], vec![0; 4096]);
++        let mut socket = UdpSocket::new(buffer(), buffer());
++        socket.bind(port).unwrap();
++        self.sockets.add(socket)
++    }
++
++    /// A UDP socket on port 5000 holding one datagram of `len` bytes from port 5001.
++    fn udp_with_datagram(len: usize) -> (Self, SocketHandle) {
++        let mut net = Loop::new();
++        let (receiver, sender) = (net.udp(5000), net.udp(5001));
++        net.sockets
++            .get_mut::<UdpSocket>(sender)
++            .send_slice(&vec![7; len], IpEndpoint::new(LOCALHOST, 5000))
++            .unwrap();
++        net.poll();
++        (net, receiver)
++    }
++
++    /// The accepted end of a TCP connection over loopback, holding `len` bytes.
++    fn tcp_with_data(len: usize) -> (Self, SocketHandle) {
++        let mut net = Loop::new();
++        let new_socket = || {
++            TcpSocket::new(
++                TcpSocketBuffer::new(vec![0; 4096]),
++                TcpSocketBuffer::new(vec![0; 4096]),
++            )
++        };
++        let mut server = new_socket();
++        server.listen(5000).unwrap();
++        let server = net.sockets.add(server);
++        let client = net.sockets.add(new_socket());
++        net.sockets
++            .get_mut::<TcpSocket>(client)
++            .connect(net.iface.context(), IpEndpoint::new(LOCALHOST, 5000), 5001)
++            .unwrap();
++        net.poll();
++        net.sockets
++            .get_mut::<TcpSocket>(client)
++            .send_slice(&vec![7; len])
++            .unwrap();
++        net.poll();
++        (net, server)
++    }
++}
++
++/// A RecvMsg buffer of `len` bytes that starts with the three sizes.
++fn request(sizes: [usize; 3], len: usize) -> Vec<u8> {
++    let mut buf = vec![0; len.max(3 * WORD)];
++    for (index, size) in sizes.iter().enumerate() {
++        buf[index * WORD..(index + 1) * WORD].copy_from_slice(&size.to_le_bytes());
++    }
++    buf.truncate(len);
++    buf
++}
++
++fn errno<T: std::fmt::Debug>(result: syscall::Result<T>) -> i32 {
++    result.unwrap_err().errno
++}
++
++#[test]
++fn udp_recvmsg_refuses_short_and_overflowing_buffers() {
++    let (mut net, receiver) = Loop::udp_with_datagram(100);
++    let socket = net.sockets.get_mut::<UdpSocket>(receiver);
++    let mut file = SchemeFile::Socket(SocketFile::new_with_data(
++        receiver,
++        IpListenEndpoint::default(),
++    ));
++
++    for len in [0, 8, 3 * WORD - 1] {
++        let mut how = vec![0; len];
++        assert_eq!(
++            errno(socket.handle_recvmsg(&mut file, &mut how, 0)),
++            EINVAL,
++            "{len} bytes"
++        );
++    }
++    // Sizes that add up past usize::MAX to fewer bytes than the buffer holds.
++    let mut how = request([usize::MAX - 8, 16, 0], 3 * WORD);
++    assert_eq!(errno(socket.handle_recvmsg(&mut file, &mut how, 0)), EINVAL);
++    // Room for a 1-byte name, but the sender's path is longer.
++    let mut how = request([1, 100, 0], 3 * WORD + 101);
++    assert_eq!(errno(socket.handle_recvmsg(&mut file, &mut how, 0)), EINVAL);
++
++    // The datagram is still there for a call that fits, which takes 10 bytes of it.
++    let mut how = request([64, 10, 0], 3 * WORD + 74);
++    let name = b"/scheme/udp/127.0.0.1:5001";
++    let reply = socket.handle_recvmsg(&mut file, &mut how, 0).unwrap();
++    assert_eq!(reply, 2 * WORD + name.len() + 10);
++    assert_eq!(&how[..WORD], &name.len().to_le_bytes());
++    assert_eq!(&how[WORD..WORD + name.len()], name);
++    assert_eq!(
++        &how[WORD + name.len()..2 * WORD + name.len()],
++        &10usize.to_le_bytes()
++    );
++    assert_eq!(&how[2 * WORD + name.len()..reply], &[7; 10]);
++    assert!(
++        !UdpSocket::can_recv(socket),
++        "the rest of the datagram is dropped"
++    );
++}
++
++#[test]
++fn udp_read_cuts_a_long_datagram() {
++    let (mut net, receiver) = Loop::udp_with_datagram(100);
++    let socket = net.sockets.get_mut::<UdpSocket>(receiver);
++    let mut file = SocketFile::new_with_data(receiver, IpListenEndpoint::default());
++    let mut buf = [0; 1];
++    assert_eq!(socket.read_buf(&mut file, &mut buf).unwrap(), 1);
++    assert_eq!(buf, [7]);
++    assert!(!UdpSocket::can_recv(socket));
++}
++
++#[test]
++fn udp_write_refuses_the_unspecified_address_and_oversized_datagrams() {
++    let mut net = Loop::new();
++    let sender = net.udp(5001);
++    let socket = net.sockets.get_mut::<UdpSocket>(sender);
++    let unspecified = IpListenEndpoint::from((IpAddress::v4(0, 0, 0, 0), 5000));
++    let mut file = SocketFile::new_with_data(sender, unspecified);
++    assert_eq!(errno(socket.write_buf(&mut file, &[1; 10])), EINVAL);
++
++    let mut file = SocketFile::new_with_data(sender, IpListenEndpoint::from((LOCALHOST, 5000)));
++    assert_eq!(errno(socket.write_buf(&mut file, &[1; 5000])), EMSGSIZE);
++    assert_eq!(socket.write_buf(&mut file, &[1; 10]).unwrap(), 10);
++}
++
++#[test]
++fn tcp_recvmsg_refuses_a_reply_that_does_not_fit() {
++    let (mut net, server) = Loop::tcp_with_data(100);
++    let socket = net.sockets.get_mut::<TcpSocket>(server);
++    assert!(
++        TcpSocket::can_recv(socket),
++        "the loopback connection carries the data"
++    );
++    let mut file = SchemeFile::Socket(SocketFile::new_with_data(server, None));
++
++    for len in [0, 8, 3 * WORD - 1] {
++        let mut how = vec![0; len];
++        assert_eq!(
++            errno(socket.handle_recvmsg(&mut file, &mut how, 0)),
++            EINVAL,
++            "{len} bytes"
++        );
++    }
++    // No room asked for, so the peer's path does not fit.
++    let mut how = request([0, 0, 0], 3 * WORD);
++    assert_eq!(errno(socket.handle_recvmsg(&mut file, &mut how, 0)), EINVAL);
++    let mut how = request([0, usize::MAX - 8, 16], 3 * WORD);
++    assert_eq!(errno(socket.handle_recvmsg(&mut file, &mut how, 0)), EINVAL);
++
++    let mut how = request([64, 100, 0], 3 * WORD + 164);
++    let name = b"/scheme/tcp/127.0.0.1:5001";
++    let reply = socket.handle_recvmsg(&mut file, &mut how, 0).unwrap();
++    assert_eq!(reply, 2 * WORD + name.len() + 100);
++    assert_eq!(&how[WORD..WORD + name.len()], name);
++    assert_eq!(&how[2 * WORD + name.len()..reply], &[7; 100]);
++}
+diff --git a/netstack/src/scheme/udp.rs b/netstack/src/scheme/udp.rs
+index d8a550d1..db869bb5 100644
+--- a/netstack/src/scheme/udp.rs
++++ b/netstack/src/scheme/udp.rs
+@@ -4,13 +4,14 @@ use libredox::flag;
+ use scheme_utils::FpathWriter;
+ use smoltcp::iface::SocketHandle;
+ use smoltcp::socket::udp::{
+-    PacketBuffer as UdpSocketBuffer, PacketMetadata as UdpPacketMetadata, Socket as UdpSocket,
++    PacketBuffer as UdpSocketBuffer, PacketMetadata as UdpPacketMetadata,
++    SendError as UdpSendError, Socket as UdpSocket,
+ };
+ use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
+ use syscall::{self, Error as SyscallError, Result as SyscallResult};
+ 
+ use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
+-use super::{parse_endpoint, SchemeWrapper, Smolnetd, SocketSet};
++use super::{parse_endpoint, recvmsg, SchemeWrapper, Smolnetd, SocketSet};
+ use crate::port_set::PortSet;
+ use crate::router::Router;
+ 
+@@ -205,9 +206,18 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
+                     .expect("If we can send, this should be specified"),
+                 endpoint.port,
+             );
+-            self.send_slice(buf, endpoint).expect("Can't send slice");
+-            Ok(buf.len())
+-        } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
++            match self.send_slice(buf, endpoint) {
++                Ok(()) => return Ok(buf.len()),
++                // Port 0 or the unspecified address.
++                Err(UdpSendError::Unaddressable) => return Err(SyscallError::new(syscall::EINVAL)),
++                Err(UdpSendError::BufferFull) if buf.len() > self.payload_send_capacity() => {
++                    return Err(SyscallError::new(syscall::EMSGSIZE));
++                }
++                // It fits once queued datagrams have been sent.
++                Err(UdpSendError::BufferFull) => {}
++            }
++        }
++        if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
+             Err(SyscallError::new(syscall::EAGAIN))
+         } else {
+             Err(SyscallError::new(syscall::EWOULDBLOCK)) // internally scheduled to re-read
+@@ -222,7 +232,12 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
+         if !file.read_enabled {
+             Ok(0)
+         } else if self.can_recv(&file.data) {
+-            let (length, _) = self.recv_slice(buf).expect("Can't receive slice");
++            // A datagram longer than `buf` is cut to fit and the rest of it dropped.
++            let (payload, _) = self
++                .recv()
++                .map_err(|_| SyscallError::new(syscall::EWOULDBLOCK))?;
++            let length = payload.len().min(buf.len());
++            buf[..length].copy_from_slice(&payload[..length]);
+             Ok(length)
+         } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
+             Err(SyscallError::new(syscall::EAGAIN))
+@@ -319,60 +334,30 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
+         if !socket_file.read_enabled {
+             Ok(0)
+         } else if self.can_recv(&socket_file.data) {
+-            let usize_length = size_of::<usize>();
+-            let prepared_name_len = usize::from_le_bytes(
+-                how[0..usize_length]
+-                    .try_into()
+-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
+-            );
+-            let prepared_whole_iov_size = usize::from_le_bytes(
+-                how[usize_length..2 * usize_length]
+-                    .try_into()
+-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
+-            );
+-            let prepared_msg_controllen = usize::from_le_bytes(
+-                how[2 * usize_length..3 * usize_length]
+-                    .try_into()
+-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
+-            );
+-            if 3 * usize_length
+-                + prepared_name_len
+-                + prepared_msg_controllen
+-                + prepared_whole_iov_size
+-                > how.len()
+-            {
+-                //expected returned buffer size is larger than provided -> return invalid
+-                return Err(SyscallError::new(syscall::EINVAL));
+-            }
+-
+-            //the relibc deserialization functions expect NO GAPS between the name and payload slices
+-            //so the payload must be temporarily stored during recv_slice
+-            let mut payload_tmp = vec![0u8; prepared_whole_iov_size];
+-            let (length, address) = self
+-                .recv_slice(&mut payload_tmp)
+-                .expect("Can't recieve slice");
++            let request = recvmsg::Request::parse(how)?;
++            let (datagram_len, endpoint) = match self.peek() {
++                Ok((payload, meta)) => (payload.len(), meta.endpoint),
++                Err(_) => return Err(SyscallError::new(syscall::EWOULDBLOCK)),
++            };
++            // A datagram longer than the caller's room is cut to fit and the rest of it
++            // dropped, as POSIX describes for message-based sockets.
++            let length = datagram_len.min(request.payload_len);
+ 
+             //Address Handling
+-            let address_formatted = if prepared_name_len > 0 {
+-                format!(
+-                    "{}{}:{}",
+-                    Self::BASE_PATH,
+-                    address.endpoint.addr,
+-                    address.endpoint.port
+-                )
++            let address_formatted = if request.name_len > 0 {
++                format!("{}{}:{}", Self::BASE_PATH, endpoint.addr, endpoint.port)
+             } else {
+                 String::from("")
+             };
+-            how[..usize_length].copy_from_slice(&address_formatted.len().to_le_bytes());
+-            let payload_len_index = address_formatted.len() + usize_length;
+-            how[usize_length..payload_len_index].copy_from_slice(address_formatted.as_bytes());
++            let start = recvmsg::write_name(how, address_formatted.as_bytes(), length)?;
+ 
+             //Payload Handling
+-            how[payload_len_index..payload_len_index + usize_length]
+-                .copy_from_slice(&length.to_le_bytes());
+-            how[payload_len_index + usize_length..payload_len_index + usize_length + length]
+-                .copy_from_slice(&payload_tmp[..length]);
+-            Ok(payload_len_index + usize_length + length)
++            let (payload, _) = self
++                .recv()
++                .map_err(|_| SyscallError::new(syscall::EWOULDBLOCK))?;
++            how[start..start + length].copy_from_slice(&payload[..length]);
++            recvmsg::write_payload_len(how, start, length);
++            Ok(start + length)
+         } else if socket_file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK
+             || flags & flag::MSG_DONTWAIT as usize != 0
+         {
