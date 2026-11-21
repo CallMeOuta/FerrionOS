@@ -24,7 +24,20 @@ impl Key {
     }
 
     pub fn into_aes(self) -> Aes128 {
+        self.aes()
+    }
+
+    pub(crate) fn aes(&self) -> Aes128 {
         Aes128::new(&aes::Block::from(self.0))
+    }
+}
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        for byte in &mut self.0 {
+            unsafe { core::ptr::write_volatile(byte, 0) };
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -66,6 +79,38 @@ pub struct KeySlot {
 }
 
 impl KeySlot {
+    pub fn is_empty(&self) -> bool {
+        self.salt.0 == [0; 16]
+            && self.encrypted_keys.0.0 == [0; 16]
+            && self.encrypted_keys.1.0 == [0; 16]
+    }
+
+    pub fn to_bytes(&self) -> [u8; 48] {
+        let mut bytes = [0; 48];
+        bytes[..16].copy_from_slice(&self.salt.0);
+        bytes[16..32].copy_from_slice(&self.encrypted_keys.0.0);
+        bytes[32..].copy_from_slice(&self.encrypted_keys.1.0);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8; 48]) -> Self {
+        Self {
+            salt: Salt(bytes[..16].try_into().unwrap()),
+            encrypted_keys: (
+                EncryptedKey(bytes[16..32].try_into().unwrap()),
+                EncryptedKey(bytes[32..].try_into().unwrap()),
+            ),
+        }
+    }
+
+    pub fn unwrap(&self, password: &[u8]) -> Result<(Key, Key), argon2::Error> {
+        let aes = Self::password_aes(password, &self.salt)?;
+        Ok((
+            self.encrypted_keys.0.decrypt(&aes),
+            self.encrypted_keys.1.decrypt(&aes),
+        ))
+    }
+
     /// Get the password AES key (generated from the password and salt, encrypts the real key)
     pub fn password_aes(password: &[u8], salt: &Salt) -> Result<Aes128, argon2::Error> {
         let mut key = Key([0; 16]);
@@ -101,4 +146,15 @@ impl KeySlot {
             self.encrypted_keys.1.decrypt(&password_aes).into_aes(),
         ))
     }
+}
+
+pub fn key_slot_cas_accepts(current: [u8; 48], old: [u8; 48], new: [u8; 48]) -> bool {
+    current == old || current == new
+}
+
+pub fn has_other_live_slot(slots: &[KeySlot; 64], index: usize) -> bool {
+    slots
+        .iter()
+        .enumerate()
+        .any(|(i, entry)| i != index && !entry.is_empty())
 }

@@ -12,13 +12,21 @@ use uuid::Uuid;
 fn main() {
     env_logger::init();
 
-    let mut args = env::args().skip(1);
+    let (key, args) = match redoxfs::key_tool::take_key_file(env::args().skip(1)) {
+        Ok(ok) => ok,
+        Err(err) => {
+            eprintln!("redoxfs-clone: {}", err);
+            process::exit(1);
+        }
+    };
+    let password_opt = key.as_ref().map(|key| key.0.as_slice());
+    let mut args = args.into_iter();
 
     let disk_path_old = if let Some(path) = args.next() {
         path
     } else {
         println!("redoxfs-clone: no old disk image provided");
-        println!("redoxfs-clone NEW-DISK OLD-DISK [BOOTLOADER]");
+        println!("redoxfs-clone [--key-file PATH|-] OLD-DISK NEW-DISK [BOOTLOADER]");
         process::exit(1);
     };
 
@@ -26,7 +34,7 @@ fn main() {
         path
     } else {
         println!("redoxfs-clone: no new disk image provided");
-        println!("redoxfs-clone NEW-DISK OLD-DISK [BOOTLOADER]");
+        println!("redoxfs-clone [--key-file PATH|-] OLD-DISK NEW-DISK [BOOTLOADER]");
         process::exit(1);
     };
 
@@ -49,7 +57,19 @@ fn main() {
         }
     };
 
-    let mut fs_old = match FileSystem::open(disk_old, None, None, false) {
+    // The key opens an encrypted old volume and always encrypts the new one.
+    let fs_old = match FileSystem::open(disk_old, password_opt, None, false) {
+        Err(err) if password_opt.is_some() && err.errno == syscall::EKEYREJECTED => {
+            match fs::File::open(&disk_path_old).map(DiskFile::from) {
+                Ok(disk_old) => FileSystem::open(disk_old, None, None, false),
+                Err(err) => Err(syscall::Error::new(
+                    err.raw_os_error().unwrap_or(syscall::EIO),
+                )),
+            }
+        }
+        other => other,
+    };
+    let mut fs_old = match fs_old {
         Ok(fs) => fs,
         Err(err) => {
             println!(
@@ -97,7 +117,7 @@ fn main() {
     let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let mut fs = match FileSystem::create_reserved(
         disk,
-        None,
+        password_opt,
         &bootloader,
         ctime.as_secs(),
         ctime.subsec_nanos(),

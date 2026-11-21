@@ -1247,6 +1247,62 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         Ok(0)
     }
 
+    fn call(
+        &mut self,
+        id: usize,
+        payload: &mut [u8],
+        metadata: &[u64],
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
+        use crate::key_tool::{KEY_CALL, KEY_HEADER, KEY_SET, MAX_PASSPHRASE};
+        if metadata.first() != Some(&KEY_CALL) {
+            return Err(Error::new(EOPNOTSUPP));
+        }
+        Handle::get_resource(self.handles.get(&id))?;
+        let (_, uid, _) = get_uid_gid_from_pid(&self.proc_creds_capability, ctx.pid)?;
+        if uid != 0 {
+            return Err(Error::new(EPERM));
+        }
+        // The scheme receives three metadata words; unused ones are zero.
+        match metadata {
+            [KEY_CALL, KEY_HEADER, 0] if payload.len() == BLOCK_SIZE as usize => {
+                payload.copy_from_slice(&self.fs.header);
+                Ok(payload.len())
+            }
+            [KEY_CALL, KEY_SET, index]
+                if *index < 64 && (97..=96 + MAX_PASSPHRASE).contains(&payload.len()) =>
+            {
+                let index = *index as usize;
+                let old_bytes: [u8; 48] = payload[..48].try_into().unwrap();
+                let new_bytes: [u8; 48] = payload[48..96].try_into().unwrap();
+                let current_bytes = self.fs.header.key_slots[index].to_bytes();
+                if !crate::key::key_slot_cas_accepts(current_bytes, old_bytes, new_bytes) {
+                    return Err(Error::new(EBUSY));
+                }
+                let authenticated = self.fs.header.unlock(&payload[96..]).is_some();
+                for byte in &mut payload[96..] {
+                    unsafe { core::ptr::write_volatile(byte, 0) };
+                }
+                if !authenticated {
+                    return Err(Error::new(syscall::ENOKEY));
+                }
+                let slot = crate::KeySlot::from_bytes(&new_bytes);
+                if slot.is_empty()
+                    && !crate::key::has_other_live_slot(&self.fs.header.key_slots, index)
+                {
+                    return Err(Error::new(EINVAL));
+                }
+                assert!(
+                    !slot.is_empty()
+                        || crate::key::has_other_live_slot(&self.fs.header.key_slots, index)
+                );
+                self.fs.set_key_slot(index, slot)?;
+                Ok(0)
+            }
+            _ => Err(Error::new(EINVAL)),
+        }
+    }
+
     fn std_fs_call(
         &mut self,
         id: usize,

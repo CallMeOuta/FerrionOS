@@ -137,13 +137,21 @@ fn resize<D: Disk>(fs: &mut FileSystem<D>, size_arg: String) -> Result<(), Strin
 fn main() {
     env_logger::init();
 
-    let mut args = env::args().skip(1);
+    let (key, args) = match redoxfs::key_tool::take_key_file(env::args().skip(1)) {
+        Ok(ok) => ok,
+        Err(err) => {
+            eprintln!("redoxfs-resize: {}", err);
+            process::exit(1);
+        }
+    };
+    let password_opt = key.as_ref().map(|key| key.0.as_slice());
+    let mut args = args.into_iter();
 
     let disk_path = if let Some(path) = args.next() {
         path
     } else {
         eprintln!("redoxfs-resize: no new disk image provided");
-        eprintln!("redoxfs-resize NEW-DISK [SIZE]");
+        eprintln!("redoxfs-resize [--key-file PATH|-] NEW-DISK [SIZE]");
         process::exit(1);
     };
 
@@ -160,7 +168,7 @@ fn main() {
         }
     };
 
-    let mut fs = match FileSystem::open(disk, None, None, true) {
+    let mut fs = match FileSystem::open(disk, password_opt, None, true) {
         Ok(fs) => fs,
         Err(err) => {
             eprintln!(

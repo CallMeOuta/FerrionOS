@@ -32,6 +32,29 @@ pub struct FileSystem<D: Disk> {
 }
 
 impl<D: Disk> FileSystem<D> {
+    /// Change one slot and overwrite every header in the ring before returning.
+    /// An interrupted roll must be retried before claiming the old slot is gone.
+    pub fn set_key_slot(&mut self, index: usize, slot: crate::KeySlot) -> Result<()> {
+        if self.cipher_opt.is_none() || index >= self.header.key_slots.len() {
+            return Err(Error::new(syscall::error::EINVAL));
+        }
+        if slot.is_empty() && !crate::key::has_other_live_slot(&self.header.key_slots, index) {
+            return Err(Error::new(syscall::error::EINVAL));
+        }
+        self.tx(|tx| {
+            tx.header.key_slots[index] = slot;
+            tx.header_changed = true;
+            Ok(())
+        })?;
+        for _ in 1..HEADER_RING {
+            self.tx(|tx| {
+                tx.header_changed = true;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
     /// Open a file system on a disk
     pub fn open(
         mut disk: D,
@@ -158,6 +181,7 @@ impl<D: Disk> FileSystem<D> {
 
         let cipher_opt = match password_opt {
             Some(password) => {
+                crate::require_seeded_random().map_err(|_| Error::new(syscall::error::EIO))?;
                 //TODO: handle errors
                 header.key_slots[0] = KeySlot::new(
                     password,

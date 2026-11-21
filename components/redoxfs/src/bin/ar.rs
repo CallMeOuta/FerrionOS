@@ -12,13 +12,21 @@ use uuid::Uuid;
 fn main() {
     env_logger::init();
 
-    let mut args = env::args().skip(1);
+    let (key, args) = match redoxfs::key_tool::take_key_file(env::args().skip(1)) {
+        Ok(ok) => ok,
+        Err(err) => {
+            eprintln!("redoxfs-ar: {}", err);
+            process::exit(1);
+        }
+    };
+    let password_opt = key.as_ref().map(|key| key.0.as_slice());
+    let mut args = args.into_iter();
 
     let disk_path = if let Some(path) = args.next() {
         path
     } else {
         println!("redoxfs-ar: no disk image provided");
-        println!("redoxfs-ar DISK FOLDER [BOOTLOADER]");
+        println!("redoxfs-ar [--key-file PATH|-] DISK FOLDER [BOOTLOADER]");
         process::exit(1);
     };
 
@@ -26,7 +34,7 @@ fn main() {
         path
     } else {
         println!("redoxfs-ar: no folder provided");
-        println!("redoxfs-ar DISK FOLDER [BOOTLOADER]");
+        println!("redoxfs-ar [--key-file PATH|-] DISK FOLDER [BOOTLOADER]");
         process::exit(1);
     };
 
@@ -66,7 +74,7 @@ fn main() {
     let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     match FileSystem::create_reserved(
         disk,
-        None,
+        password_opt,
         &bootloader,
         ctime.as_secs(),
         ctime.subsec_nanos(),

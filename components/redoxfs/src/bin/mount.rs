@@ -161,7 +161,9 @@ fn print_usage_exit() -> ! {
 }
 
 fn usage() {
-    eprintln!("redoxfs [--no-daemon|-d] [--uuid] [disk or uuid] [mountpoint] [block in hex]");
+    eprintln!(
+        "redoxfs [--no-daemon|-d] [--key-file PATH] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
+    );
 }
 
 enum DiskId {
@@ -176,7 +178,7 @@ fn filesystem_by_path(
     boot_password: Option<&[u8]>,
 ) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
     log::debug!("opening {}", path);
-    let attempts = 10;
+    let attempts = if boot_password.is_some() { 0 } else { 10 };
     for attempt in 0..=attempts {
         let typed;
         let password_opt = if attempt > 0 {
@@ -352,11 +354,18 @@ fn daemon(
     mountpoint: &str,
     block_opt: Option<u64>,
     mut write: Option<File>,
+    key_file: Option<&str>,
 ) -> ! {
     setsig();
 
     // Read once: reading wipes the bootloader's copy, and the search below may try several disks
-    let boot_password = bootloader_password();
+    let boot_password = match key_file {
+        Some(path) => match redoxfs::key_tool::read_secret(Some(path), "") {
+            Ok(mut secret) => Some(Passphrase(std::mem::take(&mut secret.0))),
+            Err(err) => print_err_exit(format!("cannot read key file: {err}")),
+        },
+        None => bootloader_password(),
+    };
     let boot_password_opt = boot_password.as_ref().map(|password| password.0.as_slice());
     let filesystem_opt = match *disk_id {
         DiskId::Path(ref path) => filesystem_by_path(path, block_opt, true, boot_password_opt),
@@ -419,10 +428,17 @@ fn main() {
     let mut disk_id: Option<DiskId> = None;
     let mut mountpoint: Option<String> = None;
     let mut block_opt: Option<u64> = None;
+    let mut key_file = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--no-daemon" | "-d" => daemonise = false,
+            "--key-file" => {
+                key_file = Some(
+                    args.next()
+                        .unwrap_or_else(|| print_err_exit("missing key file")),
+                )
+            }
 
             "--uuid" if disk_id.is_none() => {
                 disk_id = Some(DiskId::Uuid(
@@ -467,7 +483,13 @@ fn main() {
             if pid == 0 {
                 drop(read);
 
-                daemon(&disk_id, &mountpoint, block_opt, Some(write));
+                daemon(
+                    &disk_id,
+                    &mountpoint,
+                    block_opt,
+                    Some(write),
+                    key_file.as_deref(),
+                );
             } else if pid > 0 {
                 drop(write);
 
@@ -486,6 +508,6 @@ fn main() {
         }
     } else {
         log::info!("running in foreground");
-        daemon(&disk_id, &mountpoint, block_opt, None);
+        daemon(&disk_id, &mountpoint, block_opt, None, key_file.as_deref());
     }
 }

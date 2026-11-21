@@ -33,7 +33,11 @@ pub use self::dir::{DirEntry, DirList};
 pub use self::disk::*;
 pub use self::filesystem::FileSystem;
 pub use self::header::{HEADER_RING, Header};
-pub use self::key::{Key, KeySlot, Salt};
+pub use self::key::{Key, KeySlot, Salt, has_other_live_slot, key_slot_cas_accepts};
+#[cfg(feature = "std")]
+pub use self::key_tool::require_seeded_random;
+#[cfg(feature = "std")]
+pub mod key_tool;
 #[cfg(feature = "std")]
 pub use self::mount::mount;
 pub use self::node::{Node, NodeFlags, NodeLevel, NodeLevelData};

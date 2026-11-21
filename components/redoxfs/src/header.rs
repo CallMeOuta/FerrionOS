@@ -117,10 +117,19 @@ impl Header {
     }
 
     pub fn cipher(&self, password: &[u8]) -> Option<Xts128<Aes128>> {
+        self.unlock(password)
+            .map(|(_, keys)| Xts128::new(keys.0.into_aes(), keys.1.into_aes()))
+    }
+
+    /// Return master keys only after checking them against this header.
+    pub fn unlock(&self, password: &[u8]) -> Option<(usize, (crate::Key, crate::Key))> {
         let hash = self.create_encrypted_hash(None);
-        for slot in self.key_slots.iter() {
-            //TODO: handle errors
-            let cipher = slot.cipher(password).unwrap();
+        for (index, slot) in self.key_slots.iter().enumerate() {
+            if slot.is_empty() {
+                continue;
+            }
+            let keys = slot.unwrap(password).ok()?;
+            let cipher = Xts128::new(keys.0.aes(), keys.1.aes());
             let mut block = aes::Block::from(self.encrypted_hash);
             cipher.decrypt_area(
                 &mut block,
@@ -129,7 +138,7 @@ impl Header {
                 get_tweak_default,
             );
             if block == aes::Block::from(hash) {
-                return Some(cipher);
+                return Some((index, keys));
             }
         }
         None

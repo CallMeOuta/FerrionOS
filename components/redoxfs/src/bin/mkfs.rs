@@ -2,14 +2,13 @@ extern crate redoxfs;
 extern crate uuid;
 
 use std::io::Read;
-use std::{env, fs, io, process, time};
+use std::{env, fs, process, time};
 
 use redoxfs::{DiskFile, FileSystem};
-use termion::input::TermRead;
 use uuid::Uuid;
 
 fn usage() -> ! {
-    eprintln!("redoxfs-mkfs [--encrypt] DISK [BOOTLOADER]");
+    eprintln!("redoxfs-mkfs [--encrypt] [--key-file PATH] DISK [BOOTLOADER]");
     process::exit(1);
 }
 
@@ -19,8 +18,13 @@ fn main() {
     let mut encrypt = false;
     let mut disk_path_opt = None;
     let mut bootloader_path_opt = None;
-    for arg in env::args().skip(1) {
+    let mut key_file = None;
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
         if arg == "--encrypt" {
+            encrypt = true;
+        } else if arg == "--key-file" {
+            key_file = Some(args.next().unwrap_or_else(|| usage()));
             encrypt = true;
         } else if disk_path_opt.is_none() {
             disk_path_opt = Some(arg);
@@ -71,21 +75,17 @@ fn main() {
     };
 
     let password_opt = if encrypt {
-        eprint!("redoxfs-mkfs: password: ");
-
-        let password = io::stdin()
-            .read_passwd(&mut io::stderr())
-            .unwrap()
-            .unwrap_or_default();
-
-        eprintln!();
-
-        if password.is_empty() {
-            eprintln!("redoxfs-mkfs: empty password, giving up");
+        if let Err(err) = redoxfs::require_seeded_random() {
+            eprintln!("redoxfs-mkfs: cannot generate keys: {err}");
             process::exit(1);
         }
-
-        Some(password)
+        match redoxfs::key_tool::read_secret(key_file.as_deref(), "redoxfs-mkfs: password") {
+            Ok(password) => Some(password),
+            Err(err) => {
+                eprintln!("redoxfs-mkfs: {err}");
+                process::exit(1);
+            }
+        }
     } else {
         None
     };
@@ -95,7 +95,7 @@ fn main() {
         .unwrap();
     match FileSystem::create_reserved(
         disk,
-        password_opt.as_ref().map(|x| x.as_bytes()),
+        password_opt.as_ref().map(|x| x.0.as_slice()),
         &bootloader,
         ctime.as_secs(),
         ctime.subsec_nanos(),
