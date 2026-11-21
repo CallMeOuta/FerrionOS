@@ -1,0 +1,11 @@
+[package]
+description = "Native counter and timer descriptors"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+mkdir -pv "${COOKBOOK_STAGE}/usr/lib/init.d"
+cp "${COOKBOOK_RECIPE}/10_fdobjd.service" "${COOKBOOK_STAGE}/usr/lib/init.d/10_fdobjd.service"
+"""
