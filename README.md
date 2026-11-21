@@ -13,6 +13,19 @@ FerrionOS _is not_ just a kernel: it is a **full-featured operating system**, pr
 
 The build system is makefiles (`Makefile`, `mk/`), a Rust build tool called the cookbook (`src/`), package recipes (`recipes/`) and filesystem configs (`config/`). They fetch, cross-compile and package the system's components and assemble a bootable image.
 
+## What it looks like
+
+The x86_64 desktop image in QEMU at 1280x800, captured by `scripts/vm-test.py screenshots`.
+
+| | |
+|---|---|
+| ![The login screen: the FerrionOS mark and name above the login box](docs/images/login.png) | ![The boot splash: the mark above a progress bar](docs/images/boot-splash.png) |
+| The login screen | The boot splash |
+| ![COSMIC Terminal showing a Nushell table of /usr/share/ui](docs/images/terminal-nushell.png) | ![COSMIC Files showing /usr](docs/images/file-manager.png) |
+| Nushell in COSMIC Terminal | COSMIC Files |
+| ![COSMIC Edit with a small Rust program](docs/images/text-editor.png) | ![The image viewer showing the login background](docs/images/image-viewer.png) |
+| COSMIC Edit | The image viewer |
+
 ## Quick start
 
 On a Linux host:

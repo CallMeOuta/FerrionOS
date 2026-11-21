@@ -327,8 +327,8 @@ SCREENSHOT_APPS = [
     # In COSMIC Terminal Nushell sees a terminal one column wide, and an
     # interactive Nushell clears the screen at its first prompt: the table gets
     # its width from the command line, and the terminal then waits instead.
+    # An interactive fish there overflows its stack, so fish has no picture yet.
     ("terminal-nushell", 'cosmic-term -e bash -c "nu -c \\"ls /usr/share/ui | sort-by size | table --width 110\\"; sleep 3600"'),
-    ("terminal-fish", 'cosmic-term -e fish -C "ls -l /usr/share/ui"'),
     ("files", "cosmic-files /usr"),
     ("editor", "cosmic-edit /tmp/hello.rs"),
     ("viewer", "viewer /usr/share/ui/login.png"),
