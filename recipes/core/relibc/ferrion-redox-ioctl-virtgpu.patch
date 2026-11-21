@@ -1,12 +1,13 @@
-FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d. It touches only the crate redox-ioctl, which the other patches leave alone:
-- A `virtgpu` module: the numbers, flags and structures of Linux's include/uapi/drm/virtgpu_drm.h at the tag v7.3, with that header's MIT notice, and the payloads the GPU driver will receive for the requests Mesa's Venus driver makes. Nothing calls it yet: relibc's ioctl translation and the driver take it up from slice GP3 of the GPU plan.
-- Each payload type that `define_ioctl_data!` builds gains a `LAYOUT` constant: its fixed fields with their offsets and sizes, then its arrays. FerrionOS's scripts/virtgpu-layout-check.py reads it to compare the payloads with Linux's header.
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d. It touches only the crate redox-ioctl, which the other patches leave alone, and leaves the wire format of the drm module as it is:
+- A `virtgpu` module: the numbers, flags and structures of Linux's include/uapi/drm/virtgpu_drm.h at the tag v7.3, with that header's MIT notice, DRM's own close request from drm.h at the same commit, and the payloads the GPU driver will receive for the requests Mesa's Venus driver makes, with unit tests that send them both ways. Nothing calls it yet: relibc's ioctl translation and the driver take it up from slice GP3 of the GPU plan.
+- `define_ioctl_data!` takes a direction for each array: `array`, sent and copied back as before; `in_array`, sent and not copied back, so that a submission's command is copied once and never written into; `out_array`, sent as zeros and copied back.
+- Each payload type that `define_ioctl_data!` builds gains a `LAYOUT` constant: its fixed fields with their offsets and sizes, then its arrays with their element's size and alignment and their direction. The virtgpu module asserts at compile time that its payloads have no padding and that their arrays start aligned whatever the counts. FerrionOS's scripts/virtgpu-layout-check.py reads the constants to compare the payloads with Linux's headers.
 
 diff --git a/redox-ioctl/src/ioctl_data.rs b/redox-ioctl/src/ioctl_data.rs
-index 02530174..9cd04914 100644
+index 02530174..e5bc1f16 100644
 --- a/redox-ioctl/src/ioctl_data.rs
 +++ b/redox-ioctl/src/ioctl_data.rs
-@@ -5,6 +5,33 @@ pub trait IoctlData {
+@@ -5,7 +5,106 @@ pub trait IoctlData {
      unsafe fn read_from(&mut self, buf: &[u8]);
  }
  
@@ -15,10 +16,36 @@ index 02530174..9cd04914 100644
 +/// then each array those pointers name, in this order.
 +pub struct WireLayout {
 +    pub fixed_size: usize,
-+    /// Name, offset and size of each fixed field.
-+    pub fixed: &'static [(&'static str, usize, usize)],
-+    /// Pointer field, count field, element type and element size of each array.
-+    pub arrays: &'static [(&'static str, &'static str, &'static str, usize)],
++    pub fixed: &'static [WireField],
++    pub arrays: &'static [WireArray],
++}
++
++pub struct WireField {
++    pub name: &'static str,
++    pub offset: usize,
++    pub size: usize,
++}
++
++pub struct WireArray {
++    /// The request's field that points at the array.
++    pub pointer: &'static str,
++    /// The request's field that holds the number of elements.
++    pub count: &'static str,
++    pub element: &'static str,
++    pub size: usize,
++    pub align: usize,
++    pub direction: WireDirection,
++}
++
++/// Which way an array's contents travel between the caller and the scheme.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum WireDirection {
++    /// Sent to the scheme and copied back to the caller: `array`.
++    Both,
++    /// Sent to the scheme only: `in_array`.
++    In,
++    /// Sent as zeros and copied back to the caller: `out_array`.
++    Out,
 +}
 +
 +impl WireLayout {
@@ -27,43 +54,150 @@ index 02530174..9cd04914 100644
 +        let mut end = 0;
 +        let mut i = 0;
 +        while i < self.fixed.len() {
-+            if self.fixed[i].1 != end {
++            if self.fixed[i].offset != end {
 +                return false;
 +            }
-+            end += self.fixed[i].2;
++            end += self.fixed[i].size;
 +            i += 1;
 +        }
 +        end == self.fixed_size
 +    }
++
++    /// Whether every array starts at an offset its elements' alignment divides,
++    /// whatever the counts: the fixed part's size is a multiple of the first
++    /// array's alignment, and no array is aligned more strictly than the one
++    /// before it.
++    pub const fn is_aligned(&self) -> bool {
++        let mut i = 0;
++        while i < self.arrays.len() {
++            let align = self.arrays[i].align;
++            if i == 0 && !self.fixed_size.is_multiple_of(align) {
++                return false;
++            }
++            if i > 0 && align > self.arrays[i - 1].align {
++                return false;
++            }
++            i += 1;
++        }
++        true
++    }
 +}
 +
  macro_rules! define_ioctl_data {
++    (@direction array) => { $crate::WireDirection::Both };
++    (@direction in_array) => { $crate::WireDirection::In };
++    (@direction out_array) => { $crate::WireDirection::Out };
++
++    (@write out_array, $data:ident, $ptr:expr, $size:ident) => {
++        $data.extend(iter::repeat(0u8).take($size));
++    };
++    (@write $dir:ident, $data:ident, $ptr:expr, $size:ident) => {
++        if $ptr as usize != 0 {
++            let src = unsafe { slice::from_raw_parts($ptr as usize as *const u8, $size) };
++            $data.extend_from_slice(src);
++        } else {
++            $data.extend(iter::repeat(0u8).take($size));
++        };
++    };
++
++    (@read in_array, $dst:expr, $src:ident, $size:ident) => {
++        let _ = $src;
++    };
++    (@read $dir:ident, $dst:expr, $src:ident, $size:ident) => {
++        if $dst as usize != 0 {
++            unsafe {
++                slice::from_raw_parts_mut($dst as usize as *mut u8, $size).copy_from_slice($src);
++            }
++        }
++    };
++
      (struct $ioctl_ty:ident, $mem_ty:ident {
          $($rest:tt)*
-@@ -117,6 +144,21 @@ macro_rules! define_ioctl_data {
+     }) => {
+@@ -29,7 +128,7 @@ macro_rules! define_ioctl_data {
+         );
+     };
+     (struct $ioctl_ty:ident, $mem_ty:ident {
+-        $field:ident: $ty:ty [array<$el:ty, $counted_by:ident>],
++        $field:ident: $ty:ty [$dir:ident<$el:ty, $counted_by:ident>],
+         $($rest:tt)*
+     } =>
+         ($($ioctl_fields:tt)*),
+@@ -39,13 +138,13 @@ macro_rules! define_ioctl_data {
+         define_ioctl_data!(
+             struct $ioctl_ty, $mem_ty { $($rest)* } =>
+                 ($($ioctl_fields)* $field: $ty,),
+-                ($($counted_fields)* $field: $ty [array<$el, $counted_by>],),
++                ($($counted_fields)* $field: $ty [$dir<$el, $counted_by>],),
+                 ($($noncounted_fields)*)
+         );
+     };
+     (struct $ioctl_ty:ident, $mem_ty:ident {} =>
+         ($($ioctl_field:ident: $ioctl_field_ty:ty,)*),
+-        ($($counted_field:ident: $counted_ty:ty [array<$el:ty, $counted_by:ident>],)*),
++        ($($counted_field:ident: $counted_ty:ty [$dir:ident<$el:ty, $counted_by:ident>],)*),
+         ($($noncounted_field:ident: $noncounted_ty:ty,)*)
+     ) => {
+         // FIXME check ioctl_ty doesn't have padding
+@@ -78,18 +177,7 @@ macro_rules! define_ioctl_data {
+                 });
+                 $(
+                     let size = self.$counted_by as usize * size_of::<$el>();
+-                    if self.$counted_field as usize != 0 {
+-                        let $counted_field = unsafe {
+-                            #[allow(clippy::ptr_cast_constness)]
+-                            // can't use expect with reason because lint doesn't trigger on all arches
+-                            // can't use cfg as applying lint on riscv64/aarch64 fails as self.$counted_field is u64
+-                            slice::from_raw_parts(self.$counted_field as *const u8, size)
+-                        };
+-                        data.extend_from_slice(&$counted_field);
+-                    } else {
+-                        data.extend(iter::repeat(0u8).take(size));
+-                    };
+-
++                    define_ioctl_data!(@write $dir, data, self.$counted_field, size);
+                 )*
+                 data
+             }
+@@ -102,11 +190,7 @@ macro_rules! define_ioctl_data {
+                 $(
+                     let size = self.$counted_by as usize * size_of::<$el>();
+                     let $counted_field = buf.split_off(..size).unwrap();
+-                    if self.$counted_field as usize != 0 {
+-                        unsafe {
+-                            slice::from_raw_parts_mut(self.$counted_field as *mut u8, size).copy_from_slice($counted_field);
+-                        }
+-                    }
++                    define_ioctl_data!(@read $dir, self.$counted_field, $counted_field, size);
+                 )*
+ 
+                 assert!(buf.is_empty());
+@@ -117,6 +201,23 @@ macro_rules! define_ioctl_data {
          }
  
          impl<'a> $mem_ty<'a> {
 +            pub const LAYOUT: $crate::WireLayout = $crate::WireLayout {
 +                fixed_size: size_of::<${concat(__, $mem_ty, Noncounted)}>(),
-+                fixed: &[$((
-+                    stringify!($noncounted_field),
-+                    ::core::mem::offset_of!(${concat(__, $mem_ty, Noncounted)}, $noncounted_field),
-+                    size_of::<$noncounted_ty>(),
-+                ),)*],
-+                arrays: &[$((
-+                    stringify!($counted_field),
-+                    stringify!($counted_by),
-+                    stringify!($el),
-+                    size_of::<$el>(),
-+                ),)*],
++                fixed: &[$($crate::WireField {
++                    name: stringify!($noncounted_field),
++                    offset: ::core::mem::offset_of!(${concat(__, $mem_ty, Noncounted)}, $noncounted_field),
++                    size: size_of::<$noncounted_ty>(),
++                },)*],
++                arrays: &[$($crate::WireArray {
++                    pointer: stringify!($counted_field),
++                    count: stringify!($counted_by),
++                    element: stringify!($el),
++                    size: size_of::<$el>(),
++                    align: align_of::<$el>(),
++                    direction: define_ioctl_data!(@direction $dir),
++                },)*],
 +            };
 +
              pub fn with(
                  mut buf: &'a mut [u8],
                  f: impl FnOnce($mem_ty<'a>) -> syscall::Result<usize>,
 diff --git a/redox-ioctl/src/lib.rs b/redox-ioctl/src/lib.rs
-index 0746aba7..744090f4 100644
+index 0746aba7..ef092cdc 100644
 --- a/redox-ioctl/src/lib.rs
 +++ b/redox-ioctl/src/lib.rs
 @@ -6,6 +6,7 @@ extern crate alloc;
@@ -71,29 +205,36 @@ index 0746aba7..744090f4 100644
  #[macro_use]
  mod ioctl_data;
 -pub use ioctl_data::IoctlData;
-+pub use ioctl_data::{IoctlData, WireLayout};
++pub use ioctl_data::{IoctlData, WireArray, WireDirection, WireField, WireLayout};
  
  pub mod drm;
 +pub mod virtgpu;
 diff --git a/redox-ioctl/src/virtgpu.rs b/redox-ioctl/src/virtgpu.rs
 new file mode 100644
-index 00000000..e9d54c75
+index 00000000..18f83488
 --- /dev/null
 +++ b/redox-ioctl/src/virtgpu.rs
-@@ -0,0 +1,476 @@
-+//! The DRM requests of virtio-gpu.
+@@ -0,0 +1,621 @@
++//! The DRM requests of virtio-gpu, and DRM's own close request, which Mesa's
++//! Venus driver makes on the same device.
 +//!
 +//! Numbers, flags and structures are those of Linux's
 +//! `include/uapi/drm/virtgpu_drm.h` at the tag v7.3 (commit
 +//! c03c1a14507dfaf8b856c2608f9ac216021fc222), whose notice follows. A program
 +//! compiled against that header hands these structures to `ioctl` as they
 +//! are, so every size, offset and number here stays equal to the header's.
-+//! FerrionOS's `scripts/virtgpu-layout-check.py` compares them.
++//! The close request and its structure are those of `include/uapi/drm/drm.h`
++//! at the same commit, under the same MIT terms. FerrionOS's
++//! `scripts/virtgpu-layout-check.py` compares them.
 +//!
 +//! The payload types, `VirtgpuMap` and the others, are what the driver
 +//! receives for a request: the structure without its pointers, then each
-+//! array a pointer names. Transfers, waits and the older resource creation
-+//! have structures only: no payload is defined for them.
++//! array a pointer names. An array the request only reads is `in_array`,
++//! sent and not copied back; one it only writes is `out_array`, sent as
++//! zeros. Arrays are listed from the most strictly aligned down, so each
++//! starts aligned whatever the counts, which the assertion at the end checks.
++//! Transfers, waits and the older resource creation have structures only:
++//! no payload is defined for them.
 +//!
 +//! Copyright 2013 Red Hat
 +//! All Rights Reserved.
@@ -126,7 +267,7 @@ index 00000000..e9d54c75
 +    slice,
 +};
 +
-+use crate::{IoctlData, WireLayout};
++use crate::{IoctlData, WireField, WireLayout};
 +
 +/// `DRM_COMMAND_BASE` of Linux's `drm.h`: driver requests start here.
 +pub const DRM_COMMAND_BASE: u64 = 0x40;
@@ -359,6 +500,20 @@ index 00000000..e9d54c75
 +    (3 << 30) | ((size as u64) << 16) | (0x64 << 8) | nr
 +}
 +
++/// `DRM_IOW(nr, T)` of Linux's `drm.h`: `_IOC(_IOC_WRITE, 'd', nr, size)`.
++pub const fn drm_iow(nr: u64, size: usize) -> u64 {
++    assert!(nr < 1 << 8 && size < 1 << 14);
++    (1 << 30) | ((size as u64) << 16) | (0x64 << 8) | nr
++}
++
++pub use drm_sys::drm_gem_close;
++
++/// `DRM_IOCTL_GEM_CLOSE` of Linux's `drm.h`: drops a buffer number. Its
++/// function number is not one of the driver's own, which start at
++/// `DRM_COMMAND_BASE`.
++pub const GEM_CLOSE: u64 = 0x09;
++pub const DRM_IOCTL_GEM_CLOSE: u64 = drm_iow(GEM_CLOSE, size_of::<drm_gem_close>());
++
 +pub const DRM_IOCTL_VIRTGPU_MAP: u64 = drm_iowr(MAP, size_of::<drm_virtgpu_map>());
 +pub const DRM_IOCTL_VIRTGPU_EXECBUFFER: u64 =
 +    drm_iowr(EXECBUFFER, size_of::<drm_virtgpu_execbuffer>());
@@ -393,23 +548,26 @@ index 00000000..e9d54c75
 +}
 +
 +// The arrays assume `syncobj_stride` equals the size of
-+// `drm_virtgpu_execbuffer_syncobj`; the caller of `write` checks it first.
++// `drm_virtgpu_execbuffer_syncobj` whenever `num_in_syncobjs` or
++// `num_out_syncobjs` is nonzero; the caller of `write` checks it first. With
++// both counts zero the stride is not read, as in Linux: Venus sends 0 then.
 +// `fence_fd` carries a fence's number in the handle's table, never a
-+// descriptor of the calling process.
++// descriptor of the calling process. The sync objects come first and the
++// command last, so that a command of any length leaves the others aligned.
 +define_ioctl_data! {
 +    struct drm_virtgpu_execbuffer, VirtgpuExecbuffer {
 +        flags: u32,
 +        size: u32,
-+        command: u64 [array<u8, size>],
-+        bo_handles: u64 [array<u32, num_bo_handles>],
 +        num_bo_handles: u32,
 +        fence_fd: i32,
 +        ring_idx: u32,
 +        syncobj_stride: u32,
 +        num_in_syncobjs: u32,
 +        num_out_syncobjs: u32,
-+        in_syncobjs: u64 [array<drm_virtgpu_execbuffer_syncobj, num_in_syncobjs>],
-+        out_syncobjs: u64 [array<drm_virtgpu_execbuffer_syncobj, num_out_syncobjs>],
++        in_syncobjs: u64 [in_array<drm_virtgpu_execbuffer_syncobj, num_in_syncobjs>],
++        out_syncobjs: u64 [in_array<drm_virtgpu_execbuffer_syncobj, num_out_syncobjs>],
++        bo_handles: u64 [in_array<u32, num_bo_handles>],
++        command: u64 [in_array<u8, size>],
 +    }
 +}
 +
@@ -426,7 +584,7 @@ index 00000000..e9d54c75
 +    struct drm_virtgpu_get_caps, VirtgpuGetCaps {
 +        cap_set_id: u32,
 +        cap_set_ver: u32,
-+        addr: u64 [array<u8, size>],
++        addr: u64 [out_array<u8, size>],
 +        size: u32,
 +        pad: u32,
 +    }
@@ -441,7 +599,7 @@ index 00000000..e9d54c75
 +        size: u64,
 +        pad: u32,
 +        cmd_size: u32,
-+        cmd: u64 [array<u8, cmd_size>],
++        cmd: u64 [in_array<u8, cmd_size>],
 +        blob_id: u64,
 +        blob_hints: u32,
 +        pad2: u32,
@@ -452,7 +610,7 @@ index 00000000..e9d54c75
 +    struct drm_virtgpu_context_init, VirtgpuContextInit {
 +        num_params: u32,
 +        pad: u32,
-+        ctx_set_params: u64 [array<drm_virtgpu_context_set_param, num_params>],
++        ctx_set_params: u64 [in_array<drm_virtgpu_context_set_param, num_params>],
 +    }
 +}
 +
@@ -495,8 +653,16 @@ index 00000000..e9d54c75
 +    pub const LAYOUT: WireLayout = WireLayout {
 +        fixed_size: size_of::<__VirtgpuGetparamNoncounted>(),
 +        fixed: &[
-+            ("param", offset_of!(__VirtgpuGetparamNoncounted, param), 8),
-+            ("value", offset_of!(__VirtgpuGetparamNoncounted, value), 8),
++            WireField {
++                name: "param",
++                offset: offset_of!(__VirtgpuGetparamNoncounted, param),
++                size: 8,
++            },
++            WireField {
++                name: "value",
++                offset: offset_of!(__VirtgpuGetparamNoncounted, value),
++                size: 8,
++            },
 +        ],
 +        arrays: &[],
 +    };
@@ -522,8 +688,15 @@ index 00000000..e9d54c75
 +    }
 +}
 +
++define_ioctl_data! {
++    struct drm_gem_close, GemClose {
++        handle: u32,
++        pad: u32,
++    }
++}
++
 +/// Each request that has a payload: its function number, the name of its
-+/// structure in Linux's header, and the payload's layout.
++/// structure in Linux's headers, and the payload's layout.
 +pub const PAYLOADS: &[(u64, &str, &WireLayout)] = &[
 +    (MAP, "drm_virtgpu_map", &VirtgpuMap::LAYOUT),
 +    (
@@ -548,12 +721,118 @@ index 00000000..e9d54c75
 +        "drm_virtgpu_context_init",
 +        &VirtgpuContextInit::LAYOUT,
 +    ),
++    (GEM_CLOSE, "drm_gem_close", &GemClose::LAYOUT),
 +];
 +
 +const _: () = {
 +    let mut i = 0;
 +    while i < PAYLOADS.len() {
-+        assert!(PAYLOADS[i].2.is_packed());
++        assert!(PAYLOADS[i].2.is_packed() && PAYLOADS[i].2.is_aligned());
 +        i += 1;
 +    }
 +};
++
++#[cfg(test)]
++mod tests {
++    use alloc::vec;
++
++    use super::*;
++
++    /// A payload buffer as the scheme receives one: aligned to 8 bytes.
++    fn aligned(wire: &[u8]) -> Vec<u64> {
++        let mut backing = vec![0u64; wire.len().div_ceil(8)];
++        unsafe { slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), wire.len()) }
++            .copy_from_slice(wire);
++        backing
++    }
++
++    // In read-only memory: copying anything back into it would fault.
++    static COMMAND: [u8; 12] = [1; 12];
++
++    #[test]
++    fn submission_arrays_are_aligned_and_sent_one_way() {
++        let out = [drm_virtgpu_execbuffer_syncobj {
++            handle: 7,
++            flags: 0,
++            point: 9,
++        }];
++        let mut exbuf = drm_virtgpu_execbuffer {
++            flags: VIRTGPU_EXECBUF_RING_IDX,
++            size: 12,
++            command: COMMAND.as_ptr() as u64,
++            syncobj_stride: 16,
++            num_out_syncobjs: 1,
++            out_syncobjs: out.as_ptr() as u64,
++            ..Default::default()
++        };
++        let mut wire = unsafe { exbuf.write() };
++        assert_eq!(wire.len(), 32 + 16 + 12);
++        assert_eq!(wire[48..], COMMAND);
++
++        let mut backing = aligned(&wire);
++        let len = wire.len();
++        let payload = unsafe { slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), len) };
++        VirtgpuExecbuffer::with(payload, |mut data| {
++            assert_eq!(data.out_syncobjs()[0].handle, 7);
++            assert_eq!(data.out_syncobjs()[0].point, 9);
++            assert_eq!(data.command(), &COMMAND[..]);
++            data.set_fence_fd(5);
++            Ok(0)
++        })
++        .unwrap();
++
++        wire.copy_from_slice(payload);
++        for byte in &mut wire[32..] {
++            *byte = 0xEE;
++        }
++        unsafe { exbuf.read_from(&wire) };
++        assert_eq!(exbuf.fence_fd, 5);
++        assert_eq!(out[0].handle, 7);
++    }
++
++    #[test]
++    fn capset_is_sent_as_zeros_and_copied_back() {
++        let mut capset = [0xAAu8; 160];
++        let mut caps = drm_virtgpu_get_caps {
++            cap_set_id: VIRTGPU_DRM_CAPSET_VENUS,
++            size: 160,
++            addr: capset.as_mut_ptr() as u64,
++            ..Default::default()
++        };
++        let mut wire = unsafe { caps.write() };
++        assert_eq!(wire.len(), 16 + 160);
++        assert!(wire[16..].iter().all(|&byte| byte == 0));
++        wire[16..].fill(0x42);
++        unsafe { caps.read_from(&wire) };
++        assert!(capset.iter().all(|&byte| byte == 0x42));
++    }
++
++    #[test]
++    fn getparam_answer_is_written_through_value() {
++        let mut answer: u64 = 0;
++        let mut param = drm_virtgpu_getparam {
++            param: VIRTGPU_PARAM_HOST_VISIBLE,
++            value: core::ptr::from_mut(&mut answer) as u64,
++        };
++        let mut wire = unsafe { param.write() };
++        VirtgpuGetparam::with(&mut wire, |mut data| {
++            assert_eq!(data.param(), VIRTGPU_PARAM_HOST_VISIBLE);
++            data.set_value(1);
++            Ok(0)
++        })
++        .unwrap();
++        unsafe { param.read_from(&wire) };
++        assert_eq!(answer, 1);
++    }
++
++    #[test]
++    fn short_or_long_payloads_are_refused() {
++        let mut wire = vec![0u8; 8 + 16];
++        wire[..4].copy_from_slice(&2u32.to_ne_bytes());
++        let mut backing = aligned(&wire);
++        let payload =
++            unsafe { slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), wire.len()) };
++        assert!(VirtgpuContextInit::with(payload, |_| Ok(0)).is_err());
++        assert!(VirtgpuGetparam::with(&mut [0u8; 15], |_| Ok(0)).is_err());
++    }
++}
