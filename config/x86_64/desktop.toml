@@ -44,6 +44,13 @@ nsmgr-bounds-probe = {}
 # Run as `user`, it checks that the display driver refuses dumb-buffer mappings and sizes outside
 # a buffer or the driver's limits and keeps working; scripts/vm-test.py graphics-bounds runs it.
 graphics-bounds-probe = {}
+# Run as root (a `user` login may not create a scheme), it checks that a short read from a
+# user-space scheme leaves the rest of the caller's buffer untouched; scripts/vm-test.py
+# scheme-short-read runs it.
+scheme-short-read-probe = {}
+# Run as `user`, it checks that a zero-timeout poll that finds nothing leaves no event
+# subscription behind; scripts/vm-test.py event-poll runs it.
+event-poll-probe = {}
 # Run as `user`, it checks that the network stack refuses calls whose buffers do not fit and
 # keeps working; as root with `mac`, that network drivers refuse reads past their `mac`;
 # scripts/vm-test.py net-calls and net-hardening run it.

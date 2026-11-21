@@ -1,0 +1,10 @@
+[package]
+name = "event-poll-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Checks that a zero-timeout poll that finds nothing leaves no event subscription behind"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
