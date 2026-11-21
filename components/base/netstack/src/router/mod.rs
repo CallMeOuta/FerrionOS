@@ -39,7 +39,7 @@ impl Router {
         }
     }
 
-    pub const MTU: usize = 1486;
+    pub const MTU: usize = 1500;
 
     pub fn can_recv(&self) -> bool {
         let mut can_recv = false;
@@ -64,10 +64,13 @@ impl Router {
                     break;
                 };
 
-                self.rx_buffer
-                    .enqueue(buf.len(), ())
-                    .expect("We checked if it was full")
-                    .copy_from_slice(buf);
+                // Padding at the end of the ring can leave no room for a packet even
+                // when a slot is free, so a full buffer drops the packet here.
+                let Ok(slot) = self.rx_buffer.enqueue(buf.len(), ()) else {
+                    debug!("Dropped incoming packet: receive buffer full");
+                    break;
+                };
+                slot.copy_from_slice(buf);
             }
         }
     }

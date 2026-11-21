@@ -1,9 +1,11 @@
 use std::collections::btree_map::{BTreeMap, Entry};
 
+use crate::random;
+
+/// Ports (or ICMP identifiers) in use, keyed by the port number itself.
 pub struct PortSet {
     from: u16,
-    range: u16,
-    next: u16,
+    to: u16,
     ports: BTreeMap<u16, usize>,
 }
 
@@ -14,28 +16,35 @@ impl PortSet {
         }
         Some(PortSet {
             from,
-            range: to - from + 1,
-            next: 0,
+            to,
             ports: BTreeMap::new(),
         })
     }
 
+    /// Claims a free port in the range, chosen at random: algorithm 1 of RFC 6056,
+    /// section 3.3.1, a random start followed by the next free port.
     pub fn get_port(&mut self) -> Option<u16> {
-        if self.ports.len() >= self.range as usize {
-            return None;
-        }
-
-        let port = loop {
-            if let Entry::Vacant(entry) = self.ports.entry(self.next) {
-                entry.insert(1);
-                let port = self.from + self.next;
-                self.next = self.next.wrapping_add(1);
-                break port;
+        match random::u32() {
+            Ok(start) => self.get_port_from(start),
+            Err(err) => {
+                error!("No local port: cannot read the random scheme: {err}");
+                None
             }
-            self.next = self.next.wrapping_add(1);
-        };
+        }
+    }
 
-        Some(port)
+    fn get_port_from(&mut self, start: u32) -> Option<u16> {
+        let range = u32::from(self.to) - u32::from(self.from) + 1;
+        let mut offset = start % range;
+        for _ in 0..range {
+            let port = u16::try_from(u32::from(self.from) + offset).ok()?;
+            if let Entry::Vacant(entry) = self.ports.entry(port) {
+                entry.insert(1);
+                return Some(port);
+            }
+            offset = (offset + 1) % range;
+        }
+        None
     }
 
     pub fn claim_port(&mut self, port: u16) -> bool {

@@ -8,7 +8,7 @@ use smoltcp::storage::PacketMetadata;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{
     ArpOperation, ArpPacket, ArpRepr, EthernetAddress, EthernetFrame, EthernetProtocol,
-    EthernetRepr, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr,
+    EthernetRepr, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, ETHERNET_HEADER_LEN,
 };
 
 use super::LinkDevice;
@@ -16,6 +16,33 @@ use super::LinkDevice;
 struct Neighbor {
     hardware_address: EthernetAddress,
     expires_at: Instant,
+}
+
+/// The most neighbors the cache holds; senders choose their own addresses, so the
+/// cache must not grow with them.
+const MAX_NEIGHBORS: usize = 256;
+
+/// Remembers `ip`'s hardware address. When the cache is full, expired entries go
+/// first, then the entry closest to expiring.
+fn insert_neighbor(
+    cache: &mut BTreeMap<IpAddress, Neighbor>,
+    ip: IpAddress,
+    neighbor: Neighbor,
+    now: Instant,
+) {
+    if !cache.contains_key(&ip) && cache.len() >= MAX_NEIGHBORS {
+        cache.retain(|_, entry| entry.expires_at >= now);
+        if cache.len() >= MAX_NEIGHBORS {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at)
+                .map(|(ip, _)| *ip);
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+    }
+    cache.insert(ip, neighbor);
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +70,7 @@ pub struct EthernetLink {
     network_file: File,
     hardware_address: Option<EthernetAddress>,
     ip_address: Option<Ipv4Cidr>,
+    oversized_frames: u64,
 }
 
 impl EthernetLink {
@@ -50,6 +78,8 @@ impl EthernetLink {
     const MAX_WAITING_PACKET_COUNT: usize = 10;
     const MTU: usize = 1500;
     const WAITING_PACKET_BUFFER_SIZE: usize = Self::MTU * Self::MAX_WAITING_PACKET_COUNT;
+    /// The Ethernet header and an IP packet of `MTU` bytes.
+    const MAX_FRAME_LEN: usize = ETHERNET_HEADER_LEN + Self::MTU;
 
     const NEIGHBOR_LIVE_TIME: Duration = Duration::from_secs(60);
     const ARP_SILENCE_TIME: Duration = Duration::from_secs(1);
@@ -66,10 +96,13 @@ impl EthernetLink {
             waiting_packets,
             hardware_address: None,
             ip_address: None,
-            input_buffer: vec![0u8; Self::MTU],
+            // One byte more than a whole frame, so a driver that cuts a longer frame to
+            // the buffer is seen doing it.
+            input_buffer: vec![0u8; Self::MAX_FRAME_LEN + 1],
             output_buffer: Vec::with_capacity(Self::MTU),
             arp_state: Default::default(),
             neighbor_cache: Default::default(),
+            oversized_frames: 0,
         }
     }
 
@@ -150,12 +183,14 @@ impl EthernetLink {
                     return;
                 }
 
-                self.neighbor_cache.insert(
+                insert_neighbor(
+                    &mut self.neighbor_cache,
                     IpAddress::Ipv4(source_protocol_addr),
                     Neighbor {
                         hardware_address: source_hardware_addr,
                         expires_at: now + Self::NEIGHBOR_LIVE_TIME,
                     },
+                    now,
                 );
 
                 if let ArpOperation::Request = operation {
@@ -347,17 +382,32 @@ impl LinkDevice for EthernetLink {
 
         let mut input_buffer = std::mem::take(&mut self.input_buffer);
         loop {
-            if let Err(e) = self.network_file.read(&mut input_buffer) {
-                if e.kind() != ErrorKind::WouldBlock {
-                    error!("Failed to read ethernet device on link {}", self.name);
-                } else {
-                    // No packet to read but we check if we have arp to send
-                    self.send_arp(now);
+            let len = match self.network_file.read(&mut input_buffer) {
+                Ok(len) if len > 0 => len,
+                result => {
+                    if result.is_err_and(|e| e.kind() != ErrorKind::WouldBlock) {
+                        error!("Failed to read ethernet device on link {}", self.name);
+                    } else {
+                        // No packet to read but we check if we have arp to send
+                        self.send_arp(now);
+                    }
+                    self.input_buffer = input_buffer;
+                    return None;
                 }
-                self.input_buffer = input_buffer;
-                return None;
+            };
+            if len > Self::MAX_FRAME_LEN {
+                self.oversized_frames += 1;
+                if self.oversized_frames.is_power_of_two() {
+                    warn!(
+                        "Dropped {} incoming frames on {} larger than {} bytes",
+                        self.oversized_frames,
+                        self.name,
+                        Self::MAX_FRAME_LEN
+                    );
+                }
+                continue;
             }
-            let packet = EthernetFrame::new_unchecked(&input_buffer[..]);
+            let packet = EthernetFrame::new_unchecked(&input_buffer[..len]);
             let Ok(repr) = EthernetRepr::parse(&packet) else {
                 debug!("Dropped incomming frame on {} (Malformed)", self.name);
                 continue;
@@ -375,7 +425,7 @@ impl LinkDevice for EthernetLink {
             match repr.ethertype {
                 EthernetProtocol::Ipv4 => {
                     self.input_buffer = input_buffer;
-                    return Some(EthernetFrame::new_unchecked(&self.input_buffer[..]).payload());
+                    return Some(EthernetFrame::new_unchecked(&self.input_buffer[..len]).payload());
                 }
                 EthernetProtocol::Arp => self.process_arp(packet.payload(), now),
                 _ => continue,

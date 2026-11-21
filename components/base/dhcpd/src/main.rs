@@ -1,8 +1,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, UdpSocket};
-use std::time::Duration;
-use std::{env, process, time};
+use std::time::{Duration, Instant};
+use std::{env, process};
 
 use dhcp::Dhcp;
 
@@ -106,6 +106,165 @@ fn first_dns_server(data: &[u8]) -> Option<[u8; 4]> {
     Some([data[0], data[1], data[2], data[3]])
 }
 
+const BOOTREQUEST: u8 = 1;
+const BOOTREPLY: u8 = 2;
+const DHCPDISCOVER: u8 = 1;
+const DHCPOFFER: u8 = 2;
+const DHCPREQUEST: u8 = 3;
+const DHCPACK: u8 = 5;
+const DHCPNAK: u8 = 6;
+const MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
+/// The fixed fields and the magic cookie; the options follow.
+const OPTIONS_START: usize = 240;
+/// Ask the server to broadcast its replies: the stack has no address to receive a unicast one.
+const FLAG_BROADCAST: u16 = 0x8000;
+
+/// A server's reply that answers this client's request.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Reply {
+    message_type: u8,
+    yiaddr: [u8; 4],
+    subnet: Option<[u8; 4]>,
+    router: Option<[u8; 4]>,
+    dns: Option<[u8; 4]>,
+    server_id: Option<[u8; 4]>,
+}
+
+/// Parses `data` as a reply to the request with transaction ID `xid` from the client
+/// with hardware address `mac`. Anything else is `None`: another client's reply, a
+/// request, or a message whose fields or options are malformed.
+fn parse_reply(data: &[u8], xid: [u8; 4], mac: [u8; 6]) -> Option<Reply> {
+    if data.len() < OPTIONS_START
+        || data[0] != BOOTREPLY
+        || data[1] != 1
+        || data[2] != 6
+        || data[4..8] != xid
+        || data[28..34] != mac
+        || data[236..240] != MAGIC_COOKIE
+    {
+        return None;
+    }
+
+    let mut reply = Reply {
+        yiaddr: data[16..20].try_into().ok()?,
+        ..Reply::default()
+    };
+    let mut message_type = None;
+    let mut options = &data[OPTIONS_START..];
+    loop {
+        match options {
+            [] | [255, ..] => break,
+            [0, rest @ ..] => options = rest,
+            [code, len, rest @ ..] => {
+                let value = rest.get(..usize::from(*len))?;
+                options = &rest[value.len()..];
+                // A known option of the wrong length makes the whole message malformed.
+                match code {
+                    1 => reply.subnet = reply.subnet.or(Some(value.try_into().ok()?)),
+                    // Options 3 and 6 list addresses in preference order.
+                    3 => reply.router = reply.router.or(Some(first_dns_server(value)?)),
+                    6 => reply.dns = reply.dns.or(Some(first_dns_server(value)?)),
+                    53 => match value {
+                        [kind] => message_type = message_type.or(Some(*kind)),
+                        _ => return None,
+                    },
+                    54 => reply.server_id = reply.server_id.or(Some(value.try_into().ok()?)),
+                    _ => {}
+                }
+            }
+            [_] => return None,
+        }
+    }
+    reply.message_type = message_type?;
+    Some(reply)
+}
+
+/// The offer to take: an offer of an address.
+fn accept_offer(reply: Reply) -> Option<Reply> {
+    (reply.message_type == DHCPOFFER && reply.yiaddr != [0; 4]).then_some(reply)
+}
+
+/// The answer to the request for `offer`: an acknowledgment of the offered address
+/// or a refusal, from the server that made the offer.
+fn accept_answer(reply: Reply, offer: &Reply) -> Option<Reply> {
+    if offer.server_id.is_some() && reply.server_id != offer.server_id {
+        return None;
+    }
+    match reply.message_type {
+        DHCPACK if reply.yiaddr == offer.yiaddr => Some(reply),
+        DHCPNAK => Some(reply),
+        _ => None,
+    }
+}
+
+fn random_xid() -> Result<[u8; 4], String> {
+    let mut xid = [0; 4];
+    try_fmt!(
+        File::open("/scheme/rand").and_then(|mut rand| rand.read_exact(&mut xid)),
+        "failed to read /scheme/rand"
+    );
+    Ok(xid)
+}
+
+fn message(xid: [u8; 4], mac: MacAddr, options: &[u8]) -> Dhcp {
+    let mut chaddr = [0; 16];
+    chaddr[..6].copy_from_slice(&mac.bytes);
+    let mut message = Dhcp {
+        op: BOOTREQUEST,
+        htype: 1,
+        hlen: 6,
+        hops: 0,
+        tid: u32::from_ne_bytes(xid),
+        secs: 0,
+        flags: FLAG_BROADCAST.to_be(),
+        ciaddr: [0, 0, 0, 0],
+        yiaddr: [0, 0, 0, 0],
+        siaddr: [0, 0, 0, 0],
+        giaddr: [0, 0, 0, 0],
+        chaddr,
+        sname: [0; 64],
+        file: [0; 128],
+        magic: u32::from_ne_bytes(MAGIC_COOKIE),
+        options: [0; 308],
+    };
+    message.options[..options.len()].copy_from_slice(options);
+    message
+}
+
+fn send(socket: &UdpSocket, message: &Dhcp) -> Result<(), String> {
+    let data = unsafe {
+        std::slice::from_raw_parts((message as *const Dhcp) as *const u8, size_of::<Dhcp>())
+    };
+    try_fmt!(socket.send(data), "failed to send");
+    Ok(())
+}
+
+/// Waits until `deadline` for a datagram that `accept` takes, and ignores the others.
+fn receive(
+    socket: &UdpSocket,
+    deadline: Instant,
+    verbose: bool,
+    accept: impl Fn(&[u8]) -> Option<Reply>,
+) -> Result<Reply, String> {
+    let mut data = vec![0; 65536];
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or("timed out")?;
+        try_fmt!(
+            socket.set_read_timeout(Some(remaining)),
+            "failed to set read timeout"
+        );
+        let len = try_fmt!(socket.recv(&mut data), "failed to receive");
+        match accept(&data[..len]) {
+            Some(reply) => return Ok(reply),
+            None if verbose => println!("DHCP: Ignored a datagram of {len} bytes"),
+            None => {}
+        }
+    }
+}
+
 fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
     let current_mac = MacAddr::from_str(get_iface_cfg_value(iface, "mac")?.trim());
 
@@ -123,11 +282,7 @@ fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
         );
     }
 
-    let tid = try_fmt!(
-        time::SystemTime::now().duration_since(time::UNIX_EPOCH),
-        "failed to get time"
-    )
-    .subsec_nanos();
+    let xid = random_xid()?;
 
     let socket = try_fmt!(UdpSocket::bind(("0.0.0.0", 68)), "failed to bind udp");
     try_fmt!(
@@ -135,309 +290,132 @@ fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
         "failed to connect udp"
     );
     try_fmt!(
-        socket.set_read_timeout(Some(Duration::new(30, 0))),
-        "failed to set read timeout"
-    );
-    try_fmt!(
         socket.set_write_timeout(Some(Duration::new(30, 0))),
         "failed to set write timeout"
     );
+    let deadline = Instant::now() + Duration::new(30, 0);
 
-    {
-        let mut discover = Dhcp {
-            op: 1,
-            htype: 1,
-            hlen: 6,
-            hops: 0,
-            tid,
-            secs: 0,
-            flags: 0x8000u16.to_be(),
-            ciaddr: [0, 0, 0, 0],
-            yiaddr: [0, 0, 0, 0],
-            siaddr: [0, 0, 0, 0],
-            giaddr: [0, 0, 0, 0],
-            chaddr: [
-                current_mac.bytes[0],
-                current_mac.bytes[1],
-                current_mac.bytes[2],
-                current_mac.bytes[3],
-                current_mac.bytes[4],
-                current_mac.bytes[5],
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-            ],
-            sname: [0; 64],
-            file: [0; 128],
-            magic: 0x63825363u32.to_be(),
-            options: [0; 308],
-        };
-
-        for (s, d) in [
-            // DHCP Message Type (Discover)
-            53, 1, 1, // End
-            255,
-        ]
-        .iter()
-        .zip(discover.options.iter_mut())
-        {
-            *d = *s;
-        }
-
-        let discover_data = unsafe {
-            std::slice::from_raw_parts((&discover as *const Dhcp) as *const u8, size_of::<Dhcp>())
-        };
-
-        let _sent = try_fmt!(socket.send(discover_data), "failed to send discover");
-
-        if verbose {
-            println!("DHCP: Sent Discover");
-        }
-    }
-
-    let mut offer_data = [0; 65536];
-    try_fmt!(socket.recv(&mut offer_data), "failed to receive offer");
-    let offer = unsafe { &*(offer_data.as_ptr() as *const Dhcp) };
+    send(
+        &socket,
+        &message(xid, current_mac, &[53, 1, DHCPDISCOVER, 255]),
+    )
+    .map_err(|err| format!("discover: {err}"))?;
     if verbose {
-        println!(
-            "DHCP: Offer IP: {:?}, Server IP: {:?}",
-            offer.yiaddr, offer.siaddr
-        );
+        println!("DHCP: Sent Discover");
     }
 
-    let mut subnet_option = None;
-    let mut router_option = None;
-    let mut dns_option = None;
-    let mut server_id_option = None;
-    {
-        let mut options = offer.options.iter();
-        while let Some(option) = options.next() {
-            match *option {
-                0 => (),
-                255 => break,
-                _ => {
-                    if let Some(len) = options.next()
-                        && *len as usize <= options.as_slice().len()
-                    {
-                        let data = &options.as_slice()[..*len as usize];
-                        for _data_i in 0..*len {
-                            options.next();
-                        }
-                        match *option {
-                            1 => {
-                                if verbose {
-                                    println!("DHCP: Subnet Mask: {data:?}");
-                                }
-                                if data.len() == 4 && subnet_option.is_none() {
-                                    subnet_option = Some(Vec::from(data));
-                                }
-                            }
-                            3 => {
-                                if verbose {
-                                    println!("DHCP: Router: {data:?}");
-                                }
-                                if data.len() == 4 && router_option.is_none() {
-                                    router_option = Some(Vec::from(data));
-                                }
-                            }
-                            6 => {
-                                if verbose {
-                                    println!("DHCP: Domain Name Server: {data:?}");
-                                }
-                                if dns_option.is_none() {
-                                    dns_option = first_dns_server(data);
-                                }
-                            }
-                            51 => {
-                                if verbose {
-                                    println!("DHCP: Lease Time: {data:?}");
-                                }
-                            }
-                            53 => {
-                                if verbose {
-                                    println!("DHCP: Message Type: {data:?}");
-                                }
-                            }
-                            54 => {
-                                if verbose {
-                                    println!("DHCP: Server ID: {data:?}");
-                                }
-                                if data.len() == 4 {
-                                    // Store the server ID
-                                    server_id_option = Some([data[0], data[1], data[2], data[3]]);
-                                }
-                            }
-                            _ => {
-                                if verbose {
-                                    println!("DHCP: {option}: {data:?}");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mask_len = if let Some(subnet) = subnet_option {
-            let mut subnet: u32 = u32::from(subnet[0]) << 24
-                | u32::from(subnet[1]) << 16
-                | u32::from(subnet[2]) << 8
-                | u32::from(subnet[3]);
-            subnet = !subnet;
-            subnet.leading_zeros()
-        } else {
-            println!("DHCP: No subnet mask");
-            0
-        };
-
-        let new_ips = format!(
-            "{}.{}.{}.{}/{}\n",
-            offer.yiaddr[0], offer.yiaddr[1], offer.yiaddr[2], offer.yiaddr[3], mask_len
-        );
-        try_fmt!(
-            set_iface_cfg_value(iface, "addr/set", &new_ips),
-            "failed to set ip"
-        );
-
-        if verbose {
-            let new_ip = try_fmt!(get_iface_cfg_value(iface, "addr/list"), "failed to get ip");
-            println!("DHCP: New IP: {}", new_ip.trim());
-        }
-
-        if let Some(router) = router_option {
-            let default_route = format!(
-                "default via {}.{}.{}.{}",
-                router[0], router[1], router[2], router[3]
-            );
-
-            try_fmt!(
-                set_cfg_value("route/add", &default_route),
-                "failed to set default route"
-            );
-
-            if verbose {
-                let new_router = try_fmt!(get_cfg_value("route/list"), "failed to get ip router");
-                println!("DHCP: New Router: {}", new_router.trim());
-            }
-        } else {
-            println!("DHCP: No router");
-        }
-
-        let dns = dns_option.unwrap_or([9, 9, 9, 9]);
-        let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
-
-        try_fmt!(
-            set_cfg_value("resolv/nameserver", &nameserver),
-            "failed to set name server"
-        );
-        // User namespaces cannot open netcfg. Publish the same server through
-        // the resolver's existing, world-readable configuration file.
-        try_fmt!(
-            std::fs::write("/etc/net/dns", &nameserver),
-            "failed to publish name server"
-        );
-
-        if verbose {
-            println!("DHCP: New DNS: {nameserver}");
-        }
+    let offer = receive(&socket, deadline, verbose, |data| {
+        parse_reply(data, xid, current_mac.bytes).and_then(accept_offer)
+    })
+    .map_err(|err| format!("offer: {err}"))?;
+    if verbose {
+        println!("DHCP: Offer: {offer:?}");
     }
 
-    {
-        let mut request = Dhcp {
-            op: 1,
-            htype: 1,
-            hlen: 6,
-            hops: 0,
-            tid,
-            secs: 0,
-            flags: 0,
-            ciaddr: [0; 4],
-            yiaddr: [0; 4],
-            siaddr: [0; 4],
-            giaddr: [0; 4],
-            chaddr: [
-                current_mac.bytes[0],
-                current_mac.bytes[1],
-                current_mac.bytes[2],
-                current_mac.bytes[3],
-                current_mac.bytes[4],
-                current_mac.bytes[5],
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
+    // If the offer named no server, use "0.0.0.0"
+    let server_id = offer.server_id.unwrap_or([0, 0, 0, 0]);
+    let [a, b, c, d] = offer.yiaddr;
+    let [s0, s1, s2, s3] = server_id;
+    send(
+        &socket,
+        &message(
+            xid,
+            current_mac,
+            &[
+                // DHCP Message Type (Request)
+                53,
+                1,
+                DHCPREQUEST,
+                // Requested IP Address
+                50,
+                4,
+                a,
+                b,
+                c,
+                d,
+                // Server Identifier - use Option 54 from the Offer
+                54,
+                4,
+                s0,
+                s1,
+                s2,
+                s3,
+                // End
+                255,
             ],
-            sname: [0; 64],
-            file: [0; 128],
-            magic: 0x63825363u32.to_be(),
-            options: [0; 308],
-        };
-
-        // If the server_id_option was None, use "0.0.0.0"
-        let server_id = server_id_option.unwrap_or([0, 0, 0, 0]);
-
-        for (s, d) in [
-            // DHCP Message Type (Request)
-            53,
-            1,
-            3,
-            // Requested IP Address
-            50,
-            4,
-            offer.yiaddr[0],
-            offer.yiaddr[1],
-            offer.yiaddr[2],
-            offer.yiaddr[3],
-            // Server Identifier - use Option 54 from the Offer
-            54,
-            4,
-            server_id[0],
-            server_id[1],
-            server_id[2],
-            server_id[3],
-            // End
-            255,
-        ]
-        .iter()
-        .zip(request.options.iter_mut())
-        {
-            *d = *s;
-        }
-
-        let request_data = unsafe {
-            std::slice::from_raw_parts((&request as *const Dhcp) as *const u8, size_of::<Dhcp>())
-        };
-
-        let _sent = try_fmt!(socket.send(request_data), "failed to send request");
-
-        if verbose {
-            println!("DHCP: Sent Request");
-        }
+        ),
+    )
+    .map_err(|err| format!("request: {err}"))?;
+    if verbose {
+        println!("DHCP: Sent Request");
     }
 
-    {
-        let mut ack_data = [0; 65536];
-        try_fmt!(socket.recv(&mut ack_data), "failed to receive ack");
-        let ack = unsafe { &*(ack_data.as_ptr() as *const Dhcp) };
+    let ack = receive(&socket, deadline, verbose, |data| {
+        parse_reply(data, xid, current_mac.bytes).and_then(|reply| accept_answer(reply, &offer))
+    })
+    .map_err(|err| format!("ack: {err}"))?;
+    if ack.message_type == DHCPNAK {
+        return Err("the server refused the offered address".to_string());
+    }
+    if verbose {
+        println!("DHCP: Ack: {ack:?}");
+    }
+
+    // The address is configured only once the server has acknowledged it. The
+    // acknowledgment's parameters come first, the offer's fill what it leaves out.
+    let mask_len = if let Some(subnet) = ack.subnet.or(offer.subnet) {
+        (!u32::from_be_bytes(subnet)).leading_zeros()
+    } else {
+        println!("DHCP: No subnet mask");
+        0
+    };
+
+    let new_ips = format!("{a}.{b}.{c}.{d}/{mask_len}\n");
+    try_fmt!(
+        set_iface_cfg_value(iface, "addr/set", &new_ips),
+        "failed to set ip"
+    );
+
+    if verbose {
+        let new_ip = try_fmt!(get_iface_cfg_value(iface, "addr/list"), "failed to get ip");
+        println!("DHCP: New IP: {}", new_ip.trim());
+    }
+
+    if let Some(router) = ack.router.or(offer.router) {
+        let default_route = format!(
+            "default via {}.{}.{}.{}",
+            router[0], router[1], router[2], router[3]
+        );
+
+        try_fmt!(
+            set_cfg_value("route/add", &default_route),
+            "failed to set default route"
+        );
+
         if verbose {
-            println!(
-                "DHCP: Ack IP: {:?}, Server IP: {:?}",
-                ack.yiaddr, ack.siaddr
-            );
+            let new_router = try_fmt!(get_cfg_value("route/list"), "failed to get ip router");
+            println!("DHCP: New Router: {}", new_router.trim());
         }
+    } else {
+        println!("DHCP: No router");
+    }
+
+    let dns = ack.dns.or(offer.dns).unwrap_or([9, 9, 9, 9]);
+    let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+
+    try_fmt!(
+        set_cfg_value("resolv/nameserver", &nameserver),
+        "failed to set name server"
+    );
+    // User namespaces cannot open netcfg. Publish the same server through
+    // the resolver's existing, world-readable configuration file.
+    try_fmt!(
+        std::fs::write("/etc/net/dns", &nameserver),
+        "failed to publish name server"
+    );
+
+    if verbose {
+        println!("DHCP: New DNS: {nameserver}");
     }
 
     Ok(())

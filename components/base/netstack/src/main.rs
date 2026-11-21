@@ -15,6 +15,7 @@ mod error;
 mod link;
 mod logger;
 mod port_set;
+mod random;
 mod router;
 mod scheme;
 
@@ -83,6 +84,8 @@ fn run(daemon: daemon::Daemon) -> Result<()> {
 
     let time_path = format!("/scheme/time/{}", syscall::CLOCK_MONOTONIC);
     let time_fd = Fd::open(&time_path, O_RDWR, 0).context("failed to open /scheme/time")?;
+
+    random::init().context("failed to open /scheme/rand")?;
 
     event::user_data! {
         enum EventSource {

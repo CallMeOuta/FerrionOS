@@ -101,7 +101,10 @@ impl Smolnetd {
             |_timestamp, printer| trace!("{}", printer),
         );
 
-        let config = Config::new(HardwareAddress::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        // The engine draws TCP initial sequence numbers from this seed; its default is 0.
+        config.random_seed = crate::random::u64()
+            .map_err(|err| Error::from_io_error(err, "failed to read /scheme/rand"))?;
         let mut iface = SmoltcpInterface::new(config, &mut network_device, Instant::now());
         iface.update_ip_addrs(|ip_addrs| ip_addrs.extend(protocol_addrs));
         iface
