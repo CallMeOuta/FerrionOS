@@ -64,7 +64,7 @@ The Matrix messages are sent to Discord and vice-versa using a bot, but sometime
 
 ## [GitLab](https://gitlab.redox-os.org/redox-os/redox)
 
-This is the Redox project's GitLab server. FerrionOS has no issue tracker of its own yet.
+This is the Redox project's GitLab server. FerrionOS's own code, issues and pull requests live at [github.com/CallMeOuta/FerrionOS](https://github.com/CallMeOuta/FerrionOS): report a FerrionOS problem there, but never a security weakness, which stays out of public issues.
 
 A slightly more formal way of communication with fellow Redox developers, but a little less quick and convenient like the chat. Submit an issue when you run into problems compiling or testing. Issues can also be used if you would like to discuss a certain topic: be it features, code style, code inconsistencies, minor changes and fixes, etc.
 
