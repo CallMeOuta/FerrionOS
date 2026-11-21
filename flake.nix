@@ -36,9 +36,6 @@
     {
       formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
 
-      # TODO: Create FerrionOS Image as package
-      # TODO: No cross-compile for now, as there is no pkgsCross.aarch64-unknown-redox and so on
-      # TODO: Get rid of make env step: package custom libtool and setup rust toolchain properly
       devShells = forAllSystems (pkgs: {
         # Podman config taken from https://nixos.wiki/wiki/Podman and https://gist.github.com/adisbladis/187204cb772800489ee3dac4acdd9947
         # Provides a script that copies required files to ~/
@@ -65,7 +62,6 @@
                 systemctl --user start podman.socket || true
                 export PODMAN_SYSTEMD_UNIT=podman.socket
               '';
-            # Provides a fake "docker" binary mapping to podman
             dockerCompat = pkgs.runCommand "docker-podman-compat" { } ''
               mkdir -p $out/bin
               ln -s ${pkgs.podman}/bin/podman $out/bin/docker
@@ -73,19 +69,15 @@
           in
           pkgs.mkShell rec {
             buildInputs = with pkgs; [
-              # Podman
               dockerCompat
-              podman # Docker compat
-              runc # Container runtime
-              conmon # Container runtime monitor
-              skopeo # Interact with container registry
-              slirp4netns # User-mode networking for unprivileged namespaces
-              fuse-overlayfs # CoW for images, much faster than default vfs
+              podman
+              runc
+              conmon
+              skopeo
+              slirp4netns
+              fuse-overlayfs
 
-              # with FSTOOLS_IN_PODMAN=1 these are not needed
-              # without it, the installer fails to link FUSE somehow
-              #fuse
-              qemu_kvm # for host arch
+              qemu_kvm
               qemu
             ];
 
@@ -100,7 +92,6 @@
             '';
           };
 
-        #TODO: This isn't tested yet, use at your own risk
         native = (pkgs.mkShell.override { stdenv = pkgs.gcc14Stdenv; }) rec {
           nativeBuildInputs =
             with pkgs;
@@ -154,13 +145,13 @@
 
           buildInputs = with pkgs; [
             (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
-            gmp # relibc
-            mpfr # relibc
-            libmpc # relibc
-            fuse # fuser
-            libpng # netsurf
-            fontconfig # orbutils
-            SDL # prboom
+            gmp
+            mpfr
+            libmpc
+            fuse
+            libpng
+            fontconfig
+            SDL
           ];
 
           hardeningDisable = [ "format" ];

@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 
-# Alternative script for the build system Makefiles
 
-###########################################################################
-#                                                                         #
-# Build the system, with a specified processor type and filesystem config #
-#                                                                         #
-###########################################################################
 
 usage()
 {

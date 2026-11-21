@@ -2,15 +2,10 @@
 /prefix/
 .config
 **/my_*
-# Local settings folder for Jetbrains products (RustRover, IntelliJ, CLion)
 .idea/
-# Local settings folder for Visual Studio Professional
 .vs/
-# Local settings folder for vscode
 .vscode/
-# Local settings folder for the devcontainer extension that most IDEs support.
 .devcontainer/
-# Cookbook
 /repo
 /web
 /cookbook.toml
@@ -23,9 +18,7 @@ source.tar
 source.tar.tmp
 target
 wget-log
-# Roadmaps: kept on the maintainer's machine, never committed
 /plans/
-# Output of `mdbook build book`
 /book/book/
 # Local issue tracker (docs/agents/issue-tracker.md): kept on the maintainer's machine, never committed
 /.scratch/

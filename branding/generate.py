@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-# Builds every derived file of the FerrionOS identity from its three sources:
-#   mark.svg           the mark on its grid of 4 by 7 units
-#   wordmark.svg       the name, outlined
-#   color.tokens.json  ground and ink
-# The outputs are the files main() writes under this directory. The text ones
-# say in their first lines that they are generated. orbdata/, book/ and github/
-# hold the images for the package, the book and the project page, each at the
-# path or under the name its user expects.
-# Run it after changing a source:
-#   python3 branding/generate.py
-# Python standard library only, plus three programs on PATH: rsvg-convert
-# (librsvg) for the PNG files, magick (ImageMagick) for the JPEG and optipng
-# for the two PNG files that are uploaded to the project page.
 
 import json
 import re
@@ -26,37 +13,27 @@ HERE = Path(__file__).resolve().parent
 SVG = "{http://www.w3.org/2000/svg}"
 PROGRAMS = ("rsvg-convert", "magick", "optipng")
 
-# The mark above the name, in pixels at 16 pixels per unit.
 UNIT = 16
-NAME_CAP_HEIGHT = 24  # 1.5 units
-MARK_TO_NAME = 32  # 2 units, from the foot of the mark to the cap line of the name
-NAME_INSET = 4  # a quarter unit, from the left edge of the lockup to the first stem
-LOCKUP_WIDTH = 160  # 10 units
-LOCKUP_HEIGHT = 176  # 11 units
+NAME_CAP_HEIGHT = 24
+MARK_TO_NAME = 32
+NAME_INSET = 4
+LOCKUP_WIDTH = 160
+LOCKUP_HEIGHT = 176
 
-# The login background and the wallpaper are the size of the reference screen:
-# orblogin and the wallpaper program scale an image to cover the screen, and
-# leave one of the screen's own size as it is. orblogin draws its box,
-# LOGIN_BOX_HEIGHT pixels high, on the center.
 SCREEN = (1280, 800)
 LOGIN_BOX_HEIGHT = 164
-NAME_TO_BOX = 64  # 4 units, from the baseline of the name to the top of the box
+NAME_TO_BOX = 64
 
-# Square slots: the side, then the pixels per unit of the mark in it.
-START_ICON = (48, 6)  # the launcher's start button, on nothing
-FAVICON = (32, 4)  # the book's favicon, on a ground tile
-AVATAR = (500, 40)  # an account's or an organization's picture, on the ground
+START_ICON = (48, 6)
+FAVICON = (32, 4)
+AVATAR = (500, 40)
 
-# The book's logo slot, which its first page sets with width and height.
 BOOK_LOGO = (511, 180)
 
-# The project page: the card shown where a link to the project is shared, and
-# the pixels per unit of the lockup on it and at the head of the README.
 SOCIAL_PREVIEW = (1280, 640)
 SOCIAL_PREVIEW_UNIT = 40
 README_UNIT = 32
 
-# The empty part of the boot splash's progress bar: ink at this share over ground.
 TRACK_SHARE = Fraction(16, 100)
 
 TITLE = '<title id="t">FerrionOS</title>'
@@ -170,7 +147,6 @@ def main():
         dx, dy = (side - columns * unit) // 2, (side - rows * unit) // 2
         return f'    <g fill="{color}">\n{mark_paths(outlines, "        ", unit, dx, dy)}\n    </g>'
 
-    # The mark redrawn for the symbolic icon slots: a whole number of pixels per unit.
     for side in (16, 32):
         unit = side // 8
         dx, dy = (side - columns * unit) // 2, (side - rows * unit) // 2
@@ -181,10 +157,8 @@ def main():
 </svg>
 """)
 
-    # The mark for the text console: two columns by one row per unit.
     write("mark.txt", "".join("".join("##" if cell else "  " for cell in row).rstrip() + "\n" for row in cells))
 
-    # The mark above the name, on a grid fine enough for both to use whole numbers.
     ratio = Fraction(NAME_CAP_HEIGHT, UNIT) / (baseline - cap_line)
     name_scale, grid = ratio.numerator, ratio.denominator
     px = Fraction(grid, UNIT)
@@ -218,34 +192,26 @@ def main():
 
     lockup_file("lockup.svg", UNIT, "currentColor", "The mark above the name")
 
-    # The login background: the lockup above where orblogin draws its box.
     width, height = SCREEN
     name_baseline = LOGIN_BOX_HEIGHT // 2 + NAME_TO_BOX
     mark_top = name_baseline + NAME_CAP_HEIGHT + MARK_TO_NAME + rows * UNIT
     render("orbdata/usr/share/ui/login.png", width, height,
            paper(width, height) + "\n" + lockup_at((width - LOCKUP_WIDTH) // 2, height // 2 - mark_top, ink))
 
-    # The wallpaper: the ground and nothing else.
     subprocess.run(["magick", "-size", f"{width}x{height}", f"xc:{ground}", "-sampling-factor", "4:4:4",
                     "-quality", "100", "-strip", str(target("orbdata/usr/share/ui/background.jpg"))], check=True)
 
-    # The launcher's start button: the mark in ink on nothing.
     side, unit = START_ICON
     render("orbdata/usr/share/icons/places/start-here.png", side, side, centred_mark(side, unit, ink))
 
-    # The book's favicon: the mark in ink on a ground tile, which shows on any tab bar.
     side, unit = FAVICON
     render("book/theme/favicon.png", side, side, paper(side, side) + "\n" + centred_mark(side, unit, ink))
 
-    # The book's logo, for light and for dark pages: the lockup with the name starting at
-    # the left edge, where the page's text starts.
     width, height = BOOK_LOGO
     for name, color in (("light", ground), ("dark", ink)):
         render(f"book/src/assets/logo-{name}.png", width, height,
                lockup_at(-NAME_INSET, (height - LOCKUP_HEIGHT) // 2, color))
 
-    # The project page. On the card the lockup is centered on the ground: its box across, and
-    # from the top of the mark to the baseline of the name down.
     width, height = SOCIAL_PREVIEW
     unit = SOCIAL_PREVIEW_UNIT
     mark_to_baseline = (rows * UNIT + MARK_TO_NAME + NAME_CAP_HEIGHT) * unit // UNIT
@@ -258,7 +224,6 @@ def main():
     lockup_file("github/readme-dark.svg", README_UNIT, ink, "The mark above the name in ink, for dark pages")
     lockup_file("github/readme-light.svg", README_UNIT, ground, "The mark above the name in the ground color, for light pages")
 
-    # The mark and its place on the boot path, for code that fills rectangles.
     ground_rgb, ink_rgb = int(ground[1:], 16), int(ink[1:], 16)
     bitmap = ", ".join("0b" + "".join("1" if cell else "0" for cell in row) for row in cells)
     write("mark.rs", f"""// Generated by branding/generate.py from mark.svg and color.tokens.json. Do not edit.
@@ -290,8 +255,6 @@ pub const NAME_CAP_LINE: usize = {name_baseline + NAME_CAP_HEIGHT};
 pub const NAME_BASELINE: usize = {name_baseline};
 """)
 
-    # The ground for Orbital, which paints it behind every window: lines for the end of the
-    # orbital.toml that the orbdata package installs.
     write("orbital-background.toml", f"""
 # Generated by branding/generate.py from color.tokens.json. Do not edit.
 # The ground, as 0xAARRGGBB. Orbital reads a color as a table with a `data` key and falls back to

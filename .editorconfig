@@ -1,4 +1,3 @@
-# Conventions the tree already follows. Patch files are exempt.
 root = true
 
 [*]
@@ -9,19 +8,15 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 4
 
-# make requires tabs in recipe lines
 [{Makefile,*.mk}]
 indent_style = tab
 
 [*.nix]
 indent_size = 2
 
-# Trailing spaces can be a Markdown line break
 [*.md]
 trim_trailing_whitespace = false
 
-# Patches against third-party sources are byte-exact: context lines keep
-# their trailing whitespace, tabs and line endings.
 [*.patch]
 charset = unset
 end_of_line = unset

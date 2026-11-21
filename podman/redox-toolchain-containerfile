@@ -1,4 +1,3 @@
-# Configuration file to build linux toolchain using lower glibc constraint
 
 FROM docker.io/library/debian:oldstable-backports
 
