@@ -1,5 +1,5 @@
 FerrionOS changes to the Redox bootloader (MIT licence, kept), made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8:
-- quiet boot on UEFI: the screen stays blank for one second while a key can ask for the mode menu and the status text; without a key nothing is printed, the best mode is taken, the framebuffer is filled with the background color, and the kernel gets QUIET=1 and BOOT_BACKGROUND=000000. Warnings stay off the screen; errors, panics and the RedoxFS password prompt still show. BIOS boots as before;
+- quiet boot on UEFI: the screen stays blank for one second while a key can ask for the mode menu and the status text; without a key nothing is printed, the best mode is taken, the framebuffer is filled with FerrionOS's ground color #0f0e0c, and the kernel gets QUIET=1 and BOOT_BACKGROUND=0f0e0c. Warnings stay off the screen; errors, panics and the RedoxFS password prompt still show. BIOS boots as before;
 - a failing SetAttribute no longer panics, which a serial port behind a socket triggered;
 - the banners name FerrionOS.
 
@@ -52,7 +52,7 @@ index afd1b71..00141ba 100644
      }
  
 diff --git a/src/main.rs b/src/main.rs
-index 28d1e24..c6a6cf9 100644
+index 28d1e24..02c2f2f 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -12,6 +12,7 @@ use core::{
@@ -72,9 +72,9 @@ index 28d1e24..c6a6cf9 100644
 +/// kernel so that the OS stays quiet too.
 +pub static QUIET: AtomicBool = AtomicBool::new(false);
 +
-+/// The color a quiet boot fills the screen with, as 0xRRGGBB. The kernel environment carries it
-+/// as `BOOT_BACKGROUND`, so that the OS draws on the same color.
-+const BACKGROUND_COLOR: u32 = 0x000000;
++/// The color a quiet boot fills the screen with, as 0xRRGGBB: FerrionOS's ground. The kernel
++/// environment carries it as `BOOT_BACKGROUND`, so that the OS draws on the same color.
++const BACKGROUND_COLOR: u32 = 0x0f0e0c;
 +
  fn select_mode(
      os: &impl Os,

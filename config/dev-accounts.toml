@@ -5,10 +5,19 @@
 # that leaves it out has no login accounts. An image that leaves the build
 # machine carries its own accounts instead.
 
-# Console greeting; it names the accounts below.
+# Console greeting: the FerrionOS mark (branding/mark.txt) above a box that
+# names the accounts below.
 [[files]]
 path = "/etc/issue"
 data = """
+########
+##
+##
+
+######
+##
+##
+
 ########## FerrionOS #########
 # Login with the following:  #
 # `user`                     #

@@ -1,9 +1,9 @@
 FerrionOS change to Redox base (MIT licence, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f:
-- fbbootlogd draws a boot splash instead of the boot log when /scheme/sys/env has QUIET=1: the background color from BOOT_BACKGROUND and a progress bar that moves on boot events read from the log (splash.rs lists them), with a square left for the FerrionOS mark; any key shows the log;
+- fbbootlogd draws a boot splash instead of the boot log when /scheme/sys/env has QUIET=1: the background color from BOOT_BACKGROUND (the FerrionOS ground #0f0e0c without it), the FerrionOS mark where the login screen shows it next, and in place of the name under it a progress bar that moves on boot events read from the log (splash.rs lists them); any key shows the log;
 - console-draw lets a TextScreen be hidden and shown again, and lets a caller draw on a V2DisplayMap.
 
 diff --git a/drivers/graphics/console-draw/src/lib.rs b/drivers/graphics/console-draw/src/lib.rs
-index 8e58e8d3..57123d13 100644
+index 8e58e8d..57123d1 100644
 --- a/drivers/graphics/console-draw/src/lib.rs
 +++ b/drivers/graphics/console-draw/src/lib.rs
 @@ -130,6 +130,17 @@ impl V2DisplayMap {
@@ -83,7 +83,7 @@ index 8e58e8d3..57123d13 100644
          let mut max_changed_x = 0;
          let mut min_changed_y = map.height / self.font.height;
 diff --git a/drivers/graphics/fbbootlogd/src/main.rs b/drivers/graphics/fbbootlogd/src/main.rs
-index 8c1bc9a1..9c9235ee 100644
+index 8c1bc9a..9c9235e 100644
 --- a/drivers/graphics/fbbootlogd/src/main.rs
 +++ b/drivers/graphics/fbbootlogd/src/main.rs
 @@ -1,7 +1,7 @@
@@ -206,12 +206,13 @@ index 8c1bc9a1..9c9235ee 100644
          }
 diff --git a/drivers/graphics/fbbootlogd/src/splash.rs b/drivers/graphics/fbbootlogd/src/splash.rs
 new file mode 100644
-index 00000000..7e4d3ed7
+index 0000000..9e25616
 --- /dev/null
 +++ b/drivers/graphics/fbbootlogd/src/splash.rs
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,183 @@
 +//! The boot splash fbbootlogd draws instead of the log when the bootloader passes `QUIET=1`: the
-+//! background color and a progress bar that moves only when a boot event shows up in the log.
++//! background color, the FerrionOS mark where the login screen shows it next, and a progress bar
++//! that moves only when a boot event shows up in the log.
 +
 +use std::io;
 +
@@ -237,9 +238,31 @@ index 00000000..7e4d3ed7
 +/// splash.
 +const PROGRESS_STEPS: usize = PROGRESS_EVENTS.len() + 1;
 +
-+/// The empty part and the filled part of the progress bar, as 0xRRGGBB.
-+const BAR_TRACK_COLOR: u32 = 0x3a3a3a;
-+const BAR_FILL_COLOR: u32 = 0xe0e0e0;
++/// The ground, the ink and the empty part of a progress bar, as 0xRRGGBB.
++const GROUND: u32 = 0x0f0e0c;
++const INK: u32 = 0xedebe7;
++const TRACK: u32 = 0x33312f;
++
++/// The mark on its grid of 4 by 7 units: one byte per row from the top, with the left
++/// column in bit 3.
++const MARK_COLUMNS: usize = 4;
++const MARK: [u8; 7] = [0b1111, 0b1000, 0b1000, 0b0000, 0b1110, 0b1000, 0b1000];
++
++/// The login background is 1280 by 800 pixels, and orblogin scales it to cover the screen.
++/// The lengths below are in its pixels: on a screen a length is the larger of
++/// `length * width / LOGIN_WIDTH` and `length * height / LOGIN_HEIGHT`.
++const LOGIN_WIDTH: usize = 1280;
++const LOGIN_HEIGHT: usize = 800;
++
++/// One unit of the mark's grid, and the width of the box of the mark and the name.
++const MARK_UNIT: usize = 16;
++const LOCKUP_WIDTH: usize = 160;
++
++/// Heights above the centre of the screen: the top of the mark, then the cap line and the
++/// baseline of the name that the login screen sets under it.
++const MARK_TOP: usize = 314;
++const NAME_CAP_LINE: usize = 170;
++const NAME_BASELINE: usize = 146;
 +
 +pub struct Splash {
 +    /// 0xRRGGBB, from the bootloader's `BOOT_BACKGROUND`.
@@ -262,7 +285,7 @@ index 00000000..7e4d3ed7
 +    pub fn from_env(env: &str) -> Option<Splash> {
 +        let mut quiet = false;
 +        // The bootloader writes BOOT_BACKGROUND with QUIET=1; black if it is missing
-+        let mut background = 0;
++        let mut background = GROUND;
 +        for line in env.lines() {
 +            match line.split_once('=') {
 +                Some(("QUIET", value)) => quiet = value == "1",
@@ -314,24 +337,41 @@ index 00000000..7e4d3ed7
 +            };
 +            fill(pixels, stride, screen, self.background);
 +
-+            // The FerrionOS mark goes in this square once it is chosen (V2b step 4 of
-+            // plans/product-roadmap.md); until then the square shows the background.
-+            let side = width.min(height) / 4;
-+            let mark = Rect {
-+                x: (width - side) / 2,
-+                y: (height / 2).saturating_sub(side * 3 / 4),
-+                width: side,
-+                height: side,
-+            };
++            // A length of the login background on this screen. orblogin scales that background
++            // to cover the screen, so the mark drawn here is where the login screen shows it next
++            let scaled =
++                |length: usize| (length * width / LOGIN_WIDTH).max(length * height / LOGIN_HEIGHT);
++            let unit = scaled(MARK_UNIT).max(1);
 +
-+            // The bar runs under the mark, as wide as it
++            let mark_x = (width / 2).saturating_sub(MARK_COLUMNS * unit / 2);
++            let mark_y = (height / 2).saturating_sub(scaled(MARK_TOP));
++            for (row, bits) in MARK.iter().enumerate() {
++                for column in 0..MARK_COLUMNS {
++                    if bits >> (MARK_COLUMNS - 1 - column) & 1 == 1 {
++                        let cell = Rect {
++                            x: mark_x + column * unit,
++                            y: mark_y + row * unit,
++                            width: unit,
++                            height: unit,
++                        };
++                        fill(pixels, stride, cell, INK);
++                    }
++                }
++            }
++
++            // The bar takes the place of the name that the login screen sets under the mark: as
++            // wide as the name's box, a quarter of a unit high, halfway up its capitals
++            let bar_width = scaled(LOCKUP_WIDTH);
++            let bar_height = (unit / 4).max(2);
 +            let bar = Rect {
-+                x: mark.x,
-+                y: mark.y + mark.height + side / 4,
-+                width: mark.width,
-+                height: (side / 40).max(4),
++                x: (width / 2).saturating_sub(bar_width / 2),
++                y: (height / 2)
++                    .saturating_sub(scaled((NAME_CAP_LINE + NAME_BASELINE) / 2))
++                    .saturating_sub(bar_height / 2),
++                width: bar_width,
++                height: bar_height,
 +            };
-+            fill(pixels, stride, bar, BAR_TRACK_COLOR);
++            fill(pixels, stride, bar, TRACK);
 +            fill(
 +                pixels,
 +                stride,
@@ -339,7 +379,7 @@ index 00000000..7e4d3ed7
 +                    width: bar.width * done / PROGRESS_STEPS,
 +                    ..bar
 +                },
-+                BAR_FILL_COLOR,
++                INK,
 +            );
 +        })
 +    }

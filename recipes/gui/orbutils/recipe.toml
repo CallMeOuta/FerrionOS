@@ -3,6 +3,8 @@ description = "Orbital utilities"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/orbutils.git"
+rev = "380995d3e29453dbc6e8a30b39fccf085b07f6ee"
+patches = ["ferrion-neutral-login.patch"]
 
 [build]
 template = "custom"

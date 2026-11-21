@@ -2,7 +2,7 @@
 
 The mark, the wordmark, the two colors and every file made from them. Decided by the maintainer on 2026-11-20 after one round of three candidates; the record of that round is at the end.
 
-On 2026-11-20 the files below were complete and no recipe or config installed them yet: the image still showed the upstream logo on its login screen and on the launcher's start button.
+Installed in the x86_64 desktop image on 2026-11-20: the login screen, the launcher's start button, the wallpaper and Orbital's background come from `orbdata/` and `orbital-background.toml` through `recipes/gui/orbdata`, the boot splash draws `mark.rs` through `recipes/core/base`'s patch, the bootloader fills the screen with the ground, `recipes/gui/orbutils`'s patch gives the login box the neutral colors, and `config/dev-accounts.toml` puts `mark.txt` above the console's login prompt. Screenshots of the booted image matched the expected frames' probe pixels; images Orbital draws come out one step darker than the tokens (`#0e0d0b` for the ground, `#eceae6` for the ink), while flat fills are exact.
 
 ## The kit
 

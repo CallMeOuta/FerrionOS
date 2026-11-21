@@ -138,7 +138,7 @@
 {"check": "sources", "subject": "recipes/core/redoxfs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/redoxfs/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/relibc", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/relibc/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/strace", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/strace/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/userutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/userutils/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/userutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/uutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/cosmic/cosmic-edit", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/cosmic/cosmic-files", "status": "pass", "note": "git source pinned by rev", "fix": ""}
@@ -233,10 +233,10 @@
 {"check": "sources", "subject": "recipes/games/sopwith", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/games/spacecadetpinball", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/graphics/procedural-wallpapers-rs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/graphics/procedural-wallpapers-rs/recipe.toml"}
-{"check": "sources", "subject": "recipes/gui/orbdata", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/gui/orbdata/recipe.toml"}
+{"check": "sources", "subject": "recipes/gui/orbdata", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/gui/orbital", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/gui/orbital/recipe.toml"}
 {"check": "sources", "subject": "recipes/gui/orbterm", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/gui/orbterm/recipe.toml"}
-{"check": "sources", "subject": "recipes/gui/orbutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/gui/orbutils/recipe.toml"}
+{"check": "sources", "subject": "recipes/gui/orbutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/icons/cosmic-icons", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/icons/hicolor-icon-theme", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/icons/hicolor-icon-theme/recipe.toml"}
 {"check": "sources", "subject": "recipes/icons/pop-icon-theme", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/icons/pop-icon-theme/recipe.toml"}

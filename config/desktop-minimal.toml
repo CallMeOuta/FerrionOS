@@ -9,10 +9,14 @@ filesystem_size = 256
 
 # Package settings
 [packages]
-orbdata = {}
+# From source: orbdata's recipe lays FerrionOS's login background, wallpaper,
+# launcher button and window-server background over upstream's, and orbutils
+# carries a patch that draws the login box in FerrionOS's colors; the package
+# server's builds have neither.
+orbdata = "source"
 orbital = {}
 orbterm = {}
-orbutils = {}
+orbutils = "source"
 
 # The orbutils package's launcher entry for the image viewer, with a description
 # that names no OS; written after the packages (postinstall) so that it wins.

@@ -1,0 +1,161 @@
+FerrionOS change to orbutils (source under the MIT licence, the whole under GPLv3 for its GPL dependencies; both kept), made against upstream commit 380995d3e29453dbc6e8a30b39fccf085b07f6ee:
+- orblogin draws its box in FerrionOS's colours instead of upstream's blue and black: ground #0f0e0c behind the image and in the fields, panel #1c1b19, labels #aaa9a5, text and the focused field's edge in ink #edebe7, the other field's edge #6c6b68, buttons #33312f (#444341 under the pointer); the reds of a failed login stay.
+
+diff --git a/orbutils/src/orblogin/main.rs b/orbutils/src/orblogin/main.rs
+index cb64226..592f837 100644
+--- a/orbutils/src/orblogin/main.rs
++++ b/orbutils/src/orblogin/main.rs
+@@ -158,9 +158,9 @@ fn build_ui_config() -> Result<UiConfig, Box<dyn Error + 'static>> {
+         image_mode: BackgroundMode::from_str("zoom"),
+         image: Image::from_path(IMAGE_PATH).map_err(|_| format!("Cannot load {}", IMAGE_PATH))?,
+ 
+-        btn_color_inactive: Color::rgb(39, 72, 105),
+-        btn_color_active: Color::rgb(59, 102, 135),
+-        btn_border_color: Color::rgb(29, 29, 29),
++        btn_color_inactive: Color::rgb(51, 49, 47),
++        btn_color_active: Color::rgb(68, 67, 65),
++        btn_border_color: Color::rgb(51, 49, 47),
+     })
+ }
+ 
+@@ -494,7 +494,7 @@ fn handle_redraw(
+         (0, height)
+     };
+ 
+-    window.set(Color::rgb(0, 0, 0));
++    window.set(Color::rgb(15, 14, 12));
+ 
+     let x = (w as i32 - crop_w as i32) / 2;
+     let y = (h as i32 - crop_h as i32) / 2;
+@@ -504,30 +504,30 @@ fn handle_redraw(
+ 
+     let x = (window.width() as i32 - 216 * s_i) / 2;
+     let y = (window.height() as i32 - 164 * s_i) / 2;
+-    window.rect(x, y, 216 * s_u, 164 * s_u, Color::rgba(0, 0, 0, 128));
++    window.rect(x, y, 216 * s_u, 164 * s_u, Color::rgb(28, 27, 25));
+ 
+     font.render("Username:", 16.0 * s_f).draw(
+         window,
+         x + 8 * s_i,
+         y + 8 * s_i,
+-        Color::rgb(255, 255, 255),
++        Color::rgb(170, 169, 165),
+     );
+     font.render("Password:", 16.0 * s_f).draw(
+         window,
+         x + 8 * s_i,
+         y + 68 * s_i,
+-        Color::rgb(255, 255, 255),
++        Color::rgb(170, 169, 165),
+     );
+ 
+     let active = if failure {
+         Color::rgb(255, 0, 0)
+     } else {
+-        Color::rgb(255, 255, 255)
++        Color::rgb(237, 235, 231)
+     };
+     let inactive = if failure {
+         Color::rgb(128, 0, 0)
+     } else {
+-        Color::rgb(29, 29, 29)
++        Color::rgb(108, 107, 104)
+     };
+ 
+     let x = (window.width() as i32 - 200 * s_i) / 2;
+@@ -549,7 +549,7 @@ fn handle_redraw(
+             y + 2 * s_i,
+             196 * s_u,
+             24 * s_u,
+-            Color::rgb(40, 40, 40),
++            Color::rgb(15, 14, 12),
+         );
+         let mut string = username.to_string();
+         if item == 0 {
+@@ -559,7 +559,7 @@ fn handle_redraw(
+             window,
+             x + 6 * s_i,
+             y + 6 * s_i,
+-            Color::rgb(255, 255, 255),
++            Color::rgb(237, 235, 231),
+         );
+     }
+ 
+@@ -579,7 +579,7 @@ fn handle_redraw(
+             y + 2 * s_i,
+             196 * s_u,
+             24 * s_u,
+-            Color::rgb(40, 40, 40),
++            Color::rgb(15, 14, 12),
+         );
+         let mut string = String::new();
+         for _c in password.chars() {
+@@ -592,7 +592,7 @@ fn handle_redraw(
+             window,
+             x + 6 * s_i,
+             y + 6 * s_i,
+-            Color::rgb(255, 255, 255),
++            Color::rgb(237, 235, 231),
+         );
+     }
+ 
+@@ -600,20 +600,20 @@ fn handle_redraw(
+ 
+     // --- Login Button ---
+     {
+-        window.rect(x, y, 200 * s_u, 28 * s_u, Color::rgb(29, 29, 29));
++        window.rect(x, y, 200 * s_u, 28 * s_u, Color::rgb(51, 49, 47));
+         window.rect(
+             x + 2 * s_i,
+             y + 2 * s_i,
+             196 * s_u,
+             24 * s_u,
+-            Color::rgb(39, 72, 105),
++            Color::rgb(51, 49, 47),
+         );
+         let text = font.render(&"Login", 16.0 * s_f);
+         text.draw(
+             window,
+             x + (200 * s_i - text.width() as i32) / 2,
+             y + 6 * s_i,
+-            Color::rgb(255, 255, 255),
++            Color::rgb(237, 235, 231),
+         );
+     }
+ 
+@@ -664,7 +664,7 @@ fn handle_redraw(
+                 window,
+                 keymap_btn_x + (btn_size_i - text_k.width() as i32) / 2,
+                 keymap_btn_y + btn_text_offset_y,
+-                Color::rgb(255, 255, 255),
++                Color::rgb(237, 235, 231),
+             );
+         }
+         {
+@@ -687,7 +687,7 @@ fn handle_redraw(
+                 window,
+                 power_btn_x + (btn_size_i - text_p.width() as i32) / 2,
+                 power_btn_y + btn_text_offset_y,
+-                Color::rgb(255, 255, 255),
++                Color::rgb(237, 235, 231),
+             );
+         }
+         if keymap_dropdown_open {
+@@ -725,7 +725,7 @@ fn handle_redraw(
+                     window,
+                     menu_x + 6 * s_i,
+                     item_y + 6 * s_i,
+-                    Color::rgb(255, 255, 255),
++                    Color::rgb(237, 235, 231),
+                 );
+             }
+         }
+@@ -765,7 +765,7 @@ fn handle_redraw(
+                     window,
+                     menu_x + 6 * s_i,
+                     item_y + 6 * s_i,
+-                    Color::rgb(255, 255, 255),
++                    Color::rgb(237, 235, 231),
+                 );
+             }
+         }
