@@ -1,0 +1,14 @@
+#TODO promote: LC1 of plans/linux-compat.md passes `scripts/vm-test.py foreign-call linux-hello` in 10 of 10 boots on the patched kernel; move to recipes/core once the kernel patch lands
+# linux-run, the Linux layer's launcher and runtime: `linux-run PROGRAM [ARGUMENT...]` starts a
+# static Linux x86-64 program and answers its system calls through the kernel's foreign-call
+# hook (recipes/core/kernel/ferrion-foreign-call.patch). The crate lives in crate/ beside this
+# file. config/x86_64/desktop.toml installs it; `scripts/vm-test.py linux-hello` checks it.
+[package]
+description = "Runs static Linux x86-64 programs on FerrionOS"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

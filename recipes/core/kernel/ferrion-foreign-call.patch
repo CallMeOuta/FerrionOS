@@ -1,0 +1,215 @@
+FerrionOS change to the Redox kernel (MIT license, kept), made against upstream commit e7f1d4231d0f4b55fbef229d9cd9459302c101f4 with ferrion-quiet-boot.patch, ferrion-boot-name.patch, ferrion-lockdown.patch, ferrion-scheme-short-read.patch and ferrion-event-call-unsubscribe.patch applied (Linux layer LC1, the foreign-call hook):
+- a thread's handle `foreign-call` takes three words, an entry and the start and end of a native range; three zeros unregister. Only the thread itself may write it (EPERM otherwise), the range must lie in user memory and hold the entry (EINVAL), and other architectures answer EOPNOTSUPP;
+- on x86_64 a `syscall` instruction outside the registered range is not dispatched: the thread resumes at the entry through a separate IRETQ exit with every general register as the instruction left it (RCX and R11 hold the return address and flags), so the call grants nothing the thread could not do by jumping there;
+- the registration is copied into the percpu block on each switch, starts empty in every new context and is cleared when the context's address space changes (exec).
+
+diff --git a/src/arch/x86_64/interrupt/syscall.rs b/src/arch/x86_64/interrupt/syscall.rs
+index be5afb2..b0fc9bb 100644
+--- a/src/arch/x86_64/interrupt/syscall.rs
++++ b/src/arch/x86_64/interrupt/syscall.rs
+@@ -65,9 +65,23 @@ pub unsafe fn init() {
+     }
+ }
+ 
++/// Returns true for a foreign call: a `syscall` instruction outside the range the thread
++/// registered through its `foreign-call` handle. It is not dispatched; the thread resumes at the
++/// registered entry with every register as the instruction left it (RCX and R11 hold the return
++/// address and flags), through the IRETQ exit below.
+ #[unsafe(no_mangle)]
+-pub unsafe extern "C" fn __inner_syscall_instruction(stack: *mut InterruptStack) {
++pub unsafe extern "C" fn __inner_syscall_instruction(stack: *mut InterruptStack) -> bool {
+     unsafe {
++        let [entry, start, end] = crate::percpu::PercpuBlock::current().foreign_call.get();
++        if entry != 0 {
++            // `syscall` is two bytes long, and RIP was pushed from RCX, the address after it.
++            let instruction = (*stack).iret.rip.wrapping_sub(2);
++            if !(start..end).contains(&instruction) {
++                (*stack).iret.rip = entry;
++                return true;
++            }
++        }
++
+         let mut token = CleanLockToken::new();
+         let allowed = ptrace::breakpoint_callback(PTRACE_STOP_PRE_SYSCALL, None, &mut token)
+             .and_then(|_| ptrace::next_breakpoint().map(|f| !f.contains(PTRACE_FLAG_IGNORE)));
+@@ -89,6 +103,7 @@ pub unsafe extern "C" fn __inner_syscall_instruction(stack: *mut InterruptStack)
+         }
+ 
+         ptrace::breakpoint_callback(PTRACE_STOP_POST_SYSCALL, None, &mut token);
++        false
+     }
+ }
+ 
+@@ -113,6 +128,8 @@ pub unsafe extern "C" fn syscall_instruction() {
+     // Call inner funtion
+     "mov rdi, rsp;",
+     "call __inner_syscall_instruction;",
++    "test al, al;",
++    "jnz 3f;",
+ 
+     "
+     .globl enter_usermode
+@@ -174,6 +191,23 @@ pub unsafe extern "C" fn syscall_instruction() {
+     xor rcx, rcx
+     xor r11, r11
+     iretq
++
++    // Foreign-call exit: every general register as the thread left it and RIP at the entry the
++    // thread registered, which the registration checked to be a user address. IRETQ restores
++    // RFLAGS from the frame; RCX and R11 keep the return address and flags of the `syscall`.
++    .p2align 4
++3:
++    ",
++    pop_preserved!(),
++    pop_scratch!(),
++    "swapgs;",
++    // IRETQ with the nested-task flag set raises #GP in long mode, and FMASK leaves that flag as
++    // the user set it. The frame's RFLAGS still carries it back.
++    "pushfq;",
++    "and QWORD PTR [rsp], ~0x4000;",
++    "popfq;",
++    "iretq;",
++    "
+     .globl __syscall_instruction_end
+ __syscall_instruction_end:
+     ",
+diff --git a/src/context/context.rs b/src/context/context.rs
+index e189337..202191c 100644
+--- a/src/context/context.rs
++++ b/src/context/context.rs
+@@ -133,6 +133,10 @@ pub struct Context {
+     /// not running, otherwise the status must be read from the percpu (which can not be accessed
+     /// by other hw-threads, unless frozen).
+     pub inside_syscall: bool,
++    /// Foreign-call registration of this thread: `[entry, start, end]`, all zero when unset. A
++    /// `syscall` instruction outside `start..end` is not dispatched but resumed at `entry`, with
++    /// every register intact. Mirrored in the percpu block while the context runs.
++    pub foreign_call: [usize; 3],
+ 
+     #[cfg(feature = "syscall_debug")]
+     pub syscall_debug_info: crate::syscall::debug::SyscallDebugInfo,
+@@ -234,6 +238,7 @@ impl Context {
+             sched_cpu_time: 0,
+             sched_affinity: LogicalCpuSet::all(),
+             inside_syscall: false,
++            foreign_call: [0; 3],
+             syscall_head: SyscallFrame::Free(RaiiFrame::allocate()?),
+             syscall_tail: SyscallFrame::Free(RaiiFrame::allocate()?),
+             wake: None,
+@@ -387,9 +392,13 @@ impl Context {
+             return addr_space;
+         };
+ 
++        // A new address space no longer holds the code the registration named.
++        self.foreign_call = [0; 3];
++
+         if self.is_current_context() {
+             // TODO: Share more code with context::arch::switch_to.
+             let this_percpu = PercpuBlock::current();
++            this_percpu.foreign_call.set([0; 3]);
+ 
+             if let Some(ref prev_addrsp) = self.addr_space {
+                 assert!(Arc::ptr_eq(
+diff --git a/src/context/switch.rs b/src/context/switch.rs
+index a86ad1b..147ca1a 100644
+--- a/src/context/switch.rs
++++ b/src/context/switch.rs
+@@ -1246,6 +1246,7 @@ unsafe fn switch_to(
+     //*percpu.ptrace_session.borrow_mut() = ptrace_session;
+     percpu.ptrace_flags.set(ptrace_flags);
+     prev_context.inside_syscall = percpu.inside_syscall.replace(next_context.inside_syscall);
++    percpu.foreign_call.set(next_context.foreign_call);
+ 
+     #[cfg(feature = "profiling")]
+     {
+diff --git a/src/percpu.rs b/src/percpu.rs
+index 558f967..cb087ba 100644
+--- a/src/percpu.rs
++++ b/src/percpu.rs
+@@ -46,6 +46,8 @@ pub struct PercpuBlock {
+     pub ptrace_flags: Cell<PtraceFlags>,
+     pub ptrace_session: RefCell<Option<Weak<Session>>>,
+     pub inside_syscall: Cell<bool>,
++    /// The running context's `Context::foreign_call`, read on every system call entry.
++    pub foreign_call: Cell<[usize; 3]>,
+ 
+     pub syscall_debug_info: Cell<SyscallDebugInfo>,
+ 
+@@ -227,6 +229,7 @@ impl PercpuBlock {
+             ptrace_flags: Cell::new(PtraceFlags::empty()),
+             ptrace_session: RefCell::new(None),
+             inside_syscall: Cell::new(false),
++            foreign_call: Cell::new([0; 3]),
+ 
+             syscall_debug_info: Cell::new(SyscallDebugInfo::default()),
+ 
+diff --git a/src/scheme/proc.rs b/src/scheme/proc.rs
+index 333e026..94de6ba 100644
+--- a/src/scheme/proc.rs
++++ b/src/scheme/proc.rs
+@@ -123,6 +123,8 @@ enum ContextHandle {
+ 
+     Regs(RegsKind),
+     Sighandler,
++    /// The thread's foreign-call registration; only the thread itself may change it.
++    ForeignCall,
+     Start,
+     NewFiletable {
+         filetable: Arc<LockedFdTbl>,
+@@ -248,6 +250,7 @@ impl ProcScheme {
+             "regs/int" => (ContextHandle::Regs(RegsKind::Int), false),
+             "regs/env" => (ContextHandle::Regs(RegsKind::Env), false),
+             "sighandler" => (ContextHandle::Sighandler, false),
++            "foreign-call" => (ContextHandle::ForeignCall, false),
+             "start" => (ContextHandle::Start, false),
+             "open_via_dup" => (ContextHandle::OpenViaDup, false),
+             "mmap-min-addr" => (
+@@ -1130,6 +1133,33 @@ impl ContextHandle {
+ 
+                 Ok(size_of::<SetSighandlerData>())
+             }
++            ContextHandle::ForeignCall => {
++                // Three words: the entry, then the start and end of the native range. Three zeros
++                // unregister. The registration only moves where this thread's own `syscall`
++                // instructions resume, so it grants nothing, and no other thread may set it.
++                if !cfg!(target_arch = "x86_64") {
++                    return Err(Error::new(EOPNOTSUPP));
++                }
++                let mut words = buf.usizes();
++                let mut next = || words.next().ok_or(Error::new(EINVAL))?;
++                let (entry, start, end) = (next()?, next()?, next()?);
++                if !Arc::ptr_eq(&context, &*crate::context::current()) {
++                    return Err(Error::new(EPERM));
++                }
++                let registration = [entry, start, end];
++                if registration != [0; 3]
++                    && !(start < end && end <= crate::USER_END_OFFSET && (start..end).contains(&entry))
++                {
++                    return Err(Error::new(EINVAL));
++                }
++                // The context first, then this CPU's mirror: a switch in between copies the
++                // context's value into the mirror.
++                context.write(token.token()).foreign_call = registration;
++                crate::percpu::PercpuBlock::current()
++                    .foreign_call
++                    .set(registration);
++                Ok(3 * size_of::<usize>())
++            }
+             ContextHandle::Start => {
+                 let cpu_id = {
+                     let mut guard = context.write(token.token());
+@@ -1583,6 +1613,14 @@ impl ContextHandle {
+                     debug_name,
+                 })
+             }
++            ContextHandle::ForeignCall => {
++                let words = context.read(token.token()).foreign_call;
++                let mut bytes = [0_u8; 3 * size_of::<usize>()];
++                for (chunk, word) in bytes.chunks_exact_mut(size_of::<usize>()).zip(words) {
++                    chunk.copy_from_slice(&word.to_ne_bytes());
++                }
++                buf.copy_common_bytes_from_slice(&bytes)
++            }
+             ContextHandle::Sighandler => {
+                 let data = match context.read(token.token()).sig {
+                     Some(ref sig) => SetSighandlerData {

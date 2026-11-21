@@ -1,0 +1,9 @@
+binutils	2.44-3	amd64
+gcc	4:14.2.0-1	amd64
+gcc-14	14.2.0-19	amd64
+golang-1.24-go	1.24.4-1	amd64
+golang-go	2:1.24~2	amd64
+libc6-dev	2.41-12+deb13u4	amd64
+musl	1.2.5-3.1~deb13u1	amd64
+musl-dev	1.2.5-3.1~deb13u1	amd64
+musl-tools	1.2.5-3.1~deb13u1	amd64

@@ -1,0 +1,16 @@
+[package]
+name = "linux-run"
+description = "FerrionOS's Linux layer: starts a static Linux x86-64 program and answers its system calls"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# One static binary is the launcher and the runtime mapped into every Linux process. It links
+# relibc through the libc crate and uses relibc's exported `redox_*` calls for the rest; it does
+# not link a second redox-rt.
+[dependencies]
+libc = "0.2.191"
+
+[profile.release]
+panic = "abort"

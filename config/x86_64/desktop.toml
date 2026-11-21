@@ -55,6 +55,13 @@ event-poll-probe = {}
 # keeps working; as root with `mac`, that network drivers refuse reads past their `mac`;
 # scripts/vm-test.py net-calls and net-hardening run it.
 net-call-probe = {}
+# The Linux layer's LC1 (plans/linux-compat.md): linux-run starts a static Linux program as the
+# calling user, in the caller's namespace, adding no right; it relies on the kernel's
+# foreign-call hook. foreign-call-probe checks the hook and the crossing, and linux-hello-fixtures
+# holds the four pinned hello programs; scripts/vm-test.py foreign-call and linux-hello run them.
+linux-run = {}
+foreign-call-probe = {}
+linux-hello-fixtures = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
 # ferrion-run check uses to show that a profile alone withholds the network.

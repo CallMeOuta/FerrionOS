@@ -1,0 +1,19 @@
+# Probes for the Linux layer's foreign-call hook (plans/linux-compat.md, LC1). The C sources
+# live beside this file:
+#   foreign-call-probe  native: the kernel hook's boundary checks and its cost
+#   linux-probe         a static Linux program without a C library, run under linux-run: register,
+#                       FS and XMM crossings, Linux signal frames, clone, and call costs. It is a
+#                       Linux file, so it lives under usr/share, where the cookbook does not strip.
+# config/x86_64/desktop.toml installs it; `scripts/vm-test.py foreign-call` runs both.
+[package]
+description = "Checks the kernel's foreign-call hook and the Linux layer's crossings"
+
+[build]
+template = "custom"
+script = """
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin" "${COOKBOOK_STAGE}/usr/share/foreign-call-probe"
+${CC} -O2 -Wall -static -masm=intel -mno-red-zone -o "${COOKBOOK_STAGE}/usr/bin/foreign-call-probe" \
+    "${COOKBOOK_RECIPE}/foreign-call-probe.c" -lpthread
+${CC} -O2 -Wall -static -nostdlib -ffreestanding -fno-pie -no-pie -fno-stack-protector -mno-red-zone \
+    -o "${COOKBOOK_STAGE}/usr/share/foreign-call-probe/linux-probe" "${COOKBOOK_RECIPE}/linux-probe.c"
+"""
