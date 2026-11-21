@@ -2,12 +2,18 @@
 description = "OpenGL and Vulkan CPU and GPU drivers, and also drivers for other Khronos Group standards"
 
 [source]
-git = "https://gitlab.redox-os.org/redox-os/mesa.git"
-upstream = "https://gitlab.freedesktop.org/mesa/mesa"
-branch = "redox-24.0"
-rev = "9850ea1ad7d687240757ebf9a73760ceb4ba28a9"
-shallow_clone = true
-patches = ["ferrion-libsync-wait.patch", "ferrion-native-window.patch"]
+tar = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"
+blake3 = "46527abb9520ae0a593c43e470c97909af5243b2cb646d9383b81d3131605431"
+patches = [
+    "ferrion-util.patch",
+    "ferrion-drm-headers.patch",
+    "ferrion-meson.patch",
+    "ferrion-egl-platform.patch",
+    "ferrion-orbital.patch",
+    "ferrion-jit-diagnostic.patch",
+    "ferrion-libsync-wait.patch",
+]
+
 [build]
 template = "custom"
 dependencies = [
@@ -19,6 +25,7 @@ dependencies = [
     "libglvnd",
 ]
 dev-dependencies = [
+    "host:glslang",
     "llvm21.dev",
 ]
 script = """
@@ -31,22 +38,16 @@ export LDFLAGS+=" -lorbital"
 
 if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
     # TODO: Fix wayland-scanner and enable wayland platform
-    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast -Dglvnd=true)
+    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast -Dglvnd=enabled)
 else
-    # No vulkan, lavapipe or EGL which is strictly requires shared library support
-    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=disabled -Dshared-glapi=disabled -Dgbm=disabled -Dplatforms=)
+    # EGL and Vulkan require shared libraries.
+    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=disabled -Degl=disabled -Dvulkan-drivers= -Dgbm=disabled -Dplatforms=)
 fi
 
 cookbook_meson \
     -Ddri-drivers-path=/usr/lib/dri \
     -Dglx=disabled \
     -Dllvm=enabled \
-    -Dosmesa=true \
     -Dshader-cache=disabled \
-    -Dgallium-drivers=swrast
-
-# Hack to add LLVM libs, the list can be seen from meson log and check for matches $("${LLVM_CONFIG}" --libs)
-LLVMLIBS="-lLLVMBitReader -lLLVMCore -lLLVMExecutionEngine -lLLVMInstCombine -lLLVMMCDisassembler" 
-LLVMLIBS+=" -lLLVMMCJIT -lLLVMScalarOpts -lLLVMTransformUtils -lLLVMCoroutines -lLLVMLTO"
-sed -i "s/ -lOSMesa / -lOSMesa ${LLVMLIBS} -lstdc++ /" "${COOKBOOK_STAGE}/usr/lib/pkgconfig/osmesa.pc"
+    -Dgallium-drivers=llvmpipe,softpipe
 """

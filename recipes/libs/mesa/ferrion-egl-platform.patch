@@ -1,0 +1,272 @@
+FerrionOS: Port the existing CPU graphics support to Mesa 26.3.1.
+Source: https://gitlab.redox-os.org/redox-os/mesa.git, d6695f16..9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
+See PORTING.md for the original commits and obsolete hunks.
+
+--- a/include/EGL/eglext.h
++++ b/include/EGL/eglext.h
+@@ -276,6 +276,11 @@
+ #define EGL_PLATFORM_GBM_KHR              0x31D7
+ #endif /* EGL_KHR_platform_gbm */
+ 
++#ifndef EGL_KHR_platform_redox
++#define EGL_KHR_platform_redox 1
++#define EGL_PLATFORM_REDOX_KHR          0x31D9
++#endif /* EGL_KHR_platform_redox */
++
+ #ifndef EGL_KHR_platform_wayland
+ #define EGL_KHR_platform_wayland 1
+ #define EGL_PLATFORM_WAYLAND_KHR          0x31D8
+@@ -924,6 +929,11 @@
+ #define EGL_EXT_platform_wayland 1
+ #define EGL_PLATFORM_WAYLAND_EXT          0x31D8
+ #endif /* EGL_EXT_platform_wayland */
++
++#ifndef EGL_EXT_platform_redox
++#define EGL_EXT_platform_redox 1
++#define EGL_PLATFORM_REDOX_EXT            0x31D9
++#endif /* EGL_EXT_platform_redox */
+ 
+ #ifndef EGL_EXT_platform_x11
+ #define EGL_EXT_platform_x11 1
+@@ -1479,6 +1489,16 @@
+ #define EGL_PLATFORM_SCREEN_QNX           0x3550
+ #endif /* EGL_QNX_platform_screen */
+ 
++#ifndef EGL_REDOX_image_native_buffer
++#define EGL_REDOX_image_native_buffer 1
++#define EGL_NATIVE_BUFFER_REDOX           0x3751
++#endif /* EGL_REDOX_image_native_buffer */
++
++#ifndef EGL_REDOX_platform_screen
++#define EGL_REDOX_platform_screen 1
++#define EGL_PLATFORM_SCREEN_REDOX         0x3750
++#endif /* EGL_REDOX_platform_screen */
++
+ #ifndef EGL_TIZEN_image_native_buffer
+ #define EGL_TIZEN_image_native_buffer 1
+ #define EGL_NATIVE_BUFFER_TIZEN           0x32A0
+--- a/src/egl/drivers/dri2/egl_dri2.c
++++ b/src/egl/drivers/dri2/egl_dri2.c
+@@ -919,6 +919,9 @@
+    case _EGL_PLATFORM_DEVICE:
+       ret = dri2_initialize_device(disp);
+       break;
++   case _EGL_PLATFORM_REDOX:
++      ret = dri2_initialize_redox(disp);
++      break;
+    case _EGL_PLATFORM_X11:
+    case _EGL_PLATFORM_XCB:
+       ret = dri2_initialize_x11(disp);
+@@ -1010,6 +1013,11 @@
+       break;
+    case _EGL_PLATFORM_DRM:
+       dri2_teardown_drm(dri2_dpy);
++      break;
++   case _EGL_PLATFORM_REDOX:
++      /* libgallium is linked into EGL in this release. No driver dlclose
++       * occurs here, unlike the Mesa 24 path covered by dso-atexit-probe.
++       */
+       break;
+    case _EGL_PLATFORM_WAYLAND:
+       dri2_teardown_wayland(dri2_dpy);
+--- a/src/egl/drivers/dri2/egl_dri2.h
++++ b/src/egl/drivers/dri2/egl_dri2.h
+@@ -303,6 +303,11 @@
+    _EGLSurface base;
+    struct dri_drawable *dri_drawable;
+ 
++#ifdef HAVE_REDOX_PLATFORM
++   void *orb_window;
++   void *orb_surface;
++#endif
++
+ #ifdef HAVE_X11_PLATFORM
+    xcb_drawable_t drawable;
+    xcb_xfixes_region_t region;
+@@ -532,6 +537,17 @@
+ }
+ #endif
+ 
++#ifdef HAVE_REDOX_PLATFORM
++EGLBoolean
++dri2_initialize_redox(_EGLDisplay *disp);
++#else
++static inline EGLBoolean
++dri2_initialize_redox(_EGLDisplay *disp)
++{
++   return _eglError(EGL_NOT_INITIALIZED, "FerrionOS platform not built");
++}
++#endif
++
+ #ifdef HAVE_WAYLAND_PLATFORM
+ EGLBoolean
+ dri2_initialize_wayland(_EGLDisplay *disp);
+--- a/src/egl/generate/egl.xml
++++ b/src/egl/generate/egl.xml
+@@ -3041,6 +3041,11 @@
+                 <enum name="EGL_PLATFORM_GBM_KHR"/>
+             </require>
+         </extension>
++        <extension name="EGL_KHR_platform_redox" supported="egl">
++            <require>
++                <enum name="EGL_PLATFORM_REDOX_KHR"/>
++            </require>
++        </extension>
+         <extension name="EGL_KHR_platform_wayland" supported="egl">
+             <require>
+                 <enum name="EGL_PLATFORM_WAYLAND_KHR"/>
+--- a/src/egl/main/eglapi.c
++++ b/src/egl/main/eglapi.c
+@@ -442,6 +442,12 @@
+          _eglGetGbmDisplay((struct gbm_device *)native_display, attrib_list);
+       break;
+ #endif
++#ifdef HAVE_REDOX_PLATFORM
++   case EGL_PLATFORM_REDOX_EXT:
++      disp = _eglGetRedoxDisplay(native_display,
++                                   attrib_list);
++      break;
++#endif
+ #ifdef HAVE_WAYLAND_PLATFORM
+    case EGL_PLATFORM_WAYLAND_EXT:
+       disp = _eglGetWaylandDisplay((struct wl_display *)native_display,
+@@ -600,6 +606,8 @@
+ 
+    _EGL_CHECK_EXTENSION(NV_context_priority_realtime);
+ 
++   _EGL_CHECK_EXTENSION(REDOX_image_native_buffer);
++
+    _EGL_CHECK_EXTENSION(WL_bind_wayland_display);
+    _EGL_CHECK_EXTENSION(WL_create_wayland_buffer_from_image);
+ 
+--- a/src/egl/main/egldisplay.c
++++ b/src/egl/main/egldisplay.c
+@@ -78,6 +78,7 @@
+    {_EGL_PLATFORM_X11, "x11"},
+    {_EGL_PLATFORM_XCB, "xcb"},
+    {_EGL_PLATFORM_WAYLAND, "wayland"},
++   {_EGL_PLATFORM_REDOX, "redox"},
+    {_EGL_PLATFORM_DRM, "drm"},
+    {_EGL_PLATFORM_ANDROID, "android"},
+    {_EGL_PLATFORM_HAIKU, "haiku"},
+@@ -127,6 +128,12 @@
+ {
+    if (nativeDisplay == EGL_DEFAULT_DISPLAY)
+       return _EGL_INVALID_PLATFORM;
++
++#ifdef HAVE_REDOX_PLATFORM
++   const char *orbital_env = getenv("ORBITAL_DISPLAY");
++   if (orbital_env && orbital_env[0] != '\0')
++      return _EGL_PLATFORM_REDOX;
++#endif
+ 
+ #ifdef HAVE_WINDOWS_PLATFORM
+    if (GetObjectType(nativeDisplay) == OBJ_DC)
+@@ -614,6 +621,43 @@
+    return dpy;
+ }
+ #endif /* HAVE_DRM_PLATFORM */
++
++#ifdef HAVE_REDOX_PLATFORM
++_EGLDisplay *
++_eglGetRedoxDisplay(void *native_display,
++                      const EGLAttrib *attrib_list)
++{
++   _EGLDisplay *dpy;
++   _EGLDevice *dev = NULL;
++
++   /* This platform recognizes only EXT_explicit_device */
++   if (attrib_list) {
++      for (int i = 0; attrib_list[i] != EGL_NONE; i += 2) {
++         EGLAttrib attrib = attrib_list[i];
++         EGLAttrib value = attrib_list[i + 1];
++
++         switch (attrib) {
++         case EGL_DEVICE_EXT:
++            dev = _eglLookupDevice((void *)value);
++            if (!dev) {
++               _eglError(EGL_BAD_DEVICE_EXT, "eglGetPlatformDisplay");
++               return NULL;
++            }
++            break;
++
++         default:
++            _eglError(EGL_BAD_ATTRIBUTE, "eglGetPlatformDisplay");
++            return NULL;
++         }
++      }
++   }
++
++   dpy = _eglFindDisplay(_EGL_PLATFORM_REDOX, native_display, attrib_list);
++   _eglSetExplicitDevice(dpy, dev);
++
++   return dpy;
++}
++#endif /* HAVE_REDOX_PLATFORM */
+ 
+ #ifdef HAVE_WAYLAND_PLATFORM
+ _EGLDisplay *
+--- a/src/egl/main/egldisplay.h
++++ b/src/egl/main/egldisplay.h
+@@ -49,6 +49,7 @@
+    _EGL_PLATFORM_X11,
+    _EGL_PLATFORM_XCB,
+    _EGL_PLATFORM_WAYLAND,
++   _EGL_PLATFORM_REDOX,
+    _EGL_PLATFORM_DRM,
+    _EGL_PLATFORM_ANDROID,
+    _EGL_PLATFORM_HAIKU,
+@@ -153,6 +154,8 @@
+ 
+    EGLBoolean NV_context_priority_realtime;
+ 
++   EGLBoolean REDOX_image_native_buffer;
++
+    EGLBoolean WL_bind_wayland_display;
+    EGLBoolean WL_create_wayland_buffer_from_image;
+ };
+@@ -335,6 +338,13 @@
+                   const EGLAttrib *attrib_list);
+ #endif
+ 
++#ifdef HAVE_REDOX_PLATFORM
++
++_EGLDisplay *
++_eglGetRedoxDisplay(void *native_display,
++                      const EGLAttrib *attrib_list);
++#endif
++
+ #ifdef HAVE_WAYLAND_PLATFORM
+ struct wl_display;
+ 
+--- a/src/egl/main/eglglobals.c
++++ b/src/egl/main/eglglobals.c
+@@ -77,6 +77,10 @@
+ #if !DETECT_OS_WINDOWS
+       "EGL_EXT_platform_device"
+       " EGL_EXT_explicit_device"
++#endif
++#ifdef HAVE_REDOX_PLATFORM
++      " EGL_EXT_platform_redox"
++      " EGL_KHR_platform_redox"
+ #endif
+ #ifdef HAVE_WAYLAND_PLATFORM
+       " EGL_EXT_platform_wayland"
+--- a/src/egl/meson.build
++++ b/src/egl/meson.build
+@@ -87,9 +87,12 @@
+ 
+   files_egl += files(
+     'drivers/dri2/platform_device.c',
+-    'drivers/dri2/platform_surfaceless.c',
+-  )
+-
++  )
++
++  files_egl += 'drivers/dri2/platform_surfaceless.c'
++  if with_platform_redox
++    files_egl += 'drivers/dri2/platform_redox.c'
++  endif
+   if with_platform_x11
+     files_egl += files('drivers/dri2/platform_x11.c')
+     incs_for_egl += inc_loader_x11

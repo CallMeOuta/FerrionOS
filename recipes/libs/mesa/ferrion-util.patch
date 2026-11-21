@@ -1,0 +1,120 @@
+FerrionOS: Port the existing CPU graphics support to Mesa 26.3.1.
+Source: https://gitlab.redox-os.org/redox-os/mesa.git, d6695f16..9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
+See PORTING.md for the original commits and obsolete hunks.
+
+--- a/include/c99_alloca.h
++++ b/include/c99_alloca.h
+@@ -35,7 +35,7 @@
+ 
+ #  define alloca _alloca
+ 
+-#elif defined(__sun) || defined(__CYGWIN__)
++#elif defined(__sun) || defined(__CYGWIN__) || defined(__redox__)
+ 
+ #  include <alloca.h>
+ 
+--- a/src/util/detect_os.h
++++ b/src/util/detect_os.h
+@@ -91,6 +91,11 @@
+ #define DETECT_OS_POSIX 1
+ #endif
+ 
++#if defined(__redox__)
++#define DETECT_OS_REDOX 1
++#define DETECT_OS_POSIX 1
++#endif
++
+ 
+ /*
+  * Make sure DETECT_OS_* are always defined, so that they can be used with #if
+@@ -131,6 +136,9 @@
+ #ifndef DETECT_OS_OPENBSD
+ #define DETECT_OS_OPENBSD 0
+ #endif
++#ifndef DETECT_OS_REDOX
++#define DETECT_OS_REDOX 0
++#endif
+ #ifndef DETECT_OS_SOLARIS
+ #define DETECT_OS_SOLARIS 0
+ #endif
+--- a/src/util/macros.h
++++ b/src/util/macros.h
+@@ -90,6 +90,10 @@
+ /**
+  * Static (compile-time) assertion.
+  */
++#if !defined(__cplusplus)
++# undef static_assert
++# define static_assert _Static_assert
++#endif
+ #define STATIC_ASSERT(cond) do { \
+    static_assert(cond, #cond); \
+ } while (0)
+--- a/src/util/memstream.c
++++ b/src/util/memstream.c
+@@ -69,6 +69,9 @@
+    }
+ 
+    return success;
++#elif defined(__redox__)
++    /* TODO: open_memstream on FerrionOS. */
++    return false;
+ #else
+    FILE *const f = open_memstream(bufp, sizep);
+    mem->f = f;
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -60,7 +60,7 @@
+ #  include <unistd.h>
+ #  include <android/log.h>
+ #  include <sys/system_properties.h>
+-#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
++#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM || DETECT_OS_REDOX
+ #  include <unistd.h>
+ #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
+ #  include <sys/resource.h>
+--- a/src/util/u_endian.h
++++ b/src/util/u_endian.h
+@@ -70,7 +70,7 @@
+ #endif
+ 
+ #elif defined(__NetBSD__) || defined(__FreeBSD__) || \
+-      defined(__DragonFly__)
++      defined(__DragonFly__) || defined(__redox__)
+ #include <sys/types.h>
+ #include <machine/endian.h>
+ 
+--- a/src/util/u_math.h
++++ b/src/util/u_math.h
+@@ -59,6 +59,10 @@
+ extern "C" {
+ #endif
+ 
++
++#ifndef M_LOG2E
++#define M_LOG2E 1.4426950408889634074
++#endif
+ 
+ #ifndef M_SQRT2
+ #define M_SQRT2 1.41421356237309504880
+--- a/src/util/u_thread.c
++++ b/src/util/u_thread.c
+@@ -176,7 +176,7 @@
+ int64_t
+ util_thread_get_time_nano(thrd_t thread)
+ {
+-#if defined(HAVE_PTHREAD) && !defined(__APPLE__) && !defined(__HAIKU__) && !defined(__managarm__)
++#if defined(HAVE_PTHREAD) && !defined(__APPLE__) && !defined(__HAIKU__) && !defined(__managarm__) && !defined(__redox__)
+    struct timespec ts;
+    clockid_t cid;
+ 
+--- a/src/gallium/auxiliary/hud/hud_context.c
++++ b/src/gallium/auxiliary/hud/hud_context.c
+@@ -36,6 +36,7 @@
+ #include <inttypes.h>
+ #include <signal.h>
+ #include <stdio.h>
++#include <unistd.h>
+ 
+ #include "util/detect_os.h"
+ 

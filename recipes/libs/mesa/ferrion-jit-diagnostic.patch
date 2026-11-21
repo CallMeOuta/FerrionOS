@@ -1,0 +1,26 @@
+FerrionOS: Port the existing CPU graphics support to Mesa 26.3.1.
+Source: https://gitlab.redox-os.org/redox-os/mesa.git, d6695f16..9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
+See PORTING.md for the original commits and obsolete hunks.
+
+--- a/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
++++ b/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
+@@ -632,6 +632,11 @@
+ 
+    JIT = builder.create();
+ 
++   if (!JIT) {
++      fprintf(stderr, "LLVM: JIT is not available, rerun with 'export GALLIUM_DRIVER=softpipe'\n");
++      fflush(stderr);
++   } else {
++
+    if (cache_out) {
+       LPObjectCache *objcache = new LPObjectCache(cache_out);
+       JIT->setObjectCache(objcache);
+@@ -642,7 +647,6 @@
+    JITEventListener *JEL = JITEventListener::createIntelJITEventListener();
+    JIT->RegisterJITEventListener(JEL);
+ #endif
+-   if (JIT) {
+       *OutJIT = wrap(JIT);
+       return 0;
+    }
