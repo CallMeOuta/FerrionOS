@@ -28,7 +28,10 @@ uutils = {}
 path = "/etc/login_schemes.toml"
 data = """
 [user_schemes.root]
-schemes = ["*"]
+# `namespace:scheme-create` names a right, not a scheme: root's logins may create schemes,
+# which the installer needs to mount the target disk (base ferrion-scheme-create-fork.patch).
+# Programs root starts in a namespace of their own, such as ferrion-run's, do not get it.
+schemes = ["*", "namespace:scheme-create"]
 [user_schemes.user]
 schemes = [
   # Kernel schemes

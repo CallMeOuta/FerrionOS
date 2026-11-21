@@ -26,6 +26,9 @@ fish-shell = "source"
 ion = {}
 nushell = {}
 zsh = {}
+# Run as `user`, it checks that the namespace manager refuses fork requests whose lengths run
+# past their end and keeps working; scripts/vm-test.py nsmgr-bounds runs it.
+nsmgr-bounds-probe = {}
 
 # The login shells a user may pick.
 [[files]]

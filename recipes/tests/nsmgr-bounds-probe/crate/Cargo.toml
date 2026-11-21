@@ -1,0 +1,10 @@
+[package]
+name = "nsmgr-bounds-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Checks that the namespace manager refuses fork requests with lengths past their end"
+publish = false
+
+[dependencies]
+libredox = "0.2.0"

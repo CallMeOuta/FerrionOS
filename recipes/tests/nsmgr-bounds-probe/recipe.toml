@@ -1,0 +1,14 @@
+# Run as `user`, nsmgr-bounds-probe sends the namespace manager fork requests whose name length
+# runs past the end of the request and passes when each is refused with EINVAL while the
+# namespace manager keeps answering (base ferrion-nsmgr-request-bounds.patch). The crate lives in
+# crate/ beside this file. config/x86_64/desktop.toml installs it; `scripts/vm-test.py
+# nsmgr-bounds` runs it.
+[package]
+description = "Checks that the namespace manager refuses fork requests with lengths past their end"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

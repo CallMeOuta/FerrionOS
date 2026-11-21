@@ -16,6 +16,13 @@
 #           /scheme, no physical memory, and lockdown-probe passes (needs an
 #           image whose config includes config/lockdown.toml)
 # Every run boots with -snapshot, so the image is never changed, and `make` is
+#   scheme-create  logs in as `user` on the serial console and checks that its
+#           login may not open the scheme-creation capability, then as root:
+#           root's login may, a program root starts under ferrion-run may not
+#           (x86_64 desktop)
+#   nsmgr-bounds  logs in as `user` on the serial console and runs
+#           nsmgr-bounds-probe: fork requests whose name length runs past their
+#           end get EINVAL and the namespace manager keeps answering (x86_64 desktop)
 # told the image is up to date, so a run never starts a build. Screenshots
 # (PNG) and the serial log of each run go under --out. Run from the
 # repository root. Python standard library only.
@@ -375,6 +382,30 @@ def test_shells(vm, args):
     return True, f"{len(SHELL_CHECKS)} shell checks passed"
 
 
+def test_nsmgr_bounds(vm, args):
+    """Logs in as `user` on the serial console and runs nsmgr-bounds-probe: fork requests whose name length runs past their end get EINVAL, a well-formed fork still works, and the shell can still run a program afterwards."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    results = {}
+    for tag, line in (("probe", "nsmgr-bounds-probe"), ("after", "ls / >/dev/null")):
+        since = vm.mark()
+        # The status is echoed inside bash: `user`'s login shell is not POSIX.
+        vm.type(f"bash -c '{line}; echo nb-end-{tag}-$?'\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)nb-end-{tag}-(\d+)", 60, since)
+        results[tag] = (int(found.group(2)) if found else None, found.group(1) if found else vm.text(since))
+    (vm.out / "nsmgr-bounds.txt").write_text("".join(f"[{tag}] exit {status}\n{output}\n"
+                                                     for tag, (status, output) in results.items()))
+    lines = re.findall(r"nsmgr-bounds-probe: (?:pass|FAIL) .*", results["probe"][1])
+    detail = "; ".join(line.strip() for line in lines) or "no result line"
+    if results["probe"][0] != 0:
+        return False, f"probe exit {results['probe'][0]}: {detail}; see {vm.out / 'nsmgr-bounds.txt'}"
+    if results["after"][0] != 0:
+        return False, f"the shell could not run `ls /` afterwards (exit {results['after'][0]}); see {vm.out}"
+    return True, detail
+
+
 # The nonce the tpm test asks attestd about, in hexadecimal, and the PCRs it compares.
 TPM_NONCE = "f3" * 32
 TPM_PCRS = (7, 8, 9)
@@ -612,6 +643,53 @@ def test_lockdown(vm, args):
 
 TESTS = {"boot": test_boot, "shells": test_shells, "screenshots": test_screenshots, "tpm": test_tpm,
          "lockdown": test_lockdown}
+
+def test_scheme_create(vm, args):
+    """Issue 7: `user`'s serial login may not open the scheme-creation capability; root's login, made next, may, and a program root starts under ferrion-run may not."""
+    probe = "cat /scheme/namespace/scheme-creation-cap 2>&1 >/dev/null"
+    results, transcript = {}, []
+    def check(name, line):
+        # The status is echoed inside bash: `user`'s login shell is not POSIX.
+        since = vm.mark()
+        vm.type(f"bash -c '{line}; echo sc-end-{name}-$?'\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)sc-end-{name}-(\d+)", 60, since)
+        output = found.group(1) if found else vm.text(since)
+        transcript.append(f"[{name}] $ {line}\n{output}exit {found.group(2) if found else 'none'}\n")
+        results[name] = None if not found else "Permission denied" not in output
+
+    # `user` logs in first: after root's Ion session had exited on the serial console, `user`'s
+    # Nushell quit at once with "failed to take control of the terminal" (seen 2026-11-21).
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    check("user", probe)
+    since = vm.mark()
+    vm.type("exit\n")
+    if not vm.wait_serial(r"login: ", args.timeout, since):
+        return False, f"no login prompt after user's logout; see {vm.out}"
+    # After a logout the serial log shows the login prompt drawn twice; type after the second.
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20, since):
+        return False, f"no password prompt for root after user's logout; see {vm.out}"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, since):
+        return False, f"no root shell after user's logout; see {vm.out}"
+    check("root", probe)
+    check("root-ferrion-run", "ferrion-run " + probe)
+    (vm.out / "scheme-create.txt").write_text("".join(transcript))
+    expected = {"user": False, "root": True, "root-ferrion-run": False}
+    wrong = [f"{name} {'opened' if results[name] else 'was refused' if results[name] is False else 'gave no answer'}"
+             for name in expected if results[name] != expected[name]]
+    if wrong:
+        return False, "; ".join(wrong) + f"; see {vm.out / 'scheme-create.txt'}"
+    return True, "root's login opens the capability; under ferrion-run and as user it is refused"
+
+
+TESTS["scheme-create"] = test_scheme_create
+TESTS["nsmgr-bounds"] = test_nsmgr_bounds
 
 
 def main():
