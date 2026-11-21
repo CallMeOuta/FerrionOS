@@ -53,6 +53,13 @@
 #           `user`'s password is empty (x86_64 desktop)
 #   resolver  checks hosts-file names as `user`, then captures DHCP option 6
 #           and the actual DNS query destination on QEMU's net0 using desktop curl
+#   net-hardening  boots twice with a host-side peer on QEMU's network hub, the card
+#           chosen by --make net= (e1000 by default, or virtio), and logs in as root:
+#           DHCP replies for another request are ignored, TCP initial sequence numbers differ
+#           between boots and source ports do not count up, 20 lookups take only
+#           the reply with their ID and question from the server's address and
+#           port, frames of 1,514 to 9,000 bytes leave the driver running, and
+#           40,000 ARP senders grow the stack by less than 512 KiB (x86_64 desktop)
 # Every run boots with -snapshot, so the image is never changed (disk-keys and
 # disk-install boot copies in a temporary directory instead), and `make` is
 # told the image is up to date, so a run never starts a build. Screenshots
@@ -67,6 +74,7 @@ import re
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1967,6 +1975,339 @@ echo cli-tar-ok
     return True, "sed substitution, awk arithmetic and tar -czf/-xzf -C passed"
 
 
+# The net-hardening test's network: QEMU's user network (restricted, so nothing leaves
+# the host) and a host-side peer share one hub with the guest's card. The peer sees
+# every frame the guest sends and writes its own frames back through a dgram netdev.
+# The user network's replies are held for 300 ms, so the peer's replies arrive first.
+GUEST_MAC = bytes.fromhex("525400123456")
+SLIRP_MAC = bytes.fromhex("52550a000202")  # the user network's gateway, 10.0.2.2
+GUEST_IP = "10.0.2.15"
+# The server the guest is told to ask. It is on the guest's link, where only the peer
+# answers ARP for it: the restricted user network gives no router or name server.
+TEST_DNS = "10.0.2.53"
+TEST_DNS_MAC = bytes.fromhex("525400000253")
+NET_CARDS = {"e1000": "e1000", "virtio": "virtio-net-pci"}
+
+
+def inet_sum(data):
+    if len(data) % 2:
+        data += b"\0"
+    total = sum(int.from_bytes(data[i:i + 2], "big") for i in range(0, len(data), 2))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return ~total & 0xFFFF
+
+
+def ipv4_packet(src, dst, proto, payload):
+    header = bytearray(20)
+    header[0], header[8], header[9] = 0x45, 64, proto
+    header[2:4] = (20 + len(payload)).to_bytes(2, "big")
+    header[12:16], header[16:20] = socket.inet_aton(src), socket.inet_aton(dst)
+    header[10:12] = inet_sum(bytes(header)).to_bytes(2, "big")
+    return bytes(header) + payload
+
+
+def udp_frame(dst_mac, src_ip, dst_ip, sport, dport, payload, src_mac=SLIRP_MAC):
+    length = 8 + len(payload)
+    udp = sport.to_bytes(2, "big") + dport.to_bytes(2, "big") + length.to_bytes(2, "big") + b"\0\0" + payload
+    pseudo = socket.inet_aton(src_ip) + socket.inet_aton(dst_ip) + b"\0\x11" + length.to_bytes(2, "big")
+    udp = udp[:6] + (inet_sum(pseudo + udp) or 0xFFFF).to_bytes(2, "big") + udp[8:]
+    return dst_mac + src_mac + b"\x08\x00" + ipv4_packet(src_ip, dst_ip, 17, udp)
+
+
+def dhcp_reply(xid, chaddr, kind, yiaddr, server="10.0.2.2", dns=None, tail=b"\xff"):
+    options = bytes([53, 1, kind, 54, 4]) + socket.inet_aton(server) + bytes([1, 4, 255, 255, 255, 0, 3, 4, 10, 0, 2, 2])
+    if dns:
+        options += bytes([6, 4]) + socket.inet_aton(dns)
+    body = (bytes([2, 1, 6, 0]) + xid + b"\0\0\x80\0" + bytes(4) + socket.inet_aton(yiaddr)
+            + socket.inet_aton("10.0.2.2") + bytes(4) + chaddr + bytes(192) + b"\x63\x82\x53\x63")
+    return udp_frame(b"\xff" * 6, "10.0.2.2", "255.255.255.255", 67, 68, body + options + tail)
+
+
+def dns_reply(query_id, question, answer, flags=0x8180):
+    """A reply with one question (wire form, with type and class) and one A record."""
+    return (struct.pack("!HHHHHH", query_id, flags, 1, 1, 0, 0) + question
+            + b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 30, 4) + socket.inet_aton(answer))
+
+
+class NetPeer:
+    """The host-side peer on the net-hardening test's hub, for one boot."""
+
+    def __init__(self, out):
+        self.out = out
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 22)
+        self.sock.bind(("127.0.0.1", 0))
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        self.qemu_port = probe.getsockname()[1]
+        probe.close()
+        self.lock = threading.Condition()
+        self.log = {"dhcp": [], "dns": [], "syn": [], "sent": []}
+        self.arp_replies = 0
+        self.guest_ip = GUEST_IP  # the address the guest sends from, once it has one
+        self.closed = False
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def qemu_flags(self, card):
+        return (f"-netdev user,id=net0,restrict=on "
+                f"-netdev dgram,id=netpeer,local.type=inet,local.host=127.0.0.1,local.port={self.qemu_port},"
+                f"remote.type=inet,remote.host=127.0.0.1,remote.port={self.sock.getsockname()[1]} "
+                "-netdev hubport,id=hub-user,hubid=7,netdev=net0 -netdev hubport,id=hub-peer,hubid=7,netdev=netpeer "
+                f"-netdev hubport,id=hub-card,hubid=7 -device {NET_CARDS[card]},netdev=hub-card,mac=52:54:00:12:34:56 "
+                "-object filter-buffer,id=user-delay,netdev=net0,queue=tx,interval=300000")
+
+    def send(self, frame, note=None):
+        self.sock.sendto(frame, ("127.0.0.1", self.qemu_port))
+        if note:
+            with self.lock:
+                self.log["sent"].append(note)
+
+    def _read(self):
+        while not self.closed:
+            try:
+                frame = self.sock.recv(65536)
+            except OSError:
+                return
+            try:
+                self._handle(frame)
+            except (IndexError, ValueError, struct.error):
+                pass
+
+    def _handle(self, frame):
+        if frame[6:12] != GUEST_MAC:
+            return
+        kind = frame[12:14]
+        if kind == b"\x08\x06" and frame[20:22] == b"\x00\x02" and frame[38:40] == b"\x0a\x01":
+            with self.lock:
+                self.arp_replies += 1
+                self.lock.notify_all()
+            return
+        if kind == b"\x08\x06" and frame[20:22] == b"\x00\x01" and frame[38:42] == socket.inet_aton(TEST_DNS):
+            self.send(GUEST_MAC + TEST_DNS_MAC + b"\x08\x06\x00\x01\x08\x00\x06\x04\x00\x02" + TEST_DNS_MAC
+                      + socket.inet_aton(TEST_DNS) + GUEST_MAC + frame[28:32])
+            return
+        if kind != b"\x08\x00":
+            return
+        ip = frame[14:]
+        ihl = (ip[0] & 15) * 4
+        src, dst, payload = socket.inet_ntoa(ip[12:16]), socket.inet_ntoa(ip[16:20]), ip[ihl:int.from_bytes(ip[2:4], "big")]
+        sport, dport = int.from_bytes(payload[0:2], "big"), int.from_bytes(payload[2:4], "big")
+        if src != "0.0.0.0":
+            self.guest_ip = src
+        if ip[9] == 6 and payload[13] & 0x12 == 0x02:
+            with self.lock:
+                self.log["syn"].append({"dst": f"{dst}:{dport}", "sport": sport,
+                                        "isn": int.from_bytes(payload[4:8], "big")})
+        elif ip[9] == 17 and dport == 67:
+            self._dhcp(payload[8:])
+        elif ip[9] == 17 and dport == 53 and dst == TEST_DNS:
+            self._dns(src, sport, payload[8:])
+
+    def _dhcp(self, body):
+        xid, chaddr, options = body[4:8], body[28:44], body[240:]
+        found, cursor = {}, 0
+        while cursor + 1 < len(options) and options[cursor] != 255:
+            if options[cursor] == 0:
+                cursor += 1
+                continue
+            size = options[cursor + 1]
+            found.setdefault(options[cursor], options[cursor + 2:cursor + 2 + size])
+            cursor += 2 + size
+        kind = found.get(53, b"\0")[0]
+        entry = {"type": kind, "xid": xid.hex()}
+        if 50 in found:
+            entry["requested"] = socket.inet_ntoa(found[50])
+        with self.lock:
+            self.log["dhcp"].append(entry)
+        other_xid = bytes(b ^ 0xA5 for b in xid)
+        other_mac = bytes([chaddr[0] ^ 2]) + chaddr[1:]
+        if kind == 1:  # discover: offers that must all be ignored
+            self.send(dhcp_reply(other_xid, chaddr, 2, "10.0.2.99", dns="192.0.2.99"), "offer, other xid")
+            self.send(dhcp_reply(xid, other_mac, 2, "10.0.2.98", dns="192.0.2.98"), "offer, other hardware address")
+            self.send(dhcp_reply(xid, chaddr, 5, "10.0.2.97", dns="192.0.2.97"), "ack instead of offer")
+            self.send(dhcp_reply(xid, chaddr, 2, "10.0.2.96", tail=bytes([6, 40]) + socket.inet_aton("192.0.2.96")),
+                      "offer, option past the end")
+        elif kind == 3:  # request: answers that must all be ignored
+            requested = entry.get("requested", GUEST_IP)
+            self.send(dhcp_reply(other_xid, chaddr, 5, requested, dns="192.0.2.95"), "ack, other xid")
+            self.send(dhcp_reply(xid, chaddr, 6, requested, server="10.0.2.9"), "nak from another server")
+            self.send(dhcp_reply(xid, chaddr, 5, "10.0.2.94", dns="192.0.2.94"), "ack of another address")
+
+    def _dns(self, guest_ip, port, query):
+        query_id, cursor = int.from_bytes(query[:2], "big"), 12
+        while query[cursor]:
+            cursor += 1 + query[cursor]
+        question = query[12:cursor + 5]
+        other = b"\x05other\x07invalid\x00" + question[-4:]
+        with self.lock:
+            self.log["dns"].append({"id": query_id, "sport": port})
+
+        def reply(source, sport, answer, qid=query_id, q=question):
+            self.send(udp_frame(GUEST_MAC, source, guest_ip, sport, port, dns_reply(qid, q, answer), TEST_DNS_MAC))
+
+        # Each wrong reply names its own address; only the last one may be used.
+        reply(TEST_DNS, 53, "192.0.2.66", qid=query_id ^ 0x5A5A)
+        reply(TEST_DNS, 53, "192.0.2.67", q=other)
+        reply(TEST_DNS, 5353, "192.0.2.68")
+        reply("10.0.2.54", 53, "192.0.2.69")
+        reply(TEST_DNS, 53, "192.0.2.70")
+
+    def large_frames(self, guest_ip):
+        """Frames of 1,514 (full size), 1,518, 4,000 and 9,000 bytes, each twice."""
+        for size in (1514, 1518, 4000, 9000) * 2:
+            self.send(udp_frame(GUEST_MAC, "10.0.2.2", guest_ip, 9, 9, bytes(size - 42)), f"{size}-byte frame")
+            time.sleep(0.05)
+
+    def arp_flood(self, guest_ip, count, window=16):
+        """ARP requests for the guest's address from `count` distinct senders in
+        10.1.0.0/16, `window` at a time; returns how many the guest answered."""
+        with self.lock:
+            start = self.arp_replies
+        target = socket.inet_aton(guest_ip)
+        for first in range(0, count, window):
+            for n in range(first, min(count, first + window)):
+                mac = b"\x02\x00" + n.to_bytes(4, "big")
+                sender = bytes([10, 1, (n >> 8) & 0xFF, n & 0xFF])
+                arp = b"\x00\x01\x08\x00\x06\x04\x00\x01" + mac + sender + bytes(6) + target
+                self.send(b"\xff" * 6 + mac + b"\x08\x06" + arp)
+            with self.lock:
+                self.lock.wait_for(lambda: self.arp_replies - start >= min(count, first + window) - window // 2, 0.05)
+        time.sleep(1)
+        with self.lock:
+            return self.arp_replies - start
+
+    def close(self, name):
+        self.closed = True
+        self.sock.close()
+        with self.lock:
+            (self.out / name).write_text(json.dumps(self.log, indent=1) + "\n")
+            return self.log
+
+
+def consecutive_run(ports):
+    """The longest run of consecutive numbers among `ports`."""
+    longest, run, previous = 0, 0, None
+    for port in sorted(set(ports)):
+        run = run + 1 if previous is not None and port == previous + 1 else 1
+        longest, previous = max(longest, run), port
+    return longest
+
+
+def context_rows(vm):
+    """PID, private memory in bytes and name of each process, from /scheme/sys/context."""
+    _, text = run_status(vm, "cat /scheme/sys/context > /tmp/context.txt && cat /tmp/context.txt", 60)
+    units = {"B": 1, "KB": 1 << 10, "MB": 1 << 20, "GB": 1 << 30}
+    rows = []
+    for match in re.finditer(r"(?m)^(\d+)\s+\d+\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+([\d.]+) ([KMG]?B)\s+"
+                             r"[\d.]+ [KMG]?B\s+(\S.*?)\s*$", text):
+        rows.append((int(match.group(1)), float(match.group(2)) * units[match.group(3)], match.group(4)))
+    return rows
+
+
+def process(rows, name):
+    found = [row for row in rows if row[2].rsplit("/", 1)[-1] == name]
+    return found[0] if found else None
+
+
+def test_net_hardening(args, out):
+    """Network hardening on the card `--make net=` picks (e1000 or virtio), over two boots: DHCP offers and answers for another request or malformed are ignored; TCP initial sequence numbers differ between boots and source ports are not consecutive; a name lookup takes only the reply with its ID and question from the server's address and port, 20 times of 20; frames of 1,514 to 9,000 bytes leave the network driver running; 40,000 ARP senders grow the stack by less than 512 KiB and it still answers."""
+    card = next((item.split("=", 1)[1] for item in reversed(args.make) if item.startswith("net=")), "e1000")
+    if card not in NET_CARDS:
+        return False, f"net-hardening runs with net=e1000 (the default) or net=virtio, not net={card}"
+    problems, notes, boots = [], [f"card {card}"], []
+
+    def lookup(vm, name):
+        _, text = run_status(vm, f"bash -c 'curl -4 --noproxy \"*\" -sv --connect-timeout 1 --max-time 4 "
+                                 f"http://{name}.lookup.invalid/ 2>&1 | grep -E \"Trying|resolve\"'", 30)
+        found = re.search(r"Trying (192\.0\.2\.\d+):80", text)
+        return found.group(1) if found else "none"
+
+    for boot in (1, 2):
+        boot_out = out / f"boot-{boot}"
+        boot_out.mkdir(parents=True, exist_ok=True)
+        peer = NetPeer(boot_out)
+        vm = VM(args, boot_out, qemu_flags=peer.qemu_flags(card), make=("net=no",))
+        log = None
+        try:
+            if not root_shell(vm, args.timeout):
+                return False, f"boot {boot}: no root shell on the serial console; see {boot_out}"
+            # dhcpd starts in the background; wait until it has exited.
+            _, text = run_status(vm, "bash -c 'for i in $(seq 600); do grep -q dhcpd /scheme/sys/context || break; "
+                                     "sleep 0.1; done; cat /etc/net/dns; echo; cat /scheme/netcfg/ifaces/eth0/addr/list'", 90)
+            (boot_out / "dhcp.txt").write_text(text)
+            configured = re.findall(r"(?m)^\s*(\d+\.\d+\.\d+\.\d+(?:/\d+)?)\s*$", text)
+            if any(re.match(r"192\.0\.2\.9\d|10\.0\.2\.9\d", value) for value in configured):
+                problems.append(f"boot {boot}: dhcpd took a reply meant to be ignored: {configured}")
+
+            run_status(vm, "bash -c 'for i in $(seq 20); do curl -s --connect-timeout 1 http://10.0.2.2:9/ >/dev/null; done'", 120)
+
+            if boot == 1:
+                run_status(vm, f"echo {TEST_DNS} > /etc/net/dns")
+                # The restricted user network names no router, and with no route `curl` can
+                # hang connecting to the looked-up address past --max-time (seen with
+                # virtio-net); a route to the user network's gateway lets it time out.
+                run_status(vm, "bash -c 'printf \"default via 10.0.2.2\" > /scheme/netcfg/route/add'")
+                answers = [lookup(vm, f"q{n}") for n in range(20)]
+                (boot_out / "lookups.txt").write_text("\n".join(answers) + "\n")
+                wrong = [answer for answer in answers if answer != "192.0.2.70"]
+                if wrong:
+                    problems.append(f"{len(wrong)} of 20 lookups did not take the matching reply: {sorted(set(wrong))}")
+                else:
+                    notes.append("20 of 20 lookups took the matching reply")
+
+                driver = "virtio-netd" if card == "virtio" else "e1000d"
+                before = process(context_rows(vm), driver)
+                peer.large_frames(peer.guest_ip)
+                time.sleep(2)
+                after = process(context_rows(vm), driver)
+                answer = lookup(vm, "after-frames")
+                if before is None or after is None or before[0] != after[0] or answer == "none":
+                    problems.append(f"after large frames: {driver} {before} then {after}, lookup {answer}")
+                else:
+                    notes.append(f"{driver} kept PID {after[0]} through frames of 1,514 to 9,000 bytes")
+
+                before = process(context_rows(vm), "netstack")
+                answered = peer.arp_flood(peer.guest_ip, 40_000)
+                after = process(context_rows(vm), "netstack")
+                answer = lookup(vm, "after-arp")
+                (boot_out / "arp.txt").write_text(f"answered {answered}\nbefore {before}\nafter {after}\nlookup {answer}\n")
+                if answered < 10_000:
+                    problems.append(f"the ARP flood reached the stack only {answered} times; see {boot_out}")
+                elif before is None or after is None or after[1] - before[1] >= 512 << 10 or answer == "none":
+                    problems.append(f"after {answered} ARP senders: netstack {before} then {after}, lookup {answer}")
+                else:
+                    notes.append(f"netstack grew {int(after[1] - before[1]) >> 10} KiB over {answered} ARP senders")
+            vm.kill()
+        finally:
+            vm.close()
+            log = peer.close(f"peer-boot-{boot}.json")
+        if not any(entry["type"] == 1 for entry in log["dhcp"]):
+            problems.append(f"boot {boot}: the peer saw no DHCP discover, so its replies were not sent")
+        requested = {entry.get("requested") for entry in log["dhcp"] if entry["type"] == 3}
+        if requested != {GUEST_IP}:
+            problems.append(f"boot {boot}: dhcpd requested {sorted(map(str, requested))}, not only {GUEST_IP}")
+        syns = list({entry["sport"]: entry for entry in log["syn"] if entry["dst"] == "10.0.2.2:9"}.values())
+        boots.append(syns)
+        if len(syns) < 20:
+            problems.append(f"boot {boot}: saw {len(syns)} of 20 connections")
+        elif consecutive_run([entry["sport"] for entry in syns]) >= 3:
+            problems.append(f"boot {boot}: consecutive source ports {sorted(entry['sport'] for entry in syns)}")
+        if boot == 1:
+            queries = log["dns"]
+            if consecutive_run([entry["sport"] for entry in queries]) >= 3 or len({e["id"] for e in queries}) < len(queries):
+                problems.append(f"lookup ports or IDs repeat or count up: {queries}")
+
+    isns = [[entry["isn"] for entry in syns] for syns in boots]
+    if all(isns) and (isns[0][0] == isns[1][0] or set(isns[0]) & set(isns[1])):
+        problems.append(f"initial sequence numbers repeat across boots: {isns[0][:3]} and {isns[1][:3]}")
+    elif all(isns):
+        notes.append(f"first sequence numbers {isns[0][0]} and {isns[1][0]}; no number shared between boots")
+    if problems:
+        return False, "; ".join(problems) + f"; see {out}"
+    return True, "; ".join(notes)
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -1984,6 +2325,8 @@ TESTS["cli-tools"] = test_cli_tools
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
+# This one starts its own two boots of the shared image, with a peer on QEMU's network hub.
+OWN_IMAGE["net-hardening"] = test_net_hardening
 TESTS.update(OWN_IMAGE)
 
 
