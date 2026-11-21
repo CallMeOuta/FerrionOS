@@ -1,0 +1,100 @@
+FerrionOS change to the bootloader (MIT license, kept), made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8 with ferrion-quiet-boot.patch, ferrion-verified-boot.patch, ferrion-measured-boot.patch and ferrion-passphrase-wipe.patch applied:
+- Request a firmware random seed and leave it in a reserved page for randd to consume and wipe. Pass only its address and size, outside the measured environment.
+
+diff --git a/src/main.rs b/src/main.rs
+index cd8f550..085ee8f 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -59,6 +59,16 @@ mod measure {
+     }
+ }
+ 
++// The firmware's random seed comes from UEFI's RNG protocol; the BIOS bootloader passes none.
++#[cfg(any(target_arch = "riscv64", target_os = "uefi"))]
++mod rng;
++#[cfg(not(any(target_arch = "riscv64", target_os = "uefi")))]
++mod rng {
++    pub fn seed<O: crate::os::Os>(_: &O) -> Option<&'static [u8]> {
++        None
++    }
++}
++
+ /// The boot entry this bootloader starts, measured into PCR 8. There is one entry today.
+ const BOOT_ENTRY: &str = "normal";
+ 
+@@ -813,6 +823,12 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+             writeln!(w, "TPM_EVENT_LOG_ADDR={:016x}", log.as_ptr() as usize).unwrap();
+             writeln!(w, "TPM_EVENT_LOG_SIZE={:016x}", log.len()).unwrap();
+         }
++        // Only where the seed is, never the seed, and outside the measured part: the page's
++        // address may differ between boots.
++        if let Some(seed) = rng::seed(os) {
++            writeln!(w, "RNG_SEED_ADDR={:016x}", seed.as_ptr() as usize).unwrap();
++            writeln!(w, "RNG_SEED_SIZE={:016x}", seed.len()).unwrap();
++        }
+         env_size = w.i;
+     }
+ 
+diff --git a/src/rng.rs b/src/rng.rs
+new file mode 100644
+index 0000000..4af1ee1
+--- /dev/null
++++ b/src/rng.rs
+@@ -0,0 +1,57 @@
++//! A random seed from the firmware (FerrionOS). Through EFI_RNG_PROTOCOL, when the firmware has
++//! it, the bootloader asks for 32 bytes with the firmware's default algorithm and leaves them in a
++//! reserved page of their own. The kernel gets only the page's address and the seed's size, as
++//! `RNG_SEED_ADDR` and `RNG_SEED_SIZE`, after the measured part of the environment; init hands the
++//! two to randd alone, which mixes the bytes into its key and overwrites the page with zeros.
++//! Without the protocol (OVMF offers it only with RDRAND or a virtio-rng device) nothing is
++//! passed and randd relies on its other sources.
++
++use std::proto::Protocol;
++use uefi::guid::{Guid, RNG_PROTOCOL_GUID};
++use uefi::status::Status;
++
++use crate::os::Os;
++
++/// The size of the seed: the key size of randd's ChaCha20 generator.
++pub const SEED_SIZE: usize = 32;
++
++#[allow(non_snake_case)]
++#[repr(C)]
++pub struct RngProtocol {
++    GetInfo: usize,
++    GetRNG: extern "efiapi" fn(
++        This: *mut RngProtocol,
++        RNGAlgorithm: *const Guid,
++        RNGValueLength: usize,
++        RNGValue: *mut u8,
++    ) -> Status,
++}
++
++struct Rng(&'static mut RngProtocol);
++
++impl Protocol<RngProtocol> for Rng {
++    fn guid() -> Guid {
++        RNG_PROTOCOL_GUID
++    }
++
++    fn new(inner: &'static mut RngProtocol) -> Self {
++        Rng(inner)
++    }
++}
++
++/// The seed, written by the firmware straight into a reserved page, or None without the protocol.
++pub fn seed<O: Os>(os: &O) -> Option<&'static [u8]> {
++    let rng = Rng::locate_protocol().ok()?;
++    let page = os.alloc_zeroed_page_aligned(SEED_SIZE);
++    if page.is_null() {
++        return None;
++    }
++    let this: *mut RngProtocol = rng.0;
++    let status = (rng.0.GetRNG)(this, core::ptr::null(), SEED_SIZE, page);
++    if !status.is_success() {
++        unsafe { core::ptr::write_bytes(page, 0, SEED_SIZE) };
++        log::warn!("EFI_RNG_PROTOCOL returned {:?}; passing no seed", status);
++        return None;
++    }
++    Some(unsafe { core::slice::from_raw_parts(page, SEED_SIZE) })
++}

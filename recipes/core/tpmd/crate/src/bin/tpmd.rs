@@ -1,7 +1,8 @@
 //! tpmd: the TPM 2.0 driver.
 //!
 //! It finds the TPM through the ACPI TPM2 table, maps its Command Response Buffer (CRB)
-//! registers and checks it answers TPM2_GetRandom. It registers no scheme name: it makes one
+//! registers, checks it answers TPM2_GetRandom and mixes the bytes into /scheme/rand/hardware.
+//! It registers no scheme name: it makes one
 //! handle to itself, starts `attestd` with that handle and keeps none, so `attestd` is the only
 //! process that can send the TPM a command, and no process can open another. When `attestd`
 //! closes the handle, tpmd exits. Without a usable TPM it starts `attestd` with no handle.
@@ -9,6 +10,8 @@
 //! The register layout is the CRB interface of the TCG PC Client Platform TPM Profile (PTP)
 //! specification; QEMU's `tpm-crb` device implements it.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::process::Command;
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -24,6 +27,7 @@ use syscall::flag::MODE_CHR;
 use tpmd::{TPM_FD_ENV, service, tpm2};
 
 const PAGE_SIZE: usize = 4096;
+const RANDOM_BYTES: u16 = 32;
 
 /// ACPI TPM2 table: start method 7 is the Command Response Buffer interface.
 const START_METHOD_CRB: u32 = 7;
@@ -241,21 +245,24 @@ impl Crb {
     }
 
     /// Checks the TPM answers, sending TPM2_Startup first if the firmware did not.
-    fn probe(&self) -> Result<(), String> {
+    fn probe(&self) -> Result<Vec<u8>, String> {
         self.request_locality()?;
-        let mut response = self.transact(&tpm2::get_random(8), PROBE_TIMEOUT)?;
+        let mut response = self.transact(&tpm2::get_random(RANDOM_BYTES), PROBE_TIMEOUT)?;
         if tpm2::response_code(&response) == Some(tpm2::RC_INITIALIZE) {
             eprintln!("tpmd: the firmware did not start the TPM; sending TPM2_Startup");
             let startup = self.transact(&tpm2::startup_clear(), PROBE_TIMEOUT)?;
             tpm2::parse_empty(&startup).map_err(|e| format!("TPM2_Startup: {e}"))?;
-            response = self.transact(&tpm2::get_random(8), PROBE_TIMEOUT)?;
+            response = self.transact(&tpm2::get_random(RANDOM_BYTES), PROBE_TIMEOUT)?;
         }
         let random =
             tpm2::parse_get_random(&response).map_err(|e| format!("TPM2_GetRandom: {e}"))?;
-        if random.len() != 8 {
+        if random.is_empty() || random.len() > usize::from(RANDOM_BYTES) {
             return Err(format!("TPM2_GetRandom returned {} bytes", random.len()));
         }
-        Ok(())
+        for byte in &mut response {
+            unsafe { ptr::write_volatile(byte, 0) };
+        }
+        Ok(random)
     }
 }
 
@@ -345,6 +352,25 @@ fn start_attestd(tpm_fd: Option<usize>) -> Result<(), String> {
         .map_err(|e| format!("cannot start attestd: {e}"))
 }
 
+/// Passes the probe's bytes to randd before entering the null namespace. A short TPM response
+/// still contributes bytes, but randd only marks a hardware write seeded at 32 bytes.
+fn feed_randd(random: &mut [u8]) {
+    let result = OpenOptions::new()
+        .write(true)
+        .open("/scheme/rand/hardware")
+        .and_then(|mut file| file.write_all(random));
+    match result {
+        Ok(()) => eprintln!(
+            "tpmd: mixed {} bytes from TPM2_GetRandom into /scheme/rand",
+            random.len()
+        ),
+        Err(err) => eprintln!("tpmd: cannot feed TPM2_GetRandom to /scheme/rand: {err}"),
+    }
+    for byte in random {
+        unsafe { ptr::write_volatile(byte, 0) };
+    }
+}
+
 fn main() {
     let notify = service::init_notify_fd().expect("tpmd: start it through init");
 
@@ -352,12 +378,15 @@ fn main() {
         None => Err("no TPM2 ACPI table: no TPM".into()),
         Some(table) => {
             let crb = Crb::from_table(&table)?;
-            crb.probe()?;
-            Ok(crb)
+            let random = crb.probe()?;
+            Ok((crb, random))
         }
     });
     let crb = match crb {
-        Ok(crb) => crb,
+        Ok((crb, mut random)) => {
+            feed_randd(&mut random);
+            crb
+        }
         Err(e) => {
             eprintln!("tpmd: {e}; attestd starts without a TPM");
             if let Err(e) = start_attestd(None) {
