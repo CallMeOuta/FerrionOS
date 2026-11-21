@@ -6,6 +6,7 @@ extern crate alloc;
 
 #[macro_use]
 mod ioctl_data;
-pub use ioctl_data::IoctlData;
+pub use ioctl_data::{IoctlData, WireArray, WireDirection, WireField, WireLayout};
 
 pub mod drm;
+pub mod virtgpu;

@@ -5,7 +5,106 @@ pub trait IoctlData {
     unsafe fn read_from(&mut self, buf: &[u8]);
 }
 
+/// The layout of the payload a scheme receives for one request: the fixed
+/// fields, which are the request's own fields without its array pointers,
+/// then each array those pointers name, in this order.
+pub struct WireLayout {
+    pub fixed_size: usize,
+    pub fixed: &'static [WireField],
+    pub arrays: &'static [WireArray],
+}
+
+pub struct WireField {
+    pub name: &'static str,
+    pub offset: usize,
+    pub size: usize,
+}
+
+pub struct WireArray {
+    /// The request's field that points at the array.
+    pub pointer: &'static str,
+    /// The request's field that holds the number of elements.
+    pub count: &'static str,
+    pub element: &'static str,
+    pub size: usize,
+    pub align: usize,
+    pub direction: WireDirection,
+}
+
+/// Which way an array's contents travel between the caller and the scheme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireDirection {
+    /// Sent to the scheme and copied back to the caller: `array`.
+    Both,
+    /// Sent to the scheme only: `in_array`.
+    In,
+    /// Sent as zeros and copied back to the caller: `out_array`.
+    Out,
+}
+
+impl WireLayout {
+    /// Whether the fixed fields cover the fixed part with no padding between them.
+    pub const fn is_packed(&self) -> bool {
+        let mut end = 0;
+        let mut i = 0;
+        while i < self.fixed.len() {
+            if self.fixed[i].offset != end {
+                return false;
+            }
+            end += self.fixed[i].size;
+            i += 1;
+        }
+        end == self.fixed_size
+    }
+
+    /// Whether every array starts at an offset its elements' alignment divides,
+    /// whatever the counts: the fixed part's size is a multiple of the first
+    /// array's alignment, and no array is aligned more strictly than the one
+    /// before it.
+    pub const fn is_aligned(&self) -> bool {
+        let mut i = 0;
+        while i < self.arrays.len() {
+            let align = self.arrays[i].align;
+            if i == 0 && !self.fixed_size.is_multiple_of(align) {
+                return false;
+            }
+            if i > 0 && align > self.arrays[i - 1].align {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+}
+
 macro_rules! define_ioctl_data {
+    (@direction array) => { $crate::WireDirection::Both };
+    (@direction in_array) => { $crate::WireDirection::In };
+    (@direction out_array) => { $crate::WireDirection::Out };
+
+    (@write out_array, $data:ident, $ptr:expr, $size:ident) => {
+        $data.extend(iter::repeat(0u8).take($size));
+    };
+    (@write $dir:ident, $data:ident, $ptr:expr, $size:ident) => {
+        if $ptr as usize != 0 {
+            let src = unsafe { slice::from_raw_parts($ptr as usize as *const u8, $size) };
+            $data.extend_from_slice(src);
+        } else {
+            $data.extend(iter::repeat(0u8).take($size));
+        };
+    };
+
+    (@read in_array, $dst:expr, $src:ident, $size:ident) => {
+        let _ = $src;
+    };
+    (@read $dir:ident, $dst:expr, $src:ident, $size:ident) => {
+        if $dst as usize != 0 {
+            unsafe {
+                slice::from_raw_parts_mut($dst as usize as *mut u8, $size).copy_from_slice($src);
+            }
+        }
+    };
+
     (struct $ioctl_ty:ident, $mem_ty:ident {
         $($rest:tt)*
     }) => {
@@ -29,7 +128,7 @@ macro_rules! define_ioctl_data {
         );
     };
     (struct $ioctl_ty:ident, $mem_ty:ident {
-        $field:ident: $ty:ty [array<$el:ty, $counted_by:ident>],
+        $field:ident: $ty:ty [$dir:ident<$el:ty, $counted_by:ident>],
         $($rest:tt)*
     } =>
         ($($ioctl_fields:tt)*),
@@ -39,13 +138,13 @@ macro_rules! define_ioctl_data {
         define_ioctl_data!(
             struct $ioctl_ty, $mem_ty { $($rest)* } =>
                 ($($ioctl_fields)* $field: $ty,),
-                ($($counted_fields)* $field: $ty [array<$el, $counted_by>],),
+                ($($counted_fields)* $field: $ty [$dir<$el, $counted_by>],),
                 ($($noncounted_fields)*)
         );
     };
     (struct $ioctl_ty:ident, $mem_ty:ident {} =>
         ($($ioctl_field:ident: $ioctl_field_ty:ty,)*),
-        ($($counted_field:ident: $counted_ty:ty [array<$el:ty, $counted_by:ident>],)*),
+        ($($counted_field:ident: $counted_ty:ty [$dir:ident<$el:ty, $counted_by:ident>],)*),
         ($($noncounted_field:ident: $noncounted_ty:ty,)*)
     ) => {
         // FIXME check ioctl_ty doesn't have padding
@@ -78,18 +177,7 @@ macro_rules! define_ioctl_data {
                 });
                 $(
                     let size = self.$counted_by as usize * size_of::<$el>();
-                    if self.$counted_field as usize != 0 {
-                        let $counted_field = unsafe {
-                            #[allow(clippy::ptr_cast_constness)]
-                            // can't use expect with reason because lint doesn't trigger on all arches
-                            // can't use cfg as applying lint on riscv64/aarch64 fails as self.$counted_field is u64
-                            slice::from_raw_parts(self.$counted_field as *const u8, size)
-                        };
-                        data.extend_from_slice(&$counted_field);
-                    } else {
-                        data.extend(iter::repeat(0u8).take(size));
-                    };
-
+                    define_ioctl_data!(@write $dir, data, self.$counted_field, size);
                 )*
                 data
             }
@@ -102,11 +190,7 @@ macro_rules! define_ioctl_data {
                 $(
                     let size = self.$counted_by as usize * size_of::<$el>();
                     let $counted_field = buf.split_off(..size).unwrap();
-                    if self.$counted_field as usize != 0 {
-                        unsafe {
-                            slice::from_raw_parts_mut(self.$counted_field as *mut u8, size).copy_from_slice($counted_field);
-                        }
-                    }
+                    define_ioctl_data!(@read $dir, self.$counted_field, $counted_field, size);
                 )*
 
                 assert!(buf.is_empty());
@@ -117,6 +201,23 @@ macro_rules! define_ioctl_data {
         }
 
         impl<'a> $mem_ty<'a> {
+            pub const LAYOUT: $crate::WireLayout = $crate::WireLayout {
+                fixed_size: size_of::<${concat(__, $mem_ty, Noncounted)}>(),
+                fixed: &[$($crate::WireField {
+                    name: stringify!($noncounted_field),
+                    offset: ::core::mem::offset_of!(${concat(__, $mem_ty, Noncounted)}, $noncounted_field),
+                    size: size_of::<$noncounted_ty>(),
+                },)*],
+                arrays: &[$($crate::WireArray {
+                    pointer: stringify!($counted_field),
+                    count: stringify!($counted_by),
+                    element: stringify!($el),
+                    size: size_of::<$el>(),
+                    align: align_of::<$el>(),
+                    direction: define_ioctl_data!(@direction $dir),
+                },)*],
+            };
+
             pub fn with(
                 mut buf: &'a mut [u8],
                 f: impl FnOnce($mem_ty<'a>) -> syscall::Result<usize>,
