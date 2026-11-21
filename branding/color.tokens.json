@@ -1,0 +1,15 @@
+{
+    "ferrion": {
+        "color": {
+            "$type": "color",
+            "ground": {
+                "$description": "The one background from power-on to login, and behind the mark everywhere.",
+                "$value": { "colorSpace": "oklch", "components": [0.164, 0.004, 84.6], "hex": "#0f0e0c" }
+            },
+            "ink": {
+                "$description": "The mark, the wordmark and text on the ground.",
+                "$value": { "colorSpace": "oklch", "components": [0.94, 0.006, 84.6], "hex": "#edebe7" }
+            }
+        }
+    }
+}

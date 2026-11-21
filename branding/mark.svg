@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="112" viewBox="0 0 4 7" role="img" aria-labelledby="t" fill="currentColor">
+    <title id="t">FerrionOS</title>
+    <!--
+        The FerrionOS mark, on a grid of 4 by 7 units: a capital F cut through its stem above the middle arm.
+        Every stroke and the cut are 1 unit, the top arm is 4 units and the middle arm 3.
+        This file is the source of every other form of the mark; generate.py reads it.
+        Each path is one closed outline written with M, h, v, H, V and z on whole units.
+    -->
+    <path d="M0 0h4v1H1v2H0z"/>
+    <path d="M0 4h3v1H1v2H0z"/>
+</svg>
