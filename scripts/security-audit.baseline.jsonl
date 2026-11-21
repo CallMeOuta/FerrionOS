@@ -116,6 +116,9 @@
 {"check": "accounts", "subject": "config/x86_64/jeremy.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/x86_64/jeremy.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/dev-accounts.toml)", "fix": "remove [users.user] from config/dev-accounts.toml or give it no login"}
 {"check": "accounts", "subject": "config/x86_64/jeremy.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
+{"check": "accounts", "subject": "config/x86_64/mesa-cpu.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
+{"check": "accounts", "subject": "config/x86_64/mesa-cpu.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/x86_64/desktop.toml)", "fix": "remove [users.user] from config/x86_64/desktop.toml or give it no login"}
+{"check": "accounts", "subject": "config/x86_64/mesa-cpu.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
 {"check": "accounts", "subject": "config/x86_64/redoxer.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/x86_64/redoxer.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/dev-accounts.toml)", "fix": "remove [users.user] from config/dev-accounts.toml or give it no login"}
 {"check": "accounts", "subject": "config/x86_64/redoxer.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
@@ -162,7 +165,7 @@
 {"check": "sources", "subject": "recipes/cosmic/cosmic-store", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-store/recipe.toml"}
 {"check": "sources", "subject": "recipes/cosmic/cosmic-term", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-term/recipe.toml"}
 {"check": "sources", "subject": "recipes/cosmic/cosmic-text", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-text/recipe.toml"}
-{"check": "sources", "subject": "recipes/data/ca-certificates", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/data/ca-certificates/recipe.toml"}
+{"check": "sources", "subject": "recipes/data/ca-certificates", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/data/generaluser-gs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/data/generaluser-gs/recipe.toml"}
 {"check": "sources", "subject": "recipes/data/shared-mime-info", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/data/terminfo", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/data/terminfo/recipe.toml"}
@@ -234,7 +237,7 @@
 {"check": "sources", "subject": "recipes/games/hematite", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/hematite/recipe.toml"}
 {"check": "sources", "subject": "recipes/games/neverball", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/games/openjazz", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/openjk", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/openjk/recipe.toml"}
+{"check": "sources", "subject": "recipes/games/openjk", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/games/openttd", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/games/openttd-opengfx", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/openttd-opengfx/recipe.toml"}
 {"check": "sources", "subject": "recipes/games/openttd-openmsx", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/openttd-openmsx/recipe.toml"}
@@ -272,6 +275,7 @@
 {"check": "sources", "subject": "recipes/libs/libdrm", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libffi", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libflac", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/libglvnd", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libgmp", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libiconv", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libinotify-stub", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -293,7 +297,7 @@
 {"check": "sources", "subject": "recipes/libs/libxml2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/lua-compat-53", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/lua-compat-53/recipe.toml"}
 {"check": "sources", "subject": "recipes/libs/luv", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/luv/recipe.toml"}
-{"check": "sources", "subject": "recipes/libs/mesa", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/mesa", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/mesa-glu", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/mpc", "status": "fail", "note": "tar source without blake3: any content is accepted", "fix": "add blake3 = \"<hash>\" to [source] in recipes/libs/mpc/recipe.toml"}
 {"check": "sources", "subject": "recipes/libs/ncurses", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -312,7 +316,7 @@
 {"check": "sources", "subject": "recipes/libs/sdl1-image", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl1-mixer", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl1-ttf", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/sdl2", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/sdl2/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/sdl2", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl2-gfx", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl2-image", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl2-mixer", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
