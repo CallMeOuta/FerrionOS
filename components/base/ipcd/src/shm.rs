@@ -124,14 +124,15 @@ impl SchemeSync for ShmScheme {
         }
     }
     fn unlinkat(&mut self, dirfd: usize, path: &str, flags: usize, _ctx: &CallerCtx) -> Result<()> {
-        let handle = self.handles.get(dirfd)?;
-        if !matches!(handle, Handle::SchemeRoot) {
-            return Err(Error::new(EACCES));
-        }
+        // A directory handle unlinks the objects it can create: those under its own prefix.
+        let path: Rc<str> = match self.handles.get(dirfd)? {
+            Handle::SchemeRoot => Rc::from(path),
+            Handle::Directory(parent) => Rc::from(format!("{}.{}", *parent, path).as_str()),
+            Handle::Shm(_) => return Err(Error::new(EACCES)),
+        };
         if flags & AT_REMOVEDIR == AT_REMOVEDIR {
             return Err(Error::new(ENOTDIR));
         }
-        let path = Rc::from(path);
         let mut entry = match self.maps.entry(Rc::clone(&path)) {
             Entry::Occupied(e) => e,
             Entry::Vacant(_) => return Err(Error::new(ENOENT)),
