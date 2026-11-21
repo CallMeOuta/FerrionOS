@@ -30,11 +30,22 @@ cmd = "dhcpd"
 type = "oneshot"
 """
 
+# A service and not a script: redoxerd ends QEMU through its exit port, which needs the hardware
+# right; redoxerd starts the command under test without it.
 [[files]]
-path = "/usr/lib/init.d/30_redoxer"
+path = "/usr/lib/init.d/30_redoxer.service"
 data = """
-requires_weak 10_net.target
-ion /usr/lib/run_redoxer.ion
+[unit]
+description = "Redoxer test runner"
+requires_weak = [
+    "10_net.target",
+]
+
+[service]
+cmd = "ion"
+args = ["/usr/lib/run_redoxer.ion"]
+type = "oneshot"
+hardware = true
 """
 
 [[files]]
