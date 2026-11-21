@@ -1,0 +1,35 @@
+# Test image, not for daily use: the server image plus the tools a programmer
+# working with AI agents reaches for, so that `scripts/vm-test.py dev-parity`
+# can try each task (git over HTTPS, Rust, Python, Node.js and npm, OpenSSH,
+# Helix, and the npm packages of Claude Code and Codex) and record which work.
+# It carries the dev accounts from config/dev-accounts.toml.
+#
+# Build and check it:
+#   make all ARCH=x86_64 CONFIG_NAME=dev-parity
+#   scripts/vm-test.py dev-parity --config dev-parity --make QEMU_MEM=4096
+#
+# The large new packages use the "binary" rule: upstream's prebuilt packages
+# instead of a cook here, because Rust, GCC and Node.js take hours to cook.
+# The rule carries over to their package dependencies that the server image
+# does not already cook from source.
+
+include = ["../server.toml"]
+
+[general]
+# Filesystem size in MiB: the packages take about 1.5 GiB, and the tasks write
+# a Cargo build, a Python virtual environment and npm installs on top.
+filesystem_size = 4096
+
+[packages]
+# git and ca-certificates come from server.toml.
+# Rust: rustc and cargo. GCC is the linker rustc calls (`cc`), with binutils.
+rust = "binary"
+gcc13 = "binary"
+# Python 3.12 with pip (the recipe installs it through ensurepip).
+python312 = "binary"
+# Node.js 21 with npm; its recipe is under recipes/wip/.
+nodejs-21 = "binary"
+# ssh, ssh-keygen and sshd.
+openssh = "binary"
+# hx, a wrapper script that runs bash, and the helix binary.
+helix = "binary"

@@ -35,6 +35,9 @@ ferrion-cli = {}
 # It only takes access away (the network schemes, the sudo scheme, inherited descriptors)
 # and is not setuid; scripts/vm-test.py ferrion-run checks it.
 ferrion-run = {}
+# Security roadmap S12: run as `user`, it checks that signals sent through process handles
+# follow kill()'s permission rule; scripts/vm-test.py signal-handle runs it.
+signal-handle-probe = {}
 # Run as `user`, it checks that the namespace manager refuses fork requests whose lengths run
 # past their end and keeps working; scripts/vm-test.py nsmgr-bounds runs it.
 nsmgr-bounds-probe = {}
@@ -57,6 +60,15 @@ data = """
 /usr/bin/ion
 /usr/bin/nu
 /usr/bin/zsh
+"""
+
+# Nushell runs every file in /usr/share/nushell/vendor/autoload after env.nu and
+# config.nu, then the user's own autoload directory, where a file can turn the
+# banner back on. FerrionOS starts quietly: no welcome banner.
+[[files]]
+path = "/usr/share/nushell/vendor/autoload/ferrion.nu"
+data = """
+$env.config.show_banner = false
 """
 
 # Replaces the table from config/dev-accounts.toml whole, so the password is repeated.

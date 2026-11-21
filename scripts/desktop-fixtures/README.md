@@ -1,0 +1,1 @@
+The SVG files under `flat/` and their generator, `mockups.py`, are FerrionOS desktop fixtures copied from the desktop design plan; these mockups are the desktop's target picture, not screenshots of the current desktop.

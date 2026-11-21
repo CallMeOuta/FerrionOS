@@ -15,7 +15,26 @@
 #           and checks that root reaches no raw hardware: no device scheme in
 #           /scheme, no physical memory, and lockdown-probe passes (needs an
 #           image whose config includes config/lockdown.toml)
-# Every run boots with -snapshot, so the image is never changed, and `make` is
+#   driver-namespaces  presses Enter on the graphical login (input through
+#           inputd), logs in as root on the serial console, reads
+#           /scheme/sys/iostat and checks that every namespace handle each
+#           driver holds can open only memory and pipe (audiod: memory and
+#           rand); lists the drivers not running at the snapshot as not exercised
+#   rand-seed  checks random bytes and seed status across two boots each with
+#           firmware RNG only, timing jitter only, and the host CPU RNG
+#   ferrion-run  logs in as `user` on the serial console and checks that
+#           `ferrion-run --no-network` and a profile keep a program off the
+#           network, also through sudo, that a socket opened before the launch does not work in
+#           the program, and that a socket or disk file as standard input or
+#           output is refused; each denial is first tried without the launcher,
+#           where it must succeed (x86_64 desktop)
+#   disk-keys  on an image built with encrypt_disk (config disk-encryption-test):
+#           a recovery key added on the host opens it at the bootloader, and after
+#           `redoxfs-key change` in the guest and a reboot the old passphrase is
+#           refused, the new one accepted and the old slot is in no header
+#   disk-install  installs from that config's live image to a second disk with
+#           the text installer, then starts the installed disk with its passphrase
+#           and with the recovery key the installer printed
 #   scheme-create  logs in as `user` on the serial console and checks that its
 #           login may not open the scheme-creation capability, then as root:
 #           root's login may, a program root starts under ferrion-run may not
@@ -23,11 +42,22 @@
 #   nsmgr-bounds  logs in as `user` on the serial console and runs
 #           nsmgr-bounds-probe: fork requests whose name length runs past their
 #           end get EINVAL and the namespace manager keeps answering (x86_64 desktop)
+#   desktop-regions  compares the settled desktop with the flat first-run target's region probes
+#   cli-tools  checks sed, awk and gzip tar creation/extraction with -C on the desktop
+#   sudo-notty  logs in as `user` on the serial console and runs sudo with no
+#           terminal on any standard descriptor: no panic, and exit 0 because
+#           `user`'s password is empty (x86_64 desktop)
+#   resolver  checks hosts-file names as `user`, then captures DHCP option 6
+#           and the actual DNS query destination on QEMU's net0 using desktop curl
+# Every run boots with -snapshot, so the image is never changed (disk-keys and
+# disk-install boot copies in a temporary directory instead), and `make` is
 # told the image is up to date, so a run never starts a build. Screenshots
 # (PNG) and the serial log of each run go under --out. Run from the
 # repository root. Python standard library only.
 
 import argparse
+import base64
+import json
 import os
 import re
 import shutil
@@ -191,7 +221,7 @@ class Swtpm:
 class VM:
     """One QEMU run started by `make qemu`: serial on stdio, monitor on a socket."""
 
-    def __init__(self, args, out, tpm=False):
+    def __init__(self, args, out, tpm=False, qemu_flags="", make=(), snapshot=True):
         image = ROOT / "build" / args.arch / args.config / "harddrive.img"
         if not image.exists():
             sys.exit(f"vm-test: {image.relative_to(ROOT)} is missing; build it first: "
@@ -206,16 +236,19 @@ class VM:
         self.scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-"))
         self.monitor_path = self.scratch / "monitor.sock"
         self.tpm = Swtpm() if tpm else None
-        flags = f"-display none -snapshot -monitor unix:{self.monitor_path},server=on,wait=off"
+        # Without -snapshot the guest writes to the disk; only for copies given by DISK= in `make`.
+        flags = f"-display none {'-snapshot ' if snapshot else ''}-monitor unix:{self.monitor_path},server=on,wait=off"
         if self.tpm:
             flags += " " + self.tpm.qemu_flags
+        if qemu_flags:
+            flags += " " + qemu_flags
         env = dict(os.environ, QEMUFLAGS=flags)
         # `-o` takes each target exactly as make spells it, relative to the
         # repository root (an absolute path would not match): neither the image
         # nor the package repository behind it is ever rebuilt by a test.
         build = image.parent.relative_to(ROOT)
         command = ["make", "-s", "-o", str(build / "harddrive.img"), "-o", str(build / "repo.tag"), "qemu",
-                   f"ARCH={args.arch}", f"CONFIG_NAME={args.config}", *args.make]
+                   f"ARCH={args.arch}", f"CONFIG_NAME={args.config}", *args.make, *make]
         self.start = time.monotonic()
         self.proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, start_new_session=True)
@@ -382,6 +415,69 @@ def test_shells(vm, args):
     return True, f"{len(SHELL_CHECKS)} shell checks passed"
 
 
+def test_logout(vm, args):
+    """Logs in as `user` on the serial console and exits; the login prompt returns and procmgr logs no refused SIGCHLD."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("exit\n")
+    if not vm.wait_serial(r"login: ", 60, since):
+        return False, f"no login prompt after `exit`; see {vm.out / 'serial.log'}"
+    time.sleep(2)
+    refused = re.search(r"\[src/procmgr\.rs:\d+ ERROR\] failed to send SIGCHLD.*", vm.text())
+    if refused:
+        return False, f"procmgr refused the exit SIGCHLD: {refused.group(0).strip()!r}"
+    return True, "the login prompt returned and no SIGCHLD was refused"
+
+
+# How many times the ls-loop test runs `ls /scheme`. Ion signals each command it starts
+# (SIGCONT), and the crash needs that signal to land while `ls` is starting. Before relibc's
+# ferrion-sigentry-rcx.patch it crashed in 3 of 3 boots of the desktop with its display running,
+# and about once in 1000 to 3000 runs without a display; use --repeat.
+LS_LOOP_RUNS = 1000
+
+
+def test_ls_loop(vm, args):
+    """Logs in as `root` on the serial console and runs `ls /scheme` 1000 times (LS_LOOP_RUNS) from Ion; no run may crash."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no password prompt for root"
+    vm.type("password\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type(f"for i in 1..={LS_LOOP_RUNS}; ls /scheme > /dev/null; end; echo ls-loop-$((40+2))\n")
+    end = vm.wait_serial(r"ls-loop-42|ended by signal", 300, since)
+    time.sleep(1)
+    crash = re.search(r".*EXCEPTION RAISED.*NAME /usr/bin/ls.*", vm.text(since))
+    if crash or (end and end.group(0) != "ls-loop-42"):
+        fault = re.search(r"Page fault: .*", vm.text(since))
+        found = (crash.group(0).strip() if crash else end.group(0)) + (f"; {fault.group(0).strip()}" if fault else "")
+        return False, f"ls crashed: {found}; see {vm.out / 'serial.log'}"
+    if not end:
+        return False, f"the loop did not finish within 300s; see {vm.out / 'serial.log'}"
+    return True, f"{LS_LOOP_RUNS} runs of `ls /scheme` without a crash"
+
+
+def test_signal_handle(vm, args):
+    """Logs in as `user` on the serial console and runs signal-handle-probe: a root child that sudo made in the probe's session refuses SIGTERM both from kill() and through a process handle."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("signal-handle-probe\n")
+    verdict = vm.wait_serial(r"signal-handle-probe: (REFUSED|ACCEPTED|INCONCLUSIVE)", 60, since)
+    detail = re.search(r"signal-handle-probe: uid .*", vm.text(since))
+    detail = detail.group(0).strip() if detail else "no result line"
+    if not verdict:
+        return False, f"signal-handle-probe printed no verdict; see {vm.out / 'serial.log'}"
+    return verdict.group(1) == "REFUSED", f"{verdict.group(1)}: {detail}"
+
+
 def test_nsmgr_bounds(vm, args):
     """Logs in as `user` on the serial console and runs nsmgr-bounds-probe: fork requests whose name length runs past their end get EINVAL, a well-formed fork still works, and the shell can still run a program afterwards."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -404,6 +500,28 @@ def test_nsmgr_bounds(vm, args):
     if results["after"][0] != 0:
         return False, f"the shell could not run `ls /` afterwards (exit {results['after'][0]}); see {vm.out}"
     return True, detail
+
+
+def test_sudo_notty(vm, args):
+    """Issue 10: as `user` on the serial console, `sudo true` with standard input, output and error off the terminal does not panic and exits 0, since `user`'s password is empty (config/dev-accounts.toml)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    # Run in bash: `user`'s login shell is not POSIX. The end marker is computed so the typed line never matches it.
+    vm.type("bash -c 'sudo true > /tmp/x 2>&1 < /dev/null; echo rc=$?; cat /tmp/x; echo sudo-notty-end-$((40+2))'\n")
+    found = vm.wait_serial(r"(?s)\nrc=(\d+)\n(.*)sudo-notty-end-42", 60, since)
+    output = vm.text(since)
+    (vm.out / "sudo-notty.txt").write_text(output)
+    if not found:
+        return False, f"no exit status within 60s; see {vm.out / 'sudo-notty.txt'}"
+    status, said = int(found.group(1)), found.group(2).strip()
+    if "panicked" in said:
+        return False, f"sudo panicked (exit {status}): {said}"
+    if status != 0:
+        return False, f"sudo refused although `user`'s password is empty (exit {status}): {said or 'no output'}"
+    return True, "sudo true ran without a terminal and exited 0" + (f": {said}" if said else "")
 
 
 # The nonce the tpm test asks attestd about, in hexadecimal, and the PCRs it compares.
@@ -556,6 +674,61 @@ def test_screenshots(vm, args):
     return True, f"saved {len(saved)} screenshots in {vm.out}: {saved}"
 
 
+def test_desktop_regions(vm, args):
+    """Compares the desktop's region probes with flat/first-run.svg within two RGB steps."""
+    import xml.etree.ElementTree as ET
+
+    fixture = ROOT / "scripts/desktop-fixtures/flat/first-run.svg"
+    svg = ET.parse(fixture).getroot()
+    ns = "{http://www.w3.org/2000/svg}"
+    regions = [
+        rect for group in svg.iter(ns + "g") if group.get("id") == "regions"
+        for rect in group.iter(ns + "rect")
+    ]
+    if not regions:
+        return False, f"no regions in {fixture.name}"
+    probes = []
+    for region in regions:
+        points = []
+        for probe in region.attrib["data-probes"].split():
+            place, color = probe.split(":")
+            x, y = map(int, place.split(","))
+            expected = bytes.fromhex(color.removeprefix("#"))
+            if len(expected) != 3:
+                raise ValueError(f"invalid RGB probe in {region.attrib['id']}")
+            points.append((x, y, expected))
+        if not points:
+            raise ValueError(f"no probes in {region.attrib['id']}")
+        probes.append((region.attrib["id"], points))
+
+    while vm.elapsed() < args.timeout:
+        if vm.screenshot().kind() == "login":
+            break
+        time.sleep(0.1)
+    else:
+        return False, f"no graphical login within {args.timeout}s"
+    settle(vm, 10)
+    vm.command("sendkey ret")
+    settle(vm, 20, still=2.0)
+    frame = vm.screenshot()
+    frame.save_png(vm.out / "desktop-regions.png")
+    differing = 0
+    for name, points in probes:
+        differences = []
+        for x, y, expected in points:
+            if not (0 <= x < frame.width and 0 <= y < frame.height):
+                differences.append(f"({x},{y}) outside {frame.width}x{frame.height}")
+                continue
+            at = (y * frame.width + x) * 3
+            seen = frame.rgb[at:at + 3]
+            if any(abs(a - b) > 2 for a, b in zip(seen, expected)):
+                differences.append(f"({x},{y}) #{seen.hex()}, expected #{expected.hex()}")
+        differing += bool(differences)
+        print(f"{'FAIL' if differences else 'PASS'} {name}: "
+              + ("; ".join(differences) if differences else f"{len(points)} probes match"), flush=True)
+    return differing == 0, f"{differing}/{len(probes)} regions differ; see {vm.out / 'desktop-regions.png'}"
+
+
 # Drivers the x86_64 desktop runs under `make qemu`'s defaults (q35, NVMe, e1000,
 # xHCI, the firmware's framebuffer); each must keep running once the hardware
 # right is limited to drivers.
@@ -641,13 +814,938 @@ def test_lockdown(vm, args):
     return True, f"drivers work ({address.group(0)} from DHCP) and root reaches no raw hardware; see {vm.out}"
 
 
-TESTS = {"boot": test_boot, "shells": test_shells, "screenshots": test_screenshots, "tpm": test_tpm,
-         "lockdown": test_lockdown}
+# Drivers that enter the null namespace once they hold their handles, with the schemes their namespace
+# handles may name (ferrion-driver-null-namespace.patch of base). Matched against the basename of
+# each process in /scheme/sys/iostat.
+NULL_NAMESPACE = {"memory", "pipe"}
+DRIVER_NAMESPACES = {name: NULL_NAMESPACE for name in [
+    "pcid", "nvmed", "inputd", "ihdad", "usbhidd", "fbcond", "fbbootlogd",
+    "usbscsid", "virtio-gpud", "usbhubd", "rtcd", "redoxerd", "usbctl"]}
+DRIVER_NAMESPACES["audiod"] = {"memory", "rand"}
+# Running on the x86_64 desktop under `make qemu` once the login appears; the others start only with
+# their device (a USB HID device, disk or hub, which `make qemu` does not attach, virtio-gpu,
+# redoxerd's config), exit after one job (rtcd) or are a command (usbctl).
+DRIVER_NAMESPACES_RUNNING = ["pcid", "nvmed", "inputd", "ihdad", "fbcond", "fbbootlogd", "audiod"]
+# Keep their namespace: the drivers they start register schemes in it.
+DRIVER_NAMESPACE_SPAWNERS = ["pcid-spawner", "hwd", "xhcid"]
+IOSTAT_PROCESS = re.compile(r"^(\d+): (\S+)$")
+IOSTAT_FD = re.compile(r"^(U)?\s+(\d+):\s+(\d+)\s+(\d+)\s+[0-9A-F]+: (.*)$")
+NAMESPACE_REPORT = re.compile(r"^namespace:hardware=([01]);schemes=([^;]*);$")
+
+
+def test_driver_namespaces(vm, args):
+    """Every namespace handle a running driver holds names only memory and pipe (audiod: memory and rand), read from /scheme/sys/iostat; Enter on the login screen still reaches the desktop."""
+    kind = None
+    while vm.elapsed() < args.timeout and kind != "login":
+        kind = vm.screenshot().kind()
+        time.sleep(0.2)
+    if kind != "login":
+        return False, f"no graphical login within {args.timeout}s"
+    login = settle(vm, 10)
+    login.save_png(vm.out / "login.png")
+    vm.command("sendkey ret")
+    desktop = settle(vm, 30, still=2.0)
+    desktop.save_png(vm.out / "desktop.png")
+    problems = []
+    if desktop.rgb == login.rgb:
+        problems.append("Enter on the login screen changed nothing, so input through inputd is broken")
+
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no password prompt for root"
+    vm.type("password\n")
+    time.sleep(3)
+
+    # cat of /scheme/sys/iostat sometimes faults; the copy in /tmp is read once it is whole.
+    iostat = None
+    for attempt in range(3):
+        since = vm.mark()
+        vm.type(f"cat /scheme/sys/iostat > /tmp/iostat.txt && cat /tmp/iostat.txt; echo iostat-{attempt}-$((40+2))\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)iostat-{attempt}-42", 120, since)
+        if found and re.search(r"(?m)^\d+: \S+$", found.group(1)):
+            iostat = found.group(1)
+            break
+    if iostat is None:
+        return False, "/scheme/sys/iostat printed no process"
+    (vm.out / "iostat.txt").write_text(iostat)
+
+    processes = {}  # basename -> list of (pid, [(fd, scheme id, fpath)])
+    current = None
+    for line in iostat.splitlines():
+        line = line.rstrip()
+        header = IOSTAT_PROCESS.match(line)
+        if header:
+            current = []
+            processes.setdefault(header.group(2).rsplit("/", 1)[-1], []).append((header.group(1), current))
+            continue
+        row = IOSTAT_FD.match(line)
+        if row and current is not None:
+            current.append(((row.group(1) or "") + row.group(2), row.group(3), row.group(5)))
+    namespace_ids = {scheme for threads in processes.values() for _, rows in threads
+                     for _, scheme, path in rows if path.startswith("namespace:")}
+    if not namespace_ids:
+        problems.append("no handle in /scheme/sys/iostat reports a namespace (base without ferrion-driver-null-namespace.patch?)")
+
+    checked, not_exercised = [], []
+    for driver, allowed in DRIVER_NAMESPACES.items():
+        if driver not in processes:
+            if driver in DRIVER_NAMESPACES_RUNNING:
+                problems.append(f"{driver} is not running")
+            else:
+                not_exercised.append(driver)
+            continue
+        for pid, rows in processes[driver]:
+            handles = [(fd, path) for fd, scheme, path in rows if scheme in namespace_ids]
+            if not handles and namespace_ids:
+                problems.append(f"{driver} (pid {pid}) holds no namespace handle")
+            for fd, path in handles:
+                report = NAMESPACE_REPORT.match(path)
+                if not report:
+                    problems.append(f"{driver} (pid {pid}) fd {fd}: unreadable namespace report {path!r}")
+                    continue
+                schemes = set(filter(None, report.group(2).split(",")))
+                if schemes != allowed:
+                    problems.append(f"{driver} (pid {pid}) fd {fd} names {sorted(schemes)}, expected {sorted(allowed)}")
+        checked.append(driver)
+    spawners = [name for name in DRIVER_NAMESPACE_SPAWNERS if name in processes]
+
+    note = (f"checked {checked}; not exercised (not running at the snapshot): {not_exercised}; "
+            f"spawners keeping their namespace by design, running: {spawners}; see {vm.out}")
+    if problems:
+        return False, "; ".join(problems) + "; " + note
+    return True, note
+
+
+# Network schemes config/login-namespace.toml leaves out of `netless`'s namespace.
+NETWORK_SCHEMES = ["ip", "icmp", "tcp", "udp"]
+
+
+def test_login_namespace(vm, args):
+    """On the serial console `netless` (password) sees no network scheme and `user` (no password) sees them (needs --config login-namespace)."""
+    seen = {}
+    since = 0
+    for account, password in (("netless", "netless-test"), ("user", None)):
+        if not vm.wait_serial(r"login: ", args.timeout, since):
+            return False, f"no serial login prompt for {account} within {args.timeout}s"
+        vm.type(f"{account}\n")
+        if password:
+            if not vm.wait_serial(r"(?i)password: ", 20):
+                return False, f"no password prompt for {account}"
+            vm.type(f"{password}\n")
+        time.sleep(3)
+        since = vm.mark()
+        vm.type("ls /scheme; echo schemes-$((40+2))\n")
+        listing = vm.wait_serial(r"(?s)\n(.*)schemes-42", 30, since)
+        if not listing:
+            return False, f"`ls /scheme` as {account} printed nothing; see {vm.out / 'serial.log'}"
+        (vm.out / f"schemes-{account}.txt").write_text(listing.group(1))
+        names = set(re.findall(r"[\w.-]+", listing.group(1)))
+        seen[account] = [name for name in NETWORK_SCHEMES if name in names]
+        since = vm.mark()
+        vm.type("exit\n")
+    problems = []
+    if seen["netless"]:
+        problems.append(f"netless, logged in with its password, sees {seen['netless']}")
+    if seen["user"] != NETWORK_SCHEMES:
+        problems.append(f"user sees only {seen['user']} of {NETWORK_SCHEMES}")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, f"netless sees no network scheme and user sees {NETWORK_SCHEMES}; see {vm.out}"
+
+
+# The developer tasks the dev-parity test tries, in order. Each task is a list of
+# steps: (bash line, regex its output must match or None, seconds it may take).
+# A task stops at its first failed step. The steps work in the guest's
+# DEV_PARITY_DIR, as `user`, and use no credentials: the AI tools are installed
+# and asked for their version only.
+DEV_PARITY_DIR = "/tmp/dev-parity"
+DEV_PARITY_TASKS = {
+    "git": [
+        ("git --version", r"git version \d", 30),
+        (f"git clone --depth 1 https://github.com/octocat/Hello-World.git {DEV_PARITY_DIR}/hello-world", None, 300),
+        (f"git -C {DEV_PARITY_DIR}/hello-world log --oneline -1", r"(?m)^[0-9a-f]{7,} ", 30),
+    ],
+    "rust": [
+        ("rustc --version && cargo --version", r"cargo \d+\.\d+", 60),
+        (f"cd {DEV_PARITY_DIR} && cargo new --vcs none hello-cargo", None, 120),
+        (f"cargo build --offline --manifest-path {DEV_PARITY_DIR}/hello-cargo/Cargo.toml", None, 1200),
+        (f"{DEV_PARITY_DIR}/hello-cargo/target/debug/hello-cargo", r"Hello, world!", 60),
+    ],
+    "python": [
+        ("python3 --version", r"Python 3\.\d+", 30),
+        (f"echo 'print(\"script\", 6 * 7)' > {DEV_PARITY_DIR}/hello.py && python3 {DEV_PARITY_DIR}/hello.py",
+         r"script 42", 60),
+        (f"python3 -m venv {DEV_PARITY_DIR}/venv", None, 300),
+        (f"{DEV_PARITY_DIR}/venv/bin/pip install --no-input six==1.17.0", r"Successfully installed six-1\.17\.0", 600),
+        (f"{DEV_PARITY_DIR}/venv/bin/python -c 'import six; print(\"six\", six.__version__)'", r"six 1\.17\.0", 60),
+    ],
+    "node": [
+        ("node --version && npm --version", r"v\d+\.\d+\.\d+\s+\d+\.\d+\.\d+", 60),
+        ("node -e 'console.log(\"node\", 6 * 7)'", r"node 42", 60),
+        (f"mkdir -p {DEV_PARITY_DIR}/npm-small && cd {DEV_PARITY_DIR}/npm-small && npm install is-number@7.0.0",
+         r"added 1 package", 600),
+        (f"node -e 'console.log(\"is-number\", require(\"{DEV_PARITY_DIR}/npm-small/node_modules/is-number\")(6 * 7))'",
+         r"is-number true", 60),
+    ],
+    # Connecting to an SSH server is not tested, by the maintainer's choice.
+    "ssh": [
+        ("ssh -V", r"OpenSSH_\d", 30),
+        (f"ssh-keygen -q -t ed25519 -N '' -C dev-parity -f {DEV_PARITY_DIR}/id_ed25519 && "
+         f"ssh-keygen -l -f {DEV_PARITY_DIR}/id_ed25519.pub", r"256 SHA256:\S+ dev-parity \(ED25519\)", 120),
+    ],
+    "helix": [
+        ("hx --version", r"helix \d", 60),
+        ("hx --health", r"(?i)\blanguage\b", 300),
+    ],
+    "claude-code": [
+        (f"npm install -g --prefix {DEV_PARITY_DIR}/npm-global @anthropic-ai/claude-code", r"added \d+ package", 900),
+        (f"{DEV_PARITY_DIR}/npm-global/bin/claude --version", r"\d+\.\d+\.\d+ \(Claude Code\)", 120),
+    ],
+    "codex": [
+        (f"npm install -g --prefix {DEV_PARITY_DIR}/npm-global @openai/codex", r"added \d+ package", 900),
+        (f"{DEV_PARITY_DIR}/npm-global/bin/codex --version", r"codex-cli \d", 120),
+    ],
+}
+# Typed into bash once, before the tasks: quiet progress output and a fresh work folder.
+DEV_PARITY_SETUP = (
+    "export NO_COLOR=1 CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never PIP_DISABLE_PIP_VERSION_CHECK=1 "
+    "npm_config_progress=false npm_config_fund=false npm_config_audit=false npm_config_update_notifier=false; "
+    f"rm -rf {DEV_PARITY_DIR}; mkdir -p {DEV_PARITY_DIR} && cd {DEV_PARITY_DIR}"
+)
+
+
+def test_dev_parity(vm, args):
+    """Logs in as `user` and tries each developer task in DEV_PARITY_TASKS (git, Rust, Python, Node.js, SSH, Helix, Claude Code, Codex), recording PASS or FAIL with a reason per task; fails only when the login fails (use --config dev-parity)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    # Whatever the user's login shell, the steps run in bash, without line editing.
+    vm.type("bash --norc --noprofile --noediting\n")
+    time.sleep(1)
+    since = vm.mark()
+    vm.type("echo dev-parity-bash-$BASH_VERSION\n")
+    if not vm.wait_serial(r"dev-parity-bash-\d", 30, since):
+        return False, f"bash did not start after the login; see {vm.out / 'serial.log'}"
+
+    def run(line, timeout):
+        """Types `line`; returns (exit status or None on a timeout, output, seconds taken)."""
+        since, start = vm.mark(), time.monotonic()
+        vm.type(f"{line}; echo DPRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)DPRC-42=(\d+)\s", timeout, since)
+        took = time.monotonic() - start
+        if found:
+            return int(found.group(2)), found.group(1), took
+        return None, vm.text(since).partition("\n")[2], took
+
+    def shell_back():
+        """After a timeout: Ctrl-C, then True once bash answers again."""
+        vm.type("\x03")
+        time.sleep(1)
+        since = vm.mark()
+        vm.type("echo DPSYNC-$((40+2))\n")
+        return vm.wait_serial(r"DPSYNC-42", 60, since) is not None
+
+    status, setup, _ = run(DEV_PARITY_SETUP, 60)
+    address = None
+    for _ in range(10):
+        _, output, _ = run("cat /scheme/netcfg/ifaces/eth0/addr/list", 30)
+        address = re.search(r"\b10\.0\.2\.\d+", output)
+        if address:
+            break
+        time.sleep(3)
+    network = f"eth0 {address.group(0)}" if address else "eth0 has no address from QEMU's DHCP server"
+    (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {status}\n{setup}\n{network}\n")
+
+    results = []
+    lost = None  # the task after which bash stopped answering
+    for task, steps in DEV_PARITY_TASKS.items():
+        log, reason = [], None
+        if lost:
+            reason = f"not run: bash did not answer after {lost} timed out"
+        for number, (line, pattern, timeout) in enumerate(steps, 1):
+            if reason:
+                break
+            status, output, took = run(line, timeout)
+            log.append(f"$ {line}\n{output}\n[exit status {status}, {took:.0f}s]\n")
+            last = next((text.strip() for text in reversed(output.splitlines()) if text.strip()), "no output")
+            if status is None:
+                reason = f"step {number} timed out after {timeout}s: {last}"
+                if not shell_back():
+                    lost = task
+            elif status != 0:
+                reason = f"step {number} exited {status}: {last}"
+            elif pattern and not re.search(pattern, output):
+                reason = f"step {number} printed no match for {pattern}: {last}"
+        verdict = "FAIL" if reason else "PASS"
+        if not reason:
+            reason = f"all {len(steps)} steps passed" if len(steps) > 1 else "its step passed"
+            if task == "ssh":
+                reason += "; connecting to a server not tested, by the maintainer's choice"
+        reason = " ".join(reason.split())[:160]
+        (vm.out / f"{task}.txt").write_text("".join(log) or reason + "\n")
+        results.append((task, verdict, reason))
+        print(f"DEVPARITY {task} {verdict} {reason}", flush=True)
+
+    width = max(len(task) for task, _, _ in results)
+    table = "".join(f"{task:<{width}}  {verdict}  {reason}\n" for task, verdict, reason in results)
+    (vm.out / "summary.txt").write_text(f"{network}\n{table}")
+    print(table, end="", flush=True)
+    passed = sum(verdict == "PASS" for _, verdict, _ in results)
+    return True, f"ran {len(results)} tasks, {passed} PASS; {network}; see {vm.out / 'summary.txt'}"
+
+
+# The pages the firefox-headless test renders, in order: (name, URL, seconds the render may take).
+# Software rendering with the JIT off is slow, so the renders get minutes.
+FIREFOX_DIR = "/tmp/firefox-headless"
+FIREFOX_PAGES = [
+    ("local", f"file://{FIREFOX_DIR}/page.html", 600),
+    ("https", "https://example.com/", 900),
+]
+
+
+def test_firefox_headless(vm, args):
+    """Logs in as `user` and has `firefox --headless --screenshot` render a local page and then an HTTPS page to PNG, which travels back over the serial console (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    vm.type("bash --norc --noprofile --noediting\n")
+    time.sleep(1)
+
+    def run(line, timeout):
+        """Types `line`; returns (exit status or None on a timeout, output)."""
+        since = vm.mark()
+        vm.type(f"{line}; echo FFRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)FFRC-42=(\d+)\s", timeout, since)
+        if found:
+            return int(found.group(2)), found.group(1)
+        return None, vm.text(since).partition("\n")[2]
+
+    def png_pixels(data):
+        """Returns (width, height, distinct byte values in the image data) of a PNG, or None if it is not one."""
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return None
+        width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        idat, at = b"", 8
+        while at + 8 <= len(data):
+            size, kind = int.from_bytes(data[at:at + 4], "big"), data[at + 4:at + 8]
+            if kind == b"IDAT":
+                idat += data[at + 8:at + 8 + size]
+            at += 12 + size
+        try:
+            return width, height, len(set(zlib.decompress(idat)))
+        except zlib.error:
+            return None
+
+    status, _ = run(f"rm -rf {FIREFOX_DIR}; mkdir -p {FIREFOX_DIR}/profile && cd {FIREFOX_DIR} && "
+                    "printf '%s\\n' '<!doctype html><title>FerrionOS</title>' "
+                    "'<body style=\"background:#fff;font:48px sans-serif\"><h1>Hello from FerrionOS</h1></body>' "
+                    "> page.html", 30)
+    if status != 0:
+        return False, f"could not write the local page (status {status}); see {vm.out / 'serial.log'}"
+    _, version = run("firefox --version", 120)
+    (vm.out / "version.txt").write_text(version)
+
+    results = []
+    for name, url, timeout in FIREFOX_PAGES:
+        line = (f"MOZ_HEADLESS=1 firefox --headless --no-remote --profile {FIREFOX_DIR}/profile "
+                f"--window-size=800,600 --screenshot {FIREFOX_DIR}/{name}.png {url} > {FIREFOX_DIR}/{name}.log 2>&1")
+        status, _ = run(line, timeout)
+        if status is None:
+            vm.type("\x03")
+            time.sleep(2)
+        _, log = run(f"tail -n 40 {FIREFOX_DIR}/{name}.log", 30)
+        (vm.out / f"{name}.log").write_text(f"$ {line}\nexit status {status}\n{log}")
+        since = vm.mark()
+        vm.type(f"echo FFPNG-BEGIN; base64 -w 0 {FIREFOX_DIR}/{name}.png; echo; echo FFPNG-END\n")
+        found = vm.wait_serial(r"FFPNG-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)FFPNG-END", 300, since)
+        image = None
+        if found:
+            try:
+                image = base64.b64decode("".join(found.group(1).split()), validate=True)
+            except ValueError:
+                image = None
+        pixels = png_pixels(image) if image else None
+        if pixels:
+            (vm.out / f"{name}.png").write_bytes(image)
+        if status is None:
+            reason = f"timed out after {timeout}s"
+        elif status != 0:
+            reason = f"firefox exited {status}"
+        elif not pixels:
+            reason = "no PNG came back"
+        elif pixels[2] < 3:
+            reason = f"{pixels[0]}x{pixels[1]} PNG of one color"
+        else:
+            reason = None
+        results.append((name, reason or f"{pixels[0]}x{pixels[1]} PNG, {pixels[2]} distinct byte values"))
+        print(f"FIREFOX {name} {'FAIL' if reason else 'PASS'} {results[-1][1]}", flush=True)
+        if reason:
+            return False, f"{name} ({url}): {reason}; see {vm.out / f'{name}.log'}"
+    return True, "; ".join(f"{name}: {note}" for name, note in results) + f"; inspect the PNGs in {vm.out}"
+
+
+# `make qemu` appends -cpu host after QEMUFLAGS, so a -cpu option there is overridden.
+RAND_NO_CPU = "-global host-x86_64-cpu.rdrand=off -global host-x86_64-cpu.rdseed=off"
+RAND_FIRMWARE = RAND_NO_CPU + " -device virtio-rng-pci"
+
+
+def test_rand_seed(vm, args):
+    """Two boots differ with firmware RNG only, jitter only, and the host CPU RNG; status distinguishes seeded from jitter-only output (x86_64 KVM)."""
+    # OVMF supplies EFI_RNG_PROTOCOL with RDRAND or virtio-rng, but not with neither.
+    # Compare before checking status so an older image fails on repeated output, not a missing file.
+    cases = [("firmware", RAND_FIRMWARE, True), ("jitter", RAND_NO_CPU, False), ("cpu", "", True)]
+    notes = []
+    for case, flags, seeded in cases:
+        samples, statuses, logs = [], [], []
+        for boot in range(2):
+            current = vm
+            if case != "firmware" or boot != 0:
+                out = vm.out / f"{case}-{boot + 1}"
+                out.mkdir(parents=True, exist_ok=True)
+                current = VM(args, out, qemu_flags=flags)
+            try:
+                if not current.wait_serial(r"login: ", args.timeout):
+                    return False, f"{case} boot {boot + 1}: no serial login"
+                current.type("root\n")
+                if not current.wait_serial(r"(?i)password: ", 20):
+                    return False, f"{case} boot {boot + 1}: no password prompt"
+                current.type("password\n")
+                if not current.wait_serial(r"root:.*# ", 20):
+                    return False, f"{case} boot {boot + 1}: root shell did not start"
+                since = current.mark()
+                current.type("od -An -tx1 -N64 /scheme/rand; echo rand-bytes-$((40+2))\n")
+                found = current.wait_serial(r"(?s)(.*?)\nrand-bytes-42", 20, since)
+                rows = re.findall(r"(?m)^((?:[ \t]+[0-9a-f]{2})+)[ \t]*$", found.group(1)) if found else []
+                sample = bytes.fromhex(" ".join(rows))
+                if len(sample) != 64:
+                    return False, f"{case} boot {boot + 1}: did not read 64 random bytes"
+                samples.append(sample)
+                (current.out / "random.txt").write_text(sample.hex() + "\n")
+                since = current.mark()
+                current.type("cat /scheme/rand/status; echo rand-status-$((40+2))\n")
+                found = current.wait_serial(r"(?s)(.*?)\nrand-status-42", 20, since)
+                status = found.group(1) if found else ""
+                statuses.append(status)
+                (current.out / "random-status.txt").write_text(status)
+                logs.append(current.text())
+                current.kill()
+            finally:
+                if current is not vm:
+                    current.close()
+        if samples[0] == samples[1]:
+            return False, f"{case}: identical 64 random bytes across boots: {samples[0].hex()}"
+        expected = "yes" if seeded else "no"
+        for boot, (status, log) in enumerate(zip(statuses, logs), 1):
+            if not re.search(rf"(?m)^seeded: {expected}$", status):
+                return False, f"{case} boot {boot}: expected seeded: {expected}"
+            sources = re.search(r"(?m)^sources: (.*)$", status)
+            names = sources.group(1).split() if sources else []
+            if case != "cpu" and any(name in names for name in ("rdseed", "rdrand")):
+                return False, f"{case} boot {boot}: CPU RNG was not disabled"
+            if case == "firmware" and "firmware" not in names:
+                return False, f"{case} boot {boot}: firmware seed missing"
+            if case == "cpu" and not any(name in names for name in ("rdseed", "rdrand")):
+                return False, f"{case} boot {boot}: host CPU supplied no seed"
+            message = ("randd: seeded from a hardware or firmware source:" if seeded
+                       else "randd: NOT SEEDED from a hardware or firmware source")
+            if message not in log:
+                return False, f"{case} boot {boot}: seed log missing"
+        notes.append(f"{case}: two boots differ, seeded: {expected}")
+    return True, "; ".join(notes)
+
+
+def test_ferrion_cli(vm, args):
+    """Root runs ferrion status, shell list, search, install and remove; JSON and the installed jq executable agree (requires network)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no password prompt for root"
+    since = vm.mark()
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:[^\r\n]*# ", 30, since):
+        return False, "root Ion prompt did not appear after authentication"
+    since = vm.mark()
+    vm.type("bash --norc --noprofile --noediting\n")
+    if not vm.wait_serial(r"bash-[0-9.]+# ", 30, since):
+        return False, "bash prompt did not appear after root login"
+
+    def run(line, timeout=60):
+        since = vm.mark()
+        vm.type(f"{line}; echo FCLI-END-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)FCLI-END-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    def check_json(command, timeout=60):
+        code, text = run(f"ferrion --json {command}", timeout)
+        (vm.out / (command.split()[0] + ".txt")).write_text(text)
+        records = [line.strip() for line in text.splitlines() if line.lstrip().startswith("{")]
+        if code != 0 or len(records) != 1:
+            raise ValueError(f"{command}: exit {code}, expected one JSON record; see {vm.out}")
+        record = json.loads(records[0])
+        if (record.get("schema_version") != 1 or record.get("ok") is not True
+                or record.get("exit_code") != code):
+            raise ValueError(f"{command}: invalid success envelope")
+        expected = "shell list" if command == "shell list" else command.split()[0]
+        if record.get("command") != expected:
+            raise ValueError(f"{command}: wrong command in envelope")
+        return record["data"]
+
+    try:
+        status = check_json("status")
+        if not status.get("version"):
+            raise ValueError("status: missing FerrionOS version")
+        for key in ("verified_boot", "measured_boot", "lockdown", "disk_encryption", "seeded_randomness"):
+            if not isinstance(status.get(key), dict) or not status[key].get("state"):
+                raise ValueError(f"status: missing {key} observation")
+        if status["measured_boot"]["state"] == "unknown":
+            raise ValueError("root status: attest-statement returned no verdict")
+        shells = check_json("shell list")["shells"]
+        if {shell["name"] for shell in shells} != {"bash", "fish", "ion", "nushell", "zsh"}:
+            raise ValueError("shell list: the five offered shells are not listed")
+        if not all(shell["installed"] for shell in shells):
+            raise ValueError("shell list: an offered shell is not executable")
+        # dhcpd starts asynchronously. Wait for its published lease before pkg uses DNS.
+        code, network = run(
+            'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); '
+            'while [[ -z "$server" || "$server" == 9.9.9.9 ]] && (( SECONDS < deadline )); do '
+            'sleep 0.1; server=$(cat /etc/net/dns); done; '
+            'echo "configured DNS: $server"; [[ -n "$server" && "$server" != 9.9.9.9 ]]', 70)
+        (vm.out / "network.txt").write_text(network)
+        if code != 0:
+            raise ValueError("boot DHCP did not publish a lease DNS server")
+        results = check_json("search jq", 180)
+        if "jq" not in results["matches"]:
+            raise ValueError("search: jq was not found in the configured repository")
+        code, _ = run("test ! -e /usr/bin/jq")
+        if code != 0:
+            raise ValueError("jq is already installed; refusing to remove an image package")
+        check_json("install jq --yes", 180)
+        code, _ = run("test -x /usr/bin/jq && /usr/bin/jq --version")
+        if code != 0:
+            raise ValueError("install: jq was not installed as a working executable")
+        check_json("remove jq --yes", 180)
+        code, _ = run("test ! -e /usr/bin/jq")
+        if code != 0:
+            raise ValueError("remove: jq is still present")
+    except (ValueError, KeyError, TypeError) as error:
+        return False, str(error)
+    return True, "JSON parsed for status, shells, search, install and remove; jq appeared, ran and was removed"
+
+
+# An HTTP server on the host for the ferrion-run test; `seen` lists the paths requested.
+# QEMU's user network takes the guest's connections to 10.0.2.2 to the host's 127.0.0.1.
+def ferrion_run_server():
+    import http.server
+
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        timeout = 30
+
+        def do_GET(self):
+            seen.append(self.path)
+            body = b"ferrion-run-ok\n"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def test_ferrion_run(vm, args):
+    """As `user`: under ferrion-run --no-network curl fails with a network error, also through sudo, and a profile alone withholds the network; a socket opened before the launch is unusable in the program; a socket or disk file as a standard descriptor is refused. Each denial is first run without the launcher, where it must succeed."""
+    server, seen = ferrion_run_server()
+    try:
+        return ferrion_run_checks(vm, args, server.server_address[1], seen)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def ferrion_run_checks(vm, args, port, seen):
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    address, transcript = f"10.0.2.2:{port}", []
+
+    def run(tag, line, timeout=60, sudo=False):
+        """Runs `line` in bash as `user`; returns (exit status, output) or (None, output so far).
+        With `sudo`, answers sudo's password prompt with `user`'s empty password."""
+        since = vm.mark()
+        vm.type(f"bash -c '{line}; echo fr-end-{tag}-$?'\n")
+        end = rf"(?s)\n(.*)fr-end-{tag}-(\d+)"
+        if sudo and vm.wait_serial(rf"\[sudo\] password|fr-end-{tag}-\d", timeout, since):
+            if not re.search(rf"fr-end-{tag}-\d", vm.text(since)):
+                vm.type("\n")
+        found = vm.wait_serial(end, timeout, since)
+        output = found.group(1) if found else vm.text(since)
+        transcript.append(f"$ {line}\n{output}exit {found.group(2) if found else 'none'}\n")
+        return (int(found.group(2)) if found else None), output
+
+    def curl(path):
+        return f"curl -sS -m 10 -o /dev/null -w http-%{{http_code}} http://{address}{path}"
+
+    controls, problems = [], []
+    # Without the launcher each of these must reach the host, or the denials below prove nothing.
+    for attempt in range(10):
+        status, output = run(f"net{attempt}", curl("/plain"))
+        if status == 0 and "http-200" in output:
+            break
+        time.sleep(3)
+    else:
+        controls.append("plain curl reached no host server")
+    status, output = run("probe", f"ferrion-run-probe connect {address} /probe-plain")
+    if status != 0 or "/probe-plain" not in seen:
+        controls.append("ferrion-run-probe connect failed without the launcher")
+    status, output = run("held", f"ferrion-run-probe hold-socket {address} -- ferrion-run-probe use-fd /held-plain")
+    if status != 0 or "/held-plain" not in seen:
+        controls.append("a held socket was unusable without the launcher")
+    # `user` may sudo with an empty password on dev images: sudo is the escape to test.
+    status, output = run("sudo", "sudo " + curl("/sudo-plain"), sudo=True)
+    if status != 0 or "/sudo-plain" not in seen:
+        controls.append("sudo curl failed without the launcher")
+
+    status, output = run("launched", "ferrion-run " + curl("/launched"))
+    if status != 0 or "/launched" not in seen:
+        problems.append(f"ferrion-run without --no-network did not reach the network (exit {status})")
+
+    status, output = run("nonet", "ferrion-run --no-network " + curl("/nonet"))
+    error = re.search(r"curl: \(\d+\).*", output)
+    if "/nonet" in seen or status in (0, 125, None) or not error:
+        problems.append(f"curl under --no-network: exit {status}, no curl network error, or the host saw it")
+    status, output = run("nonet-sudo", "ferrion-run --no-network sudo " + curl("/sudo-nonet"), sudo=True)
+    if "/sudo-nonet" in seen or status in (0, 125, None):
+        problems.append(f"ferrion-run --no-network sudo curl reached the network or did not run (exit {status})")
+    status, output = run("profile", f"ferrion-run ferrion-run-probe connect {address} /probe-profile")
+    if "/probe-profile" in seen or status != 1 or "cannot connect" not in output:
+        problems.append(f"the profile /etc/ferrion-run/ferrion-run-probe.toml did not withhold the network (exit {status})")
+    status, output = run("inherit", f"ferrion-run-probe hold-socket {address} -- "
+                                    "ferrion-run --no-network ferrion-run-probe use-fd /held-launched")
+    if "/held-launched" in seen or status != 1 or re.search(r"descriptor \S+ usable:", output):
+        problems.append(f"a socket opened before the launch worked in the program (exit {status})")
+
+    status, output = run("stdout", "ferrion-run --no-network true > /tmp/ferrion-run-stdout")
+    if status != 125 or "file on disk" not in output:
+        problems.append(f"a disk file as standard output was not refused (exit {status})")
+    status, output = run("stdin", f"ferrion-run-probe hold-socket {address} --stdin -- ferrion-run --no-network true")
+    if status != 125 or "is a socket" not in output:
+        problems.append(f"a socket as standard input was not refused (exit {status})")
+    status, output = run("files", "ferrion-run --files /tmp ls")
+    if status != 125 or "file-access proxy" not in output:
+        problems.append(f"--files was not refused (exit {status})")
+
+    (vm.out / "ferrion-run.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
+    if controls:
+        return False, "control without the launcher failed, so the run proves nothing: " + "; ".join(controls) + f"; see {vm.out}"
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, f"--no-network curl fails with {error.group(0).strip()!r}; held socket and profile denied; see {vm.out}"
+
+
+# Disk encryption (plans/disk-encryption.md DE2 and DE6). These tests boot copies of the image
+# without -snapshot, because a key change or an installation must survive a reboot; the copies
+# live in a temporary directory that is removed afterwards.
+REDOXFS_KEY = ROOT / "build" / "fstools" / "bin" / "redoxfs-key"
+KEY_SLOTS_AT = 80  # offset of the 64 key slots of 48 bytes in a version 8 RedoxFS header
+SENDKEY = {" ": "spc", "-": "minus", "_": "shift-minus", ".": "dot", "/": "slash", "\n": "ret"}
+
+
+def sendkeys(command, text):
+    """Types text on QEMU's keyboard through the monitor, for the bootloader's prompt."""
+    for char in text:
+        key = SENDKEY.get(char) or (f"shift-{char.lower()}" if char.isupper() else char)
+        command(f"sendkey {key}")
+        time.sleep(0.03)
+
+
+def raw_key_slots(image):
+    """The 64 key slots of the newest RedoxFS header in a raw image, as bytes."""
+    best = None
+    with open(image, "rb") as f:
+        offset = 0
+        while block := f.read(4096):
+            if block[:8] == b"RedoxFS\0" and int.from_bytes(block[8:16], "little") == 8:
+                generation = int.from_bytes(block[40:48], "little")
+                if best is None or generation > best[0]:
+                    best = (generation, block)
+            offset += 4096
+            if offset >= 64 << 20 and best:  # the ring sits at the start of the partition
+                break
+    if best is None:
+        raise RuntimeError(f"no RedoxFS header in {image}")
+    data = best[1]
+    return [data[KEY_SLOTS_AT + 48 * i:KEY_SLOTS_AT + 48 * (i + 1)] for i in range(64)]
+
+
+def config_passphrase(args):
+    import tomllib
+    path = ROOT / "config" / args.arch / f"{args.config}.toml"
+    if not path.exists():
+        path = ROOT / "config" / f"{args.config}.toml"
+    passphrase = tomllib.loads(path.read_text()).get("general", {}).get("encrypt_disk")
+    if not passphrase:
+        sys.exit(f"vm-test: {path.relative_to(ROOT)} sets no general.encrypt_disk")
+    return passphrase
+
+
+def host_recovery_key(image, passphrase, scratch):
+    key_file = scratch / "passphrase"
+    key_file.write_text(passphrase)
+    output = subprocess.run([str(REDOXFS_KEY), "add", "--recovery", "--key-file", str(key_file), str(image)],
+                            check=True, capture_output=True, text=True).stdout
+    key_file.unlink()
+    return re.search(r"Recovery key[^:]*: ([0-9 ]+)", output).group(1).replace(" ", "")
+
+
+def unlock(vm, passphrase, attempt, timeout):
+    """Waits for the bootloader's prompt for this attempt and types the passphrase."""
+    if not vm.wait_serial(rf"RedoxFS password \({attempt}/\d+\)", timeout):
+        return False
+    sendkeys(vm.command, passphrase + "\n")
+    return True
+
+
+def boot_copy(args, out, make):
+    """Boots a copy of an image, given by DISK= and EXTRA_DISK=, that keeps what the guest writes."""
+    out.mkdir(parents=True, exist_ok=True)
+    return VM(args, out, make=make, snapshot=False)
+
+
+def root_shell(vm, timeout):
+    if not vm.wait_serial(r"login: ", timeout):
+        return False
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False
+    vm.type("password\n")
+    return bool(vm.wait_serial(r"root:.*# ", 20))
+
+
+def run_status(vm, line, timeout=120):
+    """Runs a line in the guest's root shell; returns (exit status, output) or (None, output)."""
+    since = vm.mark()
+    vm.type(f"{line}; echo vm-test-status-$?\n")
+    found = vm.wait_serial(r"(?s)\n(.*)vm-test-status-(\d+)", timeout, since)
+    if not found:
+        return None, vm.text(since)
+    return int(found.group(2)), found.group(1)
+
+
+MKFS_REUSE_MARK = b"FERRION-MKFS-REUSE"
+
+
+def mkfs_reuse_mount(vm, disk, name, flags=""):
+    """Mounts the volume on `disk` at /scheme/<name>; returns (mounted, entry count or None)."""
+    run_status(vm, f"bash -c 'redoxfs -d {flags} {disk} {name} </dev/null >/tmp/{name}.log 2>&1 & "
+                   "echo $! > /tmp/mr.pid'; sleep 3")
+    _, output = run_status(vm, f"bash -c 'if ls /scheme/{name} >/dev/null 2>&1; then echo mr-state-$((40+2))"
+                               f" $(ls -A /scheme/{name} | wc -l); else echo mr-state-$((40+1)); fi'")
+    found = re.search(r"mr-state-42 +(\d+)|mr-state-41", output)
+    if not found or found.group(1) is None:
+        run_status(vm, f"cat /tmp/{name}.log")
+        return False, None
+    return True, int(found.group(1))
+
+
+def mkfs_reuse_unmount(vm):
+    # SIGTERM is only seen after the scheme's next request; every commit is already on the disk
+    # (the mount's disk cache writes through), so the daemon is stopped outright.
+    run_status(vm, "bash -c 'kill -9 $(cat /tmp/mr.pid)'; sleep 2")
+
+
+def test_mkfs_reuse(args, out):
+    """redoxfs-mkfs over a volume that was mounted and written creates a volume whose next mount is new and empty, and redoxfs-mkfs --encrypt over an unencrypted volume asks for its passphrase (the extra disk, a 64 MiB scratch file)."""
+    scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-mkfs-"))
+    extra = scratch / "extra.img"
+    try:
+        extra.write_bytes(MKFS_REUSE_MARK)
+        os.truncate(extra, 64 << 20)
+        vm = VM(args, out, make=[f"EXTRA_DISK={extra}"])
+        try:
+            if not root_shell(vm, args.timeout):
+                return False, f"no root shell; see {vm.out}"
+            # bash cannot glob /scheme, and head fails on a disk; list with ls and read one block with dd
+            _, output = run_status(vm, "bash -c 'for s in $(ls /scheme | grep ^disk); do for e in $(ls /scheme/$s); do "
+                                       "dd if=/scheme/$s/$e bs=4096 count=1 2>/dev/null"
+                                       f" | grep -aq {MKFS_REUSE_MARK.decode()} && echo found:/scheme/$s/$e; done; done'")
+            found = re.search(r"found:(/scheme/disk[^\s$']+)", output)
+            if not found:
+                return False, f"the extra disk was not found under /scheme/disk.*; see {vm.out}"
+            disk = found.group(1)
+
+            status, output = run_status(vm, f"redoxfs-mkfs {disk}")
+            if status != 0:
+                return False, f"the first redoxfs-mkfs failed ({status}): {output.strip()[-200:]}"
+            if not mkfs_reuse_mount(vm, disk, "mkfsreuse1")[0]:
+                return False, f"the first volume did not mount; see {vm.out}"
+            run_status(vm, "bash -c 'echo old-volume > /scheme/mkfsreuse1/old.txt; mkdir /scheme/mkfsreuse1/d; "
+                           "for i in 1 2 3 4 5 6 7 8 9 10; do echo $i > /scheme/mkfsreuse1/d/$i; done'")
+            mkfs_reuse_unmount(vm)
+            status, output = run_status(vm, f"redoxfs-mkfs {disk}")
+            if status != 0:
+                return False, f"the second redoxfs-mkfs failed ({status}): {output.strip()[-200:]}"
+            mounted, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse2")
+            if not mounted:
+                return False, f"the new volume did not mount (an older header won); see {vm.out}"
+            if entries != 0:
+                return False, f"the mount shows {entries} entries: the old volume, not the new one"
+            run_status(vm, "echo plain-volume > /scheme/mkfsreuse2/plain.txt")
+            mkfs_reuse_unmount(vm)
+
+            status, output = run_status(vm, f"printf %s mkfs-reuse-pass > /tmp/mr.key; "
+                                            f"redoxfs-mkfs --encrypt --key-file /tmp/mr.key {disk}")
+            if status != 0:
+                return False, f"redoxfs-mkfs --encrypt failed ({status}): {output.strip()[-200:]}"
+            if mkfs_reuse_mount(vm, disk, "mkfsreuse3")[0]:
+                return False, "the encrypted volume mounted with no passphrase: an older, unencrypted header won"
+            mounted, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse4", "--key-file /tmp/mr.key")
+            if not mounted or entries != 0:
+                return False, f"the encrypted volume with its passphrase: mounted={mounted}, entries={entries}"
+            mkfs_reuse_unmount(vm)
+        finally:
+            vm.close()
+        return True, "second redoxfs-mkfs mounted new and empty; --encrypt over a plain volume refused without its passphrase, mounted empty with it"
+    finally:
+        shutil.rmtree(scratch)
+
+
+def test_disk_keys(args, out):
+    """DE2: a recovery key added on the host opens the volume at the bootloader; after `redoxfs-key change` on the mounted root and a reboot the old passphrase is refused and the new one accepted; no header keeps the old slot (use --config disk-encryption-test)."""
+    passphrase, new = config_passphrase(args), "ferrion-disk-changed"
+    scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-disk-"))
+    image = scratch / "harddrive.img"
+    try:
+        shutil.copyfile(ROOT / "build" / args.arch / args.config / "harddrive.img", image)
+        (scratch / "extra.img").write_bytes(b"")
+        os.truncate(scratch / "extra.img", 64 << 20)
+        disk = [f"DISK={image}", f"EXTRA_DISK={scratch / 'extra.img'}"]
+        recovery = host_recovery_key(image, passphrase, scratch)
+        old_slot = raw_key_slots(image)[0]
+
+        vm = boot_copy(args, out / "recovery", disk)
+        try:
+            if not unlock(vm, recovery, 1, args.timeout):
+                return False, "no bootloader passphrase prompt"
+            if not root_shell(vm, args.timeout):
+                return False, f"the recovery key did not reach the login; see {vm.out}"
+            run_status(vm, f"printf %s {passphrase} > /tmp/old; printf %s {new} > /tmp/new")
+            status, output = run_status(vm, "redoxfs-key change --key-file /tmp/old --new-key-file /tmp/new /")
+            run_status(vm, "rm /tmp/old /tmp/new")
+            (vm.out / "change.txt").write_text(output)
+            if status != 0:
+                return False, f"redoxfs-key change on / failed ({status}); see {vm.out / 'change.txt'}"
+        finally:
+            vm.close()
+
+        vm = boot_copy(args, out / "changed", disk)
+        try:
+            if not unlock(vm, passphrase, 1, args.timeout):
+                return False, "no bootloader passphrase prompt after the change"
+            if not unlock(vm, new, 2, 60):
+                return False, f"the old passphrase was not refused; see {vm.out}"
+            if not vm.wait_serial(r"login: ", args.timeout):
+                return False, f"the new passphrase did not reach the login; see {vm.out}"
+        finally:
+            vm.close()
+
+        slots = raw_key_slots(image)
+        if slots[0] == old_slot or image.read_bytes().find(old_slot) != -1:
+            return False, "the old slot's bytes are still in the image"
+        in_use = sum(slot[:16] != bytes(16) for slot in slots)
+        return True, f"recovery key opened it; old passphrase refused, new accepted; old slot in no header; {in_use} slots in use"
+    finally:
+        shutil.rmtree(scratch)
+
+
+def test_disk_install(args, out):
+    """DE6: the live image's text installer installs to a second disk with one passphrase; that disk starts with the passphrase and with the recovery key the installer printed; its filesystem.toml holds no passphrase and its raw bytes no file name (use --config disk-encryption-test after `make live`)."""
+    passphrase, installed = config_passphrase(args), "ferrion-installed-disk"
+    scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-install-"))
+    live, target, extra = scratch / "live.iso", scratch / "target.img", scratch / "extra.img"
+    try:
+        shutil.copyfile(ROOT / "build" / args.arch / args.config / "redox-live.iso", live)
+        for path, size in ((target, 2 << 30), (extra, 64 << 20)):
+            path.write_bytes(b"")
+            os.truncate(path, size)
+
+        vm = boot_copy(args, out / "install", [f"DISK={live}", f"EXTRA_DISK={target}"])
+        try:
+            if not unlock(vm, passphrase, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"the live image did not reach a root shell; see {vm.out}"
+            since = vm.mark()
+            vm.type("redox_installer_tui\n")
+            # lived logs "removing handle: ..." on the same console as the installer closes its
+            # handles; that line can land between a drive's number and its path.
+            choice = vm.wait_serial(r"(\d+): (?:removing handle[^\n]*\n)?\S+: 2\.00 GB", args.timeout, since)
+            if not choice or not vm.wait_serial(r"Select a drive", 10, since):
+                return False, f"the installer did not offer the 2 GB disk; see {vm.out}"
+            vm.type(choice.group(1) + "\n")
+            if not vm.wait_serial(r"Encrypt this disk\? \[Y/n\]", 30, since):
+                return False, "the installer did not ask about encryption"
+            vm.type("\n")
+            for prompt in (r"Disk passphrase: ", r"Confirm passphrase: "):
+                if not vm.wait_serial(prompt, 30, since):
+                    return False, f"no {prompt.strip()} prompt; see {vm.out}"
+                vm.type(installed + "\n")
+                since = vm.mark()
+            key = vm.wait_serial(r"Recovery key[^:]*: ([0-9 ]{55})|failed to install: .*", 900, since)
+            if not key or not key.group(1) or not vm.wait_serial(r"Type SAVED", 30, since):
+                return False, f"the installer printed no recovery key: {key.group(0) if key else 'timeout'}; see {vm.out}"
+            recovery = key.group(1).replace(" ", "")
+            vm.type("SAVED\n")
+            if not vm.wait_serial(r"root:.*# ", 120, since):
+                return False, f"the installer did not finish; see {vm.out}"
+        finally:
+            vm.close()
+
+        notes = []
+        for name, secret in (("passphrase", installed), ("recovery", recovery)):
+            vm = boot_copy(args, out / name, [f"DISK={target}", f"EXTRA_DISK={extra}"])
+            try:
+                if not unlock(vm, secret, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                    return False, f"the installed disk did not start with its {name}; see {vm.out}"
+                if name == "passphrase":
+                    status, output = run_status(vm, f"grep -c -e encrypt_disk -e {installed} -e {passphrase} /filesystem.toml")
+                    if status != 1:
+                        return False, f"the installed filesystem.toml holds a passphrase ({status}): {output!r}"
+                notes.append(f"starts with its {name}")
+            finally:
+                vm.close()
+
+        key_file = scratch / "passphrase"
+        key_file.write_text(installed)
+        listing = subprocess.run([str(REDOXFS_KEY), "list", "--key-file", str(key_file), str(target)],
+                                 check=True, capture_output=True, text=True).stdout
+        (out / "slots.txt").write_text(listing)
+        if listing.count("in use") != 2:
+            return False, f"expected two slots in use: {listing!r}"
+        raw = target.read_bytes()
+        names = [name for name in (b"filesystem.toml", b"os-release", b"redoxfs-key") if name in raw]
+        if names:
+            return False, f"file names readable in the raw disk: {names}"
+        return True, "; ".join(notes) + "; two slots in use; no file name in the raw disk"
+    finally:
+        shutil.rmtree(scratch)
+
 
 def test_scheme_create(vm, args):
     """Issue 7: `user`'s serial login may not open the scheme-creation capability; root's login, made next, may, and a program root starts under ferrion-run may not."""
     probe = "cat /scheme/namespace/scheme-creation-cap 2>&1 >/dev/null"
     results, transcript = {}, []
+
     def check(name, line):
         # The status is echoed inside bash: `user`'s login shell is not POSIX.
         since = vm.mark()
@@ -688,8 +1786,175 @@ def test_scheme_create(vm, args):
     return True, "root's login opens the capability; under ferrion-run and as user it is refused"
 
 
+def test_resolver(vm, args):
+    """Issue 11: /etc/hosts wins as user, and a captured DNS query goes to the server advertised by DHCP, not the bootstrap fallback."""
+    capture = vm.out / "resolver.pcap"
+    reply = vm.command("object_add filter-dump,id=ferrion-resolver,netdev=net0,file="
+                       + str(capture.resolve()))
+    if "error" in reply.lower() or not capture.exists():
+        return False, f"could not capture net0: {reply}"
+
+    def run(line):
+        since = vm.mark()
+        vm.type(f"bash -c '{line}; echo resolver-status-$?'\n")
+        found = vm.wait_serial(r"(?s)\n(.*)resolver-status-(\d+)", 90, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    try:
+        if not vm.wait_serial(r"login: ", args.timeout):
+            return False, "no serial login for the resolver fixture"
+        vm.type("user\n")
+        time.sleep(3)
+        status, output = run("id -u")
+        if status != 0 or not re.search(r"(?m)^[1-9][0-9]*$", output):
+            return False, f"resolver probe did not enter an ordinary-user session: {output}"
+        # Boot starts dhcpd asynchronously; a second client races its port-68 bind.
+        # Observe the existing client's published result instead.
+        status, output = run(
+            'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); '
+            'while [[ -z "$server" || "$server" == 9.9.9.9 ]] && (( SECONDS < deadline )); do '
+            'sleep 0.1; server=$(cat /etc/net/dns); done; '
+            'echo "configured DNS: $server"; [[ -n "$server" && "$server" != 9.9.9.9 ]]')
+        (vm.out / "resolver-dhcp.txt").write_text(output)
+        if status != 0:
+            return False, f"boot DHCP did not publish a lease DNS server (exit {status}); see {vm.out}"
+        status, output = run(
+            'printf "\\n192.0.2.71 hosts.resolver.fixture.invalid ferrion-host-alias\\n" | sudo tee -a /etc/hosts')
+        if status != 0:
+            return False, f"could not install hosts fixture: {output}"
+        transcript = []
+        for name in ("hosts.resolver.fixture.invalid", "FERRION-HOST-ALIAS"):
+            status, output = run(
+                f'curl -4 --noproxy "*" --connect-timeout 2 --max-time 5 -v http://{name}/')
+            transcript.append(f"[{name}] exit {status}\n{output}\n")
+            (vm.out / "resolver-user.txt").write_text("".join(transcript))
+            if not re.search(r"(?m)^\* +Trying 192\.0\.2\.71:80", output):
+                return False, f"hosts name {name} did not resolve to its fixture address; see {vm.out}"
+        status, output = run(
+            'curl -4 --noproxy "*" --connect-timeout 5 --max-time 10 -v http://dns.resolver.fixture.invalid/')
+        transcript.append(f"[DNS query] exit {status}\n{output}\n")
+        (vm.out / "resolver-user.txt").write_text("".join(transcript))
+        if status not in (6, 28):
+            return False, f"expected NXDOMAIN or timeout for DNS fixture, got curl exit {status}; see {vm.out}"
+    finally:
+        vm.command("object_del ferrion-resolver")
+
+    # Read the wire evidence only after closing QEMU's capture, which flushes it.
+    raw = capture.read_bytes()
+    order = {b"\xd4\xc3\xb2\xa1": "little", b"\xa1\xb2\xc3\xd4": "big"}.get(raw[:4])
+    if order is None or len(raw) < 24 or int.from_bytes(raw[20:24], order) != 1:
+        return False, "resolver capture is not an Ethernet pcap"
+    packets, pos = [], 24
+    while pos < len(raw):
+        if pos + 16 > len(raw):
+            return False, "truncated resolver capture header"
+        size = int.from_bytes(raw[pos + 8:pos + 12], order)
+        pos += 16
+        frame = raw[pos:pos + size]
+        if len(frame) != size:
+            return False, "truncated resolver capture packet"
+        pos += size
+        if len(frame) < 42 or frame[12:14] != b"\x08\x00":
+            continue
+        ip = frame[14:]
+        ihl = (ip[0] & 15) * 4
+        if ip[0] >> 4 != 4 or ihl < 20 or ip[9] != 17 or len(ip) < ihl + 8:
+            continue
+        udp = ip[ihl:]
+        src, dst = int.from_bytes(udp[:2], "big"), int.from_bytes(udp[2:4], "big")
+        payload = udp[8:int.from_bytes(udp[4:6], "big")]
+        packets.append((src, dst, socket.inet_ntoa(ip[16:20]), payload))
+
+    servers, queries = set(), []
+    for src, dst, address, payload in packets:
+        if src == 67 and dst == 68 and len(payload) >= 240 and payload[236:240] == b"\x63\x82\x53\x63":
+            options, cursor = {}, 240
+            while cursor < len(payload):
+                tag = payload[cursor]
+                cursor += 1
+                if tag == 255:
+                    break
+                if tag == 0:
+                    continue
+                if cursor >= len(payload):
+                    break
+                size = payload[cursor]
+                cursor += 1
+                if cursor + size > len(payload):
+                    break
+                options[tag] = payload[cursor:cursor + size]
+                cursor += size
+            dns = options.get(6, b"")
+            if options.get(53) == b"\x02" and dns and len(dns) % 4 == 0:
+                servers.add(socket.inet_ntoa(dns[:4]))
+        if dst == 53 and len(payload) >= 12 and not payload[2] & 0x80:
+            labels, cursor = [], 12
+            while cursor < len(payload) and 0 < payload[cursor] < 64:
+                size = payload[cursor]
+                labels.append(payload[cursor + 1:cursor + 1 + size])
+                cursor += size + 1
+            queries.append((b".".join(labels).lower(), address))
+    if len(servers) != 1 or "9.9.9.9" in servers:
+        return False, f"need one captured DHCP offer with a non-fallback DNS server, saw {servers}"
+    server = next(iter(servers))
+    destinations = {addr for name, addr in queries if name == b"dns.resolver.fixture.invalid"}
+    hosts_queries = [name for name, _ in queries
+                     if name in (b"hosts.resolver.fixture.invalid", b"ferrion-host-alias")]
+    (vm.out / "resolver-wire.txt").write_text(
+        f"DHCP DNS: {server}\nDNS destinations: {sorted(destinations)}\nHosts queries: {hosts_queries}\n")
+    if destinations != {server} or hosts_queries:
+        return False, f"resolver ignored hosts or DHCP DNS; see {vm.out / 'resolver-wire.txt'}"
+    return True, f"hosts names resolve without DNS; user query captured to DHCP server {server}"
+
+
+def test_cli_tools(vm, args):
+    """Issue 12: desktop text filters and tar's gzip/directory options work."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root shell on the serial console"
+    script = r'''set -euo pipefail
+work=$(mktemp -d /tmp/ferrion-cli-tools.XXXXXX)
+trap 'rm -rf "$work"' EXIT
+test "$(printf 'before\n' | sed 's/before/after/')" = after
+echo cli-sed-ok
+test "$(printf 'one 7\ntwo 5\n' | awk '{sum += $2} END {print sum}')" = 12
+echo cli-awk-ok
+mkdir -p "$work/input/empty" "$work/output"
+printf 'archive payload\n' > "$work/input/message"
+cd "$work"
+tar -czf bundle.tar.gz -C input .
+tar -xzf bundle.tar.gz -C output
+test "$(cat output/message)" = "archive payload"
+test -d output/empty
+echo cli-tar-ok
+'''
+    encoded = base64.b64encode(script.encode()).decode()
+    status, output = run_status(
+        vm, f"bash -c 'printf %s {encoded} | base64 -d | bash'", timeout=60)
+    (vm.out / "cli-tools.txt").write_text(output)
+    expected = ("cli-sed-ok", "cli-awk-ok", "cli-tar-ok")
+    missing = [marker for marker in expected if not re.search(rf"(?m)^{marker}$", output)]
+    if status != 0 or missing:
+        return False, f"cli-tools exit {status}; missing {missing}; see {vm.out / 'cli-tools.txt'}"
+    return True, "sed substitution, awk arithmetic and tar -czf/-xzf -C passed"
+
+
+TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
+         "signal-handle": test_signal_handle, "screenshots": test_screenshots,
+         "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
+         "dev-parity": test_dev_parity, "firefox-headless": test_firefox_headless, "rand-seed": test_rand_seed,
+         "ferrion-run": test_ferrion_run}
+TESTS["ferrion-cli"] = test_ferrion_cli
+TESTS["driver-namespaces"] = test_driver_namespaces
 TESTS["scheme-create"] = test_scheme_create
 TESTS["nsmgr-bounds"] = test_nsmgr_bounds
+TESTS["sudo-notty"] = test_sudo_notty
+TESTS["desktop-regions"] = test_desktop_regions
+TESTS["resolver"] = test_resolver
+TESTS["cli-tools"] = test_cli_tools
+# These boot copies of their own images instead of the shared one, and are called with (args, out).
+OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
+OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
+TESTS.update(OWN_IMAGE)
 
 
 def main():
@@ -708,17 +1973,23 @@ def main():
         parser.print_help()
         sys.exit(2)
     args = parser.parse_args()
+    if "rand-seed" in args.tests and args.arch != "x86_64":
+        parser.error("rand-seed requires x86_64 with KVM and a host CPU RNG")
     out_root = args.out or ROOT / "build" / "vm-test" / args.arch / args.config
     failures = 0
     for name in args.tests:
         for run in range(1, args.repeat + 1):
             out = out_root / f"{name}-{run}"
             out.mkdir(parents=True, exist_ok=True)
-            vm = VM(args, out, tpm=name == "tpm")
-            try:
-                ok, note = TESTS[name](vm, args)
-            finally:
-                vm.close()
+            if name in OWN_IMAGE:
+                ok, note = OWN_IMAGE[name](args, out)
+            else:
+                vm = VM(args, out, tpm=name == "tpm",
+                        qemu_flags=RAND_FIRMWARE if name == "rand-seed" else "")
+                try:
+                    ok, note = TESTS[name](vm, args)
+                finally:
+                    vm.close()
             failures += not ok
             print(f"{'PASS' if ok else 'FAIL'} {name} {run}/{args.repeat}: {note}", flush=True)
     sys.exit(1 if failures else 0)
