@@ -46,20 +46,39 @@
 #           graphics-bounds-probe: dumb-buffer mappings past a buffer's end, sizes
 #           beyond the display driver's limits and an unknown buffer number are
 #           refused, and the driver still answers a fresh handle (x86_64 desktop)
+#   scheme-short-read  logs in as root on the serial console and runs
+#           scheme-short-read-probe: a scheme the probe serves answers its forked child's reads
+#           with fewer bytes than asked, and every byte of the caller's buffer past
+#           the reply keeps its contents, inside a page and across page boundaries
+#           (root, since a `user` login may not create a scheme; x86_64 desktop)
+#   event-poll  logs in as `user` on the serial console and runs event-poll-probe:
+#           200 zero-timeout polls of empty pipes leave the kernel's event
+#           subscriber count where it was (x86_64 desktop)
 #   desktop-regions  compares the settled desktop with the flat first-run target's region probes
+#   wayland-client  checks the DD1 CPU compositor's pixels, keyboard and frame/cursor timings
 #   cli-tools  checks sed, awk and gzip tar creation/extraction with -C on the desktop
 #   sudo-notty  logs in as `user` on the serial console and runs sudo with no
 #           terminal on any standard descriptor: no panic, and exit 0 because
 #           `user`'s password is empty (x86_64 desktop)
 #   resolver  checks hosts-file names as `user`, then captures DHCP option 6
 #           and the actual DNS query destination on QEMU's net0 using desktop curl
+#   update-today  logs in as root with a working network and runs `ferrion update`
+#           and `pkg update`: neither fetches nor changes the kernel or initfs,
+#           and the next start reaches the login (x86_64 desktop)
 #   net-hardening  boots twice with a host-side peer on QEMU's network hub, the card
 #           chosen by --make net= (e1000 by default, or virtio), and logs in as root:
 #           DHCP replies for another request are ignored, TCP initial sequence numbers differ
-#           between boots and source ports do not count up, 20 lookups take only
-#           the reply with their ID and question from the server's address and
-#           port, frames of 1,514 to 9,000 bytes leave the driver running, and
-#           40,000 ARP senders grow the stack by less than 512 KiB (x86_64 desktop)
+#           between boots, do not step by a fixed amount within one and are not what
+#           smoltcp's generator gives after the two before them, source ports do not count
+#           up, 20 lookups take only the reply with their ID and question from the server's
+#           address and port, frames of 1,514 to 9,000 bytes and reads of the driver's `mac`
+#           past its end (`net-call-probe mac`) leave the driver running, and 40,000 ARP
+#           senders grow the stack by less than 512 KiB (x86_64 desktop)
+#   net-calls  boots with the same peer as DHCP and name server, logs in as `user` and
+#           runs net-call-probe: calls on tcp and udp sockets whose buffers are too short or
+#           whose sizes run past them are refused or cut to fit, and a lookup and a TCP
+#           connection leave the guest before and after it (card from --make net=;
+#           x86_64 desktop)
 # Every run boots with -snapshot, so the image is never changed (disk-keys and
 # disk-install boot copies in a temporary directory instead), and `make` is
 # told the image is up to date, so a run never starts a build. Screenshots
@@ -490,6 +509,90 @@ def test_signal_handle(vm, args):
     return verdict.group(1) == "REFUSED", f"{verdict.group(1)}: {detail}"
 
 
+def test_dlopen_ctor(vm, args):
+    """Runs a shared-library constructor that calls dlsym and nested dlopen/dlclose, checking initialized symbols and process exit (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    # Bash expands the exit status; the echoed command cannot match the numeric marker.
+    vm.type("bash -c 'dlopen-ctor; echo dlopen-ctor-exit-$?'\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)dlopen-ctor-exit-(\d+)\s", 30, since)
+    output = found.group(1) if found else vm.text(since)
+    status = int(found.group(2)) if found else None
+    log = vm.out / "dlopen-ctor.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    if status is None:
+        return False, f"constructor probe did not exit within 30s (possible loader deadlock); see {log}"
+    if status != 0 or "dlopen-ctor: FAIL" in output:
+        return False, f"constructor probe failed (exit {status}); see {log}"
+    expected = ("constructor-dlsym", "nested-initialized-symbol", "nested-dlclose",
+                "nested-destructor", "outer-initialized-symbol", "outer-dlclose")
+    missing = [name for name in expected if f"dlopen-ctor: pass {name}" not in output]
+    if missing or not re.search(r"dlopen-ctor: PASS\r?\n", output):
+        return False, f"incomplete constructor results (missing {missing}); see {log}"
+    return True, "constructor dlsym, nested dlopen/dlclose, initialized symbols and process exit passed"
+
+
+def test_dlopen_tls(vm, args):
+    """Loads two DSOs with distinct TLS objects, then checks independent null initialization and writable storage in a later pthread (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    # Bash expands the exit status; the echoed command cannot match the numeric marker.
+    vm.type("bash -c 'dlopen-tls; echo dlopen-tls-exit-$?'\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)dlopen-tls-exit-(\d+)\s", 30, since)
+    output = found.group(1) if found else vm.text(since)
+    status = int(found.group(2)) if found else None
+    log = vm.out / "dlopen-tls.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    if status is None:
+        return False, f"TLS probe did not exit within 30s; see {log}"
+    if status != 0 or "dlopen-tls: FAIL" in output:
+        return False, f"TLS probe failed (exit {status}); see {log}"
+    expected = ("dlopen", "thread-tls-initial", "thread-tls-write")
+    missing = [name for name in expected if f"dlopen-tls: pass {name}" not in output]
+    if missing or not re.search(r"dlopen-tls: PASS\r?\n", output):
+        return False, f"incomplete TLS results (missing {missing}); see {log}"
+    return True, "dlopened library TLS was initialized, writable and readable in a later pthread"
+
+
+def test_fd_primitives(vm, args):
+    """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    # The shell, not the probe, reports exit; the typed command cannot match it.
+    vm.type("bash -c 'fd-primitives-probe; echo fd-primitives-exit-$?'\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)\nfd-primitives-exit-(\d+)\s", 30, since)
+    output = found.group(1) if found else vm.text(since)
+    status = int(found.group(2)) if found else None
+    log = vm.out / "fd-primitives.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    if status is None:
+        return False, f"descriptor probe did not exit within 30s; see {log}"
+    if status != 0 or "fd-primitives-probe: FAIL" in output:
+        return False, f"descriptor probe failed (exit {status}); see {log}"
+    expected = (
+        "eventfd-counter-errors", "eventfd-semaphore", "eventfd-poll-epoll",
+        "eventfd-dup-fork-blocking", "timerfd-errors",
+        "timerfd-monotonic-relative-absolute-readiness",
+        "timerfd-realtime-relative-absolute-readiness",
+        "timerfd-gettime-interval-disarm-rearm", "timerfd-dup-fork-blocking",
+        "descriptor-flags-exec",
+    )
+    lines = output.splitlines()
+    missing = [name for name in expected if f"fd-primitives-probe: pass {name}" not in lines]
+    if missing or "fd-primitives-probe: PASS" not in lines:
+        return False, f"incomplete descriptor results (missing {missing}); see {log}"
+    return True, "eventfd/timerfd I/O, poll/epoll, dup/fork and flags across exec passed; signalfd deferred"
+
+
 def test_nsmgr_bounds(vm, args):
     """Logs in as `user` on the serial console and runs nsmgr-bounds-probe: fork requests whose name length runs past their end get EINVAL, a well-formed fork still works, and the shell can still run a program afterwards."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -536,6 +639,54 @@ def test_graphics_bounds(vm, args):
         return False, f"probe exit {results['probe'][0]}: {detail}; see {vm.out / 'graphics-bounds.txt'}"
     if results["after"][0] != 0:
         return False, f"no display scheme in /scheme afterwards (exit {results['after'][0]}); see {vm.out}"
+    return True, detail
+
+
+def test_scheme_short_read(vm, args):
+    """Logs in as root on the serial console (a `user` login may not open the scheme-creation capability) and runs scheme-short-read-probe: reads its own scheme answers to a forked child with fewer bytes than asked leave every byte of the caller's buffer past the reply unchanged, at offsets inside a page and across page boundaries, and the shell can still run a program afterwards."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    since = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20, since):
+        return False, f"no password prompt for root; see {vm.out}"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, since):
+        return False, f"no root shell; see {vm.out}"
+    results = {}
+    for tag, line in (("probe", "scheme-short-read-probe"), ("after", "ls / >/dev/null")):
+        since = vm.mark()
+        vm.type(f"bash -c '{line}; echo ssr-end-{tag}-$?'\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)ssr-end-{tag}-(\d+)", 60, since)
+        results[tag] = (int(found.group(2)) if found else None, found.group(1) if found else vm.text(since))
+    log = vm.out / "scheme-short-read.txt"
+    log.write_text("".join(f"[{tag}] exit {status}\n{output}\n" for tag, (status, output) in results.items()))
+    lines = re.findall(r"scheme-short-read-probe: (?:pass|FAIL|PASS).*", results["probe"][1])
+    failed = [line.strip() for line in lines if "FAIL" in line]
+    if results["probe"][0] != 0:
+        return False, f"probe exit {results['probe'][0]}: {'; '.join(failed) or 'no result line'}; see {log}"
+    if results["after"][0] != 0:
+        return False, f"the shell could not run `ls /` afterwards (exit {results['after'][0]}); see {log}"
+    return True, f"{sum('pass ' in line for line in lines)} short-read cases left the caller's bytes untouched"
+
+
+def test_event_poll(vm, args):
+    """Logs in as `user` on the serial console and runs event-poll-probe: zero-timeout polls of 200 empty pipes, kept open, do not grow the kernel's event subscriber count in /scheme/sys/stat."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    # The status is echoed inside bash: `user`'s login shell is not POSIX.
+    vm.type("bash -c 'event-poll-probe; echo ep-end-$?'\n")
+    found = vm.wait_serial(r"(?s)\n(.*)ep-end-(\d+)", 60, since)
+    status, output = (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+    log = vm.out / "event-poll.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    line = re.search(r"event-poll-probe: (?:PASS|FAIL).*", output)
+    detail = line.group(0).strip() if line else "no result line"
+    if status != 0:
+        return False, f"probe exit {status}: {detail}; see {log}"
     return True, detail
 
 
@@ -711,6 +862,119 @@ def test_screenshots(vm, args):
     return True, f"saved {len(saved)} screenshots in {vm.out}: {saved}"
 
 
+def run_wayland_client(args, out):
+    """Checks the DD1 pixman compositor with a cursor-capable virtio display and QMP input."""
+    with tempfile.TemporaryDirectory(prefix="ferrion-dd-qmp-") as directory:
+        path = Path(directory) / "qmp.sock"
+        vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off", make=("gpu=virtio",))
+        try:
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(args.timeout)
+                connection.connect(str(path))
+                with connection.makefile("rwb") as stream:
+                    greeting = json.loads(stream.readline())
+                    if "QMP" not in greeting:
+                        raise RuntimeError("QEMU sent no QMP greeting")
+
+                    def qmp(command, arguments=None):
+                        stream.write(json.dumps({"execute": command, "arguments": arguments or {}}).encode() + b"\n")
+                        stream.flush()
+                        while True:
+                            reply = json.loads(stream.readline())
+                            if "error" in reply:
+                                raise RuntimeError(f"QMP {command}: {reply['error']}")
+                            if "return" in reply:
+                                return reply["return"]
+
+                    qmp("qmp_capabilities")
+                    return test_wayland_client(vm, args, qmp)
+        finally:
+            vm.close()
+
+
+def test_wayland_client(vm, args, qmp):
+    """Checks a native-VT pixman Wayland client and input while a slow client renders."""
+    import statistics
+
+    problems = []
+    for marker in ("DD1_COMPOSITOR_READY", "DD1_CLIENT_READY", "DD1_SLOW_CLIENT_READY"):
+        if not vm.wait_serial(marker, args.timeout):
+            problems.append(f"missing {marker}")
+            break
+    if not problems:
+        for key in "abc":
+            vm.command(f"sendkey {key}")
+            if not vm.wait_serial(rf"DD1_KEY {key}\b", args.timeout):
+                problems.append(f"key {key} did not reach the client")
+        # The guest selects vmmouse's absolute device; HMP relative motion does
+        # not reach it. QMP sends absolute coordinates through the real device.
+        for step in range(24):
+            qmp("input-send-event", {"events": [
+                {"type": "abs", "data": {"axis": "x", "value": 1000 + step * 100}},
+                {"type": "abs", "data": {"axis": "y", "value": 1000 + step * 100}},
+            ]})
+            time.sleep(0.05)
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            text = vm.text()
+            if len(re.findall(r"DD1_FRAME client=normal ", text)) >= 60:
+                break
+            time.sleep(0.1)
+    frame = settle(vm, 5)
+    frame.save_png(vm.out / "wayland-client.png")
+    if (frame.width, frame.height) != (1280, 800):
+        problems.append(f"display is {frame.width}x{frame.height}, expected 1280x800")
+    for name, expected, points in (
+        ("normal", bytes.fromhex("e68e0d"), ((100, 120), (380, 320))),
+        ("slow", bytes.fromhex("3a9fd8"), ((540, 120), (820, 320))),
+    ):
+        for x, y in points:
+            if x >= frame.width or y >= frame.height:
+                problems.append(f"{name} probe ({x},{y}) outside display")
+                continue
+            offset = (y * frame.width + x) * 3
+            actual = frame.rgb[offset:offset + 3]
+            if any(abs(a - b) > 2 for a, b in zip(actual, expected)):
+                problems.append(f"{name} ({x},{y}) #{actual.hex()}, expected #{expected.hex()}")
+    text = vm.text()
+    commits = {(client, int(sequence)): int(timestamp)
+               for client, sequence, timestamp in re.findall(
+                   r"DD1_CLIENT_COMMIT client=(normal|slow) frame=(\d+) monotonic_ns=(\d+)", text)}
+    frames = []
+    for client, sequence, dispatch, timestamp, present in re.findall(
+            r"DD1_FRAME client=(normal|slow) frame=(\d+) dispatch_to_present_us=(\d+) monotonic_ns=(\d+) present_us=(\d+)", text):
+        committed = commits.get((client, int(sequence)))
+        if committed is None or committed > int(timestamp):
+            problems.append(f"{client} frame {sequence} lacks an ordered client commit timestamp")
+            continue
+        frames.append({"client": client, "frame": int(sequence), "commit_ns": committed,
+                       "present_ns": int(timestamp), "commit_to_present_us": (int(timestamp) - committed) / 1000,
+                       "dispatch_to_present_us": int(dispatch), "present_us": int(present)})
+    pointers = [{"read_us": int(read), "completed_us": int(done), "elapsed_us": int(delay),
+                 "x": int(x), "y": int(y)}
+                for read, done, delay, x, y in re.findall(
+                    r"DD1_POINTER read_us=(\d+) completed_us=(\d+) elapsed_us=(\d+) x=(-?\d+) y=(-?\d+)", text)]
+    normal_frames = [f["commit_to_present_us"] for f in frames if f["client"] == "normal"]
+    median = statistics.median(normal_frames) if normal_frames else None
+    if len(normal_frames) < 60:
+        problems.append(f"only {len(normal_frames)} presented normal-client commits, expected at least 60")
+    if median is not None and median > 16_700:
+        problems.append(f"commit-to-present median {median}us exceeds 16700us")
+    if len(pointers) < 12:
+        problems.append(f"only {len(pointers)} cursor movements, expected at least 12")
+    if any(p["elapsed_us"] >= 2000 for p in pointers):
+        problems.append("cursor read-to-plane ioctl reached or exceeded 2000us")
+    slow_frames = len(re.findall(r"DD1_FRAME_SUBMITTED client=slow frame=", text))
+    if slow_frames < 2:
+        problems.append("slow client did not continue rendering")
+    result = {"renderer": "pixman", "transport": "rust", "width": frame.width, "height": frame.height,
+              "frames": frames, "pointers": pointers, "frame_median_us": median,
+              "slow_frames": slow_frames, "problems": problems,
+              "timing_scope": "client commit to display handoff via CLOCK_MONOTONIC; input read to cursor ioctl completion, not scanout"}
+    (vm.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    return not problems, "; ".join(problems) if problems else f"pixels and abc match; median {median}us; see {vm.out}"
+
+
 def test_desktop_regions(vm, args):
     """Compares the desktop's region probes with flat/first-run.svg within two RGB steps."""
     import xml.etree.ElementTree as ET
@@ -734,9 +998,9 @@ def test_desktop_regions(vm, args):
             if len(expected) != 3:
                 raise ValueError(f"invalid RGB probe in {region.attrib['id']}")
             points.append((x, y, expected))
-        if not points:
-            raise ValueError(f"no probes in {region.attrib['id']}")
-        probes.append((region.attrib["id"], points))
+        # A region whose content changes (the status area's clock) carries no probes.
+        if points:
+            probes.append((region.attrib["id"], points))
 
     while vm.elapsed() < args.timeout:
         if vm.screenshot().kind() == "login":
@@ -1296,7 +1560,60 @@ def test_rand_seed(vm, args):
 
 
 def test_ferrion_cli(vm, args):
-    """Root runs ferrion status, shell list, search, install and remove; JSON and the installed jq executable agree (requires network)."""
+    """Root runs ferrion status and shell list; search refuses with no package source (exit 6); with a source on the host naming one package of this build's repo/, signed by the build's key, search, install and remove work and the installed program runs (x86_64 desktop)."""
+    scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-repo-"))
+    try:
+        server, seen = package_fixture_server(args, scratch)
+        try:
+            return ferrion_cli_checks(vm, args, server.server_address[1], seen)
+        finally:
+            server.shutdown()
+            server.server_close()
+    finally:
+        shutil.rmtree(scratch)
+
+
+# A package source served from the host for ferrion-cli, so the check reaches no outside server:
+# one package of this build's own repo/, which the desktop image does not install and which
+# depends on nothing, with an index naming its hash and the build's public key, the key that
+# signed it and every package of the image. QEMU's user network takes the guest's connections to
+# 10.0.2.2 to the host's 127.0.0.1.
+FIXTURE_PACKAGE, FIXTURE_PROGRAM = "gnu-make", "/usr/bin/make"
+
+
+def package_fixture_server(args, scratch):
+    import functools
+    import http.server
+    import tomllib
+
+    target = f"{args.arch}-unknown-redox"
+    source = ROOT / "repo" / target
+    head = source / f"{FIXTURE_PACKAGE}.toml"
+    if not head.exists():
+        sys.exit(f"vm-test: {head.relative_to(ROOT)} is missing; cook it first: make r.{FIXTURE_PACKAGE}")
+    repo = scratch / target
+    repo.mkdir()
+    shutil.copy(head, repo)
+    shutil.copy(source / f"{FIXTURE_PACKAGE}.pkgar", repo)
+    blake3 = tomllib.loads(head.read_text())["blake3"]
+    (repo / "repo.toml").write_text(f'[packages]\n{FIXTURE_PACKAGE} = "{blake3}"\n')
+    shutil.copy(ROOT / "build" / "id_ed25519.pub.toml", scratch)
+    seen = []
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            super().do_GET()
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(scratch)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def ferrion_cli_checks(vm, args, port, seen):
     if not vm.wait_serial(r"login: ", args.timeout):
         return False, f"no serial login prompt within {args.timeout}s"
     vm.type("root\n")
@@ -1317,16 +1634,16 @@ def test_ferrion_cli(vm, args):
         found = vm.wait_serial(r"(?s)\n(.*?)FCLI-END-42=(\d+)\s", timeout, since)
         return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
 
-    def check_json(command, timeout=60):
+    def check_json(command, timeout=60, expect=0):
         code, text = run(f"ferrion --json {command}", timeout)
         (vm.out / (command.split()[0] + ".txt")).write_text(text)
         records = [line.strip() for line in text.splitlines() if line.lstrip().startswith("{")]
-        if code != 0 or len(records) != 1:
-            raise ValueError(f"{command}: exit {code}, expected one JSON record; see {vm.out}")
+        if code != expect or len(records) != 1:
+            raise ValueError(f"{command}: exit {code}, expected {expect} and one JSON record; see {vm.out}")
         record = json.loads(records[0])
-        if (record.get("schema_version") != 1 or record.get("ok") is not True
+        if (record.get("schema_version") != 1 or record.get("ok") is not (expect == 0)
                 or record.get("exit_code") != code):
-            raise ValueError(f"{command}: invalid success envelope")
+            raise ValueError(f"{command}: invalid envelope")
         expected = "shell list" if command == "shell list" else command.split()[0]
         if record.get("command") != expected:
             raise ValueError(f"{command}: wrong command in envelope")
@@ -1346,7 +1663,8 @@ def test_ferrion_cli(vm, args):
             raise ValueError("shell list: the five offered shells are not listed")
         if not all(shell["installed"] for shell in shells):
             raise ValueError("shell list: an offered shell is not executable")
-        # dhcpd starts asynchronously. Wait for its published lease before pkg uses DNS.
+        # dhcpd starts asynchronously. Wait for its published lease, so the refusal below happens
+        # with a working network.
         code, network = run(
             'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); '
             'while [[ -z "$server" || "$server" == 9.9.9.9 ]] && (( SECONDS < deadline )); do '
@@ -1355,23 +1673,112 @@ def test_ferrion_cli(vm, args):
         (vm.out / "network.txt").write_text(network)
         if code != 0:
             raise ValueError("boot DHCP did not publish a lease DNS server")
-        results = check_json("search jq", 180)
-        if "jq" not in results["matches"]:
-            raise ValueError("search: jq was not found in the configured repository")
-        code, _ = run("test ! -e /usr/bin/jq")
+        if check_json(f"search {FIXTURE_PACKAGE}", expect=6).get("package_source") != "none":
+            raise ValueError("search: the refusal does not say package_source none")
+        code, _ = run(f"test ! -e {FIXTURE_PROGRAM}")
         if code != 0:
-            raise ValueError("jq is already installed; refusing to remove an image package")
-        check_json("install jq --yes", 180)
-        code, _ = run("test -x /usr/bin/jq && /usr/bin/jq --version")
+            raise ValueError(f"{FIXTURE_PROGRAM} is already in the image; refusing to remove an image package")
+        code, _ = run(f"echo http://10.0.2.2:{port} > /etc/pkg.d/90_vm_test")
         if code != 0:
-            raise ValueError("install: jq was not installed as a working executable")
-        check_json("remove jq --yes", 180)
-        code, _ = run("test ! -e /usr/bin/jq")
-        if code != 0:
-            raise ValueError("remove: jq is still present")
+            raise ValueError("could not add the host's package source")
+        try:
+            results = check_json(f"search {FIXTURE_PACKAGE}", 180)
+            if FIXTURE_PACKAGE not in results["matches"]:
+                raise ValueError(f"search: {FIXTURE_PACKAGE} was not found in the host's source")
+            check_json(f"install {FIXTURE_PACKAGE} --yes", 180)
+            code, _ = run(f"test -x {FIXTURE_PROGRAM} && {FIXTURE_PROGRAM} --version")
+            if code != 0:
+                raise ValueError(f"install: {FIXTURE_PROGRAM} was not installed as a working executable")
+            check_json(f"remove {FIXTURE_PACKAGE} --yes", 180)
+            code, _ = run(f"test ! -e {FIXTURE_PROGRAM}")
+            if code != 0:
+                raise ValueError(f"remove: {FIXTURE_PROGRAM} is still present")
+        finally:
+            run("rm -f /etc/pkg.d/90_vm_test")
     except (ValueError, KeyError, TypeError) as error:
-        return False, str(error)
-    return True, "JSON parsed for status, shells, search, install and remove; jq appeared, ran and was removed"
+        return False, f"{error}; host source served {seen}"
+    return True, (f"status and shells parsed; search refused with no source; from the host's source "
+                  f"{FIXTURE_PACKAGE} was found, installed, ran and was removed ({len(seen)} requests)")
+
+
+UPDATE_BOOT_FILES = "/usr/lib/boot/kernel /usr/lib/boot/initfs"
+
+
+def test_update_today(vm, args):
+    """As root with a working network, ferrion update exits 6 saying the image has no package source and pkg update fails without fetching; the kernel's and initfs's hashes are unchanged, the guest opens no TCP connection and sends no DNS query meanwhile, and the next start reaches the login (x86_64 desktop)."""
+    capture = vm.out / "update.pcap"
+    if not root_shell(vm, args.timeout):
+        return False, "no root shell on the serial console"
+    status, network = run_status(
+        vm, "bash -c 'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); "
+            "while [[ -z \"$server\" || \"$server\" == 9.9.9.9 ]] && (( SECONDS < deadline )); do "
+            "sleep 0.1; server=$(cat /etc/net/dns); done; echo \"configured DNS: $server\"; "
+            "[[ -n \"$server\" && \"$server\" != 9.9.9.9 ]]'", 70)
+    (vm.out / "network.txt").write_text(network)
+    if status != 0:
+        return False, "boot DHCP did not publish a lease DNS server, so the network is not up"
+    _, sources = run_status(vm, "bash -c 'grep -rv \"^#\" /etc/pkg.d; true'")
+    before_status, before = run_status(vm, f"sha256sum {UPDATE_BOOT_FILES}")
+    if before_status != 0:
+        return False, f"sha256sum failed: {before}"
+    # Packets are cut at 256 bytes: headers and DNS names are all the check reads.
+    reply = vm.command(f"object_add filter-dump,id=ferrion-update,netdev=net0,maxlen=256,file={capture.resolve()}")
+    if "error" in reply.lower():
+        return False, f"could not capture net0: {reply}"
+    try:
+        # Today's update can run for many minutes; the disk is a snapshot, so letting it run harms nothing.
+        update_status, update = run_status(vm, "ferrion --json update --yes", 1800)
+        pkg_status, pkg = run_status(vm, "pkg update --yes", 1800)
+    finally:
+        vm.command("object_del ferrion-update")
+    after_status, after = run_status(vm, f"sha256sum {UPDATE_BOOT_FILES}")
+    (vm.out / "update.txt").write_text(
+        f"/etc/pkg.d sources:\n{sources}\n[ferrion --json update --yes] exit {update_status}\n{update}\n"
+        f"[pkg update --yes] exit {pkg_status}\n{pkg}\n[before]\n{before}\n[after] exit {after_status}\n{after}\n")
+    hashes = lambda text: sorted(re.findall(r"(?m)^([0-9a-f]{64}) +\S*/usr/lib/boot/\w+", text))
+    changed = len(hashes(before)) != 2 or hashes(before) != hashes(after)
+
+    # Guest-opened TCP connections (SYN without ACK) and DNS questions while the commands ran.
+    raw = capture.read_bytes() if capture.exists() else b""
+    order = {b"\xd4\xc3\xb2\xa1": "little", b"\xa1\xb2\xc3\xd4": "big"}.get(raw[:4])
+    if order is None or int.from_bytes(raw[20:24], order) != 1:
+        return False, "update capture is not an Ethernet pcap"
+    connections, queries, pos = set(), set(), 24
+    while pos + 16 <= len(raw):
+        size = int.from_bytes(raw[pos + 8:pos + 12], order)
+        frame, pos = raw[pos + 16:pos + 16 + size], pos + 16 + size
+        if len(frame) < 34 or frame[12:14] != b"\x08\x00" or frame[14] >> 4 != 4:
+            continue
+        ip = frame[14:]
+        ihl, destination = (ip[0] & 15) * 4, socket.inet_ntoa(ip[16:20])
+        body = ip[ihl:]
+        if ip[9] == 6 and len(body) >= 14 and body[13] & 0x12 == 0x02:
+            connections.add(f"{destination}:{int.from_bytes(body[2:4], 'big')}")
+        elif ip[9] == 17 and len(body) >= 20 and int.from_bytes(body[2:4], "big") == 53:
+            labels, cursor = [], 20
+            while cursor < len(body) and 0 < body[cursor] < 64:
+                labels.append(body[cursor + 1:cursor + 1 + body[cursor]].decode(errors="replace"))
+                cursor += body[cursor] + 1
+            queries.add(".".join(labels))
+    wire = f"TCP connections opened: {sorted(connections)}; DNS questions: {sorted(queries)}"
+    (vm.out / "update-wire.txt").write_text(wire + "\n")
+
+    # The next start: refused by verified boot, or the login.
+    since = vm.mark()
+    vm.command("system_reset")
+    restart = vm.wait_serial(r"does not match the signed manifest|login: ", args.timeout, since)
+    restart = restart.group(0) if restart else f"neither the login nor a refusal within {args.timeout}s"
+
+    record = next((json.loads(line) for line in update.splitlines() if line.lstrip().startswith("{")), {})
+    said = (update_status == 6 and record.get("exit_code") == 6
+            and record.get("data", {}).get("package_source") == "none"
+            and str(record.get("error", "")).startswith("This image has no package source yet"))
+    pkg_said = re.search(r"(?m)^.*(?:not found|error).*$", pkg)
+    note = (f"ferrion update exit {update_status}, pkg update exit {pkg_status} "
+            f"({pkg_said.group(0).strip() if pkg_said else 'no reason printed'}); boot files "
+            f"{'CHANGED' if changed else 'unchanged'}; {wire}; next start: {restart.strip()}; see {vm.out}")
+    ok = said and bool(pkg_said) and not changed and not connections and not queries and restart == "login: "
+    return ok, note
 
 
 # An HTTP server on the host for the ferrion-run test; `seen` lists the paths requested.
@@ -2031,10 +2438,13 @@ def dns_reply(query_id, question, answer, flags=0x8180):
 
 
 class NetPeer:
-    """The host-side peer on the net-hardening test's hub, for one boot."""
+    """The host-side peer on the net-hardening and net-calls tests' hub, for one boot. With
+    `serve_lease` it answers DHCP with a lease of GUEST_IP naming TEST_DNS as name server;
+    without it, only with replies the guest must ignore."""
 
-    def __init__(self, out):
+    def __init__(self, out, serve_lease=False):
         self.out = out
+        self.serve_lease = serve_lease
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 22)
         self.sock.bind(("127.0.0.1", 0))
@@ -2122,7 +2532,9 @@ class NetPeer:
             self.log["dhcp"].append(entry)
         other_xid = bytes(b ^ 0xA5 for b in xid)
         other_mac = bytes([chaddr[0] ^ 2]) + chaddr[1:]
-        if kind == 1:  # discover: offers that must all be ignored
+        if self.serve_lease and kind in (1, 3):  # discover or request: offer or acknowledge
+            self.send(dhcp_reply(xid, chaddr, 2 if kind == 1 else 5, GUEST_IP, dns=TEST_DNS), "lease")
+        elif kind == 1:  # discover: offers that must all be ignored
             self.send(dhcp_reply(other_xid, chaddr, 2, "10.0.2.99", dns="192.0.2.99"), "offer, other xid")
             self.send(dhcp_reply(xid, other_mac, 2, "10.0.2.98", dns="192.0.2.98"), "offer, other hardware address")
             self.send(dhcp_reply(xid, chaddr, 5, "10.0.2.97", dns="192.0.2.97"), "ack instead of offer")
@@ -2194,6 +2606,97 @@ def consecutive_run(ports):
     return longest
 
 
+# The generator smoltcp 0.14 draws TCP initial sequence numbers from (src/rand.rs, rand_u32):
+# a 64-bit multiply-add whose output is 32 bits of the new state, at a shift set by its top
+# three bits. Two outputs leave few states, found below without trying all 2^64.
+PCG_MUL, PCG_ADD, MASK64 = 0xBB2EFCEC3C39611D, 0x7590EF39, (1 << 64) - 1
+
+
+def pcg_output(state):
+    return (state >> (29 - (state >> 61))) & 0xFFFFFFFF
+
+
+def pcg_jump(steps):
+    """(a, c) such that the state `steps` draws later is a * state + c (mod 2^64)."""
+    a, c = 1, 0
+    for _ in range(steps):
+        a, c = a * PCG_MUL & MASK64, (c * PCG_MUL + PCG_ADD) & MASK64
+    return a, c
+
+
+def first_multiple_in(a, m, lo, hi):
+    """The least x >= 0 with lo <= a*x mod m <= hi, for 0 <= lo <= hi < m, or None."""
+    a %= m
+    if lo == 0:
+        return 0
+    if a == 0:
+        return None
+    x = -(-lo // a)
+    if a * x <= hi:
+        return x
+    # No multiple of a lands in [lo, hi] before wrapping: find the least wrap count y with
+    # a*x - m*y in [lo, hi], which is the same question modulo a.
+    y = first_multiple_in(m % a, a, -hi % a, -lo % a)
+    if y is None:
+        return None
+    x = -(-(lo + m * y) // a)
+    return x if a * x - m * y <= hi else None
+
+
+def affine_hits(a, b, m, lo, hi, count):
+    """Each x in range(count), in order, with lo <= (a*x + b) mod m <= hi."""
+    start = 0
+    while start < count:
+        base = (b + a * start) % m
+        low, high = (lo - base) % m, (hi - base) % m
+        x = first_multiple_in(a, m, low, high) if low <= high else 0
+        if x is None or start + x >= count:
+            return
+        yield start + x
+        start += x + 1
+
+
+def pcg_states(x1, x2, steps):
+    """Each generator state that outputs x2 and was reached `steps` draws after one that
+    output x1. Of x1's state, the top three bits fix the shift and 32 bits are x1; the other
+    29 are the low bits, which alone decide x2's lowest bits (found as the solutions of a
+    linear congruence), and the bits just under the top three (tried in full)."""
+    a, c = pcg_jump(steps)
+    for top1 in range(8):
+        shift1 = 29 - top1
+        known = (top1 << 61) | (x1 << shift1)
+        for top2 in range(8):
+            shift2 = 29 - top2
+            bits = min(shift1, shift2) + 32
+            m = 1 << bits
+            lo = (x2 % (1 << (bits - shift2))) << shift2
+            for low in affine_hits(a, (a * known + c) % m, m, lo, lo + (1 << shift2) - 1, 1 << shift1):
+                for middle in range(1 << (29 - shift1)):
+                    state = (a * (known | low | (middle << (shift1 + 32))) + c) & MASK64
+                    if pcg_output(state) == x2:
+                        yield state
+
+
+def pcg_prediction(isns, gap=4):
+    """The first (index, steps, later) where isns[index + 2] is the generator's output `later`
+    draws after a state that gave isns[index] and, `steps` draws on, isns[index + 1]; None
+    when no number follows from the two before it with up to `gap` draws between."""
+    for index in range(len(isns) - 2):
+        x1, x2, x3 = isns[index:index + 3]
+        for steps in range(1, gap + 1):
+            for state in pcg_states(x1, x2, steps):
+                for later in range(1, gap + 1):
+                    a, c = pcg_jump(later)
+                    if pcg_output((a * state + c) & MASK64) == x3:
+                        return index, steps, later
+    return None
+
+
+def net_card(args):
+    """The network card `--make net=` picks for net-hardening and net-calls; e1000 by default."""
+    return next((item.split("=", 1)[1] for item in reversed(args.make) if item.startswith("net=")), "e1000")
+
+
 def context_rows(vm):
     """PID, private memory in bytes and name of each process, from /scheme/sys/context."""
     _, text = run_status(vm, "cat /scheme/sys/context > /tmp/context.txt && cat /tmp/context.txt", 60)
@@ -2211,8 +2714,8 @@ def process(rows, name):
 
 
 def test_net_hardening(args, out):
-    """Network hardening on the card `--make net=` picks (e1000 or virtio), over two boots: DHCP offers and answers for another request or malformed are ignored; TCP initial sequence numbers differ between boots and source ports are not consecutive; a name lookup takes only the reply with its ID and question from the server's address and port, 20 times of 20; frames of 1,514 to 9,000 bytes leave the network driver running; 40,000 ARP senders grow the stack by less than 512 KiB and it still answers."""
-    card = next((item.split("=", 1)[1] for item in reversed(args.make) if item.startswith("net=")), "e1000")
+    """Network hardening on the card `--make net=` picks (e1000 or virtio), over two boots: DHCP offers and answers for another request or malformed are ignored; TCP initial sequence numbers differ between boots, do not step by a fixed amount within one and are not smoltcp's generator's next output after the two before; source ports are not consecutive; a name lookup takes only the reply with its ID and question from the server's address and port, 20 times of 20; frames of 1,514 to 9,000 bytes and reads of the driver's mac past its end leave the network driver running; 40,000 ARP senders grow the stack by less than 512 KiB and it still answers."""
+    card = net_card(args)
     if card not in NET_CARDS:
         return False, f"net-hardening runs with net=e1000 (the default) or net=virtio, not net={card}"
     problems, notes, boots = [], [f"card {card}"], []
@@ -2267,6 +2770,18 @@ def test_net_hardening(args, out):
                 else:
                     notes.append(f"{driver} kept PID {after[0]} through frames of 1,514 to 9,000 bytes")
 
+                # driver-network answers a read of `mac` past its end with EINVAL.
+                before = process(context_rows(vm), driver)
+                status, text = run_status(vm, "net-call-probe mac", 60)
+                (boot_out / "mac.txt").write_text(text)
+                after = process(context_rows(vm), driver)
+                answer = lookup(vm, "after-mac")
+                if status != 0 or before is None or after is None or before[0] != after[0] or answer == "none":
+                    problems.append(f"mac reads: net-call-probe exit {status}, {driver} {before} then {after}, "
+                                    f"lookup {answer}; see {boot_out / 'mac.txt'}")
+                else:
+                    notes.append(f"{driver} refused mac reads past the end and kept PID {after[0]}")
+
                 before = process(context_rows(vm), "netstack")
                 answered = peer.arp_flood(peer.guest_ip, 40_000)
                 after = process(context_rows(vm), "netstack")
@@ -2293,6 +2808,18 @@ def test_net_hardening(args, out):
             problems.append(f"boot {boot}: saw {len(syns)} of 20 connections")
         elif consecutive_run([entry["sport"] for entry in syns]) >= 3:
             problems.append(f"boot {boot}: consecutive source ports {sorted(entry['sport'] for entry in syns)}")
+        numbers = [entry["isn"] for entry in syns]
+        steps = [(b - a) % (1 << 32) for a, b in zip(numbers, numbers[1:])]
+        predicted = pcg_prediction(numbers)
+        if any(step == next_step for step, next_step in zip(steps, steps[1:])):
+            problems.append(f"boot {boot}: sequence numbers step by a fixed amount: {numbers}")
+        elif predicted:
+            index, gap, later = predicted
+            problems.append(f"boot {boot}: sequence number {numbers[index + 2]} of connection {index + 3} is "
+                            f"smoltcp's generator's output {later} draw(s) after the state that gave "
+                            f"{numbers[index]} and, {gap} draw(s) on, {numbers[index + 1]}")
+        elif len(numbers) >= 3:
+            notes.append(f"boot {boot}: no sequence number follows from the two before it")
         if boot == 1:
             queries = log["dns"]
             if consecutive_run([entry["sport"] for entry in queries]) >= 3 or len({e["id"] for e in queries}) < len(queries):
@@ -2308,25 +2835,91 @@ def test_net_hardening(args, out):
     return True, "; ".join(notes)
 
 
+def test_net_calls(args, out):
+    """Boots with a host-side peer as DHCP and name server on the card `--make net=` picks (e1000 or virtio), logs in as `user` and runs net-call-probe: calls on tcp and udp sockets with buffers shorter than the reply or sizes past them are refused with EINVAL, datagrams longer than the buffer are cut to fit, the stack still carries UDP and TCP over loopback, and a lookup and a TCP connection leave the guest before and after the probe."""
+    card = net_card(args)
+    if card not in NET_CARDS:
+        return False, f"net-calls runs with net=e1000 (the default) or net=virtio, not net={card}"
+    peer = NetPeer(out, serve_lease=True)
+    vm = VM(args, out, qemu_flags=peer.qemu_flags(card), make=("net=no",))
+
+    def run(tag, line, timeout):
+        # The status is echoed inside bash: `user`'s login shell is not POSIX.
+        since = vm.mark()
+        vm.type(f"bash -c '{line}; echo nc-end-{tag}-$?'\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)nc-end-{tag}-(\d+)", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    def lookup_and_connect(tag):
+        """The address a lookup of `tag` gave, or None, and whether the peer then saw the
+        guest's connection to it."""
+        with peer.lock:
+            seen = len(peer.log["syn"])
+        _, text = run(tag, f'curl -4 --noproxy "*" -sv --connect-timeout 1 --max-time 4 '
+                           f'http://{tag}.lookup.invalid/ 2>&1 | grep -E "Trying|resolve"', 30)
+        found = re.search(r"Trying (192\.0\.2\.\d+):80", text)
+        if not found:
+            return None, False
+        with peer.lock:
+            return found.group(1), any(entry["dst"] == f"{found.group(1)}:80" for entry in peer.log["syn"][seen:])
+
+    try:
+        if not vm.wait_serial(r"login: ", args.timeout):
+            return False, f"no serial login prompt within {args.timeout}s; see {out}"
+        vm.type("user\n")
+        time.sleep(3)
+        _, text = run("lease", f"for i in $(seq 600); do grep -q {TEST_DNS} /etc/net/dns && break; sleep 0.1; done; "
+                               "cat /etc/net/dns", 90)
+        if TEST_DNS not in text:
+            return False, f"the guest did not take the peer's lease naming {TEST_DNS}: {text.strip()!r}; see {out}"
+        before = lookup_and_connect("before")
+        if not all(before):
+            return False, f"before the probe: lookup gave {before[0]}, connection seen {before[1]}; see {out}"
+        status, text = run("probe", "net-call-probe", 120)
+        (out / "net-calls.txt").write_text(f"exit {status}\n{text}")
+        after = lookup_and_connect("after")
+    finally:
+        vm.close()
+        peer.close("peer.json")
+    lines = [line.strip() for line in re.findall(r"net-call-probe: (?:pass|FAIL) .*", text)]
+    failed = [line for line in lines if ": FAIL " in line]
+    problems = []
+    if status != 0 or failed or not lines:
+        problems.append(f"net-call-probe exit {status}: {'; '.join(failed) or 'no result line'}")
+    if not all(after):
+        problems.append(f"after the probe: lookup gave {after[0]}, connection seen {after[1]}")
+    if problems:
+        return False, "; ".join(problems) + f"; see {out / 'net-calls.txt'}"
+    return True, f"card {card}; {len(lines)} checks passed; lookup and connection to {after[0]} before and after"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
          "dev-parity": test_dev_parity, "firefox-headless": test_firefox_headless, "rand-seed": test_rand_seed,
          "ferrion-run": test_ferrion_run}
 TESTS["ferrion-cli"] = test_ferrion_cli
+TESTS["update-today"] = test_update_today
 TESTS["driver-namespaces"] = test_driver_namespaces
 TESTS["scheme-create"] = test_scheme_create
 TESTS["nsmgr-bounds"] = test_nsmgr_bounds
 TESTS["graphics-bounds"] = test_graphics_bounds
 TESTS["sudo-notty"] = test_sudo_notty
+TESTS["scheme-short-read"] = test_scheme_short_read
+TESTS["event-poll"] = test_event_poll
 TESTS["desktop-regions"] = test_desktop_regions
 TESTS["resolver"] = test_resolver
 TESTS["cli-tools"] = test_cli_tools
+TESTS["dlopen-ctor"] = test_dlopen_ctor
+TESTS["dlopen-tls"] = test_dlopen_tls
+TESTS["fd-primitives"] = test_fd_primitives
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
+OWN_IMAGE["wayland-client"] = run_wayland_client
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
-# This one starts its own two boots of the shared image, with a peer on QEMU's network hub.
+# These start their own boots of the shared image, with a peer on QEMU's network hub.
 OWN_IMAGE["net-hardening"] = test_net_hardening
+OWN_IMAGE["net-calls"] = test_net_calls
 TESTS.update(OWN_IMAGE)
 
 
