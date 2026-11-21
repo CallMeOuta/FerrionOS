@@ -37,6 +37,7 @@ use crate::scheme::socket::{Handle, SchemeSocket, SocketScheme};
 mod icmp;
 mod ip;
 mod netcfg;
+mod recvmsg;
 mod socket;
 mod tcp;
 mod udp;

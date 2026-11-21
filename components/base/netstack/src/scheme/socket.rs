@@ -909,9 +909,10 @@ where
             }
             Handle::Null(_) => {
                 let path = SocketT::BASE_PATH.as_bytes();
-                buf[0..path.len()].copy_from_slice(path);
+                let count = path.len().min(buf.len());
+                buf[..count].copy_from_slice(&path[..count]);
 
-                Ok(path.len())
+                Ok(count)
             }
             _ => Err(SyscallError::new(syscall::EBADF)),
         }

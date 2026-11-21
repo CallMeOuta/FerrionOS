@@ -4,13 +4,14 @@ use libredox::flag;
 use scheme_utils::FpathWriter;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::udp::{
-    PacketBuffer as UdpSocketBuffer, PacketMetadata as UdpPacketMetadata, Socket as UdpSocket,
+    PacketBuffer as UdpSocketBuffer, PacketMetadata as UdpPacketMetadata,
+    SendError as UdpSendError, Socket as UdpSocket,
 };
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
 use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
-use super::{parse_endpoint, SchemeWrapper, Smolnetd, SocketSet};
+use super::{parse_endpoint, recvmsg, SchemeWrapper, Smolnetd, SocketSet};
 use crate::port_set::PortSet;
 use crate::router::Router;
 
@@ -205,9 +206,18 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
                     .expect("If we can send, this should be specified"),
                 endpoint.port,
             );
-            self.send_slice(buf, endpoint).expect("Can't send slice");
-            Ok(buf.len())
-        } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
+            match self.send_slice(buf, endpoint) {
+                Ok(()) => return Ok(buf.len()),
+                // Port 0 or the unspecified address.
+                Err(UdpSendError::Unaddressable) => return Err(SyscallError::new(syscall::EINVAL)),
+                Err(UdpSendError::BufferFull) if buf.len() > self.payload_send_capacity() => {
+                    return Err(SyscallError::new(syscall::EMSGSIZE));
+                }
+                // It fits once queued datagrams have been sent.
+                Err(UdpSendError::BufferFull) => {}
+            }
+        }
+        if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
             Err(SyscallError::new(syscall::EAGAIN))
         } else {
             Err(SyscallError::new(syscall::EWOULDBLOCK)) // internally scheduled to re-read
@@ -222,7 +232,12 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
         if !file.read_enabled {
             Ok(0)
         } else if self.can_recv(&file.data) {
-            let (length, _) = self.recv_slice(buf).expect("Can't receive slice");
+            // A datagram longer than `buf` is cut to fit and the rest of it dropped.
+            let (payload, _) = self
+                .recv()
+                .map_err(|_| SyscallError::new(syscall::EWOULDBLOCK))?;
+            let length = payload.len().min(buf.len());
+            buf[..length].copy_from_slice(&payload[..length]);
             Ok(length)
         } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
             Err(SyscallError::new(syscall::EAGAIN))
@@ -319,60 +334,30 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
         if !socket_file.read_enabled {
             Ok(0)
         } else if self.can_recv(&socket_file.data) {
-            let usize_length = size_of::<usize>();
-            let prepared_name_len = usize::from_le_bytes(
-                how[0..usize_length]
-                    .try_into()
-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
-            );
-            let prepared_whole_iov_size = usize::from_le_bytes(
-                how[usize_length..2 * usize_length]
-                    .try_into()
-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
-            );
-            let prepared_msg_controllen = usize::from_le_bytes(
-                how[2 * usize_length..3 * usize_length]
-                    .try_into()
-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
-            );
-            if 3 * usize_length
-                + prepared_name_len
-                + prepared_msg_controllen
-                + prepared_whole_iov_size
-                > how.len()
-            {
-                //expected returned buffer size is larger than provided -> return invalid
-                return Err(SyscallError::new(syscall::EINVAL));
-            }
-
-            //the relibc deserialization functions expect NO GAPS between the name and payload slices
-            //so the payload must be temporarily stored during recv_slice
-            let mut payload_tmp = vec![0u8; prepared_whole_iov_size];
-            let (length, address) = self
-                .recv_slice(&mut payload_tmp)
-                .expect("Can't recieve slice");
+            let request = recvmsg::Request::parse(how)?;
+            let (datagram_len, endpoint) = match self.peek() {
+                Ok((payload, meta)) => (payload.len(), meta.endpoint),
+                Err(_) => return Err(SyscallError::new(syscall::EWOULDBLOCK)),
+            };
+            // A datagram longer than the caller's room is cut to fit and the rest of it
+            // dropped, as POSIX describes for message-based sockets.
+            let length = datagram_len.min(request.payload_len);
 
             //Address Handling
-            let address_formatted = if prepared_name_len > 0 {
-                format!(
-                    "{}{}:{}",
-                    Self::BASE_PATH,
-                    address.endpoint.addr,
-                    address.endpoint.port
-                )
+            let address_formatted = if request.name_len > 0 {
+                format!("{}{}:{}", Self::BASE_PATH, endpoint.addr, endpoint.port)
             } else {
                 String::from("")
             };
-            how[..usize_length].copy_from_slice(&address_formatted.len().to_le_bytes());
-            let payload_len_index = address_formatted.len() + usize_length;
-            how[usize_length..payload_len_index].copy_from_slice(address_formatted.as_bytes());
+            let start = recvmsg::write_name(how, address_formatted.as_bytes(), length)?;
 
             //Payload Handling
-            how[payload_len_index..payload_len_index + usize_length]
-                .copy_from_slice(&length.to_le_bytes());
-            how[payload_len_index + usize_length..payload_len_index + usize_length + length]
-                .copy_from_slice(&payload_tmp[..length]);
-            Ok(payload_len_index + usize_length + length)
+            let (payload, _) = self
+                .recv()
+                .map_err(|_| SyscallError::new(syscall::EWOULDBLOCK))?;
+            how[start..start + length].copy_from_slice(&payload[..length]);
+            recvmsg::write_payload_len(how, start, length);
+            Ok(start + length)
         } else if socket_file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK
             || flags & flag::MSG_DONTWAIT as usize != 0
         {

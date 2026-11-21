@@ -8,7 +8,7 @@ use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
 use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
-use super::{parse_endpoint, SchemeWrapper, SocketSet};
+use super::{parse_endpoint, recvmsg, SchemeWrapper, SocketSet};
 use crate::port_set::PortSet;
 
 const SO_SNDBUF: usize = 7;
@@ -316,48 +316,19 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         if !socket_file.read_enabled {
             Ok(0)
         } else if self.can_recv(&socket_file.data) {
-            let usize_length = size_of::<usize>();
-            let prepared_name_len = usize::from_le_bytes(
-                how[0..usize_length]
-                    .try_into()
-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
-            );
-            let prepared_whole_iov_size = usize::from_le_bytes(
-                how[usize_length..2 * usize_length]
-                    .try_into()
-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
-            );
-            let prepared_msg_controllen = usize::from_le_bytes(
-                how[2 * usize_length..3 * usize_length]
-                    .try_into()
-                    .map_err(|_| SyscallError::new(syscall::EINVAL))?,
-            );
-            if 3 * usize_length
-                + prepared_name_len
-                + prepared_msg_controllen
-                + prepared_whole_iov_size
-                > how.len()
-            {
-                //expected returned buffer size is larger than provided -> return invalid
-                return Err(SyscallError::new(syscall::EINVAL));
-            }
+            let request = recvmsg::Request::parse(how)?;
             let address = match self.remote_endpoint() {
                 Some(endpoint) => format!("{}{}:{}", Self::BASE_PATH, endpoint.addr, endpoint.port),
                 None => format!("{}0.0.0.0:0", Self::BASE_PATH),
             };
 
-            how[..usize_length].copy_from_slice(&address.len().to_le_bytes());
-            how[usize_length..address.len() + usize_length].copy_from_slice(address.as_bytes());
+            let start = recvmsg::write_name(how, address.as_bytes(), request.payload_len)?;
             let payload_length = self
-                .recv_slice(
-                    &mut how[address.len() + 2 * usize_length
-                        ..address.len() + 2 * usize_length + prepared_whole_iov_size],
-                )
+                .recv_slice(&mut how[start..start + request.payload_len])
                 .unwrap();
-            how[address.len() + usize_length..address.len() + 2 * usize_length]
-                .copy_from_slice(&payload_length.to_le_bytes());
+            recvmsg::write_payload_len(how, start, payload_length);
 
-            Ok(address.len() + 2 * usize_length + prepared_whole_iov_size)
+            Ok(start + request.payload_len)
         } else if socket_file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK
             || flags & flag::MSG_DONTWAIT as usize != 0
         {
