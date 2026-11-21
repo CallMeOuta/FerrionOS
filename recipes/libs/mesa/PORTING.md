@@ -29,7 +29,7 @@ The fork contains 25 non-merge commits. Their surviving changes are grouped by f
 | `7cbe95c60` | GNU declarations in `ferrion-meson.patch` |
 | `2def5d84b` | alloca header in `ferrion-util.patch` |
 | `d4cdaf101` | Orbital surface and damage support in the EGL patches |
-| `86bf69c48` | Explicit EGL enablement in `ferrion-meson.patch`; static builds also disable EGL explicitly |
+| `86bf69c48` | Explicit EGL enablement in `ferrion-meson.patch`; static targets are rejected because the remaining graphics libraries require dynamic linking |
 | `bc992462a` | Gallium Xlib GLX target removed upstream |
 | `cff600b17` | Damage, stride and resize fixes in `ferrion-orbital.patch`; display detection in `ferrion-egl-platform.patch` |
 | `fda1194af` | Upstream already guards the removed LLVM AVX-512 features |

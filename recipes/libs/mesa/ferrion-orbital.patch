@@ -1,10 +1,10 @@
-FerrionOS: Port the existing CPU graphics support to Mesa 26.3.1.
+FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Adapt the Orbital software EGL platform. Carries code from the upstream platform fork at 9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
 Source: https://gitlab.redox-os.org/redox-os/mesa.git, d6695f16..9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
 See PORTING.md for the original commits and obsolete hunks.
 
 --- /dev/null
 +++ b/src/egl/drivers/dri2/platform_redox.c
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,526 @@
 +/*
 + * Mesa 3-D graphics library
 + *
@@ -50,15 +50,6 @@ See PORTING.md for the original commits and obsolete hunks.
 +#include "loader.h"
 +#include "dri_util.h"
 +#include "dri_screen.h"
-+
-+static struct dri_image *
-+redox_alloc_image(struct dri2_egl_display *dri2_dpy,
-+                  struct dri2_egl_surface *dri2_surf)
-+{
-+    return dri_create_image(
-+       dri2_dpy->dri_screen_render_gpu, dri2_surf->base.Width,
-+       dri2_surf->base.Height, dri2_surf->visual, NULL, 0, 0, NULL);
-+}
 +
 +static void
 +redox_free_images(struct dri2_egl_surface *dri2_surf)
@@ -217,6 +208,11 @@ See PORTING.md for the original commits and obsolete hunks.
 +        goto cleanup_surface;
 +    }
 +    dri2_surf->orb_window = orb_window_from_fd(window_fd);
++    if (!dri2_surf->orb_window) {
++        close(window_fd);
++        _eglError(EGL_BAD_NATIVE_WINDOW, "Unable to create Orbital window");
++        goto cleanup_surface;
++    }
 +    dri2_surf->base.Width = orb_window_width(dri2_surf->orb_window);
 +    dri2_surf->base.Height = orb_window_height(dri2_surf->orb_window);
 +
@@ -248,6 +244,11 @@ See PORTING.md for the original commits and obsolete hunks.
 +    struct dri2_egl_surface *dri2_surf = loaderPrivate;
 +
 +    if (op != __DRI_SWRAST_IMAGE_OP_SWAP || !dri2_surf || !data) {
++        return;
++    }
++
++    if (x < 0 || y < 0) {
++        _eglError(EGL_BAD_PARAMETER, "Negative software image coordinates");
 +        return;
 +    }
 +

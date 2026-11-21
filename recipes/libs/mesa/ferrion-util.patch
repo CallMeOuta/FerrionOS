@@ -1,4 +1,4 @@
-FerrionOS: Port the existing CPU graphics support to Mesa 26.3.1.
+FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Carry POSIX utility support. Carries code from the upstream platform fork at 9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
 Source: https://gitlab.redox-os.org/redox-os/mesa.git, d6695f16..9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
 See PORTING.md for the original commits and obsolete hunks.
 

@@ -30,19 +30,17 @@ dev-dependencies = [
 ]
 script = """
 DYNAMIC_INIT
+if [ "${COOKBOOK_DYNAMIC}" != "1" ]; then
+    echo "mesa requires a target with dynamic linking (COOKBOOK_DYNAMIC=1)" >&2
+    exit 1
+fi
 
 #TODO: Should be CPPFLAGS but cookbook_meson isn't reading it
 export CFLAGS+=" -DHAVE_PTHREAD=1 -I${COOKBOOK_SYSROOT}/include/libdrm"
 export LLVM_CONFIG="${TARGET}-llvm-config"
 export LDFLAGS+=" -lorbital"
 
-if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
-    # TODO: Fix wayland-scanner and enable wayland platform
-    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast -Dglvnd=enabled)
-else
-    # EGL and Vulkan require shared libraries.
-    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=disabled -Degl=disabled -Dvulkan-drivers= -Dgbm=disabled -Dplatforms=)
-fi
+COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast -Dglvnd=enabled)
 
 cookbook_meson \
     -Ddri-drivers-path=/usr/lib/dri \

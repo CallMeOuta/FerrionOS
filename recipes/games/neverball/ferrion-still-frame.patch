@@ -1,4 +1,4 @@
-FerrionOS: Add an optional fixed frame for graphics comparisons.
+FerrionOS change to Neverball (GPL-2.0-or-later license, kept), made against Neverball 1.6.0 after redox.patch: Add an optional fixed frame for graphics comparisons.
 Source: https://neverball.org/neverball-1.6.0.tar.gz (ball/main.c).
 
 --- a/ball/main.c

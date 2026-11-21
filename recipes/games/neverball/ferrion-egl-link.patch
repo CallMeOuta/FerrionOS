@@ -1,4 +1,4 @@
-FerrionOS: Link desktop OpenGL and EGL after the SDL2 migration.
+FerrionOS change to Neverball (GPL-2.0-or-later license, kept), made against Neverball 1.6.0 after redox.patch: Link desktop OpenGL and EGL.
 Source: https://neverball.org/neverball-1.6.0.tar.gz, after redox.patch.
 
 --- a/Makefile

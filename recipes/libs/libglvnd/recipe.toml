@@ -7,9 +7,13 @@ git = "https://github.com/NVIDIA/libglvnd.git"
 rev = "606f6627cf481ee6dcb32387edc010c502cdf38b"
 
 [build]
-template = "meson"
-mesonflags = [
-    "-Dglx=disabled",
-    "-Dx11=disabled",
-    "-Dhgl=false",
-]
+template = "custom"
+script = """
+DYNAMIC_INIT
+if [ "${COOKBOOK_DYNAMIC}" != "1" ]; then
+    echo "libglvnd requires a target with dynamic linking (COOKBOOK_DYNAMIC=1)" >&2
+    exit 1
+fi
+cookbook_meson -Dglx=disabled -Dx11=disabled -Dhgl=false
+rm -f "${COOKBOOK_STAGE}/usr/include/glvnd/libglxabi.h"
+"""

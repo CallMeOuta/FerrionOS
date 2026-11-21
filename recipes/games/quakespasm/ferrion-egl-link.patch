@@ -1,4 +1,4 @@
-FerrionOS: Link desktop OpenGL and EGL after the SDL2 migration.
+FerrionOS change to QuakeSpasm (GPL-2.0-or-later license, kept), made against cc32abe09ed417ce3be10af300d2dc2f686349ba after redox.patch: Link desktop OpenGL and EGL.
 Source: https://github.com/sezero/quakespasm at cc32abe09ed417ce3be10af300d2dc2f686349ba, after redox.patch.
 
 --- a/Makefile

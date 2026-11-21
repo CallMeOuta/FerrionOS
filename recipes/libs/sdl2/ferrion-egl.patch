@@ -1,4 +1,4 @@
-FerrionOS: Use EGL for SDL2 Orbital contexts and window presentation.
+FerrionOS change to SDL2 (zlib license, kept), made against the upstream platform fork at 7e78d2d9683732a1dbc17f35f3047c55cf381a82: Adapt its Orbital backend to EGL contexts and window presentation.
 Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f35f3047c55cf381a82.
 
 --- a/cmake/sdlchecks.cmake
