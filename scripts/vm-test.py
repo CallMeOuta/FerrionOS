@@ -1118,6 +1118,59 @@ def test_linux_hello(vm, args):
     return True, "; ".join(report)
 
 
+def test_linux_busybox(vm, args):
+    """Linux layer LC2: Debian's static busybox (hash-checked in its recipe stage first) runs the LC2 script under `linux-run` (`busybox sh lc2.sh`: a loop, pipelines, a subshell, a here-document, file commands, a trap, background jobs) and its stdout, stderr and status equal what Linux gave; `stty` under busybox turns echo off and back through TCGETS/TCSETS on the serial terminal; `linux-probe lc2` checks asynchronous signals (spinning, blocked with and without SA_RESTART, tgkill to a spinning thread), a fault as SIGSEGV with a frame and as the default action, fork, vfork, wait4 statuses, execve of /proc/self/exe, pipe2 and dup2. Last, the launcher of `sh -c "sleep 30 & sleep 31"` is killed and the Linux processes still running are counted, which LC2's result records."""
+    stage = ROOT / "recipes/tests/linux-busybox-fixtures/target" / f"{args.arch}-unknown-redox" / "stage/usr/share/linux-busybox"
+    sums = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=stage, capture_output=True, text=True)
+    if sums.returncode != 0:
+        return False, f"fixture hashes in {stage} do not match: {sums.stdout.strip()} {sums.stderr.strip()}"
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    d = "/usr/share/linux-busybox"
+    report, problems, log = [], [], []
+    same = lambda a, b: f"[ \"$(cat {a}; echo x)\" = \"$(cat {b}; echo x)\" ]"
+    status, out = guest_run(vm, "bb", f"cd /tmp && EXPECT_UID=$UID linux-run {d}/busybox sh {d}/lc2.sh >/tmp/bb.out 2>/tmp/bb.err </dev/null; "
+                            "echo $? >/tmp/bb.st; "
+                            f"{same('/tmp/bb.out', d + '/expected.stdout')} && o=same || o=differs; "
+                            f"{same('/tmp/bb.err', d + '/expected.stderr')} && e=same || e=differs; "
+                            f"{same('/tmp/bb.st', d + '/expected.status')} && s=same || s=differs; "
+                            "echo bb-result $o $e $s; echo ==out; cat /tmp/bb.out; echo ==err; head -c 1500 /tmp/bb.err; echo ==st; cat /tmp/bb.st", 300)
+    log.append(f"[lc2.sh] exit {status}\n{out}\n")
+    found = re.search(r"bb-result (same|differs) (same|differs) (same|differs)", out)
+    verdict = found.groups() if found else ("none", "none", "none")
+    if verdict != ("same", "same", "same"):
+        problems.append(f"lc2.sh: stdout {verdict[0]}, stderr {verdict[1]}, status {verdict[2]}")
+    else:
+        report.append("lc2.sh output equals Linux's")
+    status, out = guest_run(vm, "tty", f"linux-run {d}/busybox sh {d}/tty.sh", 120)
+    log.append(f"[tty.sh] exit {status}\n{out}\n")
+    if "echo off" not in out or "termios ok" not in out:
+        problems.append("stty under busybox: no `echo off` and `termios ok`")
+    else:
+        report.append("termios round trip")
+    status, out = guest_run(vm, "lp2", "linux-run /usr/share/foreign-call-probe/linux-probe lc2", 300)
+    log.append(f"[linux-probe lc2] exit {status}\n{out}\n")
+    lines = re.findall(r"linux-probe: (?:pass|FAIL) .*", out)
+    failed = [line.strip() for line in lines if ": FAIL " in line]
+    if status != 0 or failed or not lines:
+        problems.append(f"linux-probe lc2 exit {status}: {'; '.join(failed) or 'no FAIL line'}")
+    else:
+        report.append(f"linux-probe lc2 {len(lines)} passed")
+    status, out = guest_run(vm, "kl", f"linux-run {d}/busybox sh -c \"sleep 30 & sleep 31\" & l=$!; sleep 3; "
+                            "echo kl-before $(grep -c linux-run /scheme/sys/context); kill -9 $l; sleep 3; "
+                            "echo kl-after $(grep -c linux-run /scheme/sys/context); grep linux-run /scheme/sys/context", 120)
+    log.append(f"[kill launcher] exit {status}\n{out}\n")
+    found = re.search(r"kl-before (\d+).*kl-after (\d+)", out, re.S)
+    report.append(f"killed launcher: linux-run processes {found.group(1)} before, {found.group(2)} after" if found
+                  else "killed launcher: no count")
+    (vm.out / "linux-busybox.txt").write_text("".join(log))
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'linux-busybox.txt'}"
+    return True, "; ".join(report)
+
+
 def test_sudo_notty(vm, args):
     """Issue 10: as `user` on the serial console, `sudo true` with standard input, output and error off the terminal does not panic and exits 0, since `user`'s password is empty (config/dev-accounts.toml)."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -1288,6 +1341,96 @@ def test_screenshots(vm, args):
         vm.type("bash -c 'kill $(cat /tmp/vm-test-app.pid)'\n")
         time.sleep(2)
     return True, f"saved {len(saved)} screenshots in {vm.out}: {saved}"
+
+
+def test_gtk_window(vm, args, *, backend="orbital"):
+    """Checks a GTK3 Orbital window's blue background, white label and timed exit (use --config firefox-window)."""
+    if backend == "orbital":
+        while vm.elapsed() < args.timeout:
+            if vm.screenshot().kind() == "login":
+                break
+            time.sleep(0.1)
+        else:
+            return False, "no graphical login"
+        vm.command("sendkey ret")
+        settle(vm, 20)
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, "no serial login"
+    login_mark = vm.mark()
+    vm.type("root\n" if backend == "wayland" else "user\n")
+    if backend == "wayland":
+        if not vm.wait_serial(r"(?i)password: ", 20):
+            return False, "no root password prompt"
+        vm.type("password\n")
+    prompt = r"root:.*# " if backend == "wayland" else r"(?m)^> "
+    if not vm.wait_serial(prompt, 20, login_mark):
+        return False, "serial shell did not become ready"
+    since = vm.mark()
+    vm.type("bash -c 'echo GTK-SHELL-$((40+2))'\n")
+    if not vm.wait_serial(r"\nGTK-SHELL-42\s", 20, since):
+        return False, "no serial shell"
+
+    since = vm.mark()
+    # Serial logins do not inherit the compositor's graphical environment.
+    if backend == "wayland":
+        environment = ("until test -f /tmp/gtk-window-session; do sleep 1; done; "
+                       ". /tmp/gtk-window-session; GDK_BACKEND=wayland ")
+    else:
+        environment = "GDK_BACKEND=orbital ORBITAL_DISPLAY=/scheme/orbital "
+    vm.type(f"bash -c '{environment}gtk-window-probe; echo GTKRC-$((40+2))=$?'\n")
+    opened = vm.wait_serial(r"GTK-WINDOW: display=(\S+) type=(\S+)", 30, since)
+    if not opened:
+        vm.screenshot().save_png(vm.out / "gtk-window-failed.png")
+        return False, "GTK did not open a display; see serial.log"
+    if opened.group(2) != {"orbital": "GdkOrbitalDisplay", "wayland": "GdkWaylandDisplay"}[backend]:
+        return False, f"wrong GTK backend: {opened.group(2)}"
+
+    # Find the independent fixture color, then check its rectangle and the
+    # contrasting label inside it. A blank GTK shell or unpainted buffer fails.
+    deadline = time.monotonic() + 6
+    # Orbital's compositor rounds colors down; nesting adds another blend.
+    blue = {bytes((r, g, b)) for r in range(0x24 - 2, 0x24 + 1)
+            for g in range(0x68 - 2, 0x68 + 1) for b in range(0xAC - 2, 0xAC + 1)}
+    matched, counts = False, None
+    while time.monotonic() < deadline:
+        frame = vm.screenshot()
+        points = [i // 3 for i in range(0, len(frame.rgb), 3)
+                  if frame.rgb[i:i + 3] in blue]
+        if points:
+            xs = [p % frame.width for p in points]
+            ys = [p // frame.width for p in points]
+            left, top, right, bottom = min(xs), min(ys), max(xs), max(ys)
+            width, height = right - left + 1, bottom - top + 1
+            white = sum(min(frame.rgb[(y * frame.width + x) * 3:(y * frame.width + x) * 3 + 3]) >= 253
+                        for y in range(top + height // 4, top + 3 * height // 4)
+                        for x in range(left + width // 8, left + 7 * width // 8))
+            counts = {"blue_pixels": len(points), "white_label_pixels": white,
+                      "bounds": [left, top, right, bottom]}
+            # GTK's default size is a request: client-side decorations can
+            # enlarge it for the title and inset the colored area by a border.
+            matched = (width >= 350 and height >= 190 and len(points) > 65000
+                       and len(points) > width * height * 0.9 and white > 100)
+            if matched:
+                break
+        time.sleep(0.1)
+    frame.save_png(vm.out / "gtk-window.png")
+    (vm.out / "gtk-window-pixels.json").write_text(json.dumps(counts, indent=2) + "\n")
+    exited = vm.wait_serial(r"\nGTKRC-42=(\d+)\s", 15, since)
+    if not matched:
+        return False, f"GTK background/label pixels differ: {counts}; see gtk-window.png"
+    if not exited or exited.group(1) != "0" or "GTK-WINDOW: closed" not in vm.text(since):
+        return False, "GTK painted but did not close normally; see serial.log"
+    closed = settle(vm, 5)
+    closed.save_png(vm.out / "gtk-window-closed.png")
+    remaining = sum(closed.rgb[i:i + 3] in blue for i in range(0, len(closed.rgb), 3))
+    if remaining > 100:
+        return False, f"GTK window left {remaining} blue pixels after exit"
+    return True, f"{backend} GTK window painted and closed: {counts}; see gtk-window.png"
+
+
+def test_gtk_window_wayland(vm, args):
+    """Checks GTK's Wayland window inside the nested cosmic-comp session (use --config firefox-wayland)."""
+    return test_gtk_window(vm, args, backend="wayland")
 
 
 def run_wayland_client(args, out, *, pointer_latency=False):
@@ -3378,6 +3521,34 @@ def test_net_calls(args, out):
     return True, f"card {card}; {len(lines)} checks passed; lookup and connection to {after[0]} before and after"
 
 
+def test_dso_atexit(vm, args):
+    """A shared object's exit callback runs exactly once: at exit while the object stays open, at dlclose once it is closed (use --config dso-atexit)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    results = []
+    for mode in ("keep-open", "close"):
+        since = vm.mark()
+        vm.type(f"bash -c 'dso-atexit-probe {mode}; echo DSO-EXIT-{mode}-$?'\n")
+        found = vm.wait_serial(rf"DSO-EXIT-{mode}-(\d+)", args.timeout, since)
+        output = vm.text(since)
+        (vm.out / f"{mode}.txt").write_text(output)
+        if not found:
+            return False, f"{mode}: no exit status; see {vm.out / (mode + '.txt')}"
+        status = int(found.group(1))
+        results.append(f"{mode} status {status}")
+        if status or "DSO_ATEXIT_RETURN" not in output:
+            return False, "; ".join(results)
+        calls = output.count("DSO_ATEXIT_CALLBACK")
+        if calls != 1:
+            return False, f"{mode}: callback ran {calls} times"
+        callback = output.index("DSO_ATEXIT_CALLBACK")
+        if mode == "keep-open" and callback < output.index("DSO_ATEXIT_RETURN"):
+            return False, "kept-open callback ran before exit"
+        if mode == "close" and ("DSO_ATEXIT_CLOSED" not in output or callback > output.index("DSO_ATEXIT_CLOSED")):
+            return False, "closed object's callback did not run at dlclose"
+    return True, "; ".join(results) + "; callback once, at exit when kept open and at dlclose when closed"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -3402,6 +3573,10 @@ TESTS["cond-clock"] = test_cond_clock
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
 TESTS["linux-hello"] = test_linux_hello
+TESTS["linux-busybox"] = test_linux_busybox
+TESTS["dso-atexit"] = test_dso_atexit
+TESTS["gtk-window"] = test_gtk_window
+TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["wayland-client"] = run_wayland_client
