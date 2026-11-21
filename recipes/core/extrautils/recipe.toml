@@ -3,6 +3,8 @@ description = "Basic, but not essential for system function, UNIX shell utilitie
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/extrautils.git"
+rev = "f5e8626a89484549c8ac38525a534d831e64ff31"
+patches = ["ferrion-tar-options.patch"]
 
 [build]
 template = "custom"

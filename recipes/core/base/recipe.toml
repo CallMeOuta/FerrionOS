@@ -4,7 +4,7 @@ description = "Essential system components and drivers for FerrionOS"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/base.git"
 rev = "20f7573b4dc011ea5267189185edc0b2f12bab0f"
-patches = ["ferrion-boot-splash.patch", "ferrion-lockdown.patch", "ferrion-pty-hangup.patch", "ferrion-live-disk-view.patch", "ferrion-sigchld.patch", "ferrion-signal-handle-perm.patch", "ferrion-rand-seed.patch", "ferrion-driver-null-namespace.patch", "ferrion-scheme-create-fork.patch", "ferrion-nsmgr-request-bounds.patch"]
+patches = ["ferrion-boot-splash.patch", "ferrion-lockdown.patch", "ferrion-pty-hangup.patch", "ferrion-live-disk-view.patch", "ferrion-sigchld.patch", "ferrion-signal-handle-perm.patch", "ferrion-rand-seed.patch", "ferrion-driver-null-namespace.patch", "ferrion-scheme-create-fork.patch", "ferrion-nsmgr-request-bounds.patch", "ferrion-dhcp-dns.patch"]
 
 [build]
 template = "custom"

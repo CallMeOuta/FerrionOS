@@ -36,6 +36,8 @@ Each is a filesystem config whose init script starts the suite and ends with `sh
 
 `make ci-os-test` in `mk/ci.mk` is the worked example: it boots `CONFIG_NAME=os-test` with `gpu=no`, then mounts the image and copies the results to `build/os-test/<arch>/`. [`agents/skills/images-and-qemu.md`](../agents/skills/images-and-qemu.md) has the procedure for a suite of your own.
 
+The x86_64 desktop's command and name-resolution regressions run with `python3 scripts/vm-test.py cli-tools resolver --arch x86_64 --config desktop --timeout 120`. `cli-tools` checks GNU sed, GNU awk and extrautils' gzip tar round-trip with `-C`; it does not cover process arguments. `resolver` checks hosts-file names as an ordinary user and captures DHCP and DNS packets to compare the queried server with the advertised server. Both need an image rebuilt with the recipe patches; installing a new libc alone does not update programs that linked it statically.
+
 ## What upstream's CI ran
 
 Upstream gates its merge requests on a `.gitlab-ci.yml` that is not part of this checkout, and FerrionOS has no CI of its own yet. The upstream jobs, read on 2026-11-20:

@@ -9,7 +9,7 @@
 prompt = false
 
 [packages]
-# FerrionOS carries patches for these four (recipes/core/<name>/*.patch), so they
+# FerrionOS carries patches for these components (recipes/core/<name>/*.patch), so they
 # are always built from source: with REPO_BINARY=1 the package server would
 # otherwise supply upstream's builds without the patches.
 base = "source"
@@ -19,7 +19,7 @@ libgcc = {}
 libstdcxx = {}
 netdb = {}
 netutils = {}
-relibc = {}
+relibc = "source"
 userutils = "source"
 uutils = {}
 
@@ -92,6 +92,7 @@ data = """
 postinstall = true
 
 ## Default net configuration (optimized for QEMU)
+# dhcpd replaces this bootstrap fallback with the lease's preferred DNS server.
 [[files]]
 path = "/etc/net/dns"
 data = """
