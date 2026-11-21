@@ -1,0 +1,157 @@
+FerrionOS change to userutils (MIT license, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88 with ferrion-login-name.patch and ferrion-login-namespace.patch applied (issue 10):
+- sudo no longer panics when standard output is not a terminal: it first hands the daemon an empty password, which the daemon accepts only for a member of group sudo whose password is empty in the account database (the policy login already follows), so such an account runs the command without a prompt;
+- any other member is asked on the terminal that is standard input, with the prompt on standard error; when standard input is not a terminal sudo refuses with a message and exit status 1 and reads nothing from it;
+- the daemon answers EACCES for a caller outside group sudo, which sudo reports at once, and refuses an empty password for an account that has one without the wrong-password delay; any other daemon error is a message and exit status 1 instead of a panic.
+
+diff --git a/src/bin/sudo.rs b/src/bin/sudo.rs
+index bb606e0..7fad5b2 100644
+--- a/src/bin/sudo.rs
++++ b/src/bin/sudo.rs
+@@ -1,7 +1,8 @@
+ use std::collections::HashMap;
+ use std::env;
+-use std::io::{self, Write};
+-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
++use std::fs::File;
++use std::io::{self, IsTerminal, Write};
++use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+ use std::os::unix::process::CommandExt;
+ use std::process::{Command, exit};
+ 
+@@ -32,6 +33,11 @@ DESCRIPTION
+     The sudo utility allows a permitted user to execute a command as the
+     superuser or another user, as specified by the security policy.
+ 
++    A member of group sudo whose password is empty in the account database
++    is not asked for it. Any other member is asked for their password on
++    the terminal that is standard input; when standard input is not a
++    terminal, sudo refuses without reading it and exits with status 1.
++
+ EXIT STATUS
+     Upon successful execution of a command, the exit status from sudo will
+     be the exit status of the program that was executed. In case of error
+@@ -61,35 +67,48 @@ fn main() {
+         run_command_as_root(&cmd, &args.collect());
+     }
+ 
+-    let file = libredox::Fd::open("/scheme/sudo", libredox::flag::O_CLOEXEC, 0).unwrap();
++    let file = match libredox::Fd::open("/scheme/sudo", O_CLOEXEC, 0) {
++        Ok(file) => file,
++        Err(err) => {
++            eprintln!("sudo: cannot reach the sudo daemon at /scheme/sudo: {err}");
++            exit(1);
++        }
++    };
+ 
+-    let mut attempts = 0;
++    // The daemon accepts an empty password only for an account whose password is empty in
++    // the account database, so such an account is never asked for one.
++    if !authenticate(&file, "", &user.user) {
++        // A password is only ever read from a terminal, never from a pipe or a file.
++        if !io::stdin().is_terminal() {
++            eprintln!(
++                "sudo: a password is required for {} and standard input is not a terminal",
++                user.user
++            );
++            exit(1);
++        }
+ 
+-    loop {
+-        print!("[sudo] password for {}: ", user.user);
+-        let _ = io::stdout().flush();
+-
+-        match io::stdin().read_passwd(&mut io::stdout()).unwrap() {
+-            Some(password) => {
+-                println!();
+-
+-                match file.write(password.as_bytes()) {
+-                    Ok(_) => break,
+-                    Err(err) if err.errno() == EPERM => {
+-                        attempts += 1;
+-                        eprintln!(
+-                            "sudo: incorrect password or not in sudo group ({}/{})",
+-                            attempts, MAX_ATTEMPTS,
+-                        );
+-                        if attempts >= MAX_ATTEMPTS {
+-                            exit(1);
+-                        }
+-                    }
+-                    Err(err) => panic!("{err}"),
++        let mut attempts = 0;
++        loop {
++            eprint!("[sudo] password for {}: ", user.user);
++            let _ = io::stderr().flush();
++
++            let password = read_password_from_terminal();
++            eprintln!();
++            let password = match password {
++                Ok(Some(password)) => password,
++                Ok(None) => exit(1),
++                Err(err) => {
++                    eprintln!("sudo: cannot read the password from the terminal: {err}");
++                    exit(1);
+                 }
++            };
++
++            if authenticate(&file, &password, &user.user) {
++                break;
+             }
+-            None => {
+-                println!();
++            attempts += 1;
++            eprintln!("sudo: incorrect password ({attempts}/{MAX_ATTEMPTS})");
++            if attempts >= MAX_ATTEMPTS {
+                 exit(1);
+             }
+         }
+@@ -117,6 +136,31 @@ fn main() {
+     run_command_as_root(&cmd, &args.collect());
+ }
+ 
++/// Hands `password` to the sudo daemon: true when it accepts it, false when it is wrong. Exits
++/// when the caller may not use sudo at all or the daemon fails.
++fn authenticate(file: &libredox::Fd, password: &str, user: &str) -> bool {
++    match file.write(password.as_bytes()) {
++        Ok(_) => true,
++        Err(err) if err.errno() == EPERM => false,
++        Err(err) if err.errno() == EACCES => {
++            eprintln!("sudo: {user} is not in the sudo group");
++            exit(1);
++        }
++        Err(err) => {
++            eprintln!("sudo: the sudo daemon refused the request: {err}");
++            exit(1);
++        }
++    }
++}
++
++/// Reads a line from the terminal on standard input without echoing it.
++fn read_password_from_terminal() -> io::Result<Option<String>> {
++    // Raw mode is set on standard input's own terminal, so the prompt works whatever standard
++    // output and standard error point at.
++    let mut terminal = File::from(io::stdin().as_fd().try_clone_to_owned()?);
++    io::stdin().read_passwd(&mut terminal)
++}
++
+ enum Policy {
+     Deny,
+     Authenticate,
+@@ -237,10 +281,17 @@ impl SchemeSync for Scheme {
+                 match policy_for_user(uid) {
+                     Policy::Deny => {
+                         *handle = Handle::AwaitingPassword { uid };
+-                        return Err(Error::new(EPERM));
++                        return Err(Error::new(EACCES));
+                     }
+                     Policy::Authenticate => {
+                         let password = validate_utf8(buf)?;
++                        // sudo first tries an empty password to learn whether it must prompt.
++                        // For an account with a password that is never right: refuse it at
++                        // once, without verify_passwd's delay for a wrong password.
++                        if password.is_empty() && !user.is_passwd_blank() {
++                            *handle = Handle::AwaitingPassword { uid };
++                            return Err(Error::new(EPERM));
++                        }
+                         if user.verify_passwd(&password) {
+                             *handle = Handle::AwaitingContextFd
+                         } else {
