@@ -734,6 +734,7 @@ impl<'a> ProcScheme<'a> {
                                             &mut false,
                                             KillMode::Idempotent,
                                             false,
+                                            false, // check_permission
                                             awoken,
                                         );
                                     }
@@ -1320,6 +1321,7 @@ impl<'a> ProcScheme<'a> {
                                 &mut false,
                                 KillMode::Idempotent,
                                 false,
+                                true, // check_permission
                                 awoken,
                             )
                             .map(|()| 0),
@@ -1357,6 +1359,7 @@ impl<'a> ProcScheme<'a> {
                                 &mut false,
                                 KillMode::Idempotent,
                                 false,
+                                true, // check_permission
                                 awoken,
                             );
                         }
@@ -2058,7 +2061,8 @@ impl<'a> ProcScheme<'a> {
 
                     if let Some(parent_rc) = self.processes.get(&ppid) {
                         // When a process exits, the parent is sent SIGCHLD. The process has no threads
-                        // at this point.
+                        // at this point. The system generates this signal, so the permission check
+                        // of kill() does not apply: the parent may run under another user ID.
                         if let Err(err) = self.on_send_sig(
                             current_pid,
                             KillTarget::Proc(ppid),
@@ -2066,6 +2070,7 @@ impl<'a> ProcScheme<'a> {
                             &mut false,
                             KillMode::Idempotent,
                             false, // stop_or_continue
+                            false, // check_permission
                             awoken,
                         ) {
                             log::error!("failed to send SIGCHLD to parent PID {ppid:?}: {err}");
@@ -2132,6 +2137,7 @@ impl<'a> ProcScheme<'a> {
                                             &mut false,
                                             KillMode::Idempotent,
                                             false,
+                                            false, // check_permission
                                             awoken,
                                         ) {
                                             log::warn!(
@@ -2146,6 +2152,7 @@ impl<'a> ProcScheme<'a> {
                                             &mut false,
                                             KillMode::Idempotent,
                                             false,
+                                            false, // check_permission
                                             awoken,
                                         ) {
                                             log::warn!(
@@ -2239,6 +2246,7 @@ impl<'a> ProcScheme<'a> {
             &mut killed_self,
             KillMode::Idempotent,
             stop_or_continue,
+            true, // check_permission
             awoken,
         )?;
 
@@ -2275,6 +2283,7 @@ impl<'a> ProcScheme<'a> {
                     &mut killed_self,
                     mode,
                     stop_or_continue,
+                    true, // check_permission
                     awoken,
                 )?;
                 return if killed_self {
@@ -2310,6 +2319,7 @@ impl<'a> ProcScheme<'a> {
                 &mut killed_self,
                 mode,
                 stop_or_continue,
+                true, // check_permission
                 awoken,
             );
             match res {
@@ -2347,6 +2357,7 @@ impl<'a> ProcScheme<'a> {
         killed_self: &mut bool,
         mode: KillMode,
         stop_or_continue: bool,
+        check_permission: bool,
         awoken: &mut VecDeque<VirtualId>,
     ) -> Result<()> {
         log::trace!("SEND_SIG(from {caller_pid:?}) TARGET {target:?} {signal} {mode:?}");
@@ -2409,7 +2420,8 @@ impl<'a> ProcScheme<'a> {
             let mut target_proc_guard = target_proc_rc.borrow_mut();
             let mut target_proc = &mut *target_proc_guard;
 
-            if caller_euid != 0
+            if check_permission
+                && caller_euid != 0
                 && caller_euid != target_proc.ruid
                 && caller_ruid != target_proc.ruid
             {
@@ -2697,7 +2709,8 @@ impl<'a> ProcScheme<'a> {
                         SIGCHLD as u8,
                         killed_self,
                         KillMode::Idempotent,
-                        true, // stop_or_continue
+                        true,  // stop_or_continue
+                        false, // check_permission
                         awoken,
                     ) {
                         log::trace!("failed to SIGCHLD parent (SIGSTOP): {err}");
@@ -2729,7 +2742,8 @@ impl<'a> ProcScheme<'a> {
                         SIGCHLD as u8,
                         killed_self,
                         KillMode::Idempotent,
-                        true, // stop_or_continue
+                        true,  // stop_or_continue
+                        false, // check_permission
                         awoken,
                     )
                 {
