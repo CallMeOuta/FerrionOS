@@ -329,7 +329,7 @@ def rpm_tar(path):
                 # RPM's cpio can carry a hard-link group's data on its last
                 # member. A tar conversion makes that member a data-less link.
                 # Read the group from the original archive to retain its bytes.
-                contents[target] = subprocess.run(["bsdtar", "-xOf", str(path), *names],
+                contents[target] = subprocess.run(["bsdtar", "-xOf", str(path), "--", *names],
                                                   capture_output=True, check=True).stdout
 
         def read(member):
@@ -349,6 +349,14 @@ def cpio_entry(out, inode, name, mode, data=b"", rdev=(0, 0), nlink=1):
     out.write(b"\0" * (-len(data) % 4))
 
 
+def check_assembled(build, expected, names):
+    """A cached guest is reused only when its manifest covers exactly the files the boot reads, and they match."""
+    if not isinstance(expected, dict) or set(expected) != set(names):
+        raise RuntimeError(f"Assembled guest cache has an unexpected manifest: {build}")
+    if any(sha256(build / name) != expected[name] for name in names):
+        raise RuntimeError(f"Assembled guest cache fails SHA-256: {build}")
+
+
 def assemble(cache, packages):
     """Create a root filesystem as newc initramfs, without host mounts or root."""
     identity = hashlib.sha256()
@@ -363,9 +371,7 @@ def assemble(cache, packages):
     kernel, initrd = build / "vmlinuz", build / "rootfs.cpio.gz"
     manifest = build / "artifacts.json"
     if kernel.exists() and initrd.exists() and manifest.exists():
-        expected = json.loads(manifest.read_text())
-        if any(sha256(build / name) != digest for name, digest in expected.items()):
-            raise RuntimeError(f"Assembled guest cache fails SHA-256: {build}")
+        check_assembled(build, json.loads(manifest.read_text()), (kernel.name, initrd.name))
         return kernel, initrd
     files = {}
     modules = {}
@@ -529,22 +535,40 @@ def run_guest(args, kernel, initrd, name, directory):
     return result
 
 
+def scene_exact(scene):
+    return (isinstance(scene, dict) and scene.get("hash") == SCENE_HASH
+            and scene.get("differing_pixels") == 0 and scene.get("triangle_pixels") == 17540)
+
+
 def repeatability(runs):
-    """Compare scene hashes and complete capset bytes, not timing-dependent logs."""
+    """Compare scene hashes and complete capset bytes, not timing-dependent logs.
+
+    A device repeats only when every run passed, every scene that ran is exact, and the runs agree.
+    A scene recorded as unavailable (native contexts in a stock build) is compared but never required."""
     groups = {}
-    blocked = set()
     for run in runs:
-        if run.get("status") == "BLOCKED":
-            blocked.add(run["device"])
         guest = run.get("guest", {})
-        fingerprint = {"capset": guest.get("venus_capset"),
-                       "scenes": {g["name"]: g.get("scene") for g in guest.get("gl", [])}}
-        groups.setdefault(run["device"], []).append(fingerprint)
-    return {device: {"runs": len(values), "status": "BLOCKED" if device in blocked else
-                     "FAIL" if not all(v["scenes"] for v in values) else
-                     "PASS" if len(values) > 1 and all(v == values[0] for v in values) else
-                     "NOT_RUN" if len(values) == 1 else "FAIL"}
-            for device, values in groups.items()}
+        scenes = {g["name"]: "UNAVAILABLE" if g.get("status") == "UNAVAILABLE" else g.get("scene")
+                  for g in guest.get("gl", [])}
+        groups.setdefault(run["device"], []).append(
+            (run.get("status"), {"capset": guest.get("venus_capset"), "scenes": scenes}))
+    summary = {}
+    for device, values in groups.items():
+        statuses = {status for status, _ in values}
+        prints = [fingerprint for _, fingerprint in values]
+        if statuses == {"BLOCKED"}:
+            status = "BLOCKED"
+        elif statuses != {"PASS"}:
+            status = "FAIL"
+        elif not all(p["scenes"] and all(s == "UNAVAILABLE" or scene_exact(s) for s in p["scenes"].values())
+                     for p in prints):
+            status = "FAIL"
+        elif len(prints) == 1:
+            status = "NOT_RUN"
+        else:
+            status = "PASS" if all(p == prints[0] for p in prints) else "FAIL"
+        summary[device] = {"runs": len(values), "status": status}
+    return summary
 
 
 def main():

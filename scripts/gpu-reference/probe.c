@@ -31,8 +31,10 @@ static int gl_info(void) {
             }
         }
         if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) return 1;
-        printf("%s\t%s\t%s\n", es ? "gles" : "gl",
-               (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER));
+        const char *version = (const char *)glGetString(GL_VERSION);
+        const char *renderer = (const char *)glGetString(GL_RENDERER);
+        if (!version || !renderer) return 1;
+        printf("%s\t%s\t%s\n", es ? "gles" : "gl", version, renderer);
         eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroyContext(dpy, ctx);
     }

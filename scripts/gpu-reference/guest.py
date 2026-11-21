@@ -58,19 +58,30 @@ def gl_test(name, env):
                            "differing_pixels": int(match[4]), "centers_on_edge": int(match[5])}
     passed = (versions["exit_code"] == 0 and len(result["apis"]) == 2 and scene["exit_code"] == 0 and match
               and match[2] == EXPECTED_HASH and tuple(map(int, match.group(3, 4, 5))) == (17540, 0, 0))
-    # An accelerated test must never silently fall back to the CPU renderer.
-    if name != "llvmpipe" and match and any(s in match[1].lower() for s in ("llvmpipe", "softpipe", "lavapipe")):
-        passed = False
-    if name == "virgl" and match and "virgl" not in match[1].lower():
-        passed = False
-    if name.startswith("zink-") and match and "zink" not in match[1].lower():
-        passed = False
-    if name == "intel-native" and match and ("intel" not in match[1].lower() or "virgl" in match[1].lower()):
-        passed = False
-    if name == "llvmpipe" and match and "llvmpipe" not in match[1].lower():
-        passed = False
+    # The scene's renderer and both renderers the version probe saw must be the one asked for.
+    renderers = [match[1]] if match else []
+    renderers += [api["renderer"] for api in result["apis"].values()]
+    passed = bool(passed) and all(renderer_ok(name, renderer) for renderer in renderers)
     result["status"] = "PASS" if passed else "FAIL"
     return result
+
+
+def renderer_ok(name, renderer):
+    """Whether a renderer string names the driver a test asked for. An accelerated test never falls back to the CPU."""
+    renderer = renderer.lower()
+    if renderer in ("", "(null)"):
+        return False
+    if name != "llvmpipe" and any(s in renderer for s in ("llvmpipe", "softpipe", "lavapipe")):
+        return False
+    if name == "virgl":
+        return "virgl" in renderer
+    if name.startswith("zink-"):
+        return "zink" in renderer
+    if name == "intel-native":
+        return "intel" in renderer and "virgl" not in renderer
+    if name == "llvmpipe":
+        return "llvmpipe" in renderer
+    return True
 
 
 def vulkan_test(name, driver):
@@ -151,16 +162,17 @@ def main():
     return result
 
 
-try:
-    result = main()
-except Exception as error:
-    result = {"status": "FAIL", "error": str(error), "traceback": traceback.format_exc()}
-# Kernel shutdown messages otherwise interleave with a long serial record.
-# Keep the earlier kernel log in the record, then drain the UART before S5.
-Path("/proc/sys/kernel/printk").write_text("0\n")
-print("GPU_REFERENCE_JSON=" + json.dumps(result, separators=(",", ":")), flush=True)
-termios.tcdrain(sys.stdout.fileno())
-subprocess.run(["/bin/busybox", "poweroff", "-f"])
-while True:
-    import time
-    time.sleep(1)
+if __name__ == "__main__":  # The guest runs this file as PID 1; the host's tests only import it.
+    try:
+        result = main()
+    except Exception as error:
+        result = {"status": "FAIL", "error": str(error), "traceback": traceback.format_exc()}
+    # Kernel shutdown messages otherwise interleave with a long serial record.
+    # Keep the earlier kernel log in the record, then drain the UART before S5.
+    Path("/proc/sys/kernel/printk").write_text("0\n")
+    print("GPU_REFERENCE_JSON=" + json.dumps(result, separators=(",", ":")), flush=True)
+    termios.tcdrain(sys.stdout.fileno())
+    subprocess.run(["/bin/busybox", "poweroff", "-f"])
+    while True:
+        import time
+        time.sleep(1)

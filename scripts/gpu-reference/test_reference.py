@@ -14,6 +14,9 @@ sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("reference", Path(__file__).resolve().parents[1] / "gpu-reference-guest.py")
 reference = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reference)
+GUEST_SPEC = importlib.util.spec_from_file_location("guest", Path(__file__).resolve().with_name("guest.py"))
+guest = importlib.util.module_from_spec(GUEST_SPEC)
+GUEST_SPEC.loader.exec_module(guest)
 
 
 class ReferenceTests(unittest.TestCase):
@@ -64,10 +67,15 @@ class ReferenceTests(unittest.TestCase):
         with self.assertRaisesRegex(reference.Blocked, "OpenGL"):
             reference.preflight(SimpleNamespace(), host)
 
+    def passing_run(self):
+        scene = {"hash": reference.SCENE_HASH, "differing_pixels": 0, "triangle_pixels": 17540}
+        return {"device": "venus", "status": "PASS",
+                "guest": {"venus_capset": {"bytes_hex": "00", "sha256": "hash"},
+                          "gl": [{"name": "zink-venus", "status": "PASS", "scene": scene}]}}
+
     def test_repeatability_checks_capset_and_pixels(self):
         import copy
-        one = {"device": "venus", "guest": {"venus_capset": {"bytes_hex": "00", "sha256": "hash"},
-               "gl": [{"name": "zink-venus", "scene": {"hash": reference.SCENE_HASH, "differing_pixels": 0}}]}}
+        one = self.passing_run()
         two = copy.deepcopy(one)
         self.assertEqual(reference.repeatability([one, two])["venus"]["status"], "PASS")
         two["guest"]["venus_capset"]["bytes_hex"] = "01"
@@ -79,6 +87,56 @@ class ReferenceTests(unittest.TestCase):
     def test_missing_results_do_not_count_as_repeatable(self):
         result = {"device": "venus", "error": "no complete guest record"}
         self.assertEqual(reference.repeatability([result, result])["venus"]["status"], "FAIL")
+
+    def test_identical_failures_do_not_count_as_repeatable(self):
+        failed = {"device": "venus", "status": "FAIL", "guest": {"gl": [{"name": "virgl", "status": "FAIL"}]}}
+        self.assertEqual(reference.repeatability([failed, failed])["venus"]["status"], "FAIL")
+        wrong = self.passing_run()
+        wrong["guest"]["gl"][0]["scene"]["hash"] = "0" * 16
+        self.assertEqual(reference.repeatability([wrong, wrong])["venus"]["status"], "FAIL")
+
+    def test_blocked_never_hides_a_failure(self):
+        failed = {"device": "venus", "status": "FAIL", "error": "crash"}
+        blocked = {"device": "venus", "status": "BLOCKED", "error": "eglInitialize failed"}
+        self.assertEqual(reference.repeatability([failed, blocked])["venus"]["status"], "FAIL")
+        self.assertEqual(reference.repeatability([blocked, blocked])["venus"]["status"], "BLOCKED")
+
+    def test_unavailable_scenes_are_compared_but_not_required(self):
+        import copy
+        one = self.passing_run()
+        one["guest"]["gl"].append({"name": "intel-native", "status": "UNAVAILABLE"})
+        self.assertEqual(reference.repeatability([one, copy.deepcopy(one)])["venus"]["status"], "PASS")
+
+    def test_assembled_cache_manifest_must_name_exactly_the_boot_files(self):
+        with tempfile.TemporaryDirectory(prefix="ferrion-gpu-reference-") as folder:
+            build = Path(folder)
+            names = ("vmlinuz", "rootfs.cpio.gz")
+            for name in names:
+                (build / name).write_bytes(name.encode())
+            good = {name: reference.sha256(build / name) for name in names}
+            reference.check_assembled(build, good, names)
+            for manifest in ({}, {"vmlinuz": good["vmlinuz"]}, {**good, "../escape": "0"}, []):
+                with self.subTest(manifest=manifest), self.assertRaisesRegex(RuntimeError, "unexpected manifest"):
+                    reference.check_assembled(build, manifest, names)
+            (build / "rootfs.cpio.gz").write_bytes(b"changed")
+            with self.assertRaisesRegex(RuntimeError, "fails SHA-256"):
+                reference.check_assembled(build, good, names)
+
+    def test_gl_test_checks_every_renderer_the_probes_saw(self):
+        def outputs(versions):
+            scene = (f'GLTRI renderer="zink Vulkan 1.4(Virtio-GPU Venus)" hash={reference.SCENE_HASH} '
+                     'tri=17540 mismatches=0 centers_on_edge=0')
+            def run(command, env=None, timeout=35):
+                stdout = versions if command[-1] == "gl" else scene
+                return {"command": command, "exit_code": 0, "stdout": stdout, "stderr": ""}
+            return run
+
+        cases = [("gl\t4.6\tzink Vulkan 1.4\ngles\tOpenGL ES 3.2\tzink Vulkan 1.4\n", "PASS"),
+                 ("gl\t4.5\tllvmpipe (LLVM 22)\ngles\tOpenGL ES 3.2\tzink Vulkan 1.4\n", "FAIL"),
+                 ("gl\t(null)\t(null)\ngles\tOpenGL ES 3.2\tzink Vulkan 1.4\n", "FAIL")]
+        for versions, expected in cases:
+            with self.subTest(versions=versions), patch.object(guest, "run", side_effect=outputs(versions)):
+                self.assertEqual(guest.gl_test("zink-venus", {})["status"], expected)
 
     def test_blocked_host_writes_record_and_exits_two_without_downloads(self):
         import contextlib
