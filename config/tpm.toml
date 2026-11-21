@@ -1,0 +1,28 @@
+# TPM 2.0 driver and attestation service (recipes/core/tpmd; security roadmap S20).
+#
+# At boot init starts tpmd. tpmd finds a TPM on the CRB interface through the
+# ACPI TPM2 table, makes the one handle to itself that will ever exist and starts
+# attestd with it; it registers no scheme name, so no other process can open the
+# TPM. attestd serves /scheme/attest to root alone (tpm-pcrs, attest-statement);
+# /etc/login_schemes.toml gives `user` no `attest`. Without a TPM, tpmd starts
+# attestd alone and its statements say "tpm: absent".
+#
+# config/x86_64/desktop.toml includes this file.
+#
+# Checked by `scripts/vm-test.py tpm`, which boots with a software TPM.
+
+[packages]
+tpmd = {}
+
+[[files]]
+path = "/usr/lib/init.d/10_tpmd.service"
+data = """
+[unit]
+description = "TPM 2.0 driver and attestation service"
+
+[service]
+cmd = "tpmd"
+type = { scheme = "attest" }
+# Reads the ACPI TPM2 table and maps the TPM's registers from physical memory.
+hardware = true
+"""

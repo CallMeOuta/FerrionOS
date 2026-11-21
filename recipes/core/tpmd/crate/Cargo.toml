@@ -1,0 +1,35 @@
+[package]
+name = "tpmd"
+description = "FerrionOS TPM 2.0 driver, attestation service and their command-line tools"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "tpmd"
+path = "src/bin/tpmd.rs"
+
+[[bin]]
+name = "attestd"
+path = "src/bin/attestd.rs"
+
+[[bin]]
+name = "tpm-pcrs"
+path = "src/bin/tpm-pcrs.rs"
+
+[[bin]]
+name = "attest-statement"
+path = "src/bin/attest-statement.rs"
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+
+# The TPM2 encoding in src/tpm2.rs has no OS code, so its tests run on the build machine with
+# `cargo test --lib`; everything else runs on FerrionOS only.
+[target.'cfg(target_os = "redox")'.dependencies]
+libredox = "0.2.0"
+redox_syscall = { version = "0.9.5", features = ["std"] }
+# The commit base's Cargo.lock pins at the rev recipes/core/base/recipe.toml names, so the
+# scheme protocol matches the kernel and init that base is built for.
+redox-scheme = { git = "https://gitlab.redox-os.org/redox-os/redox-scheme.git", rev = "3514d5696fb8cbbe7d517d37d3074d7cd5cfdded" }
