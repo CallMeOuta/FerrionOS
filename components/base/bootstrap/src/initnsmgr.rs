@@ -77,9 +77,14 @@ impl Namespace {
         while cursor < buf.len() {
             let len = read_num::<usize>(&buf[cursor..])?;
             cursor += mem::size_of::<usize>();
-            let name = String::from_utf8(Vec::from(&buf[cursor..cursor + len]))
-                .map_err(|_| Error::new(EINVAL))?;
-            cursor += len;
+            // The length comes from the request: a name that would run past its end is refused.
+            let end = cursor.checked_add(len).ok_or(Error::new(EINVAL))?;
+            let bytes = buf.get(cursor..end).ok_or_else(|| {
+                error!("Fork request names a scheme past its end");
+                Error::new(EINVAL)
+            })?;
+            let name = String::from_utf8(Vec::from(bytes)).map_err(|_| Error::new(EINVAL))?;
+            cursor = end;
             if name == KEEP_SCHEME_CREATE {
                 keep_scheme_create = true;
             } else if name.ends_with('*') {
@@ -435,7 +440,9 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
             error!("Unknown dup kind: {}", raw_kind);
             return Err(Error::new(EINVAL));
         };
-        let payload = &buf[mem::size_of::<NsDup>()..];
+        let payload = buf
+            .get(mem::size_of::<NsDup>()..)
+            .ok_or(Error::new(EINVAL))?;
         let new_id = match kind {
             NsDup::ForkNs => self.fork_namespace(&ns_access, payload)?,
             NsDup::ShrinkPermissions => {
