@@ -1,0 +1,11 @@
+# Condition-clock regression: scripts/vm-test.py cond-clock --config firefox.
+[package]
+description = "Checks realtime and monotonic pthread condition deadlines"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/cond-clock-probe" "${COOKBOOK_RECIPE}/cond-clock-probe.c" ${LDFLAGS} -lpthread
+"""

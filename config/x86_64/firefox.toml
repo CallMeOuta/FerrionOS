@@ -26,3 +26,5 @@ firefox = "source"
 dlopen-ctor = "source"
 # Post-dlopen thread TLS regression: scripts/vm-test.py dlopen-tls --config firefox.
 dlopen-tls = "source"
+# Condition-variable clock regression: scripts/vm-test.py cond-clock --config firefox.
+cond-clock-probe = "source"
