@@ -73,3 +73,9 @@ What the x86_64 desktop image plays, recorded by QEMU's `wav` backend and compar
 |5|The same|30|264,600 exact, 1 piece|262,552 exact (2,048 lost), 2 pieces|264,539 exact (61 lost), 10 pieces|264,098 exact (502 lost), 19 pieces|
 
 Without load the stream is exact in one piece in 8 of 10 recordings; the other two lost 2,048 frames in one gap, or 14,767 in 39 pieces on the most loaded host. A first trial run on the day's image also lost 2,048 frames in one gap at 3.8 s. With two busy loops per CPU no recording was in one piece: silence is inserted, frames repeat, and up to 6,797 are lost. The patch touches only the ring path, which these runs do not use. For comparison, a Linux guest playing through ALSA on the same QEMU stayed in one exact piece with two busy loops per CPU at buffers of 512 to 2,048 frames.
+
+## Sound (AU2), 2026-11-21
+
+With `ferrion-audiod` and AU1's rebuilt base package, `audio-baseline` kept all 264,600 source frames in one piece at both volume 100 and the default 50 without guest load. With two busy loops per guest CPU, volume 100 kept 264,343 frames in 18 pieces (257 lost, 232 repeated), and volume 50 kept 264,351 in 15 pieces (249 lost, 217 repeated). All four had zero foreign frames. The host's one-minute load averages were 22.03, 19.98, 18.01 and 16.85, respectively. These results are within AU0's observed range; they do not claim glitch-free playback under load. A separate legacy playback boot still showed AU0's known 2,048-frame gap.
+
+`audio-ring` passed: 20 rounds, 21 driver descriptors before and after, and all 264,600 frames exact in one piece. Boot, shells, lockdown and driver-namespaces passed on the same image; the namespace check now names `ferrion-audiod` and still requires only `memory` and `rand`. Evidence: `build/worktrees/au2/build/audio-verified/` and its sibling `audio-verified.log`.

@@ -16,6 +16,7 @@ base = "source"
 bootloader = "source"
 kernel = "source"
 fdobjd = "source"
+ferrion-audiod = "source"
 libgcc = {}
 libstdcxx = {}
 netdb = {}
@@ -25,6 +26,19 @@ userutils = "source"
 uutils = {}
 
 ## Configuration files
+[[files]]
+path = "/usr/lib/init.d/20_audiod.service"
+data = """
+[unit]
+description = "FerrionOS audio streams"
+requires_weak = ["00_base.target"]
+
+[service]
+cmd = "ferrion-audiod"
+type = { scheme = "audio" }
+priority = -20
+"""
+
 [[files]]
 path = "/etc/login_schemes.toml"
 data = """

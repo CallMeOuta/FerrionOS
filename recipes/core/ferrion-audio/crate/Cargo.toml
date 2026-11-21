@@ -1,0 +1,12 @@
+[package]
+name = "ferrion-audio"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "FerrionOS audio stream and gain client"
+
+[dependencies]
+libc = "0.2"
+
+[workspace]

@@ -3,9 +3,17 @@
 version = 4
 
 [[package]]
+name = "ferrion-audio"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ferrion-cli"
 version = "0.1.0"
 dependencies = [
+ "ferrion-audio",
  "libc",
  "serde_json",
 ]

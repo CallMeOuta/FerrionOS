@@ -13,5 +13,6 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2"
 serde_json = "1"
+ferrion-audio = { path = "../../ferrion-audio/crate" }
 
 [workspace]

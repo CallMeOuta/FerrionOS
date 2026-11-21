@@ -1,0 +1,17 @@
+[package]
+name = "ferrion-audiod"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+daemon = { path = "../../base/source/daemon" }
+scheme-utils = { path = "../../base/source/scheme-utils" }
+redox_syscall = { version = "0.9.5", features = ["std"] }
+libredox = { version = "0.2.0", features = ["mkns"] }
+redox-scheme = { git = "https://gitlab.redox-os.org/redox-os/redox-scheme.git", default-features = false }
+libc = "0.2.181"
+anyhow = "1"
+ioslice = "0.6.0"
+serde_json = "1"

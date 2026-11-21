@@ -20,7 +20,7 @@
 #   driver-namespaces  presses Enter on the graphical login (input through
 #           inputd), logs in as root on the serial console, reads
 #           /scheme/sys/iostat and checks that every namespace handle each
-#           driver holds can open only memory and pipe (audiod: memory and
+#           driver holds can open only memory and pipe (ferrion-audiod: memory and
 #           rand); lists the drivers not running at the snapshot as not exercised
 #   rand-seed  checks random bytes and seed status across two boots each with
 #           firmware RNG only, timing jitter only, and the host CPU RNG
@@ -1812,11 +1812,11 @@ NULL_NAMESPACE = {"memory", "pipe"}
 DRIVER_NAMESPACES = {name: NULL_NAMESPACE for name in [
     "pcid", "nvmed", "inputd", "ihdad", "usbhidd", "fbcond", "fbbootlogd",
     "usbscsid", "virtio-gpud", "usbhubd", "rtcd", "redoxerd", "usbctl"]}
-DRIVER_NAMESPACES["audiod"] = {"memory", "rand"}
+DRIVER_NAMESPACES["ferrion-audiod"] = {"memory", "rand"}
 # Running on the x86_64 desktop under `make qemu` once the login appears; the others start only with
 # their device (a USB HID device, disk or hub, which `make qemu` does not attach, virtio-gpu,
 # redoxerd's config), exit after one job (rtcd) or are a command (usbctl).
-DRIVER_NAMESPACES_RUNNING = ["pcid", "nvmed", "inputd", "ihdad", "fbcond", "fbbootlogd", "audiod"]
+DRIVER_NAMESPACES_RUNNING = ["pcid", "nvmed", "inputd", "ihdad", "fbcond", "fbbootlogd", "ferrion-audiod"]
 # Keep their namespace: the drivers they start register schemes in it.
 DRIVER_NAMESPACE_SPAWNERS = ["pcid-spawner", "hwd", "xhcid"]
 IOSTAT_PROCESS = re.compile(r"^(\d+): (\S+)$")
@@ -1854,7 +1854,7 @@ def iostat_processes(iostat):
 
 
 def test_driver_namespaces(vm, args):
-    """Every namespace handle a running driver holds names only memory and pipe (audiod: memory and rand), read from /scheme/sys/iostat; Enter on the login screen still reaches the desktop."""
+    """Every namespace handle a running driver holds names only memory and pipe (ferrion-audiod: memory and rand), read from /scheme/sys/iostat; Enter on the login screen still reaches the desktop."""
     kind = None
     while vm.elapsed() < args.timeout and kind != "login":
         kind = vm.screenshot().kind()
@@ -3836,6 +3836,158 @@ def test_audio_ring(args, out):
     return True, "; ".join(notes) + f"; see {out}"
 
 
+def audio_tone_report(recording, expected, absent=None):
+    """Project complete one-second windows onto known tones, without another WAV parser."""
+    import math
+    data = recording[WAV_HEADER:]
+    samples = list(struct.iter_unpack("<hh", data[:len(data) // AUDIO_FRAME * AUDIO_FRAME]))
+    peaks = {}
+    for hz in (expected,) if absent is None else (expected, absent):
+        cosine = [math.cos(math.tau * hz * n / AUDIO_RATE) for n in range(AUDIO_RATE)]
+        sine = [math.sin(math.tau * hz * n / AUDIO_RATE) for n in range(AUDIO_RATE)]
+        channels = []
+        for channel in (0, 1):
+            amplitudes = []
+            for start in range(0, len(samples) - AUDIO_RATE + 1, AUDIO_RATE):
+                window = samples[start:start + AUDIO_RATE]
+                real = sum(frame[channel] * c for frame, c in zip(window, cosine))
+                imag = sum(frame[channel] * s for frame, s in zip(window, sine))
+                amplitudes.append(2 * math.hypot(real, imag) / AUDIO_RATE / 32767)
+            channels.append(max(amplitudes, default=0))
+        peaks[hz] = channels
+    target = 0.25 if absent is None else 0.125
+    errors = [20 * math.log10(value / target) if value else -999 for value in peaks[expected]]
+    return {"amplitudes": peaks, "gain_error_db": errors,
+            "ok": all(abs(error) <= 0.1 for error in errors)
+                  and (absent is None or max(peaks[absent]) <= target * 0.001)}
+
+
+def audio_stats(vm):
+    status, text = run_status(vm, "cat /scheme/audio/stats")
+    if status != 0:
+        raise RuntimeError(f"audio stats read failed: {text.strip()}")
+    for line in text.splitlines():
+        if line.strip().startswith("{"):
+            return json.loads(line)
+    raise RuntimeError("audio stats returned no JSON")
+
+
+def audio_cli_smoke(vm, results, problems):
+    """Keep the CLI envelope and validate the public payload, not human output."""
+    records = results.setdefault("cli", {})
+    for command in ("status", "apps", "volume 100 --yes", "volume"):
+        status, text = run_status(vm, f"ferrion --json audio {command}")
+        lines = [line.strip() for line in text.splitlines() if line.lstrip().startswith("{")]
+        record = None
+        if len(lines) == 1:
+            try:
+                record = json.loads(lines[0])
+            except ValueError:
+                pass
+        records[command] = {"status": status, "output": text, "envelope": record}
+        if (status != 0 or not isinstance(record, dict) or record.get("schema_version") != 1
+                or record.get("ok") is not True or record.get("exit_code") != 0
+                or record.get("command") != f"audio {command.split()[0]}"
+                or not isinstance(record.get("data"), dict)):
+            problems.append(f"ferrion audio {command}: invalid success envelope")
+            continue
+        data = record["data"]
+        if command == "status":
+            if (data.get("rate") != AUDIO_RATE or data.get("channels") != 2
+                    or data.get("format") != "s16le" or data.get("volume") != 100):
+                problems.append("ferrion audio status: wrong device payload")
+        elif command == "apps":
+            if not isinstance(data.get("apps"), list):
+                problems.append("ferrion audio apps: missing apps array")
+        elif data.get("volume") != 100:
+            problems.append(f"ferrion audio {command}: volume is not 100")
+
+
+def test_audio_apps(args, out):
+    """AU2: legacy tone and exact PCM, two factory-backed subprocess tones with independent program gains, readable volume, and 10,000 stream closes with flat audiod private memory and bounded stats. Uses two HDA/WAV boots; requires the rebuilt audio-probe even on the red image."""
+    results, problems = {}, []
+    # This boot works on the old daemon too: a missing probe is not the expected red.
+    legacy_out = out / "legacy"
+    legacy_out.mkdir(parents=True, exist_ok=True)
+    wav = legacy_out / "audio.wav"
+    wav.unlink(missing_ok=True)
+    vm = audio_vm(args, legacy_out, wav)
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, "no root serial login"
+        source, last = seq_signal()
+        problem = play_seq(vm, args.timeout, last, volume=100)
+        if problem:
+            problems.append(problem)
+        status, text = run_status(vm, "audio-probe tone 997 6", 120)
+        (legacy_out / "tone.txt").write_text(text)
+        if status != 0:
+            problems.append(f"legacy tone probe failed: {status}; rebuild audio-probe before the red boot")
+        time.sleep(1)  # Drain the device, as in play_seq.
+    finally:
+        vm.close()
+    recording = wav.read_bytes() if wav.exists() else b""
+    exact = check_wav(source, recording)
+    results["legacy_pcm"] = exact
+    results["legacy_tone"] = audio_tone_report(recording, 997)
+    if not exact["one_piece"] or not results["legacy_tone"]["ok"]:
+        problems.append("legacy PCM or legacy tone failed")
+
+    apps_out = out / "apps"
+    apps_out.mkdir(parents=True, exist_ok=True)
+    wav = apps_out / "audio.wav"
+    wav.unlink(missing_ok=True)
+    vm = audio_vm(args, apps_out, wav)
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, "no root serial login"
+        status, text = run_status(vm, "echo 100 > /scheme/audio/volume && cat /scheme/audio/volume")
+        results["volume"] = {"status": status, "output": text}
+        if status != 0 or not re.search(r"(?m)^100\s*$", text):
+            problems.append("cat /scheme/audio/volume did not read 100 successfully")
+        status, text = run_status(vm, "echo mute > /scheme/audio/program/tone-a/gain && "
+                                      "echo -6.020599913279624 > /scheme/audio/program/tone-b/gain")
+        results["controls"] = {"status": status, "output": text}
+        if status != 0:
+            problems.append("program gain controls failed (expected red on the old daemon)")
+        else:
+            audio_cli_smoke(vm, results, problems)
+            status, text = run_status(vm, "bash -c 'audio-probe stream tone-a 997 6 & a=$!; "
+                                          "audio-probe stream tone-b 1499 6 & b=$!; "
+                                          "wait $a; sa=$?; wait $b; sb=$?; "
+                                          "test $sa -eq 0 && test $sb -eq 0'", 120)
+            (apps_out / "tones.txt").write_text(text)
+            if status != 0 or text.count("audio-probe: tone complete") != 2:
+                problems.append("both factory tone subprocesses did not complete")
+            time.sleep(1)
+            status, text = run_status(vm, "audio-probe churn 100", 120)
+            if status != 0:
+                problems.append("stream churn warmup failed")
+            before_stats = audio_stats(vm)
+            before = process(context_rows(vm), "ferrion-audiod")
+            status, text = run_status(vm, "audio-probe churn 10000", 300)
+            (apps_out / "churn.txt").write_text(text)
+            after_stats = audio_stats(vm)
+            after = process(context_rows(vm), "ferrion-audiod")
+            results["churn"] = {"before": before, "after": after,
+                                "before_stats": before_stats, "after_stats": after_stats}
+            if status != 0 or "audio-probe: churn: 10000 closed" not in text:
+                problems.append("10,000 stream open/closes did not complete")
+            if before is None or after is None or before[0] != after[0] or after[1] > before[1]:
+                problems.append("audiod private memory did not stay flat after warmup")
+            for key in ("streams", "handles", "queued_frames"):
+                if key not in before_stats or key not in after_stats or after_stats[key] > before_stats[key]:
+                    problems.append(f"audio stats {key} is missing or grew after churn")
+    finally:
+        vm.close()
+    results["tones"] = audio_tone_report(wav.read_bytes() if wav.exists() else b"", 1499, 997)
+    if not results["tones"]["ok"]:
+        problems.append("1499 Hz is not within 0.1 dB of half gain or muted 997 Hz exceeds -60 dB")
+    (out / "audio-apps.json").write_text(json.dumps(results, indent=2) + "\n")
+    return not problems, ("; ".join(problems) if problems else
+                          "legacy PCM/tone, independent gains, readable volume, and flat 10,000-stream churn") + f"; see {out}"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -3876,6 +4028,7 @@ OWN_IMAGE["net-calls"] = test_net_calls
 # These boot with their own sound device, recorded by QEMU's wav backend.
 OWN_IMAGE["audio-baseline"] = test_audio_baseline
 OWN_IMAGE["audio-ring"] = test_audio_ring
+OWN_IMAGE["audio-apps"] = test_audio_apps
 TESTS.update(OWN_IMAGE)
 
 

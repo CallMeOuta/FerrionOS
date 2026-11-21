@@ -1,3 +1,5 @@
+mod audio;
+
 use std::ffi::CStr;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -15,12 +17,18 @@ const HELP: &str = "FerrionOS system commands
   ferrion shell list               List offered login shells
   ferrion shell set <shell>        Change your login shell for your next login
   ferrion status                   Read system and security status
+  ferrion audio status             Read audio format and mixer status
+  ferrion audio apps               List audio apps (root)
+  ferrion audio volume [0..100] [--app ID | --session ID]
+                                  Read or set volume (app/session require root)
   ferrion help                     Show this help
 
 Options (any command): --json, --yes
 Changes ask for confirmation; scripts must pass --yes.
 Package changes require root. Shell changes use sudo when needed;
 run shell set as your own account, not as sudo ferrion.
+Audio master volume uses a cubic response. App/session percentages are linear
+amplitude: 50 means -6.0206 dB; 0 mutes. Omit the percentage to read volume.
 JSON: one object, schema_version 1, command, ok, exit_code, data or error.
 Unknown security state is never reported as off. Status is a local observation,
 not a remote attestation or a guarantee of containment.
@@ -71,6 +79,7 @@ fn io_failure(error: io::Error) -> Failure {
 enum Action {
     Help,
     Status,
+    Audio(audio::Action),
     ShellList,
     ShellSet(String),
     Package(String, Vec<String>),
@@ -94,6 +103,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let action = match words.as_slice() {
         [] | ["help"] | ["--help"] => Action::Help,
         ["status"] => Action::Status,
+        ["audio", rest @ ..] => Action::Audio(audio::parse(rest)?),
         ["shell", "list"] => Action::ShellList,
         ["shell", "set", shell] => Action::ShellSet((*shell).into()),
         [op @ ("install" | "remove" | "update" | "search"), rest @ ..] => {
@@ -430,6 +440,7 @@ fn execute(options: &Options) -> Result<Value> {
     match &options.action {
         Action::Help => Ok(json!({"help": HELP})),
         Action::Status => system_status(),
+        Action::Audio(action) => audio::execute(action, options.yes),
         Action::ShellList | Action::ShellSet(_) => shell_command(&options.action, options.yes),
         Action::Package(op, packages) => package_command(op, packages, options.yes),
     }
@@ -439,6 +450,7 @@ fn command_name(action: &Action) -> &str {
     match action {
         Action::Help => "help",
         Action::Status => "status",
+        Action::Audio(action) => audio::name(action),
         Action::ShellList => "shell list",
         Action::ShellSet(_) => "shell set",
         Action::Package(op, _) => op,
@@ -465,6 +477,11 @@ fn print_text(value: &Value) {
     let data = &value["data"];
     if let Some(help) = data["help"].as_str() {
         println!("{help}");
+    } else if value["command"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("audio "))
+    {
+        audio::print(data);
     } else if data.get("stdout").is_some() {
         print!("{}", data["stdout"].as_str().unwrap_or(""));
         eprint!("{}", data["stderr"].as_str().unwrap_or(""));

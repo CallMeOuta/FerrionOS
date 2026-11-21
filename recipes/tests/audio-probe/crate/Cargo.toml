@@ -8,3 +8,4 @@ publish = false
 
 [dependencies]
 libredox = "0.2.0"
+ferrion-audio = { path = "../../../core/ferrion-audio/crate" }
