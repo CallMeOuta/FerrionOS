@@ -100,13 +100,22 @@ impl Dns {
         macro_rules! pop_name {
             () => {{
                 let mut name = String::new();
-                let old_i = i;
+                // Where the name ends in the message: after its first pointer, if any.
+                let mut end = None;
+                // A name has at most 127 labels, so more pointers than that are a loop.
+                let mut jumps = 0;
 
                 loop {
                     let name_len = pop_u8!();
                     if name_len & name_ind == name_ind {
                         i -= 1;
-                        i = (pop_n16!() - ((u16::from(name_ind)) << 8)) as usize;
+                        let pointer = pop_n16!() - ((u16::from(name_ind)) << 8);
+                        end.get_or_insert(i);
+                        jumps += 1;
+                        if jumps > 127 {
+                            return Err(format!("{}: {}: pointer loop", file!(), line!()));
+                        }
+                        i = pointer as usize;
                         continue;
                     }
                     if name_len == 0 {
@@ -120,8 +129,8 @@ impl Dns {
                     }
                 }
 
-                if i <= old_i {
-                    i = old_i + 2;
+                if let Some(end) = end {
+                    i = end;
                 }
 
                 name

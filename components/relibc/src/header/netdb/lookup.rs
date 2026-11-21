@@ -9,11 +9,12 @@ use crate::{
 
 use crate::header::{
     bits_arpainet::htons,
-    errno::EINVAL,
+    errno::{EADDRINUSE, EAGAIN, EINVAL, EIO, ETIMEDOUT, EWOULDBLOCK},
     netinet_in::{IPPROTO_UDP, in_addr, sockaddr_in},
     sys_socket::constants::{AF_INET, SOCK_DGRAM},
     time::{self, timespec},
 };
+use core::ffi::c_int;
 
 use super::{
     dns::{Dns, DnsQuery},
@@ -37,61 +38,7 @@ pub fn lookup_host(host: &str) -> Result<LookupHost, Errno> {
 
     let dns_addr = parse_ipv4_string(&dns_string).ok_or(Errno(EINVAL))?;
 
-    let mut timespec = timespec::default();
-    Sys::clock_gettime(
-        time::constants::CLOCK_REALTIME,
-        Out::from_mut(&mut timespec),
-    )?;
-    let tid = (timespec.tv_nsec >> 16) as u16;
-
-    let packet = Dns {
-        transaction_id: tid,
-        flags: 0x0100,
-        queries: vec![DnsQuery {
-            name: host.to_string(),
-            q_type: 0x0001,
-            q_class: 0x0001,
-        }],
-        answers: vec![],
-    };
-
-    let packet_data = packet.compile();
-
-    let mut dest = [0_u8; size_of::<sockaddr_in>()];
-    *plain::from_mut_bytes(&mut dest).unwrap() = sockaddr_in {
-        sin_family: u16::try_from(AF_INET).expect("AF_INET is positive and below u16::MAX"),
-        sin_port: htons(53),
-        sin_addr: in_addr { s_addr: dns_addr },
-        ..Default::default()
-    };
-
-    let sock = Sys::socket(AF_INET, SOCK_DGRAM, i32::from(IPPROTO_UDP))?;
-
-    let timeout = sys_select::timeval {
-        tv_sec: 7, // TODO: hardcoded, make it configurable?
-        tv_usec: 0,
-    };
-
-    let _ = Sys::connect(sock, &dest)?;
-    let _ = Sys::setsockopt(
-        sock,
-        sys_socket::constants::SOL_SOCKET,
-        sys_socket::constants::SO_RCVTIMEO,
-        unsafe {
-            core::slice::from_raw_parts(
-                (&raw const timeout).cast::<u8>(),
-                core::mem::size_of::<sys_select::timeval>(),
-            )
-        },
-    );
-
-    Sys::sendto(sock, &packet_data, 0, None)?;
-
-    let mut buf = vec![0u8; 65536];
-
-    let (count, _srcaddr_len) = Sys::recvfrom(sock, Out::from_mut(&mut buf), 0, None)?;
-
-    let response = Dns::parse(&buf[..count]).map_err(|_| Errno(EINVAL))?;
+    let response = query(dns_addr, host, 0x0001)?;
     let addrs: Vec<_> = response
         .answers
         .into_iter()
@@ -115,6 +62,141 @@ pub fn lookup_host(host: &str) -> Result<LookupHost, Errno> {
     Ok(addrs)
 }
 
+/// How long a lookup waits for its answer.
+const QUERY_TIMEOUT_SECS: i64 = 7; // TODO: hardcoded, make it configurable?
+/// The source ports a query is sent from, chosen at random: the dynamic range of RFC 6335.
+const SOURCE_PORTS: core::ops::RangeInclusive<u16> = 49152..=65535;
+
+/// Closes the query's socket however the query ends.
+struct QuerySocket(c_int);
+
+impl Drop for QuerySocket {
+    fn drop(&mut self) {
+        let _ = Sys::close(self.0);
+    }
+}
+
+fn random_bytes<const N: usize>() -> Result<[u8; N], Errno> {
+    let mut bytes = [0; N];
+    if Sys::getrandom(&mut bytes, 0)? != N {
+        return Err(Errno(EIO));
+    }
+    Ok(bytes)
+}
+
+fn monotonic_now() -> Result<timespec, Errno> {
+    let mut now = timespec::default();
+    Sys::clock_gettime(time::constants::CLOCK_MONOTONIC, Out::from_mut(&mut now))?;
+    Ok(now)
+}
+
+/// Binds `sock` to a random source port, trying again while the port is taken.
+fn bind_random_port(sock: c_int) -> Result<(), Errno> {
+    let span = u32::from(SOURCE_PORTS.end() - SOURCE_PORTS.start()) + 1;
+    let mut tries = 0;
+    loop {
+        let offset = u32::from(u16::from_ne_bytes(random_bytes()?)) % span;
+        let port = *SOURCE_PORTS.start() + offset as u16;
+        let mut local = [0_u8; size_of::<sockaddr_in>()];
+        *plain::from_mut_bytes(&mut local).unwrap() = sockaddr_in {
+            sin_family: u16::try_from(AF_INET).expect("AF_INET is positive and below u16::MAX"),
+            sin_port: htons(port),
+            sin_addr: in_addr { s_addr: 0 },
+            ..Default::default()
+        };
+        match Sys::bind(sock, &local) {
+            Err(Errno(EADDRINUSE)) if tries < 16 => tries += 1,
+            result => return result,
+        }
+    }
+}
+
+/// Whether `reply` answers the query with ID `id` for `name`'s records of type
+/// `q_type`: a response with the same ID and the same single question, the name
+/// compared without regard to case (RFC 5452, section 9.1).
+fn answers_query(reply: &Dns, id: u16, name: &str, q_type: u16) -> bool {
+    let name = name.strip_suffix('.').unwrap_or(name);
+    reply.transaction_id == id
+        && reply.flags & 0x8000 != 0
+        && reply.flags & 0x7800 == 0
+        && match reply.queries.as_slice() {
+            [question] => {
+                question.name.eq_ignore_ascii_case(name)
+                    && question.q_type == q_type
+                    && question.q_class == 0x0001
+            }
+            _ => false,
+        }
+}
+
+/// Sends a query for `name`'s records of type `q_type` to the server at `dns_addr`
+/// from a random source port with a random ID, and returns the first reply that
+/// answers it. The socket is connected to the server's address and port 53, so the
+/// stack hands it only datagrams from there; any other reply is ignored until the
+/// timeout.
+fn query(dns_addr: u32, name: &str, q_type: u16) -> Result<Dns, Errno> {
+    let id = u16::from_ne_bytes(random_bytes()?);
+    let packet_data = Dns {
+        transaction_id: id,
+        flags: 0x0100,
+        queries: vec![DnsQuery {
+            name: name.to_string(),
+            q_type,
+            q_class: 0x0001,
+        }],
+        answers: vec![],
+    }
+    .compile();
+
+    let mut dest = [0_u8; size_of::<sockaddr_in>()];
+    *plain::from_mut_bytes(&mut dest).unwrap() = sockaddr_in {
+        sin_family: u16::try_from(AF_INET).expect("AF_INET is positive and below u16::MAX"),
+        sin_port: htons(53),
+        sin_addr: in_addr { s_addr: dns_addr },
+        ..Default::default()
+    };
+
+    let sock = QuerySocket(Sys::socket(AF_INET, SOCK_DGRAM, i32::from(IPPROTO_UDP))?);
+    bind_random_port(sock.0)?;
+    let _ = Sys::connect(sock.0, &dest)?;
+    let deadline = monotonic_now()?.tv_sec + QUERY_TIMEOUT_SECS;
+    Sys::sendto(sock.0, &packet_data, 0, None)?;
+
+    let mut buf = vec![0u8; 65536];
+    loop {
+        let now = monotonic_now()?;
+        if now.tv_sec >= deadline {
+            return Err(Errno(ETIMEDOUT));
+        }
+        let timeout = sys_select::timeval {
+            tv_sec: (deadline - now.tv_sec) as _,
+            tv_usec: 0,
+        };
+        let _ = Sys::setsockopt(
+            sock.0,
+            sys_socket::constants::SOL_SOCKET,
+            sys_socket::constants::SO_RCVTIMEO,
+            unsafe {
+                core::slice::from_raw_parts(
+                    (&raw const timeout).cast::<u8>(),
+                    core::mem::size_of::<sys_select::timeval>(),
+                )
+            },
+        );
+
+        let count = match Sys::recvfrom(sock.0, Out::from_mut(&mut buf), 0, None) {
+            Ok((count, _)) => count,
+            Err(Errno(EAGAIN | EWOULDBLOCK | ETIMEDOUT)) => return Err(Errno(ETIMEDOUT)),
+            Err(err) => return Err(err),
+        };
+        if let Ok(reply) = Dns::parse(&buf[..count])
+            && answers_query(&reply, id, name, q_type)
+        {
+            return Ok(reply);
+        }
+    }
+}
+
 pub fn lookup_addr(addr: &in_addr) -> Result<Vec<Vec<u8>>, Errno> {
     if addr.s_addr == 0 {
         return Ok(vec![]);
@@ -129,82 +211,24 @@ pub fn lookup_addr(addr: &in_addr) -> Result<Vec<Vec<u8>>, Errno> {
             addr[3], addr[2], addr[1], addr[0]
         );
 
-        let mut timespec = timespec::default();
-        if let Ok(()) = Sys::clock_gettime(
-            time::constants::CLOCK_REALTIME,
-            Out::from_mut(&mut timespec),
-        ) {}; // TODO handle error
-        let tid = (timespec.tv_nsec >> 16) as u16;
-
-        let packet = Dns {
-            transaction_id: tid,
-            flags: 0x0100,
-            queries: vec![DnsQuery {
-                name,
-                q_type: 0x000C,
-                q_class: 0x0001,
-            }],
-            answers: vec![],
-        };
-
-        let packet_data = packet.compile();
-
-        let mut dest_addr = [0_u8; size_of::<sockaddr_in>()];
-        *plain::from_mut_bytes(&mut dest_addr).unwrap() = sockaddr_in {
-            sin_family: u16::try_from(AF_INET).expect("AF_INET is positive and below u16::MAX"),
-            sin_port: htons(53),
-            sin_addr: in_addr { s_addr: dns_addr },
-            ..Default::default()
-        };
-
-        let sock = Sys::socket(AF_INET, SOCK_DGRAM, i32::from(IPPROTO_UDP))?;
-
-        let timeout = sys_select::timeval {
-            tv_sec: 7, // TODO: hardcoded, make it configurable?
-            tv_usec: 0,
-        };
-
-        let _ = Sys::connect(sock, &dest_addr)?;
-        let _ = Sys::setsockopt(
-            sock,
-            sys_socket::constants::SOL_SOCKET,
-            sys_socket::constants::SO_RCVTIMEO,
-            unsafe {
-                core::slice::from_raw_parts(
-                    (&raw const timeout).cast::<u8>(),
-                    core::mem::size_of::<sys_select::timeval>(),
-                )
-            },
-        );
-
-        let _bytes_sent = Sys::sendto(sock, &packet_data, 0, None)?;
-
-        let mut buf = [0u8; 65536];
-
-        let (count, _dstaddr_len) = Sys::recvfrom(sock, Out::from_mut(&mut buf), 0, None)?;
-
-        match Dns::parse(&buf[..count]) {
-            Ok(response) => {
-                let names = response
-                    .answers
-                    .into_iter()
-                    .filter_map(|answer| {
-                        if answer.a_type == 0x000C && answer.a_class == 0x0001 {
-                            // answer.data is encoded kinda weird.
-                            // Basically length-prefixed strings for each
-                            // subsection of the domain.
-                            // We need to parse this to insert periods where
-                            // they belong (ie at the end of each string)
-                            Some(parse_revdns_answer(&answer.data))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                Ok(names)
-            }
-            Err(_err) => Err(Errno(EINVAL)),
-        }
+        let response = query(dns_addr, &name, 0x000C)?;
+        let names = response
+            .answers
+            .into_iter()
+            .filter_map(|answer| {
+                if answer.a_type == 0x000C && answer.a_class == 0x0001 {
+                    // answer.data is encoded kinda weird.
+                    // Basically length-prefixed strings for each
+                    // subsection of the domain.
+                    // We need to parse this to insert periods where
+                    // they belong (ie at the end of each string)
+                    Some(parse_revdns_answer(&answer.data))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Ok(names)
     } else {
         Err(Errno(EINVAL))
     }
