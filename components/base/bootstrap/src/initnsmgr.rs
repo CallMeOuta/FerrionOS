@@ -29,6 +29,11 @@ const MEMORY_SCHEME: &str = "memory";
 /// The bit of a `ShrinkPermissions` request that keeps the hardware right. libredox's
 /// `NsPermissions` does not define it, so a request built from those permissions drops the right.
 const NS_HARDWARE: usize = 1 << (usize::BITS - 1);
+/// An entry of a `ForkNs` request that names a right instead of a scheme: the new namespace keeps
+/// the right to create schemes when the handle that forks it has that right (FerrionOS, issue 7).
+/// A fork without this entry never has the right. No scheme is mistaken for it: a scheme name
+/// cannot contain `:`.
+const KEEP_SCHEME_CREATE: &str = "namespace:scheme-create";
 
 /// Whether only a handle with the hardware right may register or remove `name`.
 fn is_protected_scheme(name: &str) -> bool {
@@ -59,13 +64,15 @@ impl Namespace {
             Some(fd.clone())
         }
     }
+    /// Copies the schemes `buf` names. The flag says whether `buf` holds `KEEP_SCHEME_CREATE`.
     fn fork(
         &self,
         buf: &[u8],
         hardware: bool,
         restricted_memory: Option<&Arc<FdGuard>>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, bool)> {
         let mut schemes = HashMap::new();
+        let mut keep_scheme_create = false;
         let mut cursor = 0;
         while cursor < buf.len() {
             let len = read_num::<usize>(&buf[cursor..])?;
@@ -73,7 +80,9 @@ impl Namespace {
             let name = String::from_utf8(Vec::from(&buf[cursor..cursor + len]))
                 .map_err(|_| Error::new(EINVAL))?;
             cursor += len;
-            if name.ends_with('*') {
+            if name == KEEP_SCHEME_CREATE {
+                keep_scheme_create = true;
+            } else if name.ends_with('*') {
                 let prefix = &name[..name.len() - 1];
                 for registered_name in self.schemes.keys() {
                     if registered_name.starts_with(prefix)
@@ -90,7 +99,7 @@ impl Namespace {
                 schemes.insert(name, fd);
             }
         }
-        Ok(Self { schemes })
+        Ok((Self { schemes }, keep_scheme_create))
     }
     fn remove_scheme(&mut self, scheme: &str) -> Option<()> {
         self.schemes.remove(scheme).map(|_| ())
@@ -280,21 +289,29 @@ impl<'sock> NamespaceScheme<'sock> {
         cap_fd.dup(&[])
     }
 
+    /// A fork drops `HIGH_PERMISSIONS`. It keeps the right to create schemes only when the
+    /// request asks with `KEEP_SCHEME_CREATE` and `ns_access` has that right itself.
     fn fork_namespace(&mut self, ns_access: &NamespaceAccess, names: &[u8]) -> Result<usize> {
         let new_id = self.next_id;
-        let new_namespace = ns_access
+        let (new_namespace, keep_scheme_create) = ns_access
             .namespace
             .borrow()
             .fork(names, ns_access.hardware, self.restricted_memory.as_ref())
             .inspect_err(|&e| {
                 error!("Failed to fork namespace {}: {}", new_id, e);
             })?;
-        self.add_namespace(
-            new_id,
-            new_namespace,
-            NsPermissions::all().difference(HIGH_PERMISSIONS),
-            ns_access.hardware,
-        );
+        let mut permission = NsPermissions::all().difference(HIGH_PERMISSIONS);
+        if keep_scheme_create {
+            if ns_access.has_permission(NsPermissions::SCHEME_CREATE) {
+                permission |= NsPermissions::SCHEME_CREATE;
+            } else {
+                warn!(
+                    "Namespace {} does not get scheme creation: the forking handle lacks it",
+                    new_id
+                );
+            }
+        }
+        self.add_namespace(new_id, new_namespace, permission, ns_access.hardware);
         self.next_id += 1;
         Ok(new_id)
     }
