@@ -131,8 +131,10 @@ perf = { level = "deny", priority = -1 }
 precedence = "deny"
 unused_io_amount = "warn" #TODO: have an abstraction to irq file read/write, then set to deny
 
+# redox-ioctl from relibc's source as FerrionOS patches it, so that the drivers and relibc
+# compile the same wire types.
 [patch."https://gitlab.redox-os.org/redox-os/relibc.git"]
-#redox-ioctl = { path = "../../relibc/source/redox-ioctl" }
+redox-ioctl = { path = "../../relibc/source/redox-ioctl" }
 
 # smoltcp 0.14.0 with a hook for TCP initial sequence numbers, unpacked and patched into
 # vendor/smoltcp by the FerrionOS recipe.
