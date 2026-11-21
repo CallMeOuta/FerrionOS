@@ -35,6 +35,17 @@ The build writes a manifest with the hashes of both files, and its signature, in
 
 Not covered yet: live images, the BIOS bootloader, files beyond the `initfs`, and protection against older signed versions.
 
+## Measured Boot
+
+When the machine has a TPM 2.0, the UEFI bootloader records what it starts in the TPM, through the firmware's TCG2 protocol (`recipes/core/bootloader/ferrion-measured-boot.patch`). Each record extends a PCR, and the firmware adds an entry to its TPM event log:
+
+- PCR 7: the verified-boot key in the bootloader, all zeros when the image is not a verified-boot image.
+- PCR 8: the name of the boot entry (`normal`), and the boot environment the kernel receives, without its framebuffer lines. A boot through the menu (a key in the first second) gives a different PCR 8, because its environment lacks `QUIET=1`.
+- PCR 9: the kernel and the `initfs`, and on a verified-boot image first its manifest. On such an image each is recorded after it passed verification.
+- Last, a separator in PCRs 8 and 9.
+
+The bootloader passes a copy of the event log to the kernel as `TPM_EVENT_LOG_ADDR` and `TPM_EVENT_LOG_SIZE` in the boot environment. Without a TPM, or with firmware that lacks the TCG2 protocol, nothing is recorded and the boot is the same. If the firmware refuses a record, the bootloader shows a message that begins "FerrionOS measured boot: the TPM refused a measurement" once and boots on without further records. The BIOS bootloader records nothing. `scripts/measured-boot-test.sh <image>` shows the records in QEMU with a software TPM ([Testing](./testing-practices.md#measured-boot)). No verifier checks these values yet.
+
 ## Boot Loader
 
 ### BIOS Boot

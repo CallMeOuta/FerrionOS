@@ -34,13 +34,15 @@ Orbital is the display server and window manager that FerrionOS currently uses. 
 
 Upstream preferred it over Wayland and X11 to avoid their requirements, dependencies, and limitations (EGL on Wayland and GLX on X11): Orbital was simpler to build on a young system API, and it renders natively in software.
 
+FerrionOS has no X11: no X server, no Xwayland and no X11 libraries. Graphical programs use Orbital or Wayland. Wayland is experimental: the `wayland` filesystem configuration (`config/wayland.toml`) starts a Wayland compositor (`cosmic-comp` or `smallvil`) inside an Orbital window. A program that can only draw through X11 does not run on FerrionOS.
+
 ### Comparison with X11/Wayland
 
 This display server is simpler than X11 and Wayland, which makes porting quicker and easier. It is not as advanced as X11 and Wayland yet; upstream considers it enough to port most Linux/BSD programs.
 
 Compared to Wayland, Orbital has one protocol server implementation (like X11 for a long time), while Wayland provides protocols for compositors and clients.
 
-Also native software rendering on X11 and Wayland applications is rare, which would reduce performance on FerrionOS by partially or fully using LLVMPipe on applications or user session.
+Also few X11 or Wayland programs render natively in software, so on FerrionOS a Wayland program that does not would draw partly or fully through LLVMpipe, which reduces performance.
 
 ### Features
 
@@ -85,3 +87,5 @@ If you want to port a program to Orbital, see below:
 - If the program is written in Rust and uses the `winit` crate, as most do, it can use winit's Orbital backend. Programs that access X11 or Wayland directly need to be ported to `winit`; that change belongs in the program's own project.
 
 - If the program is written in C or C++ and accesses X11 or Wayland directly, it must be ported to the Orbital library, `liborbital` (recipe `recipes/libs/liborbital`).
+
+- Build a port with X11 disabled (meson `-Dx11=disabled`, cmake `-DWITH_X11=OFF`, configure `--without-x`, cargo features without `x11`). FerrionOS has no X11 libraries, and `scripts/no-x11-check.py` fails when a recipe depends on one.
