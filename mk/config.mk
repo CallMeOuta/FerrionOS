@@ -45,6 +45,10 @@ HOST_CARGO=env -u RUSTUP_TOOLCHAIN -u CC -u TARGET cargo
 ## FILESYSTEM_SIZE?=$(shell $(INSTALLER) --filesystem-size -c $(FILESYSTEM_CONFIG))
 ## Flags to pass to redoxfs-mkfs. Add --encrypt to set up disk encryption
 REDOXFS_MKFS_FLAGS?=
+## Set to 1 for a verified-boot harddrive.img: its UEFI bootloader starts only the kernel and initfs signed with the development key in VERIFIED_BOOT_KEYS (made on first use; see scripts/verified-boot-sign.sh, which needs FUSE, OpenSSL 3 and python3). Not for live images
+VERIFIED_BOOT?=0
+## Where the verified-boot development key pair is kept
+VERIFIED_BOOT_KEYS?=build/verified-boot
 ## Set to 1 to enable Podman build, any other value will disable it
 PODMAN_BUILD?=1
 ## Set to 1 to put filesystem tools inside podman, any other value will install it to host

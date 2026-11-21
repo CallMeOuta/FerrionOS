@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Proves UEFI Secure Boot for an x86_64 FerrionOS image in QEMU (security roadmap S16, slice 1).
-# It makes test keys (PK, KEK, db and one key that is never enrolled), enrolls PK, KEK and db
-# into a copy of OVMF's variable store with Secure Boot on, and boots a copy of the image three
-# times with OVMF_CODE.secboot, each with a different bootloader in the EFI system partition:
-#   signed     signed with the db key: must reach the graphical login
-#   unsigned   as built: the firmware must refuse it
-#   wrong-key  signed with the key that is not in db: the firmware must refuse it
+# Proves UEFI Secure Boot for an x86_64 FerrionOS image in QEMU (security roadmap S16, slices 1
+# and 2). It makes test keys (PK, KEK, db and one key that is never enrolled), enrolls PK, KEK
+# and db into a copy of OVMF's variable store with Secure Boot on, and boots copies of the image
+# with OVMF_CODE.secboot, each with a different bootloader in the EFI system partition:
+#   signed         signed with the db key: must reach the graphical login
+#   unsigned       as built: the firmware must refuse it
+#   wrong-key      signed with the key that is not in db: the firmware must refuse it
+# On a verified-boot image (VERIFIED_BOOT=1, its bootloader holds a key) three more cases boot
+# the signed bootloader on a copy whose files were changed; the bootloader must refuse each:
+#   tamper-kernel  one byte of usr/lib/boot/kernel changed
+#   tamper-initfs  one byte of usr/lib/boot/initfs changed
+#   tamper-sig     usr/lib/boot/manifest.sig signed by another key
 # The image itself is never changed. Each case leaves serial.log and screen.png under the
 # output directory, beside summary.txt and the enrolled variable store. The keys are test
 # keys, stored unencrypted: never sign anything that leaves the build machine with them.
@@ -17,13 +22,15 @@ usage() {
     cat <<EOF
 Proves UEFI Secure Boot for an x86_64 FerrionOS image in QEMU.
 
-Usage: $0 [-o <out-dir>] [-k <key-dir>] [-t <seconds>] <harddrive.img>
+Usage: $0 [-o <out-dir>] [-k <key-dir>] [-t <seconds>] [-r <redoxfs>] <harddrive.img>
 
   -o <out-dir>   results: <case>/serial.log, <case>/screen.png, summary.txt
                  (default: build/secure-boot-test)
   -k <key-dir>   PK, KEK, db and other as <name>.key and <name>.crt; missing ones are
                  generated (default: <out-dir>/keys)
   -t <seconds>   how long one boot may take to reach the login or the refusal (default: 120)
+  -r <redoxfs>   the FUSE tool that mounts the image's filesystem, for the tamper cases of a
+                 verified-boot image (default: build/fstools/bin/redoxfs)
 
 Needs qemu-system-x86_64, openssl, mtools (mcopy), python3, virt-fw-vars (package
 virt-firmware) and sbsign (package sbsigntools) or osslsigncode. OVMF is looked for in
@@ -38,11 +45,13 @@ EOF
 OUT=build/secure-boot-test
 KEYS=
 TIMEOUT=120
-while getopts "o:k:t:h" opt; do
+REDOXFS_BIN=build/fstools/bin/redoxfs
+while getopts "o:k:t:r:h" opt; do
     case "$opt" in
         o) OUT="$OPTARG" ;;
         k) KEYS="$OPTARG" ;;
         t) TIMEOUT="$OPTARG" ;;
+        r) REDOXFS_BIN="$OPTARG" ;;
         *) usage ;;
     esac
 done
@@ -85,7 +94,19 @@ fi
 
 mkdir -p "$OUT" "$KEYS"
 WORK="$(mktemp -d "$OUT/work.XXXXXX")"
-trap 'rm -f "$WORK"/*; rmdir "$WORK"' EXIT
+MOUNTED=0
+if command -v fusermount3 >/dev/null; then
+    FUMOUNT="fusermount3 -u"
+else
+    FUMOUNT="fusermount -u"
+fi
+cleanup() {
+    if [ "$MOUNTED" = 1 ]; then
+        $FUMOUNT "$WORK/mnt" || true
+    fi
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 # Test keys: self-signed RSA-2048 with SHA-256, the size every UEFI implementation must accept.
 for name in PK KEK db other; do
@@ -148,19 +169,68 @@ fi
 KVM=0
 [ -w /dev/kvm ] && KVM=1
 
+# A verified-boot image: the bootloader's key slot (after the marker FerrionBootKey/1) holds a key.
+VERIFIED="$(python3 - "$WORK/unsigned.efi" <<'EOF'
+import sys
+data = open(sys.argv[1], "rb").read()
+at = data.find(b"FerrionBootKey/1")
+print(1 if at >= 0 and any(data[at + 16:at + 48]) else 0)
+EOF
+)"
+
+# Makes $WORK/<case>.img: a copy of the image with one change in its filesystem.
+tamper() {
+    local name="$1"
+    cp --reflink=auto "$WORK/harddrive.img" "$WORK/$name.img"
+    mkdir -p "$WORK/mnt"
+    "$REDOXFS_BIN" "$WORK/$name.img" "$WORK/mnt" >"$WORK/redoxfs.log" 2>&1 &
+    MOUNTED=1
+    local boot="$WORK/mnt/usr/lib/boot"
+    for _ in $(seq 100); do
+        [ -f "$boot/kernel" ] && break
+        sleep 0.1
+    done
+    [ -f "$boot/kernel" ] || { cat "$WORK/redoxfs.log" >&2; echo "secure-boot-test: could not mount $name.img" >&2; exit 1; }
+    case "$name" in
+        tamper-kernel) flip_byte "$boot/kernel" ;;
+        tamper-initfs) flip_byte "$boot/initfs" ;;
+        tamper-sig)
+            openssl genpkey -algorithm ed25519 -out "$WORK/other-boot.key"
+            openssl pkeyutl -sign -rawin -inkey "$WORK/other-boot.key" -in "$boot/manifest" -out "$boot/manifest.sig"
+            ;;
+    esac
+    sync
+    $FUMOUNT "$WORK/mnt"
+    MOUNTED=0
+}
+
+# Inverts the byte in the middle of a file, in place.
+flip_byte() {
+    python3 - "$1" <<'EOF'
+import os, sys
+with open(sys.argv[1], "r+b") as f:
+    middle = os.fstat(f.fileno()).st_size // 2
+    f.seek(middle)
+    byte = f.read(1)[0]
+    f.seek(middle)
+    f.write(bytes([byte ^ 0xff]))
+EOF
+}
+
 # Boots one case and judges it from the serial console and QEMU's screen. The screen
-# classifier is the one scripts/vm-test.py uses.
+# classifier is the one scripts/vm-test.py uses. Arguments: case name, expected outcome
+# (boot, refuse, verified-refuse), bootloader file, disk image.
 boot_case() {
-    local name="$1" expect="$2"
+    local name="$1" expect="$2" efi="$3" disk="$4"
     mkdir -p "$OUT/$name"
     cp "$VARS" "$WORK/vars.fd"
-    mcopy -o -i "$WORK/harddrive.img@@$ESP_OFFSET" "$WORK/$name.efi" "$BOOT_PATH"
+    mcopy -o -i "$disk@@$ESP_OFFSET" "$efi" "$BOOT_PATH"
     # -B: loading scripts/vm-test.py leaves no __pycache__ in the tree
-    python3 -B - "$name" "$expect" "$OUT/$name" "$WORK" "$OVMF_CODE" "$TIMEOUT" "$KVM" <<'EOF'
+    python3 -B - "$name" "$expect" "$OUT/$name" "$WORK" "$OVMF_CODE" "$TIMEOUT" "$KVM" "$disk" <<'EOF'
 import importlib.util, re, socket, subprocess, sys, time
 from pathlib import Path
 
-name, expect, out, work, code, timeout, kvm = sys.argv[1:]
+name, expect, out, work, code, timeout, kvm, disk = sys.argv[1:]
 out, work, timeout = Path(out), Path(work), float(timeout)
 spec = importlib.util.spec_from_file_location("vm_test", Path("scripts/vm-test.py"))
 vm_test = importlib.util.module_from_spec(spec)
@@ -177,7 +247,7 @@ command = [
     "-smp", "4", "-m", "2048",
     "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
     "-drive", f"if=pflash,format=raw,unit=1,file={work / 'vars.fd'}",
-    "-drive", f"file={work / 'harddrive.img'},format=raw,if=none,id=drv0,snapshot=on",
+    "-drive", f"file={disk},format=raw,if=none,id=drv0,snapshot=on",
     "-device", "nvme,drive=drv0,serial=NVME_SERIAL", "-device", "qemu-xhci",
     "-vga", "std", "-display", "none", "-nic", "none",
     "-serial", f"file:{serial_path}", "-monitor", f"unix:{monitor_path},server=on,wait=off",
@@ -222,12 +292,13 @@ def serial():
 
 
 REFUSED = re.compile(r"BdsDxe: failed to load .*Access Denied.*")
+VERIFIED_REFUSED = re.compile(r"FerrionOS verified boot refused to start: .*")
 KERNEL = re.compile(r"^kernel::", re.M)  # the kernel prefixes its log lines with its module path
 ok, note, frame = False, f"neither the login nor a refusal within {timeout:.0f}s", None
 while time.monotonic() - start < timeout:
     frame = screen()
     log = serial()
-    refused = REFUSED.search(log)
+    refused = REFUSED.search(log) or VERIFIED_REFUSED.search(log)
     if expect == "boot" and frame.kind() == "login":
         ok = not refused and KERNEL.search(log) is not None
         note = f"graphical login at {time.monotonic() - start:.1f}s" if ok else "login seen, but the serial log disagrees"
@@ -236,8 +307,9 @@ while time.monotonic() - start < timeout:
         time.sleep(3)  # long enough for a bootloader that ran anyway to reach the kernel
         frame, log = screen(), serial()
         started = KERNEL.search(log) is not None
-        ok = expect == "refuse" and not started
-        note = f"firmware: {refused.group(0).strip()}" + ("; but the kernel started" if started else "")
+        by_firmware = refused.re is REFUSED
+        ok = expect == ("refuse" if by_firmware else "verified-refuse") and not started
+        note = f"{'firmware' if by_firmware else 'bootloader'}: {refused.group(0).strip()}" + ("; but the kernel started" if started else "")
         break
     time.sleep(0.5)
 if frame is not None:
@@ -257,10 +329,23 @@ EOF
 FAILED=0
 : > "$OUT/summary.txt"
 for case in signed:boot unsigned:refuse wrong-key:refuse; do
-    if ! boot_case "${case%%:*}" "${case#*:}" | tee -a "$OUT/summary.txt"; then
+    name="${case%%:*}"
+    if ! boot_case "$name" "${case#*:}" "$WORK/$name.efi" "$WORK/harddrive.img" | tee -a "$OUT/summary.txt"; then
         FAILED=1
     fi
 done
+if [ "$VERIFIED" = 1 ]; then
+    [ -x "$REDOXFS_BIN" ] || { echo "secure-boot-test: $REDOXFS_BIN is missing; the tamper cases need it (-r)" >&2; exit 2; }
+    for name in tamper-kernel tamper-initfs tamper-sig; do
+        tamper "$name"
+        if ! boot_case "$name" verified-refuse "$WORK/signed.efi" "$WORK/$name.img" | tee -a "$OUT/summary.txt"; then
+            FAILED=1
+        fi
+        rm -f "$WORK/$name.img"
+    done
+else
+    echo "not a verified-boot image: tamper cases skipped" | tee -a "$OUT/summary.txt"
+fi
 {
     echo "image: $IMAGE"
     echo "firmware: $OVMF_CODE, variables enrolled in $VARS"

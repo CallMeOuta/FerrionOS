@@ -17,6 +17,8 @@ Each of these can start a cook, and `make qemu` starts the whole build when the 
 
 `REPO_BINARY=1` fills the image with upstream's prebuilt packages instead of cooking. That proves a config or the image assembly quickly, and says nothing about a changed recipe.
 
+`VERIFIED_BOOT=1` on `make image` (default 0, `mk/config.mk`) builds a verified-boot image: `scripts/verified-boot-sign.sh` signs the kernel and initfs with a development key kept in `build/verified-boot/` and writes that key into the image's UEFI bootloader, which then starts no other kernel or initfs and offers no environment editor. Live images are not covered.
+
 The image is `build/<arch>/<config>/harddrive.img`. `make mount` mounts it at `build/<arch>/<config>/filesystem/` through FUSE, and `make unmount` releases it. A mount, a push (`make p.<recipe>`) and a running QEMU exclude each other: the image takes one writer at a time.
 
 ## Boot
@@ -44,7 +46,7 @@ On the serial console Ctrl-C goes to the guest, and `Ctrl-a h` lists the keys of
 - `scripts/vm-test.py shells`: logs in as `user` on the serial console and runs each shell the x86_64 desktop offers.
 - Results print one line per run, `PASS` or `FAIL` with the screens seen and their times; the exit code is 1 when any run fails. Screenshots and the serial log of each run land in `build/vm-test/<arch>/<config>/<test>-<run>/`.
 - A new test is a function in the script that drives the `VM` object (`screenshot`, `wait_serial`, `type`, `command` for any QEMU monitor command such as `sendkey`) and returns pass or fail with a note.
-- `scripts/secure-boot-test.sh <image>` checks UEFI Secure Boot on an x86_64 image: with test keys enrolled in a copy of OVMF's variables, the bootloader signed with the db key reaches the login, and the unsigned one and one signed with an unenrolled key are refused by the firmware. It borrows the screen classifier (`Frame`) from `scripts/vm-test.py`, changes only a copy of the image, and leaves `summary.txt` and per case `serial.log` and `screen.png` in `build/secure-boot-test/`. Without arguments it prints its options and the host packages it needs.
+- `scripts/secure-boot-test.sh <image>` checks UEFI Secure Boot on an x86_64 image: with test keys enrolled in a copy of OVMF's variables, the bootloader signed with the db key reaches the login, and the unsigned one and one signed with an unenrolled key are refused by the firmware. On a verified-boot image it adds three tamper cases (a changed kernel, a changed initfs, a manifest signed by another key) that the bootloader must refuse. It borrows the screen classifier (`Frame`) from `scripts/vm-test.py`, changes only copies of the image, and leaves `summary.txt` and per case `serial.log` and `screen.png` in `build/secure-boot-test/`. Without arguments it prints its options and the host packages it needs.
 
 ## Check inside the OS without typing
 

@@ -36,7 +36,7 @@ Weaknesses in components that FerrionOS builds from other projects are in scope 
 FerrionOS is not hardened yet, and the following are known and planned work rather than vulnerabilities:
 
 * The development images log in as `user` with an empty password and as `root` with the password `password` (`config/dev-accounts.toml`). They are meant for test machines only.
-* The bootloader does not yet verify the kernel or the initial filesystem it loads. Secure Boot covers the bootloader binary only, and only when it has been signed and its key enrolled.
+* Verified boot is off by default. With `make image VERIFIED_BOOT=1`, the UEFI bootloader starts only a kernel and initial filesystem that match a manifest signed with the build's key; it does not yet cover the rest of the filesystem, live images, the BIOS bootloader, or rollback to an older signed version. Secure Boot covers the bootloader binary only when it has been signed and its key enrolled.
 * Kernel and user-space hardening (W^X enforcement in the kernel, stack canaries, address-space layout randomization in all programs) is incomplete.
 
 Report a flaw in one of these areas only when it goes beyond the limitation as stated.

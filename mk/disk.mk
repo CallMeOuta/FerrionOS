@@ -14,6 +14,9 @@ else
 	fi && \
 	truncate -s "$$FILESYSTEM_SIZE"m $@.partial
 	umask 022 && $(INSTALLER) $(INSTALLER_OPTS) -c $(FILESYSTEM_CONFIG) $@.partial
+ifeq ($(VERIFIED_BOOT),1)
+	scripts/verified-boot-sign.sh $(REDOXFS) $(VERIFIED_BOOT_KEYS) $@.partial
+endif
 	mv $@.partial $@
 endif
 
