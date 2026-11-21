@@ -1,0 +1,68 @@
+{
+  "skip": [
+    "^scripts/virtgpu-layout/linux/",
+    "^recipes/.*/source/"
+  ],
+  "required_patterns": [
+    {
+      "path": "^(Makefile|mk/[^/]+\\.mk)$",
+      "text": "^##",
+      "reason": "make-docs"
+    },
+    {
+      "path": "^(Makefile|mk/[^/]+\\.mk)$",
+      "code": "^(?!\\$\\((error|warning|info|eval|call|foreach|if|shell)\\s)[^\\t#=\\s][^#=]*?::?(?![:=])",
+      "reason": "make-target-docs"
+    },
+    {
+      "path": "^mk/qemu\\.mk$",
+      "text": "^# (IOMMU \\(iommu=yes\\)|virtio-fs shares \\(share=\\.\\.\\.\\)|QEMU_MACHINE=virt  for ACPI mode)",
+      "reason": "emulator-option-docs"
+    },
+    {
+      "path": "^mk/virtiofs\\.mk$",
+      "text": "^# Share host directories with the guest through virtio-fs \\(QEMU and Cloud Hypervisor\\)\\.",
+      "reason": "emulator-option-docs"
+    },
+    {
+      "path": "\\.toml$",
+      "code": "^\\s*mode\\s*=\\s*0o0*([2-7][0-7]{3}|[0-7]{0,3}[2367])\\b",
+      "reason": "setuid-mode-reason"
+    },
+    {
+      "path": "^flake\\.nix$",
+      "text": "^# Podman config taken from https://nixos\\.wiki/wiki/Podman",
+      "reason": "source-notice"
+    },
+    {
+      "path": "^src/cook/pty\\.rs$",
+      "text": "based on portable-pty crate",
+      "reason": "source-notice"
+    },
+    {
+      "path": "^recipes/core/ferrion-wm-smoke/crate/src/main\\.rs$",
+      "text": "^// Smithay protocol/rendering setup follows smallvil; see state\\.rs and LICENSE\\.",
+      "reason": "source-notice"
+    },
+    {
+      "path": "^recipes/core/ferrion-wm-backend/crate/src/[^/]+\\.rs$",
+      "text": "follows? \\S+ (at|and)\\b[^\\n]*\\n?[^\\n]*(LICENSE|[0-9a-f]{40})",
+      "reason": "source-notice"
+    },
+    {
+      "path": "^mk/ch\\.mk$",
+      "text": "^# Configuration file for Cloud Hypervisor\\n#\\n#   make ch ",
+      "reason": "make-target-docs"
+    },
+    {
+      "path": "^recipes/demos/(sdl2-)?gears/gears\\.c$",
+      "text": "^/\\* Conversion to GLUT by Mark J\\. Kilgard \\*/$",
+      "reason": "source-notice"
+    },
+    {
+      "path": "^recipes/demos/osdemo/osdemo\\.c$",
+      "text": "^/\\* from GLUT\\.\\.\\. \\*/$",
+      "reason": "source-notice"
+    }
+  ]
+}
