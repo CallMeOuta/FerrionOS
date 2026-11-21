@@ -1,0 +1,10 @@
+[package]
+description = "FerrionOS everyday system commands"
+dependencies = ["pkgutils", "userutils", "tpmd"]
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

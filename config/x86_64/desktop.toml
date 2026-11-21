@@ -30,6 +30,7 @@ fish-shell = "source"
 ion = {}
 nushell = {}
 zsh = {}
+ferrion-cli = {}
 # The program launcher of security roadmap S12: `ferrion-run --no-network PROGRAM`.
 # It only takes access away (the network schemes, the sudo scheme, inherited descriptors)
 # and is not setuid; scripts/vm-test.py ferrion-run checks it.
