@@ -3,6 +3,8 @@
 # person would: it watches the screen, reads the serial console and types.
 #   boot    quiet boot: nothing but black, the splash and the graphical login
 #           appear on screen, and the login arrives within the timeout
+#   gpu-heads  logs in graphically on gpu=multi and checks both Orbital outputs
+#           with screendump gpu0 0 and gpu0 1
 #   shells  logs in as `user` on the serial console and runs each shell the
 #           x86_64 desktop offers
 #   tpm     boots with a software TPM (swtpm) on QEMU's tpm-crb device, logs
@@ -65,6 +67,14 @@
 # told the image is up to date, so a run never starts a build. Screenshots
 # (PNG) and the serial log of each run go under --out. Run from the
 # repository root. Python standard library only.
+# 3D devices use EGL headless and a private Unix VNC socket; screenshots fall
+# back to RFB when screendump reports no surface. --trace EVENT records QEMU
+# events in qemu-trace.log, read by VM.trace(). Each run writes result.json with
+# host versions, capture sources and PASS/FAIL/BLOCKED. Exit codes: 0/1/2;
+# failures take priority over blocked runs. BLOCKED means a 3D host lacks the
+# Linux 6.13 floor, the device properties or the EGL headless backend.
+# Headless EGL uses the firmware primary GPU; QEMU_RENDER_NODE overrides it.
+# QEMU_VK_DRIVER_FILES selects the Vulkan driver exposed through Venus.
 
 import argparse
 import base64
@@ -72,6 +82,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import signal
 import socket
 import struct
@@ -182,6 +193,215 @@ class Frame:
                                + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
+class Blocked(RuntimeError):
+    """The host cannot run the requested graphics device."""
+
+
+def command_output(command):
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+SETTING = "vm-test-setting:"
+
+
+def qemu_settings(args, make=()):
+    """Ask make so .config, environment and command-line overrides agree with the boot."""
+    # Each value carries a prefix, so a line a makefile prints with $(info ...) is never taken for one.
+    rule = (f'vm-test-settings: ; @printf "{SETTING}%s\\n" '
+            '"$(QEMU)" "$(gpu)" "$(QEMU_VK_DRIVER_FILES)" "$(QEMU_RENDER_NODE)"')
+    command = ["make", "-s", "--no-print-directory", "--eval", rule, "vm-test-settings",
+               f"ARCH={args.arch}", f"CONFIG_NAME={args.config}", *args.make, *make]
+    result = subprocess.run(command, cwd=ROOT, env=dict(os.environ, CI="1", COOKBOOK_LOGS="true"),
+                            capture_output=True, text=True, timeout=30)
+    lines = [line[len(SETTING):] for line in result.stdout.splitlines() if line.startswith(SETTING)]
+    if result.returncode or len(lines) != 4:
+        raise RuntimeError(f"cannot read QEMU settings: {result.stdout}{result.stderr}")
+    return shlex.split(lines[0]), lines[1], lines[2], lines[3]
+
+
+def boot_render_node():
+    """Use the firmware's primary GPU for headless EGL on a host with multiple GPUs."""
+    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+        boot_vga = card / "device/boot_vga"
+        if boot_vga.exists() and boot_vga.read_text().strip() == "1":
+            nodes = sorted((card / "device/drm").glob("renderD*"))
+            if nodes:
+                return "/dev/dri/" + nodes[0].name
+    return ""
+
+
+def host_versions(qemu):
+    kernel = os.uname().release
+    drivers = []
+    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+        module = card / "device/driver/module"
+        if not module.exists():
+            continue
+        version = module / "version"
+        drivers.append({"card": card.name, "driver": module.resolve().name,
+                        "version": version.read_text().strip() if version.exists() else kernel})
+    return {"kernel": kernel, "system": sys.platform,
+            "qemu": command_output([*qemu, "--version"]),
+            "virglrenderer": command_output(["pkg-config", "--modversion", "virglrenderer"]),
+            "mesa": command_output(["pkg-config", "--modversion", "gbm"]),
+            "gpu_drivers": drivers, "vk_driver_files": os.environ.get("VK_DRIVER_FILES")}
+
+
+def intel_host():
+    try:
+        return "GenuineIntel" in Path("/proc/cpuinfo").read_text()
+    except OSError:
+        return False
+
+
+def kvm_available():
+    return Path("/dev/kvm").exists()
+
+
+def qemu_accepts(qemu, *options):
+    """Whether this QEMU, on this kernel, starts with these options: paused, with no machine, then told to quit."""
+    command = [*qemu, "-machine", "none", "-nodefaults", "-display", "none", "-S", "-qmp", "stdio", *options]
+    try:
+        result = subprocess.run(command, input='{"execute":"qmp_capabilities"}\n{"execute":"quit"}\n',
+                                capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def require_3d_host(qemu, gpu, arch):
+    """BLOCKED is for a working host that lacks a feature; a QEMU that does not run is a FAIL."""
+    if gpu not in ("venus", "virtio-gl"):
+        return
+    if command_output([*qemu, "--version"]) is None:
+        raise RuntimeError(f"cannot run {shlex.join(qemu)} --version")
+    version = re.match(r"(\d+)\.(\d+)", os.uname().release)
+    if gpu == "venus" and (sys.platform != "linux" or not version or tuple(map(int, version.groups())) < (6, 13)):
+        raise Blocked("Venus checks require Linux 6.13 or newer")
+    displays = command_output([*qemu, "-display", "help"])
+    if displays is None:
+        raise RuntimeError("QEMU did not answer -display help")
+    if "egl-headless" not in displays.splitlines():
+        raise Blocked("QEMU lacks the egl-headless display backend")
+    device = "virtio-vga-gl" if arch == "x86_64" else "virtio-gpu-gl"
+    properties = command_output([*qemu, "-device", f"{device},help"])
+    required = ("hostmem", "blob", "venus") if gpu == "venus" else ("max_outputs",)
+    missing = [name for name in required if not properties or not re.search(rf"\b{name}=", properties)]
+    if missing:
+        raise Blocked(f"QEMU lacks {device} properties: {', '.join(missing)}")
+    # mk/qemu.mk asks KVM to honor the guest's memory types for Venus on an Intel host.
+    if (gpu == "venus" and arch == "x86_64" and intel_host() and kvm_available()
+            and not qemu_accepts(qemu, "-accel", "kvm,honor-guest-pat=on")):
+        raise Blocked("QEMU or the host kernel lacks KVM's honor-guest-pat, which Venus needs on an Intel host")
+
+
+class RFB:
+    """Read raw RGB frames from QEMU's private, unauthenticated Unix VNC socket."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.deadline = None
+        if self.read(12) != b"RFB 003.008\n":
+            raise RuntimeError("QEMU VNC must support RFB 3.8")
+        self.sock.sendall(b"RFB 003.008\n")
+        security = self.read(self.read(1)[0])
+        if 1 not in security:
+            raise RuntimeError("QEMU's private VNC socket must offer no authentication")
+        self.sock.sendall(b"\x01")
+        if self.read(4) != b"\0\0\0\0":
+            raise RuntimeError("QEMU refused VNC security negotiation")
+        self.sock.sendall(b"\x01")  # Shared session: do not evict another capture client.
+        self.width, self.height = struct.unpack("!HH", self.read(4))
+        self.read(16)  # Replace the server's pixel format with big-endian 0RGB below.
+        self.read(struct.unpack("!I", self.read(4))[0])
+        self.sock.sendall(b"\0\0\0\0" + struct.pack("!BBBBHHHBBB3x", 32, 24, 1, 1, 255, 255, 255, 16, 8, 0))
+        self.sock.sendall(struct.pack("!BBHii", 2, 0, 2, 0, -223))  # Raw and DesktopSize.
+        self.rgb = bytearray(self.width * self.height * 3)
+
+    def read(self, count):
+        data = bytearray()
+        while len(data) < count:
+            if self.deadline is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("no complete VNC frame before the deadline")
+                self.sock.settimeout(min(10, remaining))
+            try:
+                chunk = self.sock.recv(count - len(data))
+            except TimeoutError:
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    raise RuntimeError("no complete VNC frame before the deadline") from None
+                raise
+            if not chunk:
+                raise RuntimeError("QEMU closed VNC during a frame")
+            data.extend(chunk)
+        return bytes(data)
+
+    def frame(self, timeout=60):
+        """A whole frame. The server may send it in several updates, so every pixel must arrive in this call."""
+        previous = self.sock.gettimeout()
+        self.deadline = time.monotonic() + timeout
+        try:
+            while True:
+                width, height = self.width, self.height
+                if len(self.rgb) != width * height * 3:
+                    self.rgb = bytearray(width * height * 3)
+                missing = bytearray(b"\x01") * (width * height)
+                left = width * height
+                resized = False
+                while left and not resized:
+                    self.sock.sendall(struct.pack("!BBHHHH", 3, 0, 0, 0, width, height))
+                    resized, covered = self._update(width, height, missing)
+                    left -= covered
+                if not resized:
+                    return Frame(width, height, bytes(self.rgb))
+        finally:
+            self.deadline = None
+            self.sock.settimeout(previous)
+
+    def _update(self, width, height, missing):
+        """Read up to one FramebufferUpdate; returns whether the screen resized, and how many pixels arrived."""
+        while True:
+            message = self.read(1)[0]
+            if message == 2:  # Bell.
+                continue
+            if message == 3:  # ServerCutText.
+                self.read(3)
+                self.read(struct.unpack("!I", self.read(4))[0])
+                continue
+            if message != 0:
+                raise RuntimeError(f"unexpected VNC message {message}")
+            break
+        self.read(1)
+        resized = False
+        covered = 0
+        for _ in range(struct.unpack("!H", self.read(2))[0]):
+            x, y, w, h, encoding = struct.unpack("!HHHHi", self.read(12))
+            if encoding == -223:
+                self.width, self.height = w, h
+                resized = True
+                continue
+            if encoding != 0:
+                raise RuntimeError(f"unexpected VNC encoding {encoding}")
+            raw = self.read(w * h * 4)
+            if resized:
+                continue
+            if x + w > width or y + h > height:
+                raise RuntimeError("VNC rectangle exceeds the framebuffer")
+            pixels = bytearray(w * h * 3)
+            pixels[0::3], pixels[1::3], pixels[2::3] = raw[1::4], raw[2::4], raw[3::4]
+            for row in range(h):
+                start = (y + row) * width + x
+                self.rgb[start * 3:(start + w) * 3] = pixels[row * w * 3:(row + 1) * w * 3]
+                covered += missing[start:start + w].count(1)
+                missing[start:start + w] = bytes(w)
+        return resized, covered
+
+
 class Swtpm:
     """A software TPM 2.0 that QEMU reaches as a tpm-crb device, for one boot."""
 
@@ -245,22 +465,43 @@ class VM:
             sys.exit(f"vm-test: {mount_dir.relative_to(ROOT)} exists, so the image is mounted or was left "
                      f"mounted; run `make unmount ARCH={args.arch} CONFIG_NAME={args.config}` when it is free")
         self.out = out
+        qemu, gpu, _, render_node = qemu_settings(args, make)
+        require_3d_host(qemu, gpu, args.arch)
+        self.is_3d = gpu in ("venus", "virtio-gl")
+        self.capture_sources = set()
+        self.last_capture_source = None
+        self.trace_path = (out / "qemu-trace.log").resolve()
+        self.trace_path.unlink(missing_ok=True)
         self.scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-"))
         self.monitor_path = self.scratch / "monitor.sock"
+        self.vnc_path = self.scratch / "vnc.sock"
         self.tpm = Swtpm() if tpm else None
         # Without -snapshot the guest writes to the disk; only for copies given by DISK= in `make`.
-        flags = f"-display none {'-snapshot ' if snapshot else ''}-monitor unix:{self.monitor_path},server=on,wait=off"
+        flags = f"{'-snapshot ' if snapshot else ''}-monitor unix:{self.monitor_path},server=on,wait=off"
+        if self.is_3d:
+            flags += f" -vnc unix:{self.vnc_path}"
+        events = getattr(args, "trace", [])
+        if events:
+            flags += " -D " + shlex.quote(str(self.trace_path))
+            flags += "".join(" -trace " + shlex.quote(f"enable={event}") for event in events)
         if self.tpm:
             flags += " " + self.tpm.qemu_flags
         if qemu_flags:
             flags += " " + qemu_flags
-        env = dict(os.environ, QEMUFLAGS=flags)
+        env = dict(os.environ, CI="1", COOKBOOK_LOGS="true", QEMUFLAGS=flags)
+        if self.is_3d:
+            # A desktop-wide EGL_PLATFORM=wayland overrides QEMU's headless GBM display.
+            env.pop("EGL_PLATFORM", None)
         # `-o` takes each target exactly as make spells it, relative to the
         # repository root (an absolute path would not match): neither the image
         # nor the package repository behind it is ever rebuilt by a test.
         build = image.parent.relative_to(ROOT)
         command = ["make", "-s", "-o", str(build / "harddrive.img"), "-o", str(build / "repo.tag"), "qemu",
-                   f"ARCH={args.arch}", f"CONFIG_NAME={args.config}", *args.make, *make]
+                   "-o", str(build / "redox-live.iso"),
+                   f"ARCH={args.arch}", f"CONFIG_NAME={args.config}", *args.make, *make,
+                   "QEMU_DISPLAY=egl-headless" if self.is_3d else "QEMU_DISPLAY=none"]
+        if self.is_3d:
+            command.append("QEMU_RENDER_NODE=" + (render_node or boot_render_node()))
         self.start = time.monotonic()
         self.proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, start_new_session=True)
@@ -268,12 +509,15 @@ class VM:
         self.lock = threading.Lock()
         self.typing = threading.Lock()
         self.log = open(out / "serial.log", "wb")
-        threading.Thread(target=self._read_serial, daemon=True).start()
+        self.reader = threading.Thread(target=self._read_serial, daemon=True)
+        self.reader.start()
         try:
             self.monitor = self._connect_monitor()
-        except RuntimeError:
-            if self.tpm:
-                self.tpm.close()
+            if self.is_3d:
+                self.vnc = self._connect_vnc()
+                self.rfb = RFB(self.vnc)
+        except (RuntimeError, OSError):
+            self.close()
             raise
 
     def elapsed(self):
@@ -291,6 +535,23 @@ class VM:
                 self.type("\x1b[1;1R" * queries)
             self.log.write(chunk)
             self.log.flush()
+
+    def _connect_vnc(self, timeout=60):
+        # QEMU opens its monitor before its displays, so the VNC socket can appear later.
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"make qemu exited with {self.proc.returncode}; see {self.out / 'serial.log'}")
+            sock = socket.socket(socket.AF_UNIX)
+            sock.settimeout(10)
+            try:
+                sock.connect(str(self.vnc_path))
+                return sock
+            except (FileNotFoundError, ConnectionRefusedError):
+                sock.close()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("QEMU's VNC socket never appeared") from None
+                time.sleep(0.05)
 
     def _connect_monitor(self):
         deadline = time.monotonic() + 60
@@ -322,10 +583,26 @@ class VM:
         self.monitor.sendall(text.encode() + b"\n")
         return self._monitor_reply()
 
-    def screenshot(self):
+    def screenshot(self, head=None, device="gpu0"):
         path = self.scratch / "frame.ppm"
-        self.command(f"screendump {path}")
+        path.unlink(missing_ok=True)
+        target = f" {device} {head}" if head is not None else ""
+        reply = self.command(f"screendump {path}{target}")
+        if "no surface" in reply.lower() and self.is_3d and head in (None, 0):
+            frame = self.rfb.frame()
+            self.last_capture_source = "vnc"
+            self.capture_sources.add("vnc")
+            return frame
+        if not path.exists():
+            raise RuntimeError(f"screendump failed: {reply}")
+        self.last_capture_source = "screendump"
+        self.capture_sources.add("screendump")
         return Frame.from_ppm(path.read_bytes())
+
+    def trace(self, event=None):
+        """Read host trace lines, optionally selecting one event (enable it with --trace)."""
+        lines = self.trace_path.read_text(errors="replace").splitlines() if self.trace_path.exists() else []
+        return [line for line in lines if event is None or re.search(rf"\b{re.escape(event)}\b", line)]
 
     def text(self, since=0):
         with self.lock:
@@ -361,12 +638,19 @@ class VM:
     def close(self):
         if self.proc.poll() is None:
             try:
-                self.monitor.sendall(b"quit\n")
+                if hasattr(self, "monitor"):
+                    self.monitor.sendall(b"quit\n")
+                else:
+                    os.killpg(self.proc.pid, signal.SIGTERM)
                 self.proc.wait(timeout=20)
             except (OSError, subprocess.TimeoutExpired):
                 os.killpg(self.proc.pid, signal.SIGTERM)
                 self.proc.wait(timeout=20)
-        self.monitor.close()
+        if hasattr(self, "monitor"):
+            self.monitor.close()
+        if hasattr(self, "vnc"):
+            self.vnc.close()
+        self.reader.join(timeout=5)
         self.log.close()
         if self.tpm:
             self.tpm.close()
@@ -395,6 +679,35 @@ def test_boot(vm, args):
     if "text" in kinds:
         return False, f"text on screen before the login ({vm.out / 'text.png'}); screens {seen}"
     return True, f"login at {seen[-1][0]}s; screens {seen}"
+
+
+def test_gpu_heads(vm, args):
+    """Orbital paints both outputs of one two-head virtio display device."""
+    while vm.elapsed() < args.timeout:
+        if vm.screenshot().kind() == "login":
+            break
+        time.sleep(0.2)
+    else:
+        for head in range(2):
+            vm.screenshot(head=head).save_png(vm.out / f"head-{head}.png")
+        return False, f"no graphical login within {args.timeout}s"
+    vm.command("sendkey ret")
+    time.sleep(2)
+    deadline = time.monotonic() + args.timeout
+    while True:
+        frames = [vm.screenshot(head=head) for head in range(2)]
+        kinds = [frame.kind() for frame in frames]
+        painted = [kind != "placeholder" and frame.has_ground_row() for frame, kind in zip(frames, kinds)]
+        if all(painted) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    for head, frame in enumerate(frames):
+        frame.save_png(vm.out / f"head-{head}.png")
+    states = ["Orbital background" if kind == "black" and painted[head] else kind
+              for head, kind in enumerate(kinds)]
+    outputs = ", ".join(f"head {head}: {frame.width}x{frame.height} {states[head]}"
+                        for head, frame in enumerate(frames))
+    return all(painted), outputs + ("; both painted by Orbital" if all(painted) else "; an output is unpainted")
 
 
 # Each line is typed into the user's shell; the pattern must match the output,
@@ -2318,6 +2631,7 @@ TESTS["driver-namespaces"] = test_driver_namespaces
 TESTS["scheme-create"] = test_scheme_create
 TESTS["nsmgr-bounds"] = test_nsmgr_bounds
 TESTS["graphics-bounds"] = test_graphics_bounds
+TESTS["gpu-heads"] = test_gpu_heads
 TESTS["sudo-notty"] = test_sudo_notty
 TESTS["desktop-regions"] = test_desktop_regions
 TESTS["resolver"] = test_resolver
@@ -2342,6 +2656,8 @@ def main():
     parser.add_argument("--out", type=Path, default=None, help="default: build/vm-test/<arch>/<config>")
     parser.add_argument("--make", action="append", default=[], metavar="VAR=VALUE",
                         help="extra make variable for `make qemu`, such as net=no; repeatable")
+    parser.add_argument("--trace", action="append", default=[], metavar="EVENT",
+                        help="enable a QEMU trace event or pattern, such as virtio_gpu_*; repeatable")
     parser.add_argument("--display", action="append", default=[], metavar="SCHEME",
                         help="graphics-bounds: check only this display scheme, such as display.virtio-gpu; repeatable")
     if len(sys.argv) == 1:
@@ -2350,24 +2666,54 @@ def main():
     args = parser.parse_args()
     if "rand-seed" in args.tests and args.arch != "x86_64":
         parser.error("rand-seed requires x86_64 with KVM and a host CPU RNG")
+    for assignment in args.make:
+        if not re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", assignment):
+            parser.error("--make requires VAR=VALUE, not a make target or option")
+        if assignment.split("=", 1)[0] in ("QEMUFLAGS", "QEMU_DISPLAY", "ARCH", "CONFIG_NAME", "BUILD"):
+            parser.error("use --arch, --config and --trace; the harness controls QEMUFLAGS, QEMU_DISPLAY and BUILD")
     out_root = args.out or ROOT / "build" / "vm-test" / args.arch / args.config
-    failures = 0
+    failures = blocked = 0
     for name in args.tests:
         for run in range(1, args.repeat + 1):
             out = out_root / f"{name}-{run}"
             out.mkdir(parents=True, exist_ok=True)
-            if name in OWN_IMAGE:
-                ok, note = OWN_IMAGE[name](args, out)
-            else:
-                vm = VM(args, out, tpm=name == "tpm",
-                        qemu_flags=RAND_FIRMWARE if name == "rand-seed" else "")
-                try:
+            vm = None
+            host = {}
+            captures = []
+            last_capture = None
+            trace_lines = 0
+            make = ("gpu=multi",) if name == "gpu-heads" else ()
+            try:
+                qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
+                host = host_versions(qemu)
+                host["vk_driver_files"] = vk_driver_files or None
+                host["render_node"] = (render_node or boot_render_node()) if gpu in ("venus", "virtio-gl") else None
+                require_3d_host(qemu, gpu, args.arch)
+                if name in OWN_IMAGE:
+                    ok, note = OWN_IMAGE[name](args, out)
+                else:
+                    vm = VM(args, out, tpm=name == "tpm", make=make,
+                            qemu_flags=RAND_FIRMWARE if name == "rand-seed" else "")
                     ok, note = TESTS[name](vm, args)
-                finally:
+                verdict = "PASS" if ok else "FAIL"
+            except Blocked as error:
+                verdict, note = "BLOCKED", str(error)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                verdict, note = "FAIL", str(error)
+            finally:
+                if vm is not None:
                     vm.close()
-            failures += not ok
-            print(f"{'PASS' if ok else 'FAIL'} {name} {run}/{args.repeat}: {note}", flush=True)
-    sys.exit(1 if failures else 0)
+                    captures = sorted(vm.capture_sources)
+                    last_capture = vm.last_capture_source
+                    trace_lines = len(vm.trace())
+            failures += verdict == "FAIL"
+            blocked += verdict == "BLOCKED"
+            result = {"test": name, "run": run, "verdict": verdict, "note": note, "host": host,
+                      "make": [*args.make, *make], "capture_sources": captures, "last_capture_source": last_capture,
+                      "trace_events": args.trace, "trace_lines": trace_lines}
+            (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"{verdict} {name} {run}/{args.repeat}: {note}", flush=True)
+    sys.exit(1 if failures else 2 if blocked else 0)
 
 
 if __name__ == "__main__":
