@@ -34,7 +34,7 @@ data = """
 /usr/bin/zsh
 """
 
-# Replaces the table from config/base.toml whole, so the password is repeated.
+# Replaces the table from config/dev-accounts.toml whole, so the password is repeated.
 [users.user]
 password = ""
 shell = "/usr/bin/nu"

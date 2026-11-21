@@ -1,6 +1,6 @@
 # Minimal configuration
 
-include = ["base.toml"]
+include = ["base.toml", "dev-accounts.toml"]
 
 # General settings
 [general]

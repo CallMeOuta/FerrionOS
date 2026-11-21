@@ -30,7 +30,7 @@ The image is `build/<arch>/<config>/harddrive.img`. `make mount` mounts it at `b
 - `live=yes` boots `redox-live.iso`, which `make live` builds, instead of the hard-drive image.
 - Further QEMU flags go in the `QEMUFLAGS` environment variable. On the make command line, `QEMUFLAGS=` replaces every flag the makefile adds.
 
-The accounts come from `config/base.toml`: `user` with an empty password, and `root` with the password `password`.
+The accounts come from `config/dev-accounts.toml`, which every config meant for QEMU work includes: `user` with an empty password, and `root` with the password `password`.
 
 On the serial console Ctrl-C goes to the guest, and `Ctrl-a h` lists the keys of QEMU's console multiplexer. QEMU exits when the guest powers off, so `shutdown` in the guest ends the run. From outside, end the `qemu-system-*` process.
 

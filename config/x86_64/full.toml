@@ -1,4 +1,4 @@
-include = [ "../base.toml", "ci.toml" ]
+include = [ "../base.toml", "../dev-accounts.toml", "ci.toml" ]
 
 # General settings
 [general]
