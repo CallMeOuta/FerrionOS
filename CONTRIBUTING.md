@@ -10,7 +10,7 @@ Your involvement still matters, and these all move the project forward:
 * Documentation improvements: a page that is wrong, unclear or missing, with your proposed text or a link to it.
 * Security reports, through [SECURITY.md](SECURITY.md).
 
-Read [AGENTS.md](AGENTS.md) and the documents it points to, and [the FerrionOS Book](book/src/SUMMARY.md), to understand how FerrionOS is built and how it works.
+Read [AGENTS.md](AGENTS.md) and the documents it points to, and [the FerrionOS Book](https://callmeouta.github.io/FerrionOS/), to understand how FerrionOS is built and how it works.
 
 ## Communication
 

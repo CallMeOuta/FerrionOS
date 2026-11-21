@@ -58,6 +58,8 @@ README_FORK = [
 IDENTIFIERS = [
     # target triples, GNU triples and the variables cargo and bindgen derive from them
     r"[\w$(){}.-]*-unknown-redox\b",
+    # make qemu's share=redox value, which shares the build tree under the tag "redox"
+    r"\|redox>",
     r"\b\w+_unknown_redox\b",
     # URLs that code or a recipe fetches: GitLab, static files, packages, GitHub mirrors
     r"https?://[\w.-]*redox-os\.org[^\s\"'`)>\]]*",

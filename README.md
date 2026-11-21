@@ -42,7 +42,7 @@ A first `make all` builds the container, the toolchain and every package of the 
 
 ## Documentation
 
-- [The FerrionOS Book](book/src/SUMMARY.md), the user documentation
+- [The FerrionOS Book](https://callmeouta.github.io/FerrionOS/), the user documentation (source in `book/`)
 - [Participating](CONTRIBUTING.md): bug reports, suggestions, reference work and documentation; [reporting a security issue](SECURITY.md)
 - [Working on this repository](AGENTS.md): task guides in `agents/skills/`, reference in `docs/`
 - [How the build works](docs/build-system.md) and [how to check a change](docs/testing.md)
