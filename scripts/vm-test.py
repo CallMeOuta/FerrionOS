@@ -30,6 +30,7 @@ LOGIN_COLOR = (43, 95, 135)
 BRIGHT = 97  # a green value at or above this counts as a lit pixel
 
 
+# scripts/secure-boot-test.sh loads this file and uses Frame (from_ppm, kind, save_png).
 class Frame:
     def __init__(self, width, height, rgb):
         self.width, self.height, self.rgb = width, height, rgb
