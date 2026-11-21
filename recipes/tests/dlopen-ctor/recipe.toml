@@ -1,0 +1,13 @@
+# External loader regression: scripts/vm-test.py dlopen-ctor --config firefox.
+[package]
+description = "Checks dynamic loader reentry from shared library constructors"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin" "${COOKBOOK_STAGE}/usr/lib"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -fPIC -shared -o "${COOKBOOK_STAGE}/usr/lib/libdlopen-ctor-leaf.so" "${COOKBOOK_RECIPE}/leaf.c" ${LDFLAGS} -ldl
+${CC} ${CFLAGS} -O2 -Wall -Wextra -fPIC -shared -o "${COOKBOOK_STAGE}/usr/lib/libdlopen-ctor-outer.so" "${COOKBOOK_RECIPE}/outer.c" ${LDFLAGS} -ldl
+${CC} ${CFLAGS} -O2 -Wall -Wextra -Wl,--export-dynamic -o "${COOKBOOK_STAGE}/usr/bin/dlopen-ctor" "${COOKBOOK_RECIPE}/dlopen-ctor.c" ${LDFLAGS} -ldl
+"""
