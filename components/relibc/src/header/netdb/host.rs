@@ -168,6 +168,14 @@ impl HostState {
         None
     }
 
+    pub fn lookup_host_local(&mut self, search_name: &[u8]) -> Option<in_addr> {
+        self.gethostbyname_local(search_name)?;
+        // Copy while the caller holds HOST_STATE; hostent points into this state.
+        Some(in_addr {
+            s_addr: u32::from_ne_bytes(self.addr_bytes),
+        })
+    }
+
     pub fn gethostbyaddr_local(&mut self, search_addr: u32) -> Option<*mut hostent> {
         self.sethostent_def();
 

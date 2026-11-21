@@ -582,10 +582,16 @@ fn getaddrinfo_inner(
     });
     let node = str::from_utf8(node_cstr.to_bytes()).map_err(|_| AddrInfoErr::EAI_NONAME)?;
 
-    let lookuphost = if ai_flags & AI_NUMERICHOST > 0 {
-        let s_addr = parse_ipv4_string(node).ok_or(AddrInfoErr::EAI_NONAME)?;
+    let numeric_addr = parse_ipv4_string(node);
+    let lookuphost = if ai_flags & AI_NUMERICHOST > 0 || numeric_addr.is_some() {
+        let s_addr = numeric_addr.ok_or(AddrInfoErr::EAI_NONAME)?;
 
         vec![in_addr { s_addr }]
+    } else if let Some(addr) = HOST_STATE
+        .lock()
+        .lookup_host_local(node_cstr.to_bytes_with_nul())
+    {
+        vec![addr]
     } else {
         match lookup_host(node) {
             Ok(hosts) => hosts,

@@ -244,23 +244,19 @@ fn parse_revdns_answer(data: &[u8]) -> Vec<u8> {
 }
 
 pub fn parse_ipv4_string(ip_string: &str) -> Option<u32> {
-    let dns_vec: Vec<u8> = ip_string
-        .trim()
-        .split('.')
-        .map(|octet| octet.parse::<u8>().unwrap_or(0))
-        .collect();
-
-    if dns_vec.len() != 4 {
+    let mut octets = ip_string.trim().split('.');
+    let mut addr = [0u8; 4];
+    for octet in &mut addr {
+        let text = octets.next()?;
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *octet = text.parse().ok()?;
+    }
+    if octets.next().is_some() {
         return None;
     }
-
-    let mut dns_arr = [0u8; 4];
-
-    for (i, octet) in dns_vec.iter().enumerate() {
-        dns_arr[i] = *octet;
-    }
-
-    Some(u32::from_ne_bytes(dns_arr))
+    Some(u32::from_ne_bytes(addr))
 }
 
 #[cfg(test)]
