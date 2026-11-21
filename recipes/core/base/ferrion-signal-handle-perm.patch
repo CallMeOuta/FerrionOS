@@ -1,0 +1,81 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f, applied after ferrion-sigchld.patch:
+Check the sender's credentials for signals sent through process and group handles.
+- a signal sent through a process handle (proc-obj) or a process group handle (pgrp-obj) names the process that made the call as its sender, so kill()'s permission check and the sender information use that process's credentials.
+- a signal sent through a group handle fails, like kill() on a group, when no member of the group could be signalled.
+
+diff --git a/bootstrap/src/procmgr.rs b/bootstrap/src/procmgr.rs
+index 4f248cf6..9e0b98a2 100644
+--- a/bootstrap/src/procmgr.rs
++++ b/bootstrap/src/procmgr.rs
+@@ -225,6 +225,7 @@ fn handle_scheme<'a>(
+                         }
+                     },
+                     op,
++                    &caller,
+                     awoken,
+                 ),
+                 Op::Fpath(mut op) => {
+@@ -1098,6 +1099,7 @@ impl<'a> ProcScheme<'a> {
+         &mut self,
+         state: VacantEntry<VirtualId, PendingState, DefaultHashBuilder>,
+         mut op: OpCall,
++        caller: &CallerCtx,
+         awoken: &mut VecDeque<VirtualId>,
+     ) -> Poll<Response> {
+         let id = op.fd();
+@@ -1313,9 +1315,11 @@ impl<'a> ProcScheme<'a> {
+                         else {
+                             return Response::ready_err(EINVAL, op);
+                         };
++                        // FerrionOS: the process that sends through the handle is the sender, so
++                        // kill()'s permission check applies to its credentials.
+                         Ready(Response::new(
+                             self.on_send_sig(
+-                                fd_pid,
++                                ProcessId(caller.pid),
+                                 target,
+                                 signal,
+                                 &mut false,
+@@ -1345,6 +1349,11 @@ impl<'a> ProcScheme<'a> {
+                             return Response::ready_err(ESRCH, op);
+                         };
+                         let group = group_rc.borrow();
++                        // FerrionOS: as for kill() on a group, the sender is the process that
++                        // sends through the handle, and the call fails when no member could be
++                        // signalled.
++                        let mut num_succeeded = 0;
++                        let mut err_opt = None;
+                         for process in &group.processes {
+                             let Some(proc_rc) = process.upgrade() else {
+                                 // some process in a group exited and was awaited
+@@ -1352,8 +1361,8 @@ impl<'a> ProcScheme<'a> {
+                                 continue;
+                             };
+                             let target = KillTarget::Proc(proc_rc.borrow().pid);
+-                            let _ = self.on_send_sig(
+-                                fd_pgid,
++                            match self.on_send_sig(
++                                ProcessId(caller.pid),
+                                 target,
+                                 signal,
+                                 &mut false,
+@@ -1361,9 +1370,17 @@ impl<'a> ProcScheme<'a> {
+                                 false,
+                                 true, // check_permission
+                                 awoken,
+-                            );
++                            ) {
++                                Ok(()) => num_succeeded += 1,
++                                Err(err) => err_opt = Some(err),
++                            }
+                         }
+-                        Ready(Response::new(Ok(0), op))
++                        let result = match (num_succeeded, err_opt) {
++                            (0, Some(err)) => Err(err),
++                            (0, None) => Err(Error::new(ESRCH)),
++                            _ => Ok(0),
++                        };
++                        Ready(Response::new(result, op))
+                     }
+                 }
+             }
