@@ -106,13 +106,10 @@ impl KernelScheme for EventScheme {
         // nval must be reported immediately
         let block = read_flags & O_NONBLOCK == 0 && nval_count == 0;
 
-        let bytes_read = match queue.read(output_remain, block, token) {
-            Ok(bytes) => bytes,
-            Err(Error { errno: EAGAIN }) => return Ok(nval_count * size_of::<Event>()),
-            Err(e) => return Err(e),
-        };
-        let total_bytes_out = (nval_count * size_of::<Event>()) + bytes_read;
+        let read_result = queue.read(output_remain, block, token);
 
+        // The subscriptions written above last for this call only: remove them however the read
+        // ended, including a non-blocking read that found nothing.
         if write_len > 0 {
             for chunk in input_slice.in_exact_chunks(size_of::<Event>()) {
                 if let Ok(mut event) = unsafe { chunk.read_exact::<Event>() } {
@@ -121,7 +118,13 @@ impl KernelScheme for EventScheme {
                 }
             }
         }
-        Ok(total_bytes_out)
+
+        let bytes_read = match read_result {
+            Ok(bytes) => bytes,
+            Err(Error { errno: EAGAIN }) => 0,
+            Err(e) => return Err(e),
+        };
+        Ok((nval_count * size_of::<Event>()) + bytes_read)
     }
 
     fn close(&self, id: usize, token: &mut CleanLockToken) -> Result<()> {
