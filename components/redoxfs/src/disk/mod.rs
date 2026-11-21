@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use syscall::error::Result;
 
 #[cfg(feature = "std")]

@@ -266,6 +266,15 @@ impl<'a, D: Disk> Transaction<'a, D> {
 
     /// Write all changes cached in this [`Transaction`] to disk.
     pub fn sync(&mut self, force_squash: bool) -> Result<bool> {
+        if !force_squash
+            && !self.header_changed
+            && self.write_cache.is_empty()
+            && self.allocator_log.is_empty()
+            && self.deallocate.is_empty()
+        {
+            return Ok(false);
+        }
+
         // Make sure alloc is synced
         self.sync_allocator(force_squash)?;
 
