@@ -1,0 +1,15 @@
+FerrionOS change to Mesa (MIT license, kept), made against both the fork the recipe pins (redox-24.0 at 9850ea1ad7d687240757ebf9a73760ceb4ba28a9) and Mesa 26.3.1 (fec8830e9c94b1d67f3d8469467d5529fb2978cd), whose sync_wait is the same. When poll is interrupted, sync_wait takes the time poll used off the remaining timeout; it subtracted the end's nanoseconds from themselves, so a wait interrupted again and again before a whole second had passed never ran out. It now subtracts the start's nanoseconds.
+
+diff --git a/src/util/libsync.h b/src/util/libsync.h
+index b22b75a..fcf914a 100644
+--- a/src/util/libsync.h
++++ b/src/util/libsync.h
+@@ -142,7 +142,7 @@ static inline int sync_wait(int fd, int timeout)
+ 			return -1;
+ 		}
+ 		timeout -= (poll_end.tv_sec - poll_start.tv_sec) * 1000 +
+-			(poll_end.tv_nsec - poll_end.tv_nsec) / 1000000;
++			(poll_end.tv_nsec - poll_start.tv_nsec) / 1000000;
+ 	} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+ 
+ 	return ret;

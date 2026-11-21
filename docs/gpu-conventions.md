@@ -53,5 +53,5 @@ FerrionOS's [`ferrion-redox-ioctl-virtgpu.patch`](../recipes/core/relibc/ferrion
 
 ## Found on the way
 
-- libsync's `sync_wait` takes the time an interrupted `poll` used off the remaining timeout in whole seconds only: it subtracts `poll_end.tv_nsec` from itself (Mesa `src/util/libsync.h:144-145`). A wait interrupted by a signal can last longer than its timeout.
+- libsync's `sync_wait` takes the time an interrupted `poll` used off the remaining timeout in whole seconds only: it subtracts `poll_end.tv_nsec` from itself (Mesa `src/util/libsync.h:144-145`). A wait interrupted by a signal can last longer than its timeout. FerrionOS's [`ferrion-libsync-wait.patch`](../recipes/libs/mesa/ferrion-libsync-wait.patch) subtracts the start's nanoseconds.
 - Venus asserts in debug builds that closing a buffer succeeds (`vn_renderer_virtgpu.c:225-226`): a debug build of Mesa stops on the `EINVAL` that relibc answers to the close request today.
