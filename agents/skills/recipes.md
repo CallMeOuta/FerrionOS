@@ -10,8 +10,8 @@ Search the whole tree before creating anything: `rg --files recipes -g recipe.to
 
 ## Where it lives
 
-- A new or unfinished port lives in `recipes/wip/<category>/<name>/`. Its `recipe.toml` opens with a `#TODO` line that says what is missing, in the tree's vocabulary: `not compiled or tested`, `compiled but not tested`, a named error (`#TODO openssl-sys crate error`), or `promote` once it works. Update the line whenever the state changes.
-- A recipe that works inside the OS lives in `recipes/<category>/<name>/`. Promoting it means moving the directory, removing the `#TODO` and giving a `tar` source its `blake3`.
+- A new or unfinished port lives in `recipes/wip/<category>/<name>/`. What it still lacks (not compiled or tested, compiled but not tested, a named build error, ready to promote) is tracked in an issue that names the recipe, not in a comment: code carries no comments (AGENTS.md, Rules). Update the issue whenever the state changes.
+- A recipe that works inside the OS lives in `recipes/<category>/<name>/`. Promoting it means moving the directory, giving a `tar` source its `blake3`, and closing its issue.
 - Prove a recipe on x86_64 first. It is the architecture with by far the most working packages ([`docs/platform-state.md`](../../docs/platform-state.md)).
 
 ## The format
@@ -46,6 +46,6 @@ Climb the ladder in [`docs/testing.md`](../../docs/testing.md) as far as the cha
 2. `make rt.<name>` prints the recipe's build tree. Done when it lists the dependencies without an error.
 3. `CI=1 COOKBOOK_LOGS=true make r.<name>` cooks it. Done when the output ends with `cook <name> - successful` and `target/<target>/stage.pkgar` exists in the recipe directory. On failure read `build/logs/<target>/<name>.log`.
 4. `find recipes/<category>/<name>/target/<target>/stage -type f` shows the files where the OS expects them.
-5. Running the program needs an image: [`images-and-qemu.md`](images-and-qemu.md). Until it has run inside the OS, a `wip` recipe says `#TODO compiled but not tested`.
+5. Running the program needs an image: [`images-and-qemu.md`](images-and-qemu.md). Until it has run inside the OS, the `wip` recipe's issue says it is compiled but not tested.
 
 A recipe reaches an image through a filesystem config, or as a dependency of a meta-package in `recipes/groups/`: [`filesystem-configs.md`](filesystem-configs.md).

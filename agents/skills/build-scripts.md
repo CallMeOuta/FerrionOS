@@ -8,7 +8,7 @@ These files run on Linux, macOS, FreeBSD and on FerrionOS itself, inside the Pod
 
 - A script starts with `#!/usr/bin/env bash`. Bash is not at `/bin/bash` on every host.
 - Indent with four spaces, or with the file's own width where it differs.
-- New: a script says what it does in a comment under the shebang, and prints its usage when called without the arguments it needs. Most of `scripts/` does, and `scripts/patch-tar.sh` is the model.
+- New: a script prints what it does and its usage when called without the arguments it needs, or with `--help`; it carries no comment beyond the shebang (AGENTS.md, Rules), so a reason behind its code goes into an ADR in `docs/adr/`.
 - The scripts in `scripts/` run from the repository root and find a recipe through `make find.<recipe>` or `target/release/repo find`.
 - A message names the OS FerrionOS. A string compared with something outside this repository keeps its value: `is_os_redox` in `native_bootstrap.sh` compares `uname -s` with `Redox`, because that is what the kernel reports.
 - Check an edit with `bash -n <script>`.

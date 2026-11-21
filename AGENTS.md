@@ -20,6 +20,7 @@ Read the matching guide before starting:
 - How a `make` run becomes an image, where a setting comes from, what a target name means: [`docs/build-system.md`](docs/build-system.md)
 - What still comes from upstream's servers and repositories: [`docs/upstream.md`](docs/upstream.md)
 - Writing a commit message, or any text a user or reader sees, or reusing work linked from an issue: [`docs/code-policy.md`](docs/code-policy.md)
+- Why the code is the way it is, before changing an area or reversing a choice: the decision records in [`docs/adr/`](docs/adr/README.md)
 - Roadmaps, when `plans/` exists on this machine (it is kept out of git, so a clone has none): `plans/kernel-roadmap.md` before setting up hosting or forks or starting kernel, relibc or RedoxFS work; `plans/product-roadmap.md` before deciding what to build next for users; `plans/linux-driver-compat.md` before porting a Linux driver; `plans/performance-roadmap.md` before changing a build flag, a hot path or a hardening default; `plans/security-roadmap.md` before any change listed under Security. Never commit them.
 
 Documentation is split by genre. `agents/skills/` holds task procedure and `docs/` holds reference on how the build system is shaped; both are for anyone working on the codebase. The roadmaps in `plans/` stay local to the maintainer's machine. User documentation is the FerrionOS Book in `book/` (mdBook, published at https://callmeouta.github.io/FerrionOS/), and it follows the same naming rule.
@@ -43,6 +44,7 @@ Single-context: `GLOSSARY.md` and `docs/adr/` at the repository root. See `docs/
 - The code in this repository is the source of truth. The book in `book/` lags behind it: where they disagree, follow the code.
 - A failure that also happens without your change is pre-existing. Report it with its log and move on.
 - Code brought in from another project keeps its license notice and names its source.
+- Code carries no comments. A decision goes into an ADR in `docs/adr/`, and a hack or an unfinished state into an issue. What stays: license and copyright notices and the source notice of brought-in code, directives a tool reads (a shebang, `shellcheck`, `noqa`), the documentation of make targets, build variables and emulator options in `Makefile` and `mk/*.mk`, and the reason for a setuid, setgid or world-write `mode`; `scripts/comment-check.config.json` lists them. `python3 scripts/comment-check.py` enforces it against `scripts/comment-check.baseline.json`, whose counts only go down: after deleting comments, lower them with `--update`. Files of code brought in byte-exact (patches, `source/`) keep theirs.
 - A single source of truth stays in code, and documents point at it instead of copying it: make targets in the comments of `Makefile` and `mk/*.mk`, build variables in `mk/config.mk`, emulator options in `mk/qemu.mk`, cookbook commands and `COOKBOOK_*` variables in `REPO_HELP_STR` (`src/bin/repo/main.rs`), recipe keys in `src/recipe.rs`. Update those when behavior changes.
 
 # Security
