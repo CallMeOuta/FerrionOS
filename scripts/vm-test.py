@@ -115,6 +115,12 @@ class VM:
         if not image.exists():
             sys.exit(f"vm-test: {image.relative_to(ROOT)} is missing; build it first: "
                      f"make image ARCH={args.arch} CONFIG_NAME={args.config}")
+        # `make qemu` unmounts a mounted image before booting it; someone else's
+        # `make mount` must never be pulled out from under them.
+        mount_dir = image.parent / "filesystem"
+        if mount_dir.exists():
+            sys.exit(f"vm-test: {mount_dir.relative_to(ROOT)} exists, so the image is mounted or was left "
+                     f"mounted; run `make unmount ARCH={args.arch} CONFIG_NAME={args.config}` when it is free")
         self.out = out
         self.scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-"))
         self.monitor_path = self.scratch / "monitor.sock"
@@ -253,7 +259,9 @@ def test_boot(vm, args):
 SHELL_CHECKS = [
     ("version | get version", r"\n0\.\d+\.\d+"),  # only Nushell runs this line
     ("bash -c 'echo bash-$((40+2)) $BASH_VERSION'", r"bash-42 5\."),
-    ("fish -c 'echo fish-(math 40+2) $version'", r"fish-42 4\."),
+    # fish prints its version even when it cannot find its scripts; the data
+    # directory shows whether it found them.
+    ("fish -c 'echo fish-(math 40+2) $version $__fish_data_dir'", r"fish-42 4\.\S+ /usr/share/fish\n"),
     ("zsh -c 'echo zsh-$((40+2)) $ZSH_VERSION'", r"zsh-42 5\."),
     ("ion -c 'echo ion-$((40+2))'", r"ion-42"),
 ]
