@@ -1,0 +1,402 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the patches listed before it in recipes/core/relibc/recipe.toml applied. In the crate redox-ioctl, `define_ioctl_data!` no longer needs a payload or its arrays to be aligned, and sends padding as zeros:
+- A scheme's view of a payload copies the fixed fields out with an unaligned read and, when a setter changed one, writes them back field by field as the view is dropped.
+- An array whose bytes are aligned for its element type is used in place; one that is not is copied out and, when it was written, written back as the view is dropped.
+- So a view writes nothing that the scheme did not change: a payload sent with a write-only call reaches the scheme read-only.
+- An array's length is computed with an overflow check; an overflow gets EINVAL.
+- The caller's side writes the fixed fields one by one into zeroed bytes, and reads them back with an unaligned read.
+- A view gains `<array>_mut()`, which writes an array in place and leaves its count as the caller sent it, beside `set_<array>()`, which also sets the count to the data's length.
+The wire format does not change, and the view's existing methods keep their signatures. Unit tests cover an array out of alignment, a payload at an odd address, padding, an array written in place, a payload in read-only memory, and a count beyond the payload. The display drivers in base build against this crate through recipes/core/base/ferrion-redox-ioctl-path.patch.
+
+diff --git a/redox-ioctl/src/ioctl_data.rs b/redox-ioctl/src/ioctl_data.rs
+index e5bc1f16..314f6b8e 100644
+--- a/redox-ioctl/src/ioctl_data.rs
++++ b/redox-ioctl/src/ioctl_data.rs
+@@ -1,4 +1,5 @@
+ use alloc::vec::Vec;
++use core::{ptr, slice};
+ 
+ pub trait IoctlData {
+     unsafe fn write(&self) -> Vec<u8>;
+@@ -77,6 +78,87 @@ impl WireLayout {
+     }
+ }
+ 
++/// A typed view of one array inside a payload. The payload's bytes need not be
++/// aligned for the element type: an array that is not is copied out, and
++/// copied back when the view is dropped, if it was written. A payload the
++/// caller sent with a write-only call is mapped read-only, so nothing is
++/// written that the scheme did not change.
++pub(crate) enum WireSlice<'a, T: Copy> {
++    InPlace(&'a mut [T]),
++    Copied {
++        values: Vec<T>,
++        bytes: &'a mut [u8],
++        written: bool,
++    },
++}
++
++impl<'a, T: Copy> WireSlice<'a, T> {
++    /// # Safety
++    ///
++    /// `bytes` holds exactly `count` elements of `T`, and any bytes are a valid `T`.
++    pub(crate) unsafe fn new(bytes: &'a mut [u8], count: usize) -> Self {
++        debug_assert_eq!(Some(bytes.len()), count.checked_mul(size_of::<T>()));
++        if bytes.as_ptr().cast::<T>().is_aligned() {
++            Self::InPlace(unsafe {
++                slice::from_raw_parts_mut(bytes.as_mut_ptr().cast::<T>(), count)
++            })
++        } else {
++            let mut values = Vec::<T>::with_capacity(count);
++            unsafe {
++                ptr::copy_nonoverlapping(
++                    bytes.as_ptr(),
++                    values.as_mut_ptr().cast::<u8>(),
++                    bytes.len(),
++                );
++                values.set_len(count);
++            }
++            Self::Copied {
++                values,
++                bytes,
++                written: false,
++            }
++        }
++    }
++
++    pub(crate) fn get(&self) -> &[T] {
++        match self {
++            Self::InPlace(values) => values,
++            Self::Copied { values, .. } => values,
++        }
++    }
++
++    pub(crate) fn get_mut(&mut self) -> &mut [T] {
++        match self {
++            Self::InPlace(values) => values,
++            Self::Copied {
++                values, written, ..
++            } => {
++                *written = true;
++                values
++            }
++        }
++    }
++}
++
++impl<T: Copy> Drop for WireSlice<'_, T> {
++    fn drop(&mut self) {
++        if let Self::Copied {
++            values,
++            bytes,
++            written: true,
++        } = self
++        {
++            unsafe {
++                ptr::copy_nonoverlapping(
++                    values.as_ptr().cast::<u8>(),
++                    bytes.as_mut_ptr(),
++                    bytes.len(),
++                );
++            }
++        }
++    }
++}
++
+ macro_rules! define_ioctl_data {
+     (@direction array) => { $crate::WireDirection::Both };
+     (@direction in_array) => { $crate::WireDirection::In };
+@@ -157,24 +239,50 @@ macro_rules! define_ioctl_data {
+             $($noncounted_field: $noncounted_ty,)*
+         }
+ 
++        /// The scheme's view of one payload. The fixed fields are a copy, written
++        /// back field by field when the view is dropped if a setter changed one,
++        /// so the payload needs no alignment, its padding keeps the caller's
++        /// bytes, and a payload sent with a write-only call, which the scheme
++        /// sees read-only, is never written.
+         pub struct $mem_ty<'a> {
+-            noncounted_fields: &'a mut ${concat(__, $mem_ty, Noncounted)},
+-            $($counted_field: &'a mut [$el],)*
++            noncounted_fields: ${concat(__, $mem_ty, Noncounted)},
++            noncounted_bytes: &'a mut [u8],
++            written: bool,
++            $($counted_field: $crate::ioctl_data::WireSlice<'a, $el>,)*
++        }
++
++        impl Drop for $mem_ty<'_> {
++            fn drop(&mut self) {
++                if !self.written {
++                    return;
++                }
++                $(
++                    let offset = ::core::mem::offset_of!(${concat(__, $mem_ty, Noncounted)}, $noncounted_field);
++                    let field = &mut self.noncounted_bytes[offset..offset + size_of::<$noncounted_ty>()];
++                    unsafe {
++                        ::core::ptr::write_unaligned(
++                            field.as_mut_ptr().cast::<$noncounted_ty>(),
++                            self.noncounted_fields.$noncounted_field,
++                        );
++                    }
++                )*
++            }
+         }
+ 
+         impl $crate::ioctl_data::IoctlData for $ioctl_ty {
+             unsafe fn write(&self) -> Vec<u8> {
+-                let noncounted_fields = ${concat(__, $mem_ty, Noncounted)} {
+-                    $($noncounted_field: self.$noncounted_field,)*
+-                };
+-                // FIXME use Vec::with_capacity
++                // Field by field into zeroed bytes, so that padding is sent as zeros.
+                 let mut data = Vec::<u8>::new();
+-                data.extend_from_slice(&unsafe {
+-                    mem::transmute::<
+-                        ${concat(__, $mem_ty, Noncounted)},
+-                        [u8; size_of::<${concat(__, $mem_ty, Noncounted)}>()],
+-                    >(noncounted_fields)
+-                });
++                data.resize(size_of::<${concat(__, $mem_ty, Noncounted)}>(), 0);
++                $(
++                    let offset = ::core::mem::offset_of!(${concat(__, $mem_ty, Noncounted)}, $noncounted_field);
++                    unsafe {
++                        ::core::ptr::write_unaligned(
++                            data[offset..].as_mut_ptr().cast::<$noncounted_ty>(),
++                            self.$noncounted_field,
++                        );
++                    }
++                )*
+                 $(
+                     let size = self.$counted_by as usize * size_of::<$el>();
+                     define_ioctl_data!(@write $dir, data, self.$counted_field, size);
+@@ -195,7 +303,9 @@ macro_rules! define_ioctl_data {
+ 
+                 assert!(buf.is_empty());
+ 
+-                let noncounted_fields = unsafe { &*core::ptr::from_ref(noncounted_fields).cast::<${concat(__, $mem_ty, Noncounted)}>() };
++                let noncounted_fields = unsafe {
++                    ::core::ptr::read_unaligned(noncounted_fields.as_ptr().cast::<${concat(__, $mem_ty, Noncounted)}>())
++                };
+                 $(self.$noncounted_field = noncounted_fields.$noncounted_field;)*
+             }
+         }
+@@ -222,25 +332,33 @@ macro_rules! define_ioctl_data {
+                 mut buf: &'a mut [u8],
+                 f: impl FnOnce($mem_ty<'a>) -> syscall::Result<usize>,
+             ) -> syscall::Result<usize> {
+-                let noncounted_fields = buf.split_off_mut(..size_of::<${concat(__, $mem_ty, Noncounted)}>())
++                let noncounted_bytes = buf.split_off_mut(..size_of::<${concat(__, $mem_ty, Noncounted)}>())
+                     .ok_or(syscall::Error::new(syscall::EINVAL))?;
+-                let noncounted_fields = unsafe { &mut *core::ptr::from_mut(noncounted_fields).cast::<${concat(__, $mem_ty, Noncounted)}>() };
++                // Every field type is valid for any bytes.
++                let noncounted_fields = unsafe {
++                    ::core::ptr::read_unaligned(noncounted_bytes.as_ptr().cast::<${concat(__, $mem_ty, Noncounted)}>())
++                };
+ 
+                 $(
+-                    let $counted_field = buf.split_off_mut(..noncounted_fields.$counted_by as usize * size_of::<$el>())
++                    let count = noncounted_fields.$counted_by as usize;
++                    let len = count
++                        .checked_mul(size_of::<$el>())
+                         .ok_or(syscall::Error::new(syscall::EINVAL))?;
+-                    let $counted_field = unsafe {
+-                        slice::from_raw_parts_mut(core::ptr::from_mut($counted_field).cast::<$el>(), noncounted_fields.$counted_by as usize)
+-                    };
++                    let $counted_field = buf.split_off_mut(..len)
++                        .ok_or(syscall::Error::new(syscall::EINVAL))?;
++                    // The bytes hold `count` elements, and every element type is valid for
++                    // any bytes.
++                    let $counted_field = unsafe { $crate::ioctl_data::WireSlice::new($counted_field, count) };
+                 )*
+ 
+                 if !buf.is_empty() {
+                     return Err(syscall::Error::new(syscall::EINVAL));
+                 }
+ 
+-
+                 f($mem_ty {
+                     noncounted_fields,
++                    noncounted_bytes,
++                    written: false,
+                     $($counted_field,)*
+                 })
+             }
+@@ -253,20 +371,176 @@ macro_rules! define_ioctl_data {
+                 /// Should not be called for fields used as array length
+                 pub fn ${concat(set_, $noncounted_field)}(&mut self, data: $noncounted_ty) {
+                     self.noncounted_fields.$noncounted_field = data;
++                    self.written = true;
+                 }
+             )*
+ 
+             $(
+                 pub fn $counted_field(&self) -> &[$el] {
+-                    self.$counted_field
++                    self.$counted_field.get()
+                 }
+ 
++                /// The array as the caller sent it, to write in place. Its count
++                /// stays as the caller sent it.
++                pub fn ${concat($counted_field, _mut)}(&mut self) -> &mut [$el] {
++                    self.$counted_field.get_mut()
++                }
++
++                /// Writes `data` and sets the count to its length, which the caller
++                /// reads back, as for Linux's requests that answer how many
++                /// elements there are.
+                 pub fn ${concat(set_, $counted_field)}(&mut self, data: &[$el]) {
+-                    let copied_count = cmp::min(data.len(), self.$counted_field.len());
+-                    self.$counted_field[..copied_count].copy_from_slice(&data[..copied_count]);
++                    let values = self.$counted_field.get_mut();
++                    let copied_count = cmp::min(data.len(), values.len());
++                    values[..copied_count].copy_from_slice(&data[..copied_count]);
+                     self.noncounted_fields.$counted_by = data.len() as _;
++                    self.written = true;
+                 }
+             )*
+         }
+     };
+ }
++
++#[cfg(test)]
++mod tests {
++    use alloc::vec;
++    use core::{ptr, slice};
++
++    use crate::{
++        IoctlData,
++        drm::{DrmModeMapDumb, DrmModeObjGetProperties, drm_version},
++    };
++
++    /// `len` bytes at `offset` from an 8-aligned base.
++    fn bytes_at(backing: &mut [u64], offset: usize, len: usize) -> &mut [u8] {
++        let all = unsafe {
++            slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), backing.len() * 8)
++        };
++        &mut all[offset..offset + len]
++    }
++
++    #[test]
++    fn an_array_out_of_alignment_is_read_and_written_back() {
++        // 12 fixed bytes, then 2 property numbers, then 2 values at offset 20.
++        let mut backing = vec![0u64; 5];
++        let payload = bytes_at(&mut backing, 0, 36);
++        payload[..4].copy_from_slice(&2u32.to_ne_bytes());
++        payload[20..28].copy_from_slice(&11u64.to_ne_bytes());
++        DrmModeObjGetProperties::with(payload, |mut data| {
++            assert_eq!(data.prop_values_ptr(), &[11, 0]);
++            data.set_props_ptr(&[1, 2]);
++            data.set_prop_values_ptr(&[7, 9]);
++            Ok(0)
++        })
++        .unwrap();
++        let payload = bytes_at(&mut backing, 0, 36);
++        assert_eq!(payload[12..20], [1, 0, 0, 0, 2, 0, 0, 0]);
++        assert_eq!(payload[20..28], 7u64.to_ne_bytes());
++        assert_eq!(payload[28..36], 9u64.to_ne_bytes());
++    }
++
++    #[test]
++    fn a_payload_at_an_odd_address_is_read_and_written_back() {
++        let mut backing = vec![0u64; 3];
++        let payload = bytes_at(&mut backing, 1, 16);
++        payload[..4].copy_from_slice(&3u32.to_ne_bytes());
++        DrmModeMapDumb::with(payload, |mut data| {
++            assert_eq!(data.handle(), 3);
++            data.set_offset(0x1000_0000);
++            Ok(0)
++        })
++        .unwrap();
++        let payload = bytes_at(&mut backing, 1, 16);
++        assert_eq!(payload[8..16], 0x1000_0000u64.to_ne_bytes());
++    }
++
++    #[test]
++    fn padding_is_sent_as_zeros() {
++        // drm_version's fixed part has 4 bytes of padding after its three numbers.
++        let version = drm_version {
++            version_major: -1,
++            version_minor: -1,
++            version_patchlevel: -1,
++            name_len: 0,
++            name: ptr::null_mut(),
++            date_len: 0,
++            date: ptr::null_mut(),
++            desc_len: 0,
++            desc: ptr::null_mut(),
++        };
++        let wire = unsafe { version.write() };
++        assert_eq!(wire.len(), 40);
++        assert_eq!(wire[..12], [0xFF; 12]);
++        assert_eq!(wire[12..16], [0; 4]);
++    }
++
++    #[test]
++    fn an_array_written_in_place_keeps_its_count() {
++        use crate::virtgpu::{VIRTGPU_DRM_CAPSET_VENUS, VirtgpuGetCaps, drm_virtgpu_get_caps};
++
++        let mut capset = [0u8; 160];
++        let mut caps = drm_virtgpu_get_caps {
++            cap_set_id: VIRTGPU_DRM_CAPSET_VENUS,
++            size: 160,
++            addr: capset.as_mut_ptr() as u64,
++            ..Default::default()
++        };
++        let mut wire = unsafe { caps.write() };
++        let len = wire.len();
++        let mut backing = vec![0u64; len.div_ceil(8)];
++        let payload = bytes_at(&mut backing, 0, len);
++        payload.copy_from_slice(&wire);
++        // The host's capset is shorter than the buffer: Linux copies what it has
++        // and leaves `size` as the caller sent it.
++        VirtgpuGetCaps::with(payload, |mut data| {
++            data.addr_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
++            Ok(0)
++        })
++        .unwrap();
++        wire.copy_from_slice(bytes_at(&mut backing, 0, len));
++        unsafe { caps.read_from(&wire) };
++        assert_eq!(caps.size, 160);
++        assert_eq!(capset[..5], [1, 2, 3, 4, 0]);
++    }
++
++    // A payload the caller sent with a write-only call is mapped read-only into
++    // the scheme. These two live in read-only memory: a view that wrote to them
++    // would fault.
++    static READ_ONLY_CAP: [u64; 2] = [0x299f_c90c, 1];
++    #[repr(C, align(8))]
++    struct Aligned8([u32; 9]);
++    static READ_ONLY_PROPS: Aligned8 = Aligned8([2, 0, 0, 1, 2, 7, 0, 9, 0]);
++
++    /// The bytes at `ptr` as the scheme sees a read-only payload: as `&mut`.
++    unsafe fn read_only(ptr: *const u8, len: usize) -> &'static mut [u8] {
++        unsafe { slice::from_raw_parts_mut(ptr.cast_mut(), len) }
++    }
++
++    #[test]
++    fn a_payload_that_is_only_read_is_not_written() {
++        let cap = unsafe { read_only(READ_ONLY_CAP.as_ptr().cast::<u8>(), 16) };
++        crate::drm::DrmSetClientCap::with(cap, |data| {
++            assert_eq!((data.capability(), data.value()), (0x299f_c90c, 1));
++            Ok(0)
++        })
++        .unwrap();
++
++        // 12 fixed bytes, 2 property numbers, then 2 values at offset 20, out of
++        // alignment for u64, so they are copied out.
++        let props = unsafe { read_only(READ_ONLY_PROPS.0.as_ptr().cast::<u8>(), 36) };
++        DrmModeObjGetProperties::with(props, |data| {
++            assert_eq!(data.props_ptr(), &[1, 2]);
++            assert_eq!(data.prop_values_ptr(), &[7, 9]);
++            Ok(0)
++        })
++        .unwrap();
++    }
++
++    #[test]
++    fn counts_beyond_the_payload_are_refused() {
++        let mut backing = vec![0u64; 2];
++        let payload = bytes_at(&mut backing, 0, 12);
++        payload[..4].copy_from_slice(&u32::MAX.to_ne_bytes());
++        assert!(DrmModeObjGetProperties::with(payload, |_| Ok(0)).is_err());
++    }
++}
