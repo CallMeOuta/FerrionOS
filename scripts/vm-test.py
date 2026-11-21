@@ -25,9 +25,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r")
-# The average color of the graphical login screen, measured on the desktop image.
-LOGIN_COLOR = (43, 95, 135)
 BRIGHT = 97  # a green value at or above this counts as a lit pixel
+LIT = bytes(0 if v < BRIGHT else 1 for v in range(256))  # bytes.translate table: 1 for a lit green value
+# The login screen and the wallpaper are drawn on FerrionOS's ground color (`ground` in
+# branding/color.tokens.json), which Orbital draws up to one step darker in images; the
+# text console draws on black.
+GROUND = (0x0F, 0x0E, 0x0C)
+# orblogin's box, centered on the screen at every resolution: its fields, labels and
+# buttons are lit, while the splash and the login background leave this rectangle dark.
+LOGIN_BOX = (216, 164)
 
 
 # scripts/secure-boot-test.sh loads this file and uses Frame (from_ppm, kind, save_png).
@@ -47,16 +53,11 @@ class Frame:
             raise ValueError("truncated image")
         return cls(width, height, rgb)
 
-    def mean(self):
-        n = self.width * self.height
-        return tuple(sum(self.rgb[c::3]) / n for c in range(3))
-
     def lit_box(self):
         """Count and bounding box (x0, y0, x1, y1) of the lit pixels."""
-        to_flag = bytes(0 if v < BRIGHT else 1 for v in range(256))
         count, rows, x0, x1 = 0, [], self.width, -1
         for y in range(self.height):
-            row = self.green[y * self.width:(y + 1) * self.width].translate(to_flag)
+            row = self.green[y * self.width:(y + 1) * self.width].translate(LIT)
             n = row.count(1)
             if n:
                 count += n
@@ -64,19 +65,24 @@ class Frame:
                 x0, x1 = min(x0, row.find(1)), max(x1, row.rfind(1))
         return count, (x0, rows[0], x1, rows[-1]) if rows else None
 
-    def has_login_blue(self):
-        """True when some row is as blue as the login background, as in a half-painted login."""
+    def lit_in(self, x0, y0, x1, y1):
+        """Number of lit pixels from (x0, y0) up to, not including, (x1, y1)."""
+        return sum(self.green[y * self.width + x0:y * self.width + x1].translate(LIT).count(1)
+                   for y in range(y0, y1))
+
+    def has_ground_row(self):
+        """True when some row is mostly the ground color, as on the login screen, even half-painted."""
         stride = self.width * 3
         for y in range(0, self.height, 8):
             row = self.rgb[y * stride:(y + 1) * stride]
-            if sum(row[2::3]) - sum(row[0::3]) > 60 * self.width:
+            # every fourth pixel of the row
+            near = sum(all(abs(row[x + c] - GROUND[c]) <= 2 for c in range(3)) for x in range(0, stride, 12))
+            if near > self.width // 8:
                 return True
         return False
 
     def kind(self):
-        """black, pointer, splash, drawing, login, placeholder (QEMU's own message) or text."""
-        if all(abs(m - c) <= 10 for m, c in zip(self.mean(), LOGIN_COLOR)):
-            return "login"
+        """black, pointer, firmware, splash, drawing, login, placeholder (QEMU's own message) or text."""
         count, box = self.lit_box()
         if not count:
             return "black"
@@ -85,15 +91,23 @@ class Frame:
             return "pointer"  # the window server has started and drawn only its mouse pointer
         if (self.width, self.height) == (640, 480) and 0.44 * self.height <= y0 and y1 <= 0.52 * self.height:
             return "placeholder"  # "Guest has not initialized the display (yet)."
-        # The splash draws only in the middle third of the screen; anything lit
-        # outside it is text or an unexpected screen.
-        if self.width / 3 <= x0 and x1 < self.width * 2 / 3 and self.height / 3 <= y0 and y1 < self.height * 2 / 3:
+        width, height = LOGIN_BOX
+        left, top = (self.width - width) // 2, (self.height - height) // 2
+        in_box = self.lit_in(left, top, left + width, top + height)
+        ground = self.has_ground_row()
+        middle = self.width / 3 <= x0 and x1 < self.width * 2 / 3
+        # The firmware's logo, alone in the middle of a black screen before the bootloader runs.
+        if not ground and middle and self.height / 3 <= y0 and y1 < self.height * 2 / 3:
+            return "firmware"
+        # The splash draws the mark and its progress bar in the middle third of
+        # the screen's width and its upper two thirds, never in orblogin's box;
+        # the login background drawn before its box looks the same and counts as splash.
+        if not in_box and middle and y1 < self.height * 2 / 3:
             return "splash"
-        # A screenshot taken while the login is being painted: the text
-        # console draws gray on black and never this blue.
-        if self.has_login_blue():
-            return "drawing"
-        return "text"
+        # The text console draws gray on black and never on the ground color.
+        if not ground:
+            return "text"
+        return "login" if in_box else "drawing"
 
     def save_png(self, path):
         stride = self.width * 3
@@ -285,7 +299,91 @@ def test_shells(vm, args):
     return True, f"{len(SHELL_CHECKS)} shell checks passed"
 
 
-TESTS = {"boot": test_boot, "shells": test_shells}
+def settle(vm, timeout, still=1.0):
+    """Screenshots until the screen stops changing for `still` seconds; returns the last frame."""
+    deadline = time.monotonic() + timeout
+    frame, since = vm.screenshot(), time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        new = vm.screenshot()
+        if new.rgb != frame.rgb:
+            frame, since = new, time.monotonic()
+        elif time.monotonic() - since >= still:
+            break
+    return frame
+
+
+# Lines the screenshots test types into the user's serial shell before opening
+# programs: files for the programs to show.
+SCREENSHOT_SETUP = [
+    "bash -c 'printf \"%s\\n\" \"fn main() {\" \"    let name = \\\"FerrionOS\\\";\" "
+    "\"    println!(\\\"Hello from {name}!\\\");\" \"}\" > /tmp/hello.rs'",
+]
+
+# Programs the screenshots test opens on the desktop, one at a time, from the
+# serial console: (file name, command line without single quotes). The terminals
+# run a command and stay open. Each window closes before the next opens.
+SCREENSHOT_APPS = [
+    # In COSMIC Terminal Nushell sees a terminal one column wide, and an
+    # interactive Nushell clears the screen at its first prompt: the table gets
+    # its width from the command line, and the terminal then waits instead.
+    ("terminal-nushell", 'cosmic-term -e bash -c "nu -c \\"ls /usr/share/ui | sort-by size | table --width 110\\"; sleep 3600"'),
+    ("terminal-fish", 'cosmic-term -e fish -C "ls -l /usr/share/ui"'),
+    ("files", "cosmic-files /usr"),
+    ("editor", "cosmic-edit /tmp/hello.rs"),
+    ("viewer", "viewer /usr/share/ui/login.png"),
+]
+
+
+def test_screenshots(vm, args):
+    """Captures the splash, the login, the desktop and each program in SCREENSHOT_APPS as PNG."""
+    saved = []
+
+    def save(name, frame):
+        path = vm.out / f"{len(saved) + 1:02}-{name}.png"
+        frame.save_png(path)
+        saved.append(path.name)
+
+    # The last frame of the splash shows its progress bar furthest along.
+    kind, splash, splash_over = None, None, False
+    while vm.elapsed() < args.timeout and kind != "login":
+        frame = vm.screenshot()
+        kind = frame.kind()
+        if kind == "splash" and not splash_over:
+            splash = frame
+        elif splash:
+            splash_over = True
+        time.sleep(0.1)
+    if kind != "login":
+        return False, f"no login within {args.timeout}s"
+    if splash:
+        save("splash", splash)
+    save("login", settle(vm, 10))
+
+    # The login screen has `user` filled in and the password field focused;
+    # the dev account's password is empty.
+    vm.command("sendkey ret")
+    time.sleep(2)
+    save("desktop", settle(vm, 20, still=2.0))
+
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s; saved {saved}"
+    vm.type("user\n")
+    time.sleep(3)
+    for line in SCREENSHOT_SETUP:
+        vm.type(line + "\n")
+        time.sleep(1)
+    # The user's shell is Nushell, which has no `&`; bash starts each program
+    # in the background and keeps its process id for closing it.
+    for name, command in SCREENSHOT_APPS:
+        vm.type(f"bash -c '{command} >/dev/null 2>&1 & echo $! > /tmp/vm-test-app.pid'\n")
+        save(name, settle(vm, 30, still=2.0))
+        vm.type("bash -c 'kill $(cat /tmp/vm-test-app.pid)'\n")
+        time.sleep(2)
+    return True, f"saved {len(saved)} screenshots in {vm.out}: {saved}"
+
+
+TESTS = {"boot": test_boot, "shells": test_shells, "screenshots": test_screenshots}
 
 
 def main():
