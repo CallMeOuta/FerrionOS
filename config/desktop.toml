@@ -1,6 +1,8 @@
 # Default build system configuration
 
-include = ["desktop-minimal.toml", "server.toml"]
+# desktop-minimal.toml comes last so that its override of minimal.toml's
+# 30_console_switch wins over the copy server.toml brings in again.
+include = ["server.toml", "desktop-minimal.toml"]
 
 # General settings
 [general]

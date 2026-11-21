@@ -52,11 +52,12 @@ requires_weak 10_net.target
 glib-compile-schemas /usr/share/glib-2.0/schemas/
 """
 
-# Overridden to launch X instead of orblogin
+# Overridden to launch X instead of orblogin; after 30_console.target, as in
+# desktop-minimal.toml, so that orbital gets VT 3
 [[files]]
 path = "/usr/lib/init.d/20_orbital"
 data = """
-requires_weak 10_dbus 10_xenv 20_audiod.service
+requires_weak 10_dbus 10_xenv 20_audiod.service 30_console.target
 nowait BROWSER=/bin/netsurf-fb VT=3 orbital orbital-x11
 """
 

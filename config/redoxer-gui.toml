@@ -7,11 +7,12 @@ include = ["redoxer.toml"]
 orbdata = {}
 orbital = {}
 
-# Override to run inside of orbital
+# Override to run inside of orbital; after 30_console.target, as in
+# desktop-minimal.toml, so that orbital gets VT 3
 [[files]]
 path = "/usr/lib/init.d/30_redoxer"
 data = """
-requires_weak 10_net.target
+requires_weak 10_net.target 30_console.target
 echo
 echo "## running redoxer in orbital ##"
 nowait VT=3 orbital redoxerd

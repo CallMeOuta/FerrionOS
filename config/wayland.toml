@@ -28,11 +28,12 @@ wayland-rs = {}
 winit-wayland = {}
 xkeyboard-config = {}
 
-# Overridden to launch wayland compositor instead of orblogin
+# Overridden to launch wayland compositor instead of orblogin; after
+# 30_console.target, as in desktop-minimal.toml, so that orbital gets VT 3
 [[files]]
 path = "/usr/lib/init.d/20_orbital"
 data = """
-requires_weak 10_net.target 20_audiod.service
+requires_weak 10_net.target 20_audiod.service 30_console.target
 nowait BROWSER=/bin/netsurf-fb VT=3 orbital orbital-wayland
 """
 
