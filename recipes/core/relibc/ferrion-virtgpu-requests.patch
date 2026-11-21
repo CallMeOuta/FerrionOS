@@ -1,0 +1,304 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-redox-ioctl-virtgpu.patch and ferrion-redox-ioctl-views.patch last among them. It carries the requests of slice GP3 of FerrionOS's GPU plan:
+- The DRM translation forwards DRM's close request (0x09, the virtgpu module's GemClose) and virtio-gpu's get-parameter (0x43), get-capset (0x49) and context-init (0x4b) to the driver; the version request already went through.
+- Context-init sends its parameters by value and then the context's name, which no structure of Linux's carries: the string a DEBUG_NAME parameter points at, else the name the program runs under, as Linux names a context after the process. More than four parameters get EINVAL before any is read, a parameter array or name at address 0 EFAULT.
+- redox-ioctl: a hand-written context-init payload in the virtgpu module that carries the name after the parameters, reads every field by value, and keeps the LAYOUT the layout check compares with Linux's header, with unit tests.
+
+diff --git a/redox-ioctl/src/virtgpu.rs b/redox-ioctl/src/virtgpu.rs
+index 18f83488..8e6577bc 100644
+--- a/redox-ioctl/src/virtgpu.rs
++++ b/redox-ioctl/src/virtgpu.rs
+@@ -50,7 +50,7 @@ use core::{
+     slice,
+ };
+ 
+-use crate::{IoctlData, WireField, WireLayout};
++use crate::{IoctlData, WireArray, WireDirection, WireField, WireLayout};
+ 
+ /// `DRM_COMMAND_BASE` of Linux's `drm.h`: driver requests start here.
+ pub const DRM_COMMAND_BASE: u64 = 0x40;
+@@ -389,11 +389,127 @@ define_ioctl_data! {
+     }
+ }
+ 
+-define_ioctl_data! {
+-    struct drm_virtgpu_context_init, VirtgpuContextInit {
+-        num_params: u32,
+-        pad: u32,
+-        ctx_set_params: u64 [in_array<drm_virtgpu_context_set_param, num_params>],
++/// The most parameters context-init takes: Linux refuses more before it reads
++/// any (`virtgpu_ioctl.c`, "Number of unique parameters supported at this
++/// time").
++pub const CONTEXT_INIT_MAX_PARAMS: u32 = 4;
++
++/// The longest name a context is given: the 64-byte name of virtio-gpu's
++/// context-create command less its terminating zero, as many as Linux's
++/// `strscpy` into that field leaves.
++pub const CONTEXT_NAME_MAX: usize = 63;
++
++#[repr(C)]
++pub struct __VirtgpuContextInitNoncounted {
++    num_params: u32,
++    pad: u32,
++}
++
++/// The payload of context-init: the structure without its pointer, the
++/// parameters `ctx_set_params` points at (sent, not copied back), then the
++/// context's name, which Linux's structure does not hold.
++///
++/// A `DEBUG_NAME` parameter holds the address of a string inside an array
++/// element, which no payload can carry. So relibc reads that string itself and
++/// sends its bytes after the parameters, at most `CONTEXT_NAME_MAX` of them and
++/// without a terminating zero. When the program gives no name, as Mesa's Venus
++/// driver does not, relibc sends the name the program runs under, which is what
++/// Linux names a context after. The `DEBUG_NAME` parameter itself still arrives,
++/// its value being the caller's address, which means nothing to the driver.
++/// This payload is written by hand for that name; its `LAYOUT` describes the
++/// part Linux's structure has.
++pub struct VirtgpuContextInit<'a> {
++    num_params: u32,
++    params: &'a [u8],
++    name: &'a [u8],
++}
++
++impl<'a> VirtgpuContextInit<'a> {
++    pub const LAYOUT: WireLayout = WireLayout {
++        fixed_size: size_of::<__VirtgpuContextInitNoncounted>(),
++        fixed: &[
++            WireField {
++                name: "num_params",
++                offset: offset_of!(__VirtgpuContextInitNoncounted, num_params),
++                size: 4,
++            },
++            WireField {
++                name: "pad",
++                offset: offset_of!(__VirtgpuContextInitNoncounted, pad),
++                size: 4,
++            },
++        ],
++        arrays: &[WireArray {
++            pointer: "ctx_set_params",
++            count: "num_params",
++            element: "drm_virtgpu_context_set_param",
++            size: size_of::<drm_virtgpu_context_set_param>(),
++            align: align_of::<drm_virtgpu_context_set_param>(),
++            direction: WireDirection::In,
++        }],
++    };
++
++    /// The payload relibc sends: `pad` as the caller gave it, the parameters
++    /// read from the caller's array, then `name` cut to `CONTEXT_NAME_MAX`.
++    pub fn wire(pad: u32, params: &[drm_virtgpu_context_set_param], name: &[u8]) -> Vec<u8> {
++        let name = &name[..cmp::min(name.len(), CONTEXT_NAME_MAX)];
++        let mut data = Vec::with_capacity(
++            size_of::<__VirtgpuContextInitNoncounted>() + mem::size_of_val(params) + name.len(),
++        );
++        data.extend_from_slice(&(params.len() as u32).to_ne_bytes());
++        data.extend_from_slice(&pad.to_ne_bytes());
++        for param in params {
++            data.extend_from_slice(&param.param.to_ne_bytes());
++            data.extend_from_slice(&param.value.to_ne_bytes());
++        }
++        data.extend_from_slice(name);
++        data
++    }
++
++    /// Splits a payload the driver received. `EINVAL` when it holds fewer
++    /// parameters than `num_params` says, or a name longer than
++    /// `CONTEXT_NAME_MAX`. Reads every field by value, so the payload may have
++    /// any alignment.
++    pub fn with(
++        buf: &'a [u8],
++        f: impl FnOnce(VirtgpuContextInit<'a>) -> syscall::Result<usize>,
++    ) -> syscall::Result<usize> {
++        let invalid = || syscall::Error::new(syscall::EINVAL);
++        let (fixed, rest) = buf
++            .split_at_checked(size_of::<__VirtgpuContextInitNoncounted>())
++            .ok_or_else(invalid)?;
++        let num_params = u32::from_ne_bytes(fixed[..4].try_into().unwrap());
++        let len = (num_params as usize)
++            .checked_mul(size_of::<drm_virtgpu_context_set_param>())
++            .ok_or_else(invalid)?;
++        let (params, name) = rest.split_at_checked(len).ok_or_else(invalid)?;
++        if name.len() > CONTEXT_NAME_MAX {
++            return Err(invalid());
++        }
++        f(VirtgpuContextInit {
++            num_params,
++            params,
++            name,
++        })
++    }
++
++    pub fn num_params(&self) -> u32 {
++        self.num_params
++    }
++
++    pub fn params(&self) -> impl Iterator<Item = drm_virtgpu_context_set_param> + 'a {
++        self.params
++            .chunks_exact(size_of::<drm_virtgpu_context_set_param>())
++            .map(|param| drm_virtgpu_context_set_param {
++                param: u64::from_ne_bytes(param[..8].try_into().unwrap()),
++                value: u64::from_ne_bytes(param[8..].try_into().unwrap()),
++            })
++    }
++
++    /// The bytes relibc sent as the context's name, untrusted: any bytes, at
++    /// most `CONTEXT_NAME_MAX` of them.
++    pub fn name(&self) -> &'a [u8] {
++        self.name
+     }
+ }
+ 
+@@ -618,4 +734,44 @@ mod tests {
+         assert!(VirtgpuContextInit::with(payload, |_| Ok(0)).is_err());
+         assert!(VirtgpuGetparam::with(&mut [0u8; 15], |_| Ok(0)).is_err());
+     }
++
++    #[test]
++    fn context_init_carries_its_parameters_and_name() {
++        let params = [
++            drm_virtgpu_context_set_param {
++                param: VIRTGPU_CONTEXT_PARAM_CAPSET_ID,
++                value: u64::from(VIRTGPU_DRM_CAPSET_VENUS),
++            },
++            drm_virtgpu_context_set_param {
++                param: VIRTGPU_CONTEXT_PARAM_NUM_RINGS,
++                value: 64,
++            },
++        ];
++        let wire = VirtgpuContextInit::wire(0, &params, b"gpu-probe-context");
++        assert_eq!(wire.len(), 8 + 32 + 17);
++        // At an odd address: every field is read by value.
++        let mut shifted = vec![0u8; wire.len() + 1];
++        shifted[1..].copy_from_slice(&wire);
++        VirtgpuContextInit::with(&shifted[1..], |data| {
++            assert_eq!(data.num_params(), 2);
++            let got: Vec<_> = data.params().map(|p| (p.param, p.value)).collect();
++            assert_eq!(got, [(1, 4), (2, 64)]);
++            assert_eq!(data.name(), b"gpu-probe-context");
++            Ok(0)
++        })
++        .unwrap();
++    }
++
++    #[test]
++    fn context_name_is_cut_and_bounded() {
++        let long = [b'x'; 100];
++        let wire = VirtgpuContextInit::wire(0, &[], &long);
++        assert_eq!(wire.len(), 8 + CONTEXT_NAME_MAX);
++        let mut over = wire.clone();
++        over.push(b'x');
++        assert!(VirtgpuContextInit::with(&over, |_| Ok(0)).is_err());
++        let mut huge = wire;
++        huge[..4].copy_from_slice(&u32::MAX.to_ne_bytes());
++        assert!(VirtgpuContextInit::with(&huge, |_| Ok(0)).is_err());
++    }
+ }
+diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
+index 7d22e691..d9729a61 100644
+--- a/src/header/sys_ioctl/redox/drm.rs
++++ b/src/header/sys_ioctl/redox/drm.rs
+@@ -1,12 +1,19 @@
+ use core::slice;
+ 
+-use redox_ioctl::{IoctlData, drm::*};
++use redox_ioctl::{
++    IoctlData,
++    drm::*,
++    virtgpu::{self, GEM_CLOSE, VirtgpuContextInit, drm_gem_close, drm_virtgpu_context_set_param},
++};
+ use syscall::flag::{F_SETFD, O_RDWR};
+ 
+ use crate::{
+     error::{Errno, Result},
+-    header::{errno::EINVAL, fcntl::sys::FD_CLOEXEC},
+-    platform::types::c_int,
++    header::{
++        errno::{EFAULT, EINVAL},
++        fcntl::sys::FD_CLOEXEC,
++    },
++    platform::{self, types::c_int},
+ };
+ 
+ use super::IoctlBuffer;
+@@ -87,6 +94,61 @@ impl Dev {
+         Ok(res as c_int)
+     }
+ 
++    /// Context-init. The parameters are read from the caller's array and sent
++    /// by value, then the context's name: the string a `DEBUG_NAME` parameter
++    /// points at, or else the name the program runs under, as Linux names a
++    /// context after the process. See `VirtgpuContextInit`.
++    unsafe fn virtgpu_context_init(&self, buf: IoctlBuffer) -> Result<c_int> {
++        let init = unsafe { buf.read::<virtgpu::drm_virtgpu_context_init>() }?;
++        // Linux refuses more parameters than it knows before it reads any.
++        if init.num_params > virtgpu::CONTEXT_INIT_MAX_PARAMS {
++            return Err(Errno(EINVAL));
++        }
++        let count = init.num_params as usize;
++        if count != 0 && init.ctx_set_params == 0 {
++            return Err(Errno(EFAULT));
++        }
++        let array = init.ctx_set_params as usize as *const drm_virtgpu_context_set_param;
++        let mut params =
++            [drm_virtgpu_context_set_param::default(); virtgpu::CONTEXT_INIT_MAX_PARAMS as usize];
++        for (i, param) in params[..count].iter_mut().enumerate() {
++            *param = unsafe { array.add(i).read_unaligned() };
++        }
++        let params = &params[..count];
++
++        let mut name = [0u8; virtgpu::CONTEXT_NAME_MAX];
++        let source = match params
++            .iter()
++            .find(|param| param.param == virtgpu::VIRTGPU_CONTEXT_PARAM_DEBUG_NAME)
++        {
++            Some(param) if param.value == 0 => return Err(Errno(EFAULT)),
++            Some(param) => param.value as usize as *const u8,
++            None => unsafe { platform::program_invocation_short_name }
++                .cast_const()
++                .cast::<u8>(),
++        };
++        let mut len = 0;
++        if !source.is_null() {
++            while len < name.len() {
++                let byte = unsafe { source.add(len).read() };
++                if byte == 0 {
++                    break;
++                }
++                name[len] = byte;
++                len += 1;
++            }
++        }
++
++        let wire = VirtgpuContextInit::wire(init.pad, params, &name[..len]);
++        let res = redox_rt::sys::sys_call_wo(
++            self.fd as usize,
++            &wire,
++            syscall::CallFlags::empty(),
++            &[virtgpu::CONTEXT_INIT],
++        )?;
++        Ok(res as c_int)
++    }
++
+     unsafe fn prime_handle_to_fd(&self, mut buf: IoctlBuffer) -> Result<c_int> {
+         let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
+         let writable = (data.flags & O_RDWR as u32) != 0;
+@@ -124,10 +186,18 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
+         0x00 => unsafe { dev.read_write_ioctl::<drm_version>(buf, VERSION) },
+         0x01 => unsafe { dev.read_write_ioctl::<drm_unique>(buf, GET_UNIQUE) },
+         0x07 => unsafe { dev.read_write_ioctl::<drm_set_version>(buf, SET_VERSION) },
++        0x09 => unsafe { dev.write_ioctl::<drm_gem_close>(buf, GEM_CLOSE) },
+         0x0C => unsafe { dev.read_write_ioctl::<drm_get_cap>(buf, GET_CAP) },
+         0x0D => unsafe { dev.write_ioctl::<drm_set_client_cap>(buf, SET_CLIENT_CAP) },
+         0x2D => unsafe { dev.prime_handle_to_fd(buf) },
+         0x2E => unsafe { dev.prime_fd_to_handle(buf) },
++        0x43 => unsafe {
++            dev.read_write_ioctl::<virtgpu::drm_virtgpu_getparam>(buf, virtgpu::GETPARAM)
++        },
++        0x49 => unsafe {
++            dev.read_write_ioctl::<virtgpu::drm_virtgpu_get_caps>(buf, virtgpu::GET_CAPS)
++        },
++        0x4B => unsafe { dev.virtgpu_context_init(buf) },
+         0xA0 => unsafe { dev.read_write_ioctl::<drm_mode_card_res>(buf, MODE_CARD_RES) },
+         0xA1 => unsafe { dev.read_write_ioctl::<drm_mode_crtc>(buf, MODE_GET_CRTC) },
+         0xA2 => unsafe { dev.read_write_ioctl::<drm_mode_crtc>(buf, MODE_SET_CRTC) },
