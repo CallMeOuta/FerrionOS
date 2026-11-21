@@ -9,15 +9,18 @@
 prompt = false
 
 [packages]
-base = {}
-bootloader = {}
-kernel = {}
+# FerrionOS carries patches for these four (recipes/core/<name>/*.patch), so they
+# are always built from source: with REPO_BINARY=1 the package server would
+# otherwise supply upstream's builds without the patches.
+base = "source"
+bootloader = "source"
+kernel = "source"
 libgcc = {}
 libstdcxx = {}
 netdb = {}
 netutils = {}
 relibc = {}
-userutils = {}
+userutils = "source"
 uutils = {}
 
 ## Configuration files
