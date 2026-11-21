@@ -4,3 +4,5 @@ description = "PCI driver spawner"
 [service]
 cmd = "pcid-spawner"
 type = "oneshot"
+# Opens PCI devices and starts their drivers, which inherit the right.
+hardware = true

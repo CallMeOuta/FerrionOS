@@ -6,3 +6,5 @@ requires_weak = ["10_inputd.service", "20_graphics.target", "40_hwd.service"]
 cmd = "pcid-spawner"
 args = ["--initfs"]
 type = "oneshot"
+# Opens PCI devices and starts their drivers, which inherit the right.
+hardware = true

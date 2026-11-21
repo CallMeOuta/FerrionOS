@@ -5,3 +5,5 @@ default_dependencies = false
 [service]
 cmd = "rtcd"
 type = "oneshot"
+# Reads the real-time clock through I/O ports.
+hardware = true

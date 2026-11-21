@@ -6,3 +6,5 @@ requires_weak = ["10_inputd.service", "10_lived.service", "20_graphics.target"]
 cmd = "hwd"
 inherit_envs = ["RSDP_ADDR", "RSDP_SIZE"]
 type = "notify"
+# Reads ACPI tables and starts acpid and pcid, which inherit the right.
+hardware = true

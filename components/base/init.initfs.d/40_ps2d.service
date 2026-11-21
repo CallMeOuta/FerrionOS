@@ -6,3 +6,5 @@ condition_architecture = ["x86", "x86_64"]
 [service]
 cmd = "ps2d"
 type = "notify"
+# Drives the PS/2 controller through serio and I/O ports.
+hardware = true

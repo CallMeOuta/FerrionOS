@@ -24,6 +24,12 @@ pub struct Service {
     pub type_: ServiceType,
     #[serde(default)]
     pub priority: Option<i32>,
+    /// The hardware right (FerrionOS lockdown, S13): the service may open `irq`, `serio`,
+    /// `kernel.acpi`, `pci` and `acpi`, map physical memory and use I/O ports, and what it starts
+    /// inherits the right. Only drivers and the driver managers set it; every other service,
+    /// root's included, starts without it.
+    #[serde(default)]
+    pub hardware: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -47,6 +53,9 @@ impl Service {
             }
         }
         command.envs(base_envs).envs(&self.envs);
+        if !self.hardware {
+            daemon::without_hardware(&mut command);
+        }
 
         let (mut read_pipe, write_pipe) = io::pipe().unwrap();
         unsafe { pass_fd(&mut command, "INIT_NOTIFY", write_pipe.as_raw_fd()) };

@@ -7,3 +7,5 @@ cmd = "redoxfs"
 args = ["--uuid" ,"$REDOXFS_UUID", "file", "$REDOXFS_BLOCK"]
 inherit_envs = ["REDOXFS_PASSWORD_ADDR", "REDOXFS_PASSWORD_SIZE"]
 type = "oneshot"
+# Reads the disk password from the physical address the bootloader passes.
+hardware = true

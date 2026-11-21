@@ -20,13 +20,51 @@ use syscall::error::*;
 use syscall::schemev2::NewFdFlags;
 use syscall::{CallFlags, FobtainFdFlags, Stat};
 
+/// Schemes that reach hardware directly. Only a namespace handle that still holds the hardware
+/// right opens, lists, forks, registers or removes them (FerrionOS lockdown, S13).
+const HARDWARE_SCHEMES: &[&str] = &["irq", "serio", "kernel.acpi", "pci", "acpi"];
+/// The kernel's memory scheme. Through a handle without the hardware right it is the kernel's
+/// restricted root, which allocates ordinary memory and refuses physical memory and port I/O.
+const MEMORY_SCHEME: &str = "memory";
+/// The bit of a `ShrinkPermissions` request that keeps the hardware right. libredox's
+/// `NsPermissions` does not define it, so a request built from those permissions drops the right.
+const NS_HARDWARE: usize = 1 << (usize::BITS - 1);
+
+/// Whether only a handle with the hardware right may register or remove `name`.
+fn is_protected_scheme(name: &str) -> bool {
+    name == MEMORY_SCHEME || HARDWARE_SCHEMES.contains(&name)
+}
+
 #[derive(Debug, Clone)]
 struct Namespace {
     schemes: HashMap<String, Arc<FdGuard>>,
 }
 
 impl Namespace {
-    fn fork(&self, buf: &[u8]) -> Result<Self> {
+    /// The capability `name` stands for, seen through a handle with or without the hardware right.
+    fn resolve(
+        &self,
+        name: &str,
+        hardware: bool,
+        restricted_memory: Option<&Arc<FdGuard>>,
+    ) -> Option<Arc<FdGuard>> {
+        let fd = self.schemes.get(name)?;
+        if hardware {
+            Some(fd.clone())
+        } else if name == MEMORY_SCHEME {
+            restricted_memory.cloned()
+        } else if HARDWARE_SCHEMES.contains(&name) {
+            None
+        } else {
+            Some(fd.clone())
+        }
+    }
+    fn fork(
+        &self,
+        buf: &[u8],
+        hardware: bool,
+        restricted_memory: Option<&Arc<FdGuard>>,
+    ) -> Result<Self> {
         let mut schemes = HashMap::new();
         let mut cursor = 0;
         while cursor < buf.len() {
@@ -37,23 +75,22 @@ impl Namespace {
             cursor += len;
             if name.ends_with('*') {
                 let prefix = &name[..name.len() - 1];
-                for (registered_name, fd) in &self.schemes {
-                    if registered_name.starts_with(prefix) {
-                        schemes.insert(registered_name.clone(), fd.clone());
+                for registered_name in self.schemes.keys() {
+                    if registered_name.starts_with(prefix)
+                        && let Some(fd) = self.resolve(registered_name, hardware, restricted_memory)
+                    {
+                        schemes.insert(registered_name.clone(), fd);
                     }
                 }
             } else {
-                let Some(fd) = self.schemes.get(&name) else {
+                let Some(fd) = self.resolve(&name, hardware, restricted_memory) else {
                     warn!("Scheme {} not found in namespace", name);
                     continue;
                 };
-                schemes.insert(name, fd.clone());
+                schemes.insert(name, fd);
             }
         }
         Ok(Self { schemes })
-    }
-    fn get_scheme_fd(&self, scheme: &str) -> Option<&Arc<FdGuard>> {
-        self.schemes.get(scheme)
     }
     fn remove_scheme(&mut self, scheme: &str) -> Option<()> {
         self.schemes.remove(scheme).map(|_| ())
@@ -64,6 +101,8 @@ impl Namespace {
 struct NamespaceAccess {
     namespace: Rc<RefCell<Namespace>>,
     permission: NsPermissions,
+    /// The hardware right. The init process holds it and passes it only to drivers.
+    hardware: bool,
 }
 
 impl NamespaceAccess {
@@ -103,6 +142,8 @@ pub struct NamespaceScheme<'sock> {
     root_namespace: Namespace,
     next_id: usize,
     scheme_creation_cap: Rc<FdGuardUpper>,
+    /// What `memory` resolves to without the hardware right; `None` hides `memory` instead.
+    restricted_memory: Option<Arc<FdGuard>>,
 }
 
 const HIGH_PERMISSIONS: NsPermissions = NsPermissions::SCHEME_CREATE;
@@ -113,19 +154,36 @@ impl<'sock> NamespaceScheme<'sock> {
         schemes: HashMap<String, Arc<FdGuard>>,
         scheme_creation_cap: FdGuardUpper,
     ) -> Self {
+        // FerrionOS lockdown (S13): the kernel hands its full memory root to the boot process.
+        // Handles without the hardware right get the restricted root derived from it.
+        let restricted_memory = schemes.get(MEMORY_SCHEME).and_then(|memory| {
+            memory
+                .openat("restricted-root", libredox::protocol::O_CLOEXEC, 0)
+                .inspect_err(|err| error!("No restricted memory root, hiding `memory`: {}", err))
+                .ok()
+                .map(Arc::new)
+        });
         Self {
             socket,
             handles: HashMap::new(),
             root_namespace: Namespace { schemes },
             next_id: 0,
             scheme_creation_cap: Rc::new(scheme_creation_cap),
+            restricted_memory,
         }
     }
 
-    fn add_namespace(&mut self, id: usize, schemes: Namespace, permission: NsPermissions) {
+    fn add_namespace(
+        &mut self,
+        id: usize,
+        schemes: Namespace,
+        permission: NsPermissions,
+        hardware: bool,
+    ) {
         let handle = Handle::Access(NamespaceAccess {
             namespace: Rc::new(RefCell::new(schemes)),
             permission,
+            hardware,
         });
         self.handles.insert(id, handle);
     }
@@ -195,13 +253,23 @@ impl<'sock> NamespaceScheme<'sock> {
 
     fn open_scheme_resource(
         &self,
-        ns: &Namespace,
+        ns_access: &NamespaceAccess,
         scheme: &str,
         flags: usize,
-        _ctx: &CallerCtx,
+        ctx: &CallerCtx,
     ) -> Result<FdGuard> {
-        let Some(cap_fd) = ns.get_scheme_fd(scheme) else {
-            log::info!("Scheme {:?} not found in namespace", scheme);
+        let namespace = ns_access.namespace.borrow();
+        let Some(cap_fd) =
+            namespace.resolve(scheme, ns_access.hardware, self.restricted_memory.as_ref())
+        else {
+            if namespace.schemes.contains_key(scheme) {
+                warn!(
+                    "pid {} lacks the hardware right for {} (FerrionOS lockdown)",
+                    ctx.pid, scheme
+                );
+            } else {
+                log::info!("Scheme {:?} not found in namespace", scheme);
+            }
             return Err(Error::new(ENODEV));
         };
 
@@ -212,26 +280,35 @@ impl<'sock> NamespaceScheme<'sock> {
         cap_fd.dup(&[])
     }
 
-    fn fork_namespace(&mut self, namespace: Rc<RefCell<Namespace>>, names: &[u8]) -> Result<usize> {
+    fn fork_namespace(&mut self, ns_access: &NamespaceAccess, names: &[u8]) -> Result<usize> {
         let new_id = self.next_id;
-        let new_namespace = namespace.borrow().fork(names).inspect_err(|&e| {
-            error!("Failed to fork namespace {}: {}", new_id, e);
-        })?;
+        let new_namespace = ns_access
+            .namespace
+            .borrow()
+            .fork(names, ns_access.hardware, self.restricted_memory.as_ref())
+            .inspect_err(|&e| {
+                error!("Failed to fork namespace {}: {}", new_id, e);
+            })?;
         self.add_namespace(
             new_id,
             new_namespace,
             NsPermissions::all().difference(HIGH_PERMISSIONS),
+            ns_access.hardware,
         );
         self.next_id += 1;
         Ok(new_id)
     }
 
+    /// `raw_permission` is a set of `NsPermissions`, plus `NS_HARDWARE` to keep the hardware right.
     fn shrink_permissions(
         &mut self,
         mut ns: NamespaceAccess,
-        permission: NsPermissions,
+        raw_permission: usize,
     ) -> Result<usize> {
-        ns.permission = ns.permission.intersection(permission);
+        ns.permission = ns
+            .permission
+            .intersection(NsPermissions::from_bits_truncate(raw_permission));
+        ns.hardware &= raw_permission & NS_HARDWARE != 0;
         let next_id = self.next_id;
         self.handles.insert(next_id, Handle::Access(ns));
         self.next_id += 1;
@@ -277,12 +354,8 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
                         })
                     }
                     _ => {
-                        let res_fd = self.open_scheme_resource(
-                            &ns_access.namespace.borrow(),
-                            scheme.as_ref(),
-                            flags,
-                            ctx,
-                        )?;
+                        let res_fd =
+                            self.open_scheme_resource(&ns_access, scheme.as_ref(), flags, ctx)?;
                         Ok(OpenResult::OtherScheme { fd: res_fd.take() })
                     }
                 }
@@ -332,10 +405,13 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
     }
 
     fn dup(&mut self, id: usize, buf: &[u8], _ctx: &CallerCtx) -> Result<OpenResult> {
-        let ns_access = self.get_ns_access(id).ok_or_else(|| {
-            error!("Namespace with ID {} not found", id);
-            Error::new(ENOENT)
-        })?;
+        let ns_access = self
+            .get_ns_access(id)
+            .ok_or_else(|| {
+                error!("Namespace with ID {} not found", id);
+                Error::new(ENOENT)
+            })?
+            .clone();
 
         let raw_kind = read_num::<usize>(buf)?;
         let Some(kind) = NsDup::try_from_raw(raw_kind) else {
@@ -344,14 +420,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
         };
         let payload = &buf[mem::size_of::<NsDup>()..];
         let new_id = match kind {
-            NsDup::ForkNs => {
-                let ns = ns_access.namespace.clone();
-                self.fork_namespace(ns, payload)?
+            NsDup::ForkNs => self.fork_namespace(&ns_access, payload)?,
+            NsDup::ShrinkPermissions => {
+                self.shrink_permissions(ns_access, read_num::<usize>(payload)?)?
             }
-            NsDup::ShrinkPermissions => self.shrink_permissions(
-                ns_access.clone(),
-                NsPermissions::from_bits_truncate(read_num::<usize>(payload)?),
-            )?,
             NsDup::IssueRegister => {
                 let name = core::str::from_utf8(payload).map_err(|_| Error::new(EINVAL))?;
                 let scheme_name = RedoxScheme::new(name).ok_or_else(|| {
@@ -364,6 +436,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
                         "Permission denied to issue register capability for namespace {}",
                         id
                     );
+                    return Err(Error::new(EACCES));
+                }
+                if !ns_access.hardware && is_protected_scheme(scheme_name.as_ref()) {
+                    error!("Registering {} needs the hardware right", name);
                     return Err(Error::new(EACCES));
                 }
                 let new_id = self.next_id;
@@ -397,6 +473,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
         }
         if !ns_access.has_permission(NsPermissions::DELETE) {
             error!("Permission denied to remove scheme for namespace {}", fd);
+            return Err(Error::new(EACCES));
+        }
+        if !ns_access.hardware && is_protected_scheme(scheme.as_ref()) {
+            error!("Removing {} needs the hardware right", scheme);
             return Err(Error::new(EACCES));
         }
         match ns.remove_scheme(scheme.as_ref()) {
@@ -463,7 +543,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
 
         let opaque_offset = opaque_offset as usize;
         for (i, (name, _)) in ns.schemes.iter().enumerate().skip(opaque_offset) {
-            if name.is_empty() {
+            let hidden = ns
+                .resolve(name, ns_access.hardware, self.restricted_memory.as_ref())
+                .is_none();
+            if name.is_empty() || hidden {
                 continue;
             }
             if let Err(err) = buf.entry(DirEntry {
@@ -555,7 +638,13 @@ pub fn run(
 
     // send namespace fd to bootstrap
     let new_id = scheme.next_id;
-    scheme.add_namespace(new_id, scheme.root_namespace.clone(), NsPermissions::all());
+    // The boot process, and through it init, starts with the hardware right.
+    scheme.add_namespace(
+        new_id,
+        scheme.root_namespace.clone(),
+        NsPermissions::all(),
+        true,
+    );
     scheme.next_id += 1;
     let cap_fd = scheme
         .socket

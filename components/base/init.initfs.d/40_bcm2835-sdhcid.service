@@ -7,3 +7,5 @@ condition_board = ["raspi3bp"]
 [service]
 cmd = "bcm2835-sdhcid"
 type = "notify"
+# Drives the SD host controller.
+hardware = true

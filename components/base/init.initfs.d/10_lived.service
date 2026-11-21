@@ -5,3 +5,5 @@ description = "Live disk"
 [service]
 cmd = "lived"
 type = "notify"
+# Serves the live disk image from physical memory.
+hardware = true

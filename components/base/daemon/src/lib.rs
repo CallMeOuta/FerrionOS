@@ -7,6 +7,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use libredox::Fd;
+use libredox::protocol::{NsDup, NsPermissions};
 use redox_scheme::Socket;
 use redox_scheme::scheme::{SchemeAsync, SchemeSync};
 
@@ -137,4 +138,30 @@ impl SchemeDaemon {
         let cap_fd = socket.create_this_scheme_fd(0, cap_id, 0, 0)?;
         self.ready_with_fd(Fd::new(cap_fd))
     }
+}
+
+/// Makes `cmd` start its program without the hardware right (FerrionOS lockdown, S13).
+///
+/// The program keeps the caller's namespace, seen through a handle that hides the schemes
+/// reaching hardware (`irq`, `serio`, `kernel.acpi`, `pci`, `acpi`) and whose `memory` allocates
+/// ordinary memory only, so it can map no physical memory and use no I/O ports. init starts every
+/// service this way unless its unit sets `hardware`; a driver starts its helpers this way.
+pub fn without_hardware(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(drop_hardware_right);
+    }
+}
+
+fn drop_hardware_right() -> io::Result<()> {
+    let ns = libredox::call::getns()?;
+    let mut request = [0_u8; 2 * size_of::<usize>()];
+    let (kind, permissions) = request.split_at_mut(size_of::<usize>());
+    kind.copy_from_slice(&(NsDup::ShrinkPermissions as usize).to_le_bytes());
+    // Every permission libredox defines; the namespace manager's hardware bit is not among them.
+    permissions.copy_from_slice(&NsPermissions::all().bits().to_le_bytes());
+    let restricted = libredox::call::dup(ns, request)?;
+    // `setns` hands back the handle it replaced; close it so the program cannot inherit it.
+    let previous = libredox::call::setns(restricted)?;
+    libredox::call::close(previous)?;
+    Ok(())
 }

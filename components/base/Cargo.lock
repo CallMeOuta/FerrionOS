@@ -1206,6 +1206,7 @@ name = "init"
 version = "0.1.0"
 dependencies = [
  "config",
+ "daemon",
  "libc",
  "libredox 0.2.0",
  "plain",
@@ -2027,6 +2028,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "common",
+ "daemon",
  "fdt",
  "libc",
  "libredox 0.2.0",

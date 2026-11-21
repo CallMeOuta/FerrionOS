@@ -11,3 +11,5 @@ inherit_envs = [
     "FRAMEBUFFER_STRIDE",
 ]
 type = "notify"
+# Maps the bootloader's framebuffer from physical memory.
+hardware = true

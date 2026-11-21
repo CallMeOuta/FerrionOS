@@ -98,6 +98,8 @@ impl Command {
         command.env_clear();
         command.envs(&config.envs).envs(&process.envs);
         command.current_dir(&config.cwd);
+        // A script cannot ask for the hardware right (FerrionOS lockdown, S13).
+        daemon::without_hardware(&mut command);
 
         let mut child = match command.spawn() {
             Ok(child) => child,
