@@ -1,0 +1,101 @@
+FerrionOS change to the upstream bootloader (MIT license, kept), applied after ferrion-measured-boot.patch, made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8:
+- every buffer that held the RedoxFS passphrase typed at the prompt, those of wrong attempts included, is overwritten with zeros before it is freed, and the buffer grows by hand so that no reallocation leaves a copy behind. The page that hands the passphrase to redoxfs stays reserved; redoxfs overwrites it with zeros after reading (recipes/core/redoxfs/ferrion-passphrase-wipe.patch).
+
+diff --git a/src/main.rs b/src/main.rs
+index 2222f7b..cd8f550 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -346,6 +346,22 @@ fn select_mode(
+     mode_opt
+ }
+ 
++/// Overwrites a buffer that held a passphrase with zeros. The writes are volatile so the compiler
++/// keeps them although nothing reads the buffer afterwards.
++fn wipe(buf: &mut [u8]) {
++    for byte in buf.iter_mut() {
++        unsafe { ptr::write_volatile(byte, 0) };
++    }
++    core::sync::atomic::compiler_fence(Ordering::SeqCst);
++}
++
++/// Overwrites a passphrase's whole allocation with zeros, then drops it.
++fn wipe_password(mut password: String) {
++    let buf = unsafe { password.as_mut_vec() };
++    let capacity = buf.capacity();
++    wipe(unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr(), capacity) });
++}
++
+ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>) {
+     let attempts = 10;
+     for attempt in 0..=attempts {
+@@ -353,7 +369,7 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+         if attempt > 0 {
+             loud_print!("\rRedoxFS password ({}/{}): ", attempt, attempts);
+ 
+-            let mut password = String::new();
++            let mut password = String::with_capacity(64);
+ 
+             loop {
+                 match os.get_key() {
+@@ -365,6 +381,12 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+                     }
+                     OsKey::Char(c) => {
+                         loud_print!("*");
++                        // Grow by hand, so that no reallocation leaves a copy behind
++                        if password.len() + c.len_utf8() > password.capacity() {
++                            let mut bigger = String::with_capacity(password.capacity() * 2);
++                            bigger.push_str(&password);
++                            wipe_password(mem::replace(&mut password, bigger));
++                        }
+                         password.push(c)
+                     }
+                     OsKey::Enter => break,
+@@ -379,6 +401,8 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+ 
+             if !password.is_empty() {
+                 password_opt = Some(password);
++            } else {
++                wipe_password(password);
+             }
+         }
+         match os.filesystem(password_opt.as_ref().map(|x| x.as_bytes())) {
+@@ -386,7 +410,7 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+                 return (
+                     fs,
+                     password_opt.map(|password| {
+-                        // Copy password to page aligned memory
++                        // Copy password to page aligned memory, which redoxfs wipes after reading
+                         let password_size = password.len();
+                         let password_base = os.alloc_zeroed_page_aligned(password_size);
+ 
+@@ -398,18 +422,24 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+ 
+                         unsafe {
+                             ptr::copy(password.as_ptr(), password_base, password_size);
++                            wipe_password(password);
+                             slice::from_raw_parts(password_base, password_size)
+                         }
+                     }),
+                 );
+             }
+-            Err(err) => match err.errno {
+-                // Incorrect password, try again
+-                syscall::ENOKEY => (),
+-                _ => {
+-                    panic!("Failed to open RedoxFS: {}", err);
++            Err(err) => {
++                if let Some(password) = password_opt {
++                    wipe_password(password);
+                 }
+-            },
++                match err.errno {
++                    // Incorrect password, try again
++                    syscall::ENOKEY => (),
++                    _ => {
++                        panic!("Failed to open RedoxFS: {}", err);
++                    }
++                }
++            }
+         }
+     }
+     panic!("RedoxFS out of unlock attempts");
