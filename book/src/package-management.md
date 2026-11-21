@@ -57,7 +57,7 @@ In this example, a package is installed that has never been installed on the
 system, from a remote repository. We assume that the repository's public key is
 already installed on disk, and that the URL to the package's `pkgar` is known.
 
-In a FerrionOS image, the package source is upstream's package server (`/etc/pkg.d/50_redox`, written by `config/base.toml`), so `pkg` installs upstream's builds; FerrionOS has no package server.
+A FerrionOS image names no package source: `/etc/pkg.d`, where `pkg` reads its sources, is empty, because FerrionOS publishes no packages yet. Upstream's packages would replace FerrionOS's patched kernel and `base`; read from the code, verified boot would then refuse the next start, which has not been tried yet.
 
 First, a small, fixed-size header portion of the `pkgar` is downloaded. This is currently 136 bytes in size. It contains a NaCL signature, a NaCL public key, a BLAKE3 hash of the entry metadata, a 32-bit count of entry metadata structs and 32 bits of flags.
 

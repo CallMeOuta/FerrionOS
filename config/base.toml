@@ -140,9 +140,14 @@ path = "/etc/os-release"
 data = "../usr/lib/os-release"
 symlink = true
 
+# pkg reads its package sources from the files here. FerrionOS publishes no package index yet, so
+# none is named: `ferrion install`, `search` and `update` say so instead of fetching another
+# project's builds over FerrionOS's patched and signed kernel and base. pkg needs the directory.
 [[files]]
-path = "/etc/pkg.d/50_redox"
-data = "https://static.redox-os.org/pkg"
+path = "/etc/pkg.d"
+data = ""
+directory = true
+mode = 0o755
 
 ## /usr and symlinks for usrmerge
 [[files]]

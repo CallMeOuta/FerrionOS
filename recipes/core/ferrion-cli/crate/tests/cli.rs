@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 #[test]
@@ -23,5 +24,37 @@ fn json_stdout_and_process_exit_agree() {
         if command == "help" {
             assert!(record["data"]["help"].as_str().unwrap().contains("--yes"));
         }
+    }
+}
+
+#[test]
+fn without_a_package_source_nothing_is_fetched() {
+    // A build host has no /etc/pkg.d; a FerrionOS image has one that names no source.
+    if Path::new("/etc/pkg.d").exists() {
+        eprintln!("skipped: this host has /etc/pkg.d");
+        return;
+    }
+    for (args, command) in [
+        (vec!["--json", "update", "--yes"], "update"),
+        (vec!["--json", "install", "jq", "--yes"], "install"),
+        (vec!["--json", "search", "jq"], "search"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ferrion"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(6), "{command}");
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(record["command"], command);
+        assert_eq!(record["ok"], false);
+        assert_eq!(record["exit_code"], 6);
+        assert_eq!(record["data"]["package_source"], "none");
+        assert!(
+            record["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("This image has no package source yet")
+        );
     }
 }

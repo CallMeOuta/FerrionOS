@@ -38,6 +38,8 @@ Each is a filesystem config whose init script starts the suite and ends with `sh
 
 The x86_64 desktop's command and name-resolution regressions run with `python3 scripts/vm-test.py cli-tools resolver --arch x86_64 --config desktop --timeout 120`. `cli-tools` checks GNU sed, GNU awk and extrautils' gzip tar round-trip with `-C`; it does not cover process arguments. `resolver` checks hosts-file names as an ordinary user and captures DHCP and DNS packets to compare the queried server with the advertised server. Both need an image rebuilt with the recipe patches; installing a new libc alone does not update programs that linked it statically.
 
+The package commands run with `python3 scripts/vm-test.py ferrion-cli update-today --arch x86_64 --config desktop --timeout 120`. `ferrion-cli` reaches no outside server: it checks that `ferrion search` refuses with exit code 6 while the image names no package source, then adds a source served from the host for the check, holding one package of this build's `repo/` (`gnu-make`, which the desktop image lacks) signed by the build's key, and installs, runs and removes it; `gnu-make` must be cooked. `update-today` runs `ferrion update` and `pkg update` as root with the network up and passes when nothing was fetched: no TCP connection or DNS question in a capture of `net0`, the hashes of `usr/lib/boot/kernel` and `usr/lib/boot/initfs` unchanged, and the next start reaching the login. That a replaced kernel or initfs is refused at the next start is `scripts/secure-boot-test.sh`'s tamper cases.
+
 ## What upstream's CI ran
 
 Upstream gates its merge requests on a `.gitlab-ci.yml` that is not part of this checkout, and FerrionOS has no CI of its own yet. The upstream jobs, read on 2026-11-20:

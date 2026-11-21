@@ -4,7 +4,7 @@
 
 `pkg` (recipe `recipes/core/pkgutils`) is the package manager of FerrionOS: it installs binary packages to a running system. If you want to build packages, or include binary packages during the build, please see the [Including Programs in FerrionOS](./including-programs.md) page.
 
-An image's package source is upstream's package server (`/etc/pkg.d/50_redox`, written by `config/base.toml`), so `pkg` installs upstream's builds; FerrionOS has no package server.
+A FerrionOS image names no package source yet: `/etc/pkg.d`, where `pkg` reads its sources, is empty (`config/base.toml`), because FerrionOS publishes no packages. `pkg install`, `pkg search` and `pkg update` therefore find nothing, and `ferrion install`, `ferrion search` and `ferrion update` exit with code 6 and say so without fetching anything. `pkg remove` and `pkg list` work. Upstream's packages are not a substitute: they would replace FerrionOS's patched kernel and `base`; read from the code, verified boot would then refuse the next start, which has not been tried yet.
 
 Due to limited device support, you may get better results in an virtual machine than on real hardware.
 

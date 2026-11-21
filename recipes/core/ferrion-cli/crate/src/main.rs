@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
@@ -24,7 +25,13 @@ JSON: one object, schema_version 1, command, ok, exit_code, data or error.
 Unknown security state is never reported as off. Status is a local observation,
 not a remote attestation or a guarantee of containment.
 Exit codes: 0 success, 1 operation failed, 2 usage, 3 confirmation declined or
-required, 4 permission denied, 5 service or required data unavailable.";
+required, 4 permission denied, 5 service or required data unavailable,
+6 no package source configured (install, search and update fetch nothing).";
+
+// pkg reads its package sources from the files in this directory (pkg-lib's
+// RepoManager::update_remotes).
+const PACKAGE_SOURCES: &str = "/etc/pkg.d";
+const NO_PACKAGE_SOURCE: i32 = 6;
 
 const SHELLS: [(&str, &str); 5] = [
     ("bash", "/usr/bin/bash"),
@@ -242,6 +249,26 @@ fn executable(path: &str) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// The sources pkg would fetch from: each line of a file in `dir` that is not a comment.
+/// A missing directory names none.
+fn package_sources(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    for path in entries.filter_map(|entry| Some(entry.ok()?.path())) {
+        if let Ok(text) = fs::read_to_string(&path) {
+            sources.extend(
+                text.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_owned),
+            );
+        }
+    }
+    sources
+}
+
 fn package_failed(success: bool, stderr: &str) -> bool {
     // Today's pkg reports its operation errors but returns zero (pkg-cli/src/main.rs).
     // Capture removes terminal colors, so the explicit error prefix is unambiguous.
@@ -249,6 +276,16 @@ fn package_failed(success: bool, stderr: &str) -> bool {
 }
 
 fn package_command(op: &str, packages: &[String], yes: bool) -> Result<Value> {
+    // Only remove works without a source; the others would fetch the source's index.
+    if op != "remove" && package_sources(Path::new(PACKAGE_SOURCES)).is_empty() {
+        return Err(Failure {
+            code: NO_PACKAGE_SOURCE,
+            message: format!(
+                "This image has no package source yet: FerrionOS does not publish packages, and {PACKAGE_SOURCES} names none. Nothing was fetched or changed."
+            ),
+            data: json!({"packages": packages, "package_source": "none"}),
+        });
+    }
     if op != "search" {
         if uid() != 0 {
             return Err(fail(
@@ -537,6 +574,19 @@ mod tests {
             ),
             vec![("fish", "/usr/bin/fish"), ("nushell", "/usr/bin/nu")]
         );
+    }
+
+    #[test]
+    fn package_sources_are_the_uncommented_lines_of_pkg_d() {
+        let dir = std::env::temp_dir().join(format!("ferrion-cli-pkg-d-{}", std::process::id()));
+        assert!(package_sources(&dir).is_empty());
+        fs::create_dir_all(&dir).unwrap();
+        assert!(package_sources(&dir).is_empty());
+        fs::write(dir.join("50_example"), "# https://example.invalid/pkg\n\n").unwrap();
+        assert!(package_sources(&dir).is_empty());
+        fs::write(dir.join("90_test"), "  http://10.0.2.2:8080  \n").unwrap();
+        assert_eq!(package_sources(&dir), vec!["http://10.0.2.2:8080"]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

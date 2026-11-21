@@ -8,7 +8,7 @@ FerrionOS forked one repository of the upstream project: the build system. Every
 | Crates the cookbook links: `pkgar`, `redox-pkg`, `redox_installer`, `redoxer` | The same GitLab, at the revisions in `Cargo.lock` | `Cargo.toml` |
 | Prebuilt cross toolchain (`PREFIX_BINARY=1`) | `https://static.redox-os.org/toolchain/` | `mk/prefix.mk` |
 | Prebuilt packages (`REPO_BINARY=1`, rule `binary`) | `https://static.redox-os.org/pkg` | `REMOTE_PKG_SOURCE` in `src/lib.rs` |
-| Package source and project links written into every image | `https://static.redox-os.org/pkg` in `/etc/pkg.d/50_redox`, upstream addresses in `/usr/lib/os-release` | `config/base.toml` |
+| Project links written into every image | upstream addresses in `/usr/lib/os-release` | `config/base.toml` |
 | Layer cache for the Podman image | `docker.io/redoxos/redox-base-<host arch>` | `PODMAN_CACHE_PATH` in `mk/podman.mk` |
 | `config.sub` for autotools ports | `gitlab.redox-os.org/redox-os/gnu-config` | `GNU_CONFIG_GET` in `src/cook/script.rs` |
 | U-Boot images for ARM boards | `gitlab.redox-os.org/Ivan/redox_firmware` | `mk/qemu.mk` |
