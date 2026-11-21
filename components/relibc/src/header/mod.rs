@@ -156,6 +156,7 @@ pub mod strings;
 // TODO: stropts.h (deprecated)
 pub mod sys_auxv;
 pub mod sys_epoll;
+pub mod sys_eventfd;
 pub mod sys_file;
 pub mod sys_ioctl;
 pub mod sys_ipc;
@@ -173,6 +174,7 @@ pub mod sys_syscall;
 pub mod sys_time;
 #[deprecated]
 pub mod sys_timeb;
+pub mod sys_timerfd;
 //pub mod sys_times;
 pub mod arch_aarch64_user;
 pub mod arch_riscv64_user;

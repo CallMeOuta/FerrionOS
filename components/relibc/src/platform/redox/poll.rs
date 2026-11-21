@@ -131,13 +131,14 @@ impl Sys {
 
             let original_idx = event.data;
             if let Some(pfd) = fds.get_mut(original_idx) {
+                let was_ready = pfd.revents != 0;
                 for (p, ep) in &event_map {
                     if event.flags.contains(*ep) {
                         pfd.revents |= *p;
                     }
                 }
 
-                if pfd.revents > 0 {
+                if !was_ready && pfd.revents != 0 {
                     count += 1;
                 }
             }
