@@ -1,0 +1,15 @@
+[package]
+description = "Checks exit callbacks after closing a shared object"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=c11 -Wall -Wextra -fPIC -shared \
+    "${COOKBOOK_RECIPE}/callback.c" ${LDFLAGS} -o libdso-atexit-callback.so
+${CC} ${CFLAGS} -std=c11 -Wall -Wextra "${COOKBOOK_RECIPE}/main.c" \
+    ${LDFLAGS} -ldl -o dso-atexit-probe
+mkdir -p "${COOKBOOK_STAGE}/usr/bin" "${COOKBOOK_STAGE}/usr/lib/dso-atexit-probe"
+cp dso-atexit-probe "${COOKBOOK_STAGE}/usr/bin/"
+cp libdso-atexit-callback.so "${COOKBOOK_STAGE}/usr/lib/dso-atexit-probe/"
+"""
