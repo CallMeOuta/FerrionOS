@@ -51,7 +51,7 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
   1. Legal notices: the copyright line in `LICENSE`, copyright and license headers in code and in `*.patch` files, and `authors` in `Cargo.toml` files.
   2. Identifiers and strings that other software matches, which would break if renamed: target triples such as `x86_64-unknown-redox`, crate, package, recipe, file and directory names (RedoxFS, relibc, `redox_syscall`, `redox.patch`), make and environment variables (`HOSTED_REDOX`), the `uname -s` value the kernel reports and code compares, `ID_LIKE` in os-release, and URLs that code or a recipe fetches. Prose may name a component by its identifier. Before renaming such a string, `rg` it across the repository, then rename every use together or keep it.
   3. Files applied byte-exact from upstream: `*.patch` files and anything under a recipe's `source/`, which are never edited.
-- `README.md` has one sentence saying FerrionOS began as a fork and is not affiliated with the upstream project; it is the only other place the name appears.
+- `README.md` and the book's introduction (`book/src/introduction.md`) each have one sentence saying FerrionOS began as a fork and is not affiliated with the upstream project; they are the only other places the name appears.
 
 # Architectures
 

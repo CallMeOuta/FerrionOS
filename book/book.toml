@@ -1,0 +1,10 @@
+[book]
+title = "The FerrionOS Book"
+authors = ["FerrionOS Developers"]
+description = "How FerrionOS is designed, how to build and run it, and how to develop for it."
+src = "src"
+
+[output.html]
+theme = "./theme"
+site-url = "/FerrionOS/"
+git-repository-url = "https://github.com/CallMeOuta/FerrionOS"

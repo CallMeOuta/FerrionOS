@@ -47,9 +47,10 @@ LEGAL_LINES = [
     (r"(^|/)Cargo\.toml$", r"^\s*authors\s*="),
 ]
 
-# The README sentence (the one other place the name appears): (path regex, line regex).
+# The fork sentence, the one other place the name appears: the README and the book's
+# introduction carry it once each. (path regex, line regex).
 README_FORK = [
-    (r"^README\.md$", r"(?i)\bfork\b.*\bnot affiliated\b|\bnot affiliated\b.*\bfork\b"),
+    (r"^(README\.md|book/src/introduction\.md)$", r"(?i)\bfork\b.*\bnot affiliated\b|\bnot affiliated\b.*\bfork\b"),
 ]
 
 # Identifiers and machine-matched strings (exception 2). Case-sensitive. Every occurrence of

@@ -25,3 +25,5 @@ target
 wget-log
 # Roadmaps: kept on the maintainer's machine, never committed
 /plans/
+# Output of `mdbook build book`
+/book/book/
