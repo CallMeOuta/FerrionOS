@@ -1,0 +1,156 @@
+FerrionOS change to Zed (crates/crashes, GPL-3.0-or-later, kept), made against release v1.29.3, commit d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7:
+- crash-handler and minidumper do not build for this target. There, crates/crashes compiles src/unsupported.rs, which keeps the same interface and records nothing.
+
+diff --git a/crates/crashes/Cargo.toml b/crates/crashes/Cargo.toml
+index 04018bf..fe3c480 100644
+--- a/crates/crashes/Cargo.toml
++++ b/crates/crashes/Cargo.toml
+@@ -6,9 +6,7 @@ edition.workspace = true
+ license = "GPL-3.0-or-later"
+ 
+ [dependencies]
+-crash-handler.workspace = true
+ log.workspace = true
+-minidumper.workspace = true
+ parking_lot.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+@@ -18,6 +16,11 @@ zstd.workspace = true
+ [target.'cfg(not(target_os = "windows"))'.dependencies]
+ async-process.workspace = true
+ 
++# crash-handler and minidumper have no support for this target; src/unsupported.rs stands in.
++[target.'cfg(not(target_os = "redox"))'.dependencies]
++crash-handler.workspace = true
++minidumper.workspace = true
++
+ [target.'cfg(target_os = "linux")'.dependencies]
+ libc.workspace = true
+ 
+@@ -31,5 +34,5 @@ windows.workspace = true
+ workspace = true
+ 
+ [lib]
+-path = "src/crashes.rs"
++path = "src/lib.rs"
+ doctest = false
+diff --git a/crates/crashes/src/lib.rs b/crates/crashes/src/lib.rs
+new file mode 100644
+index 0000000..4800d53
+--- /dev/null
++++ b/crates/crashes/src/lib.rs
+@@ -0,0 +1,10 @@
++#[cfg(not(target_os = "redox"))]
++#[path = "crashes.rs"]
++mod handler;
++#[cfg(not(target_os = "redox"))]
++pub use handler::*;
++
++#[cfg(target_os = "redox")]
++mod unsupported;
++#[cfg(target_os = "redox")]
++pub use unsupported::*;
+diff --git a/crates/crashes/src/unsupported.rs b/crates/crashes/src/unsupported.rs
+new file mode 100644
+index 0000000..f1b354b
+--- /dev/null
++++ b/crates/crashes/src/unsupported.rs
+@@ -0,0 +1,98 @@
++//! Crash reporting for targets that crash-handler and minidumper do not support:
++//! the same interface as `crashes.rs`, with nothing recorded. The data types
++//! mirror the ones in `crashes.rs` so crash files written elsewhere still parse.
++
++use serde::{Deserialize, Serialize};
++use std::{
++    collections::BTreeMap,
++    env, panic,
++    path::{Path, PathBuf},
++    pin::Pin,
++    sync::Arc,
++    time::Duration,
++};
++use system_specs::GpuSpecs;
++
++pub struct Client;
++
++#[derive(Debug, Deserialize, Serialize, Clone)]
++pub struct CrashInfo {
++    pub init: InitCrashHandler,
++    pub panic: Option<CrashPanic>,
++    pub minidump_error: Option<String>,
++    #[serde(default)]
++    pub abort_message: Option<String>,
++    pub gpus: Vec<system_specs::GpuInfo>,
++    pub active_gpu: Option<system_specs::GpuSpecs>,
++    #[serde(default)]
++    pub tags: BTreeMap<String, String>,
++}
++
++#[derive(Debug, Deserialize, Serialize, Clone)]
++pub struct InitCrashHandler {
++    pub session_id: String,
++    pub zed_version: String,
++    pub binary: String,
++    pub release_channel: String,
++    pub commit_sha: String,
++}
++
++#[derive(Deserialize, Serialize, Debug, Clone)]
++pub struct CrashPanic {
++    pub message: String,
++    pub span: String,
++}
++
++pub const SENTRY_USER_ID: &str = "sentry[user][id]";
++
++#[derive(Debug, Clone)]
++pub struct UserInfo {
++    pub metrics_id: Option<String>,
++    pub is_staff: Option<bool>,
++}
++
++/// Force a backtrace to be printed on panic.
++pub fn force_backtrace() {
++    let old_hook = panic::take_hook();
++    panic::set_hook(Box::new(move |info| {
++        unsafe { env::set_var("RUST_BACKTRACE", "1") };
++        old_hook(info);
++    }));
++}
++
++/// Starts no crash handler and returns a client that records nothing.
++pub fn init<F, S, C, P>(
++    _crash_init: InitCrashHandler,
++    _spawn: S,
++    _socket_path: P,
++    _wait_timer: C,
++) -> impl Future<Output = Arc<Client>> + use<F, C, S, P>
++where
++    F: Future<Output = ()> + Send + Sync + 'static,
++    C: (Fn(Duration) -> F) + Send + Sync + 'static,
++    S: FnOnce(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
++    P: FnOnce(u32) -> PathBuf,
++{
++    log::info!("crash reporting is not supported on this target");
++    async { Arc::new(Client) }
++}
++
++pub fn set_gpu_info(_crash_client: &Arc<Client>, _specs: GpuSpecs) {}
++
++pub fn set_user_info(_crash_client: &Arc<Client>, _info: UserInfo) {}
++
++pub fn set_tag(_crash_client: &Arc<Client>, _key: impl Into<String>, _value: Option<String>) {}
++
++pub fn set_tags<K>(_crash_client: &Arc<Client>, _tags: impl IntoIterator<Item = (K, Option<String>)>)
++where
++    K: Into<String>,
++{
++}
++
++pub fn shutdown_crash_handler(_crash_client: &Arc<Client>) {}
++
++pub fn panic_hook(_crash_client: Arc<Client>, _message: &str, _location: Option<&panic::Location>) {}
++
++pub fn crash_server(_socket: &Path, _logs_dir: PathBuf) {
++    log::info!("crash reporting is not supported on this target");
++}

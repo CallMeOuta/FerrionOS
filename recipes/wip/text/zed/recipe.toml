@@ -1,4 +1,4 @@
-#TODO not compiled or tested; cargo check for the target fails in path (Path::is_empty is unstable in the prefix's rustc 1.98.0-dev, Zed pins 1.98.1), ipc-channel 0.19 (no backend for the target), util (nix::sys::resource) and cli (Detect only for Linux, FreeBSD, macOS, Windows)
+#TODO not compiled or tested: with these patches, cargo check for x86_64-unknown-redox passes for cli and remote_server; not cooked yet
 #TODO the editor ("zed" package) needs a GPUI platform backend for Orbital; X11 stays off
 # Only zstd is linked from the system: SQLite is bundled, git is run as a program, TLS is rustls
 # build instructions - https://zed.dev/docs/development/linux
@@ -6,6 +6,35 @@
 git = "https://github.com/zed-industries/zed"
 # release v1.29.3
 rev = "d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7"
+patches = [
+    "ferrion-toolchain.patch",
+    "ferrion-target.patch",
+    "ferrion-no-crash-reporter.patch",
+    "ferrion-no-webrtc.patch",
+    "ferrion-dependencies.patch",
+]
+# ferrion-dependencies.patch builds wasmtime, wasmtime-wasi and zbus from patched copies in
+# ferrion-vendor/: each crate archive from crates.io, checked against its sha256 in Zed's
+# Cargo.lock, with the patch of the same name from this directory. The cookbook does not hash
+# those three patches, so after changing one, delete source/ to fetch again.
+script = """
+recipe_dir="$(dirname "${PWD}")"
+vendor_crate() {
+    name="$1"
+    version="$2"
+    sha256="$3"
+    rm -rf "ferrion-vendor/${name}-${version}" "ferrion-vendor/${name}-${version}.crate"
+    mkdir -p ferrion-vendor
+    wget -O "ferrion-vendor/${name}-${version}.crate" "https://static.crates.io/crates/${name}/${name}-${version}.crate"
+    echo "${sha256}  ferrion-vendor/${name}-${version}.crate" | sha256sum -c -
+    tar -xzf "ferrion-vendor/${name}-${version}.crate" -C ferrion-vendor
+    rm "ferrion-vendor/${name}-${version}.crate"
+    patch --directory="ferrion-vendor/${name}-${version}" --strip=1 < "${recipe_dir}/${name}-${version}.patch"
+}
+vendor_crate wasmtime 48.0.7 12300d040e8bea7e7ccde75b9919d27ebba47a217a64b09ba058ae8d3b4290b6
+vendor_crate wasmtime-wasi 48.0.7 3ef0d3ec88f9406bc5e498848489c49ff515577500acc9f03fa93d0883dce435
+vendor_crate zbus 5.13.2 1bfeff997a0aaa3eb20c4652baf788d2dfa6d2839a0ead0b3ff69ce2f9c4bdd1
+"""
 [build]
 template = "custom"
 dependencies = [
@@ -14,5 +43,6 @@ dependencies = [
 script = """
 cookbook_cargo_packages cli
 mv "${COOKBOOK_STAGE}/usr/bin/cli" "${COOKBOOK_STAGE}/usr/bin/zed-cli"
+bin_name=remote-server bin_flags="--package remote_server" bin_final_name=zed-remote-server cookbook_cargo_build
 #mv "${COOKBOOK_STAGE}/usr/bin/zed" "${COOKBOOK_STAGE}/usr/bin/zed-editor"
 """

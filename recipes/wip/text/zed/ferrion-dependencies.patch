@@ -1,0 +1,222 @@
+FerrionOS change to Zed (workspace Cargo.toml and Cargo.lock; licenses kept), made against release v1.29.3, commit d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7:
+- async-tar without its xattr feature: on this target it would define set_xattrs twice.
+- [patch.crates-io]: wasmtime and wasmtime-wasi 48.0.7 and zbus 5.13.2 from patched copies in ferrion-vendor/, which the recipe's source script makes from the crates.io archives and wasmtime-48.0.7.patch, wasmtime-wasi-48.0.7.patch and zbus-5.13.2.patch; rustix 1.1.5 and cap-primitives 4.0.3 from a third party's forks that add this target, pinned by commit.
+- Cargo.lock updated for the above, so the build still runs with --locked; libc moves to 0.2.191, which rustix 1.1.5 needs.
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 2ecb089..6e97f17 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1220,7 +1220,6 @@ dependencies = [
+  "futures-core",
+  "libc",
+  "redox_syscall 0.7.5",
+- "xattr",
+ ]
+ 
+ [[package]]
+@@ -2697,8 +2696,7 @@ dependencies = [
+ [[package]]
+ name = "cap-primitives"
+ version = "4.0.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18"
++source = "git+https://github.com/auronandace/cap-std?rev=b028ed8000355368453f43bebd4cd261275bc9c4#b028ed8000355368453f43bebd4cd261275bc9c4"
+ dependencies = [
+  "ambient-authority",
+  "fs-set-times",
+@@ -4995,7 +4993,7 @@ dependencies = [
+  "libc",
+  "option-ext",
+  "redox_users",
+- "windows-sys 0.59.0",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -5781,7 +5779,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -6593,7 +6591,7 @@ checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
+ dependencies = [
+  "io-lifetimes 2.0.4",
+  "rustix",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -6975,7 +6973,7 @@ dependencies = [
+  "gobject-sys",
+  "libc",
+  "system-deps",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -8976,7 +8974,7 @@ checksum = "e04d7f318608d35d4b61ddd75cbdaee86b023ebe2bd5a66ee0915f0bf93095a9"
+ dependencies = [
+  "hermit-abi",
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -9058,7 +9056,7 @@ dependencies = [
+  "portable-atomic",
+  "portable-atomic-util",
+  "serde",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -9865,9 +9863,9 @@ checksum = "2c4a545a15244c7d945065b5d392b2d2d7f21526fba56ce51467b06ed445e8f7"
+ 
+ [[package]]
+ name = "libc"
+-version = "0.2.186"
++version = "0.2.191"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
++checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+ 
+ [[package]]
+ name = "libdbus-sys"
+@@ -11435,7 +11433,7 @@ version = "0.50.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+ dependencies = [
+- "windows-sys 0.59.0",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -15542,15 +15540,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "rustix"
+-version = "1.1.4"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
++version = "1.1.5"
++source = "git+https://github.com/auronandace/rustix?rev=8f6edcb63120f173e13f8653bb41136713869d81#8f6edcb63120f173e13f8653bb41136713869d81"
+ dependencies = [
+  "bitflags 2.13.1",
+  "errno 0.3.14",
+  "libc",
+  "linux-raw-sys",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -15648,7 +15645,7 @@ dependencies = [
+  "security-framework",
+  "security-framework-sys",
+  "webpki-root-certs",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -17948,7 +17945,7 @@ dependencies = [
+  "getrandom 0.4.1",
+  "once_cell",
+  "rustix",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -20019,8 +20016,6 @@ dependencies = [
+ [[package]]
+ name = "wasmtime"
+ version = "48.0.7"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "12300d040e8bea7e7ccde75b9919d27ebba47a217a64b09ba058ae8d3b4290b6"
+ dependencies = [
+  "addr2line 0.26.1",
+  "async-trait",
+@@ -20245,8 +20240,6 @@ dependencies = [
+ [[package]]
+ name = "wasmtime-wasi"
+ version = "48.0.7"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3ef0d3ec88f9406bc5e498848489c49ff515577500acc9f03fa93d0883dce435"
+ dependencies = [
+  "async-trait",
+  "bitflags 2.13.1",
+@@ -21570,7 +21563,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+ dependencies = [
+  "bitflags 2.13.1",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -22099,16 +22092,6 @@ dependencies = [
+  "x_ai",
+ ]
+ 
+-[[package]]
+-name = "xattr"
+-version = "1.6.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+-dependencies = [
+- "libc",
+- "rustix",
+-]
+-
+ [[package]]
+ name = "xcb"
+ version = "1.6.0"
+@@ -22323,8 +22306,6 @@ dependencies = [
+ [[package]]
+ name = "zbus"
+ version = "5.13.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1bfeff997a0aaa3eb20c4652baf788d2dfa6d2839a0ead0b3ff69ce2f9c4bdd1"
+ dependencies = [
+  "async-broadcast",
+  "async-executor",
+diff --git a/Cargo.toml b/Cargo.toml
+index c4063a2..f181b81 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -560,7 +560,8 @@ async-pipe = { git = "https://github.com/zed-industries/async-pipe-rs", rev = "8
+ async-process = "2.5.0"
+ async-recursion = "1.0.0"
+ async-std = { version = "1.12", features = ["unstable"] }
+-async-tar = { git = "https://github.com/zed-industries/async-tar", rev = "bd3ad6f89df9a9da7a8535958756d6bf465936a0" }
++# xattr off: on this target async-tar would define set_xattrs twice (it is both unix and redox).
++async-tar = { git = "https://github.com/zed-industries/async-tar", rev = "bd3ad6f89df9a9da7a8535958756d6bf465936a0", default-features = false, features = ["runtime-async-std"] }
+ async-task = "4.7"
+ async-trait = "0.1"
+ async-tungstenite = "0.33"
+@@ -1056,6 +1057,15 @@ webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev
+ khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+ # Includes https://github.com/rust-minidump/minidump-writer/pull/249 to fix crashes on `cmd-q` (https://github.com/zed-industries/zed/issues/57664)
+ crash-context = { git = "https://github.com/rust-minidump/minidump-writer", rev = "911b04e09b79b736cc15cbe712e83e2d3f348bb9" }
++# FerrionOS: crates built from patched copies that the recipe's source script puts in
++# ferrion-vendor/: wasmtime and wasmtime-wasi 48.0.7 (trap handling and open flags for this
++# target) and zbus 5.13.2 (no MSG_NOSIGNAL). rustix and cap-primitives come from a third
++# party's forks that add this target, pinned by commit.
++wasmtime = { path = "ferrion-vendor/wasmtime-48.0.7" }
++wasmtime-wasi = { path = "ferrion-vendor/wasmtime-wasi-48.0.7" }
++zbus = { path = "ferrion-vendor/zbus-5.13.2" }
++rustix = { git = "https://github.com/auronandace/rustix", rev = "8f6edcb63120f173e13f8653bb41136713869d81" }
++cap-primitives = { git = "https://github.com/auronandace/cap-std", rev = "b028ed8000355368453f43bebd4cd261275bc9c4" }
+ 
+ # corgi runs build.rs/proc-macros in a sandbox with no write access outside the
+ # action's own OUT_DIR. Upstream `scratch` bakes its build-time OUT_DIR in via

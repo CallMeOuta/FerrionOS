@@ -1,0 +1,176 @@
+FerrionOS change to Zed (crates/livekit_client, crates/audio and crates/call, GPL-3.0-or-later, kept), made against release v1.29.3, commit d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7:
+- These crates take the stub path FreeBSD uses, so libwebrtc, a prebuilt download with no build for this target, is left out. Calls and screen sharing do not work.
+
+diff --git a/crates/audio/Cargo.toml b/crates/audio/Cargo.toml
+index 9e10f13..66b2e86 100644
+--- a/crates/audio/Cargo.toml
++++ b/crates/audio/Cargo.toml
+@@ -29,5 +29,5 @@ util.workspace = true
+ [dev-dependencies]
+ gpui = { workspace = true, features = ["test-support"] }
+ 
+-[target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))'.dependencies]
++[target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd", target_os = "redox")))'.dependencies]
+ libwebrtc.workspace = true
+diff --git a/crates/audio/src/audio_pipeline/echo_canceller.rs b/crates/audio/src/audio_pipeline/echo_canceller.rs
+index 59f3063..a09c019 100644
+--- a/crates/audio/src/audio_pipeline/echo_canceller.rs
++++ b/crates/audio/src/audio_pipeline/echo_canceller.rs
+@@ -1,4 +1,8 @@
+-#[cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))]
++#[cfg(not(any(
++    all(target_os = "windows", target_env = "gnu"),
++    target_os = "freebsd",
++    target_os = "redox"
++)))]
+ mod real_implementation {
+     use anyhow::Context;
+     use libwebrtc::native::apm;
+@@ -38,7 +42,11 @@ mod real_implementation {
+     }
+ }
+ 
+-#[cfg(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd"))]
++#[cfg(any(
++    all(target_os = "windows", target_env = "gnu"),
++    target_os = "freebsd",
++    target_os = "redox"
++))]
+ mod fake_implementation {
+     #[derive(Clone, Default)]
+     pub struct EchoCanceller;
+@@ -51,7 +59,15 @@ mod fake_implementation {
+     }
+ }
+ 
+-#[cfg(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd"))]
++#[cfg(any(
++    all(target_os = "windows", target_env = "gnu"),
++    target_os = "freebsd",
++    target_os = "redox"
++))]
+ pub use fake_implementation::EchoCanceller;
+-#[cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))]
++#[cfg(not(any(
++    all(target_os = "windows", target_env = "gnu"),
++    target_os = "freebsd",
++    target_os = "redox"
++)))]
+ pub use real_implementation::EchoCanceller;
+diff --git a/crates/call/src/call_impl/diagnostics.rs b/crates/call/src/call_impl/diagnostics.rs
+index 9410151..9b05363 100644
+--- a/crates/call/src/call_impl/diagnostics.rs
++++ b/crates/call/src/call_impl/diagnostics.rs
+@@ -310,7 +310,8 @@ fn compute_network_stats(stats: &livekit_client::SessionStats) -> ComputedNetwor
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     )
+ ))]
+ fn compute_remote_audio_stats(
+@@ -330,7 +331,8 @@ fn compute_remote_audio_stats(
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     ))
+ ))]
+ fn compute_remote_audio_stats(
+@@ -463,7 +465,8 @@ fn compute_remote_audio_stats(
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     )
+ ))]
+ fn extract_metrics(
+@@ -481,7 +484,8 @@ fn extract_metrics(
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     ))
+ ))]
+ fn extract_metrics(
+diff --git a/crates/livekit_client/Cargo.toml b/crates/livekit_client/Cargo.toml
+index 022ab34..c654ecf 100644
+--- a/crates/livekit_client/Cargo.toml
++++ b/crates/livekit_client/Cargo.toml
+@@ -43,12 +43,12 @@ smallvec.workspace = true
+ ui.workspace = true
+ util.workspace = true
+ 
+-[target.'cfg(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd"))'.dependencies]
++[target.'cfg(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd", target_os = "redox"))'.dependencies]
+ livekit_api.workspace = true
+ nanoid.workspace = true
+ postage = { workspace = true, features = ["futures-traits", "logging", "blocking"] }
+ 
+-[target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))'.dependencies]
++[target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd", target_os = "redox")))'.dependencies]
+ libwebrtc.workspace = true
+ livekit.workspace = true
+ 
+diff --git a/crates/livekit_client/src/lib.rs b/crates/livekit_client/src/lib.rs
+index 709db81..53d556a 100644
+--- a/crates/livekit_client/src/lib.rs
++++ b/crates/livekit_client/src/lib.rs
+@@ -16,7 +16,8 @@ pub use record::CaptureInput;
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     ))
+ ))]
+ mod livekit_client;
+@@ -26,7 +27,8 @@ mod livekit_client;
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     ))
+ ))]
+ pub use livekit_client::*;
+@@ -37,7 +39,8 @@ pub use livekit_client::*;
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     )
+ ))]
+ mod mock_client;
+@@ -47,7 +50,8 @@ mod mock_client;
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     )
+ ))]
+ pub mod test;
+@@ -57,7 +61,8 @@ pub mod test;
+         test,
+         feature = "test-support",
+         all(target_os = "windows", target_env = "gnu"),
+-        target_os = "freebsd"
++        target_os = "freebsd",
++        target_os = "redox"
+     )
+ ))]
+ pub use mock_client::*;
