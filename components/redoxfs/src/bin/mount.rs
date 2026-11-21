@@ -11,6 +11,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::process;
+use std::{ptr, slice, sync::atomic};
 
 #[cfg(target_os = "redox")]
 use std::{mem::MaybeUninit, ptr::addr_of_mut, sync::atomic::Ordering};
@@ -66,8 +67,28 @@ fn pipe(pipes: &mut [i32; 2]) -> isize {
 fn capability_mode() {}
 
 #[cfg(not(target_os = "redox"))]
-fn bootloader_password() -> Option<Vec<u8>> {
+fn bootloader_password() -> Option<Passphrase> {
     None
+}
+
+/// Overwrites a buffer that held a passphrase with zeros. The writes are volatile so the compiler
+/// keeps them although nothing reads the buffer afterwards.
+fn wipe(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        unsafe { ptr::write_volatile(byte, 0) };
+    }
+    atomic::compiler_fence(atomic::Ordering::SeqCst);
+}
+
+/// A passphrase, overwritten with zeros when dropped.
+struct Passphrase(Vec<u8>);
+
+impl Drop for Passphrase {
+    fn drop(&mut self) {
+        // The whole allocation, in case it ever held a longer value
+        let capacity = self.0.capacity();
+        wipe(unsafe { slice::from_raw_parts_mut(self.0.as_mut_ptr(), capacity) });
+    }
 }
 
 #[cfg(target_os = "redox")]
@@ -75,8 +96,10 @@ fn capability_mode() {
     libredox::call::setrens(0, 0).expect("redoxfs: failed to enter null namespace");
 }
 
+/// Reads the passphrase the bootloader unlocked the disk with, then overwrites the bootloader's
+/// page with zeros so that the passphrase does not stay in physical memory.
 #[cfg(target_os = "redox")]
-fn bootloader_password() -> Option<Vec<u8>> {
+fn bootloader_password() -> Option<Passphrase> {
     use libredox::call::MmapArgs;
 
     let addr_env = env::var_os("REDOXFS_PASSWORD_ADDR")?;
@@ -98,13 +121,17 @@ fn bootloader_password() -> Option<Vec<u8>> {
     unsafe {
         let aligned_size = size.next_multiple_of(syscall::PAGE_SIZE);
 
-        let fd = libredox::Fd::open("memory:physical", libredox::flag::O_CLOEXEC, 0)
-            .expect("failed to open physical memory file");
+        let fd = libredox::Fd::open(
+            "memory:physical",
+            libredox::flag::O_RDWR | libredox::flag::O_CLOEXEC,
+            0,
+        )
+        .expect("failed to open physical memory file");
 
         let password_map = libredox::call::mmap(MmapArgs {
             addr: core::ptr::null_mut(),
             length: aligned_size,
-            prot: libredox::flag::PROT_READ,
+            prot: libredox::flag::PROT_READ | libredox::flag::PROT_WRITE,
             flags: libredox::flag::MAP_SHARED,
             fd: fd.raw(),
             offset: addr as u64,
@@ -115,10 +142,11 @@ fn bootloader_password() -> Option<Vec<u8>> {
         for i in 0..size {
             password.push(password_map.add(i).read());
         }
+        wipe(slice::from_raw_parts_mut(password_map, size));
 
         let _ = libredox::call::munmap(password_map.cast(), aligned_size);
     }
-    Some(password)
+    Some(Passphrase(password))
 }
 
 fn print_err_exit(err: impl AsRef<str>) -> ! {
@@ -145,10 +173,12 @@ fn filesystem_by_path(
     path: &str,
     block_opt: Option<u64>,
     log_errors: bool,
+    boot_password: Option<&[u8]>,
 ) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
     log::debug!("opening {}", path);
     let attempts = 10;
     for attempt in 0..=attempts {
+        let typed;
         let password_opt = if attempt > 0 {
             eprint!("redoxfs: password: ");
 
@@ -166,9 +196,10 @@ fn filesystem_by_path(
                 break;
             }
 
-            Some(password.into_bytes())
+            typed = Passphrase(password.into_bytes());
+            Some(typed.0.as_slice())
         } else {
-            bootloader_password()
+            boot_password
         };
 
         #[cfg(target_os = "redox")]
@@ -208,7 +239,7 @@ fn filesystem_by_path(
         };
 
         let disk = DiskCache::new(disk);
-        match redoxfs::FileSystem::open(disk, password_opt.as_deref(), block_opt, true) {
+        match redoxfs::FileSystem::open(disk, password_opt, block_opt, true) {
             Ok(filesystem) => {
                 log::debug!(
                     "opened filesystem on {} with uuid {}",
@@ -240,6 +271,7 @@ fn filesystem_by_path(
 fn filesystem_by_uuid(
     _uuid: &Uuid,
     _block_opt: Option<u64>,
+    _boot_password: Option<&[u8]>,
 ) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
     None
 }
@@ -248,6 +280,7 @@ fn filesystem_by_uuid(
 fn filesystem_by_uuid(
     uuid: &Uuid,
     block_opt: Option<u64>,
+    boot_password: Option<&[u8]>,
 ) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
     use std::fs;
 
@@ -271,9 +304,12 @@ fn filesystem_by_uuid(
                                                 entry.path().into_os_string().into_string()
                                             {
                                                 log::debug!("found path {}", path);
-                                                if let Some((path, filesystem)) =
-                                                    filesystem_by_path(&path, block_opt, true)
-                                                {
+                                                if let Some((path, filesystem)) = filesystem_by_path(
+                                                    &path,
+                                                    block_opt,
+                                                    true,
+                                                    boot_password,
+                                                ) {
                                                     if &filesystem.header.uuid() == uuid.as_bytes()
                                                     {
                                                         log::debug!(
@@ -319,10 +355,14 @@ fn daemon(
 ) -> ! {
     setsig();
 
+    // Read once: reading wipes the bootloader's copy, and the search below may try several disks
+    let boot_password = bootloader_password();
+    let boot_password_opt = boot_password.as_ref().map(|password| password.0.as_slice());
     let filesystem_opt = match *disk_id {
-        DiskId::Path(ref path) => filesystem_by_path(path, block_opt, true),
-        DiskId::Uuid(ref uuid) => filesystem_by_uuid(uuid, block_opt),
+        DiskId::Path(ref path) => filesystem_by_path(path, block_opt, true, boot_password_opt),
+        DiskId::Uuid(ref uuid) => filesystem_by_uuid(uuid, block_opt, boot_password_opt),
     };
+    drop(boot_password);
 
     if let Some((path, filesystem)) = filesystem_opt {
         match mount(filesystem, mountpoint, |mounted_path| {
