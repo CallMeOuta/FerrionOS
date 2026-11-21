@@ -36,6 +36,15 @@ On the serial console Ctrl-C goes to the guest, and `Ctrl-a h` lists the keys of
 
 `mk/ch.mk` (Cloud Hypervisor, x86_64 only) and `mk/virtiofs.mk` (sharing a host directory with the guest) describe themselves in their header comments.
 
+## Check from outside, as a person would
+
+`scripts/vm-test.py` boots an image through `make qemu`, watches the screen through QEMU's monitor, reads the serial console and types on it. Each run boots with `-snapshot`, so the image stays unchanged, and never starts a build. `scripts/vm-test.py` without arguments lists its tests and options.
+
+- `scripts/vm-test.py boot --repeat 20`: every boot shows only black, the splash and the graphical login, and reaches the login within the timeout. A race that shows up once in a dozen boots needs `--repeat`.
+- `scripts/vm-test.py shells`: logs in as `user` on the serial console and runs each shell the x86_64 desktop offers.
+- Results print one line per run, `PASS` or `FAIL` with the screens seen and their times; the exit code is 1 when any run fails. Screenshots and the serial log of each run land in `build/vm-test/<arch>/<config>/<test>-<run>/`.
+- A new test is a function in the script that drives the `VM` object (`screenshot`, `wait_serial`, `type`, `command` for any QEMU monitor command such as `sendkey`) and returns pass or fail with a note.
+
 ## Check inside the OS without typing
 
 1. Write a throwaway config `config/my_<name>.toml` that includes the config you need and adds an init script under `/usr/lib/init.d/` which runs your command, saves its result to a file and then calls `shutdown`. `config/acid.toml` is the model: its init script starts an ion script that the same config writes to `/usr/lib/`.
