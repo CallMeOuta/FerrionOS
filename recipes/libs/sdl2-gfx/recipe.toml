@@ -13,14 +13,13 @@ dependencies = [
     "freetype2",
     "liborbital",
     "libpng",
-    "mesa",
     "sdl2",
     "zlib",
 ]
 template = "custom"
 script = """
 DYNAMIC_INIT
-export SDL_LIBS="-lSDL2 -lorbital $("${PKG_CONFIG}" --libs osmesa) -lpng -lz -lm -lpthread -lstdc++"
+export SDL_LIBS="-lSDL2 -lorbital -lpng -lz -lm -lpthread -lstdc++"
 COOKBOOK_CONFIGURE_FLAGS+=(
     --disable-sdltest
 )

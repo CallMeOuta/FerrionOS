@@ -12,7 +12,8 @@
 #include <stdlib.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
-#include <GL/osmesa.h>
+#include <EGL/egl.h>
+#include <stdint.h>
 #include <orbital.h>
 #include <stdio.h>
 
@@ -151,7 +152,8 @@ gear(GLfloat inner_radius, GLfloat outer_radius, GLfloat width,
 static int width = 800;
 static int height = 600;
 
-static void * buffer = NULL;
+static EGLDisplay display;
+static EGLSurface surface;
 static void * window = NULL;
 
 static GLfloat view_rotx = 20.0, view_roty = 30.0, view_rotz = 0.0;
@@ -164,17 +166,7 @@ static GLuint count = 1;
 static void
 sync(void)
 {
-  glFinish();
-
-  uint32_t * frame_data = orb_window_data(window);
-  uint32_t * image_data = (uint32_t *)buffer;
-
-  int i;
-  for(i = 0; i < width * height; i++) {
-    frame_data[i] = image_data[i] | 0xFF000000;
-  }
-
-  orb_window_sync(window);
+  eglSwapBuffers(display, surface);
 }
 
 static void
@@ -286,30 +278,30 @@ main(int argc, char *argv[])
     limit = 0;
   }
 
-  OSMesaContext ctx = OSMesaCreateContextExt(OSMESA_BGRA, 16, 0, 0, NULL);
-  if (!ctx) {
-    printf("OSMesaCreateContextExt failed\n");
+  display = eglGetPlatformDisplay(0x31D9, EGL_DEFAULT_DISPLAY, NULL);
+  const EGLint attributes[] = {
+    EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_DEPTH_SIZE, 16,
+    EGL_NONE
+  };
+  EGLConfig config;
+  EGLint count;
+  if (!eglInitialize(display, NULL, NULL) || !eglBindAPI(EGL_OPENGL_API) ||
+      !eglChooseConfig(display, attributes, &config, 1, &count) || count != 1) {
+    fprintf(stderr, "EGL configuration failed: %#x\n", eglGetError());
     return 1;
   }
-
-  buffer = malloc(width * height * 4);
-  if(!buffer) {
-    printf("malloc failed\n");
-    OSMesaDestroyContext(ctx);
-    return 1;
-  }
-
-  if (!OSMesaMakeCurrent(ctx, buffer, GL_UNSIGNED_BYTE, width, height)) {
-    printf("OSMesaMakeCurrent failed\n");
-    OSMesaDestroyContext(ctx);
-    return 1;
-  }
-
-  OSMesaPixelStore(OSMESA_Y_UP, 0);
-
-  OSMesaColorClamp(GL_TRUE);
-
   window = orb_window_new_flags(-1, -1, width, height, "Gears", ORB_WINDOW_ASYNC);
+  if (!window)
+    return 1;
+  surface = eglCreateWindowSurface(display, config,
+      (EGLNativeWindowType)(uintptr_t)orb_window_fd(window), NULL);
+  EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, NULL);
+  if (surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
+      !eglMakeCurrent(display, surface, surface, context)) {
+    fprintf(stderr, "EGL context failed: %#x\n", eglGetError());
+    return 1;
+  }
 
   init();
 
@@ -336,9 +328,11 @@ main(int argc, char *argv[])
    orb_events_destroy(event_iter);
   }
 
+  eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+  eglDestroyContext(display, context);
+  eglDestroySurface(display, surface);
   orb_window_destroy(window);
-  OSMesaDestroyContext(ctx);
-  free(buffer);
+  eglTerminate(display);
 
   return 0;             /* ANSI C requires main to return int. */
 }

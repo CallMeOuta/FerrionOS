@@ -1,5 +1,5 @@
 /*
- * Test OSMesa interface at 8, 16 and 32 bits/channel.
+ * Test EGL off-screen rendering at 8, 16 and 32 bits/channel.
  *
  * Usage: osdemo [options]
  *
@@ -8,12 +8,15 @@
  *   -g   render gradient and print color values
  */
 
+#define GL_GLEXT_PROTOTYPES
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <GL/osmesa.h>
+#include <EGL/egl.h>
+#include <GL/gl.h>
+#include <GL/glext.h>
 #include <GL/glu.h>
 #include <orbital.h>
 
@@ -402,8 +405,9 @@ write_ppm(const char *filename, const GLubyte *buffer, int width, int height)
 static GLboolean
 test(GLenum type, GLint bits, const char *filename)
 {
-   const GLint z = 16, stencil = 0, accum = 0;
-   OSMesaContext ctx;
+   EGLDisplay display;
+   EGLContext context;
+   GLuint framebuffer, color, depth;
    void *buffer;
    GLint cBits;
 
@@ -415,32 +419,49 @@ test(GLenum type, GLint bits, const char *filename)
           type == GL_UNSIGNED_SHORT ||
           type == GL_FLOAT);
 
-   ctx = OSMesaCreateContextExt(OSMESA_BGRA, z, stencil, accum, NULL );
-   if (!ctx) {
-      printf("OSMesaCreateContextExt() failed!\n");
+   display = eglGetPlatformDisplay(0x31D9, EGL_DEFAULT_DISPLAY, NULL);
+   const EGLint attributes[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE };
+   EGLConfig config;
+   EGLint count;
+   if (!eglInitialize(display, NULL, NULL) || !eglBindAPI(EGL_OPENGL_API) ||
+       !eglChooseConfig(display, attributes, &config, 1, &count) || count != 1) {
+      fprintf(stderr, "EGL configuration failed: %#x\n", eglGetError());
       return 0;
    }
-
-   /* Allocate the image buffer */
+   context = eglCreateContext(display, config, EGL_NO_CONTEXT, NULL);
+   if (context == EGL_NO_CONTEXT ||
+       !eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) {
+      fprintf(stderr, "EGL context failed: %#x\n", eglGetError());
+      return 0;
+   }
    buffer = malloc(WIDTH * HEIGHT * 4 * bits / 8);
    if (!buffer) {
-      printf("Alloc image buffer failed!\n");
+      fprintf(stderr, "Image allocation failed\n");
+      return 0;
+   }
+   glGenFramebuffers(1, &framebuffer);
+   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+   glGenRenderbuffers(1, &color);
+   glBindRenderbuffer(GL_RENDERBUFFER, color);
+   glRenderbufferStorage(GL_RENDERBUFFER,
+                        bits == 8 ? GL_RGBA8 : bits == 16 ? GL_RGBA16 : GL_RGBA32F,
+                        WIDTH, HEIGHT);
+   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, color);
+   glGenRenderbuffers(1, &depth);
+   glBindRenderbuffer(GL_RENDERBUFFER, depth);
+   glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, WIDTH, HEIGHT);
+   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      fprintf(stderr, "Incomplete %d-bit framebuffer\n", bits);
       return 0;
    }
 
-   /* Bind the buffer to the context and make it current */
-   if (!OSMesaMakeCurrent( ctx, buffer, type, WIDTH, HEIGHT )) {
-      printf("OSMesaMakeCurrent (%d bits/channel) failed!\n", bits);
-      free(buffer);
-      OSMesaDestroyContext(ctx);
-      return 0;
-   }
+   glViewport(0, 0, WIDTH, HEIGHT);
 
    /* sanity checks */
    glGetIntegerv(GL_RED_BITS, &cBits);
    if (cBits != bits) {
       fprintf(stderr, "Unable to create %d-bit/channel renderbuffer.\n", bits);
-      fprintf(stderr, "May need to recompile Mesa with CHAN_BITS=16 or 32.\n");
       return 0;
    }
    glGetIntegerv(GL_GREEN_BITS, &cBits);
@@ -455,7 +476,7 @@ test(GLenum type, GLint bits, const char *filename)
    else
       printf("Rendering %d bit/channel image\n", bits);
 
-   OSMesaColorClamp(GL_TRUE);
+   glClampColor(GL_CLAMP_FRAGMENT_COLOR, GL_TRUE);
 
    init_context();
    render_image();
@@ -464,6 +485,11 @@ test(GLenum type, GLint bits, const char *filename)
 
    /* Make sure buffered commands are finished! */
    glFinish();
+   glReadPixels(0, 0, WIDTH, HEIGHT, GL_BGRA, type, buffer);
+   if (glGetError() != GL_NO_ERROR) {
+      fprintf(stderr, "OpenGL rendering or readback failed\n");
+      return 0;
+   }
 
    if (DisplayImages && filename != NULL) {
       if (type == GL_UNSIGNED_SHORT) {
@@ -515,7 +541,12 @@ test(GLenum type, GLint bits, const char *filename)
       }
    }
 
-   OSMesaDestroyContext(ctx);
+   glDeleteRenderbuffers(1, &depth);
+   glDeleteRenderbuffers(1, &color);
+   glDeleteFramebuffers(1, &framebuffer);
+   eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+   eglDestroyContext(display, context);
+   eglTerminate(display);
 
    free(buffer);
 
@@ -539,9 +570,7 @@ main( int argc, char *argv[] )
          Gradient = GL_TRUE;
    }
 
-   test(GL_UNSIGNED_BYTE, 8, "image8.ppm");
-   test(GL_UNSIGNED_SHORT, 16, "image16.ppm");
-   test(GL_FLOAT, 32, "image32.ppm");
-
-   return 0;
+   return !(test(GL_UNSIGNED_BYTE, 8, "image8.ppm") &&
+            test(GL_UNSIGNED_SHORT, 16, "image16.ppm") &&
+            test(GL_FLOAT, 32, "image32.ppm"));
 }
