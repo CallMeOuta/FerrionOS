@@ -79,6 +79,5 @@ RUN apt-get update \
         zstd \
     && if [ "$(uname -m)" = "x86_64" ]; then \
          apt-get install -y --no-install-recommends \
-            libc6-dev-i386 \
             syslinux-utils \
     ; fi

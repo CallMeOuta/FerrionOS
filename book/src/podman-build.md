@@ -1,6 +1,6 @@
 # Building FerrionOS
 
-This page builds a FerrionOS image from the repository and starts it in a virtual machine. It describes the build that FerrionOS uses and has verified: an x86_64 Linux host, the Podman build, and the x86_64 `desktop` image. The build system also targets i586, [ARM64](./aarch64.md) and RISC-V, and it can build without Podman ([Native Build](./building-redox.md)); FerrionOS has not verified those paths.
+This page builds a FerrionOS image from the repository and starts it in a virtual machine. It describes the build that FerrionOS uses and has verified: an x86_64 Linux host, the Podman build, and the x86_64 `desktop` image. The build system also targets [ARM64](./aarch64.md) (`aarch64`) and RISC-V (`riscv64gc`), and it can build without Podman ([Native Build](./building-redox.md)); FerrionOS has not verified those paths.
 
 - [What You Need](#what-you-need)
 - [Get the Source](#get-the-source)

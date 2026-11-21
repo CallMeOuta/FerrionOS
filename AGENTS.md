@@ -55,7 +55,7 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
 
 # Architectures
 
-`ARCH` is exactly one of `x86_64`, `i586`, `aarch64`, `riscv64gc`, and the directories under `config/` carry the same names. `i686` on the make command line is rejected. The derived names differ and are computed, never typed: the Rust target is `<arch>-unknown-redox`, the GNU triple for RISC-V is `riscv64-unknown-redox`, and QEMU's own names are in `mk/qemu.mk`.
+`ARCH` is exactly one of `x86_64`, `aarch64`, `riscv64gc`, and the directories under `config/` carry the same names. FerrionOS has only 64-bit build targets and userland. The derived names differ and are computed, never typed: the Rust target is `<arch>-unknown-redox`, the GNU triple for RISC-V is `riscv64-unknown-redox`, and QEMU's own names are in `mk/qemu.mk`.
 
 # Display
 

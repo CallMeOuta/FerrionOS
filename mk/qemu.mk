@@ -9,23 +9,7 @@ VGA_SUPPORTED=no
 QEMU_PATH?=$(shell command -v $(QEMU))
 QEMU_BASE_DIR?=$(shell if [ $(QEMU_PATH) ]; then realpath $$(dirname $(QEMU_PATH))/..; fi)
 
-ifeq ($(ARCH),i586)
-	audio?=ac97
-	disk?=ata
-	gpu?=vga
-	uefi=no
-	VGA_SUPPORTED=yes
-	QEMU_ARCH=i386
-	QEMU_MACHINE?=pc
-	QEMU_CPU?=pentium2
-	QEMU_SMP?=1
-	QEMU_MEM?=1024
-
-	# Default to using kvm when arch is i586 and host is x86_64
-	ifeq ($(HOST_ARCH),x86_64)
-		kvm?=yes
-	endif
-else ifeq ($(ARCH),x86_64)
+ifeq ($(ARCH),x86_64)
 	gpu?=vga
 	uefi?=yes
 	VGA_SUPPORTED=yes
@@ -178,8 +162,6 @@ endif
 ifeq ($(redoxer),yes)
 ifeq ($(ARCH),x86_64)
 	QEMUFLAGS+=-device isa-debug-exit
-else ifeq ($(ARCH),i586)
-	QEMUFLAGS+=-device isa-debug-exit
 else ifeq ($(ARCH),aarch64)
 	QEMUFLAGS+=-semihosting-config enable=on,target=native,userspace=on
 endif
@@ -295,7 +277,6 @@ endif
 EXTRA_DISK=$(BUILD)/extra.img
 disk?=nvme
 ifeq ($(disk),ata)
-	# For i386, ata will use ided
 	# For aarch64 and x86_64, ata will use ahcid
 	QEMUFLAGS+= \
 		-drive file=$(DISK),format=raw \

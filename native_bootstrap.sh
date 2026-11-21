@@ -452,7 +452,7 @@ ubuntu()
     zstd"
     # Not availible for at least ARM hosts
     case "$host_arch" in
-        x86*|i?86) pkgs="$pkgs libc6-dev-i386 syslinux-utils";;
+        x86_64) pkgs="$pkgs syslinux-utils";;
     esac
     sudo $install_command $pkgs --no-install-recommends
     if [ "$1" == "qemu" ]; then
@@ -550,7 +550,6 @@ fedora()
     gdb \
     genisoimage \
     gettext-devel \
-    glibc-devel.i686 \
     gmp-devel \
     help2man \
     libjpeg-turbo-devel \
@@ -613,7 +612,6 @@ suse()
     "gcc-c++"
     "gdb-multiarch"
     "gettext-tools"
-    "glibc-devel-32bit"
     "gmp-devel"
     "libexpat-devel"
     "libjpeg8-devel"
@@ -811,9 +809,7 @@ solus()
     gcc \
     glibc-devel \
     git \
-    libgcc-32bit \
     libpng-devel \
-    libstdc++-32bit \
     libtool-devel \
     linux-headers \
     m4 \

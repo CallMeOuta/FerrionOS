@@ -17,9 +17,6 @@ DYNAMIC_INIT
 
 # https://llvm.org/docs/CMake.html
 case "${TARGET}" in
-    x86-unknown-redox)
-        LLVM_TARGETS_TO_BUILD="X86"
-        ;;
     x86_64-unknown-redox)
         LLVM_TARGETS_TO_BUILD="X86"
         ;;

@@ -5,7 +5,7 @@
 HOST_ARCH?=$(shell uname -m)
 
 # Configuration
-## Architecture to build FerrionOS for (aarch64, i586, or x86_64). Defaults to a host one
+## Architecture to build FerrionOS for (x86_64, aarch64, or riscv64gc). Defaults to the host architecture
 ARCH?=$(HOST_ARCH)
 ## Sub-device type for aarch64 if needed
 BOARD?=
@@ -26,9 +26,8 @@ REPO_NONSTOP?=0
 REPO_OFFLINE?=0
 ## Do not strip debug info for local build
 REPO_DEBUG?=0
-## Old config value that need to be corrected
-ifeq ($(ARCH),i686)
-	ARCH=i586
+ifeq ($(filter $(ARCH),x86_64 aarch64 riscv64gc),)
+$(error Unsupported ARCH '$(ARCH)': choose x86_64, aarch64, or riscv64gc)
 endif
 ## Select filesystem config
 ifeq ($(BOARD),)
@@ -45,12 +44,8 @@ HOST_CARGO=env -u RUSTUP_TOOLCHAIN -u CC -u TARGET cargo
 ## FILESYSTEM_SIZE?=$(shell $(INSTALLER) --filesystem-size -c $(FILESYSTEM_CONFIG))
 ## Flags to pass to redoxfs-mkfs. Add --encrypt to set up disk encryption
 REDOXFS_MKFS_FLAGS?=
-## Verified boot for harddrive.img, 1 by default: its UEFI bootloader starts only the kernel and initfs signed with this build's key (scripts/verified-boot-sign.sh, which needs FUSE, OpenSSL 3 and python3). 0 builds an image whose bootloader verifies nothing and offers the boot environment editor. i586 boots through BIOS only, which cannot verify, so it defaults to 0. Not for live images
-ifeq ($(ARCH),i586)
-VERIFIED_BOOT?=0
-else
+## Verified boot for harddrive.img, 1 by default: its UEFI bootloader starts only the kernel and initfs signed with this build's key (scripts/verified-boot-sign.sh, which needs FUSE, OpenSSL 3 and python3). 0 builds an image whose bootloader verifies nothing and offers the boot environment editor. Not for live images
 VERIFIED_BOOT?=1
-endif
 ## Where the verified-boot development key pair is kept, made on first use
 VERIFIED_BOOT_KEYS?=build/verified-boot
 ## A PKCS#11 URI of an Ed25519 key on a hardware token, which then signs instead of the development key: release builds (see scripts/verified-boot-sign.sh)

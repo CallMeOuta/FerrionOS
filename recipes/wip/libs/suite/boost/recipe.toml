@@ -17,7 +17,6 @@ script = """
 DYNAMIC_INIT
 
 case "${TARGET}" in
-    i586-unknown-redox)   ADDRESS_MODEL=32 ARCHITECTURE=x86 ABI=sysv;;
     x86_64-unknown-redox) ADDRESS_MODEL=64 ARCHITECTURE=x86 ABI=sysv;;
     aarch64-unknown-redox) ADDRESS_MODEL=64 ARCHITECTURE=arm ABI=aapcs;;
     riscv64gc-unknown-redox) ADDRESS_MODEL=64 ARCHITECTURE=riscv ABI=sysv;;

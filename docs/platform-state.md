@@ -18,7 +18,7 @@ Component sources cited here are the checkouts a fetch puts in `recipes/core/<na
 
 ### Architectures
 
-- x86_64 is the only broadly exercised target. Upstream's prebuilt package repository (`REMOTE_PKG_SOURCE` in `src/lib.rs`, read by `REPO_BINARY=1`) held 489 packages for x86_64, 115 for aarch64, 99 for i586 and 83 for riscv64gc. Prove a change on x86_64 first; a recipe that fails elsewhere has probably never built there.
+- FerrionOS targets only `x86_64`, `aarch64` and `riscv64gc`, with no 32-bit userland or compatibility layer. x86_64 is the only broadly exercised target. Upstream's prebuilt package repository (`REMOTE_PKG_SOURCE` in `src/lib.rs`, read by `REPO_BINARY=1`) held 489 packages for x86_64, 115 for aarch64 and 83 for riscv64gc. Prove a change on x86_64 first; a recipe that fails elsewhere has probably never built there.
 - aarch64 reaches no graphical login in QEMU: the virtio drivers panic in `pcid`'s interrupt setup and `nvmed` panics or stalls, and only live mode reaches a text login ([`vm-baseline.md`](vm-baseline.md)). The book says "(ARM64 has limited support)" ([`book/src/aarch64.md`](../book/src/aarch64.md)).
 
 ### Hardware

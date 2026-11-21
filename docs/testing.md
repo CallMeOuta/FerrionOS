@@ -42,6 +42,6 @@ Upstream gates its merge requests on a `.gitlab-ci.yml` that is not part of this
 
 - `cargo fmt -- --check`
 - `RUSTFLAGS="-Dwarnings" cargo test --locked`
-- `make CONFIG_NAME=ci SKIP_CHECK_TOOLS=1 repo-tree ARCH=<arch>` and the same for `CONFIG_NAME=demo`, with `PODMAN_BUILD=0`, for each of the four architectures
+- `make CONFIG_NAME=ci SKIP_CHECK_TOOLS=1 repo-tree ARCH=<arch>` and the same for `CONFIG_NAME=demo`, with `PODMAN_BUILD=0`, for each supported architecture: `x86_64`, `aarch64` and `riscv64gc`
 - `./scripts/fetch-changed.sh`, which fetches every recipe whose `recipe.toml` differs from `origin/master` and so needs a git checkout
 - `make desktop` with `REPO_BINARY=1` and `FSTOOLS_NO_MOUNT=1`, an image assembled from prebuilt packages. Here that job also needs `VERIFIED_BOOT=0`: verified-boot signing mounts the image through FUSE, which `FSTOOLS_NO_MOUNT=1` leaves out

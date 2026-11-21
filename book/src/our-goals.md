@@ -11,7 +11,7 @@ FerrionOS aims to be a complete, general-purpose operating system that puts corr
 
 ### A Complete System
 
-FerrionOS has its own kernel, drivers and filesystem, written in Rust. It builds them from upstream's sources ([Components and Their Sources](./side-projects.md)). The build system has configurations for four CPU architectures: x86_64, i586, aarch64 and riscv64gc. FerrionOS has verified the x86_64 desktop image in QEMU; [Hardware Support](./hardware-support.md) has the details.
+FerrionOS has its own kernel, drivers and filesystem, written in Rust. It builds them from upstream's sources ([Components and Their Sources](./side-projects.md)). The build system has configurations for x86_64, aarch64 and riscv64gc. FerrionOS has verified the x86_64 desktop image in QEMU; [Hardware Support](./hardware-support.md) has the details.
 
 Programs written in C, C++ and Rust are built against `relibc`, a [C standard library](https://en.wikipedia.org/wiki/C_POSIX_library) written in Rust that implements a large part of POSIX. Many programs and libraries build without changes. Others need patches where they rely on functionality outside POSIX.
 

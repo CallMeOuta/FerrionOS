@@ -94,7 +94,7 @@ Install the build system dependencies:
 
 ```sh
 sudo dnf install autoconf vim bison flex genisoimage gperf \
-glibc-devel.i686 expat expat-devel fuse-devel fuse3-devel gmp-devel \
+expat expat-devel fuse-devel fuse3-devel gmp-devel \
 libpng-devel perl perl-HTML-Parser libtool libjpeg-turbo-devel
 SDL2_ttf-devel sdl12-compat-devel m4 nasm po4a syslinux \
 texinfo ninja-build meson waf python3-mako make gcc gcc-c++ \
@@ -140,7 +140,7 @@ sudo pacman -S virtualbox
 Install the build system dependencies:
 
 ```sh
-sudo zypper install gcc gcc-c++ glibc-devel-32bit nasm make fuse-devel \
+sudo zypper install gcc gcc-c++ nasm make fuse-devel \
 cmake openssl automake gettext-tools libtool po4a patch flex gperf autoconf \
 bison curl wget file libexpat-devel gmp-devel libpng16-devel libjpeg8-devel \
 perl perl-HTML-Parser m4 patch scons pkgconf syslinux-utils ninja meson python-Mako \

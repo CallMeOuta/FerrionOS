@@ -12,14 +12,11 @@ usage()
 {
     echo "build.sh:      Invoke make for a particular architecture and configuration."
     echo "Usage:"
-    echo "./build.sh [-X | -A | -5 | -R | -a ARCH] [-c CONFIG] [-f FILESYSTEM_CONFIG] TARGET..."
+    echo "./build.sh [-X | -A | -R | -a ARCH] [-c CONFIG] [-f FILESYSTEM_CONFIG] TARGET..."
     echo "    -X         Equivalent to -a x86_64."
     echo "    -A         Equivalent to -a aarch64."
-    echo "    -5         Equivalent to -a i586."
-    echo "    -6         Equivalent to -a i586 (deprecated, use -5 instead)."
     echo "    -R         Equivalent to -a riscv64gc."
-    echo "    -a ARCH:   Processor Architecture. Normally one of x86_64, aarch64 or"
-    echo "               i686. ARCH is not checked, so you can add a new architecture."
+    echo "    -a ARCH:   Processor architecture: x86_64, aarch64 or riscv64gc."
     echo "               Defaults to the directory containing the FILESYSTEM_CONFIG file,"
     echo "               or x86_64 if no FILESYSTEM_CONFIG is specified."
     echo "    -c CONFIG: The name of the config, e.g. desktop, server or demo."
@@ -31,14 +28,13 @@ usage()
     echo "    -f FILESYSTEM_CONFIG:"
     echo "               The config file to use. It can be in any location."
     echo "               However, if the file is not in a directory named x86_64, aarch64"
-    echo "               or i686, you must specify the architecture."
+    echo "               or riscv64gc, you must specify the architecture."
     echo "               If -f is not specified, FILESYSTEM_CONFIG is set to"
     echo "               config/ARCH/CONFIG.toml"
     echo "               If you specify both CONFIG and FILESYSTEM_CONFIG, it is not"
     echo "               necessary that they match, but it is recommended."
     echo "    Examples:  ./build.sh -c demo live - make build/x86_64/demo/redox-live.iso"
-    echo "               ./build.sh -6 qemu - make build/i686/desktop/harddrive.img and"
-    echo "                                    and run it in qemu"
+    echo "               ./build.sh -X qemu - build the x86_64 desktop image and run QEMU"
     echo "    NOTE:      If you do not change ARCH or CONFIG very often, edit mk/config.mk"
     echo "               and set ARCH and FILESYSTEM_CONFIG. You only need to use this"
     echo "               script when you want to override them."
@@ -55,7 +51,7 @@ ARCH=""
 CONFIG_NAME=""
 FILESYSTEM_CONFIG=""
 
-while getopts ":c:f:a:dhXA6" opt
+while getopts ":c:f:a:dhXAR" opt
 do
     case "$opt" in
         a) ARCH="$OPTARG";;
@@ -64,8 +60,6 @@ do
         X) ARCH="x86_64";;
         A) ARCH="aarch64";;
         R) ARCH="riscv64gc";;
-        5) ARCH="i586";;
-        6) ARCH="i586";;
         h) usage;;
         \?) echo "Unknown option -$OPTARG, try -h for help"; exit;;
         :) echo "-$OPTARG requires a value"; exit;;
@@ -80,8 +74,7 @@ if [ -z "$ARCH" ] && [ -n "$FILESYSTEM_CONFIG" ]; then
         x86_64) : ;;
         aarch64) : ;;
         riscv64gc) : ;;
-        i586) : ;;
-        \?) ARCH=""; echo "Unknown Architecture, please specify x86_64, aarch64, riscv64gc or i586";;
+        *) echo "Unknown architecture; specify x86_64, aarch64 or riscv64gc"; exit 1;;
     esac
 fi
 

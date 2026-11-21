@@ -61,16 +61,11 @@ COOKBOOK_CONFIGURE_FLAGS+=(
 )
 fi
 
-if [ "${CROSS_GNU_TARGET}" != "i586-unknown-redox" ]; then
-COOKBOOK_CONFIGURE_FLAGS+=(
-    --enable-frame-pointer
-)
-fi
-
 COOKBOOK_CONFIGURE_FLAGS+=(
     --target="${CROSS_GNU_TARGET}"
     --with-linker-hash-style=gnu
     --enable-languages=c,c++,lto
+    --enable-frame-pointer
     --enable-initfini-array
     --disable-nls
     --disable-multilib

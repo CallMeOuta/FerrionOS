@@ -5,7 +5,6 @@
 set -e
 
 ARCHS=(
-    i686
     x86_64
 )
 CONFIGS=(

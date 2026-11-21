@@ -92,7 +92,7 @@ read -r ESP_OFFSET ESP_SIZE <<< "$ESP_RANGE"
 MOUNTED=1
 boot_mount "$REDOXFS_BIN" "$IMAGE" "$WORK/mnt"
 BOOT="$WORK/mnt/usr/lib/boot"
-[ -f "$BOOT/bootloader.efi" ] || boot_die "$IMAGE has no UEFI bootloader (usr/lib/boot/bootloader.efi); i586 boots through BIOS only and cannot verify, build it with VERIFIED_BOOT=0"
+[ -f "$BOOT/bootloader.efi" ] || boot_die "$IMAGE has no UEFI bootloader (usr/lib/boot/bootloader.efi); verified boot requires a UEFI bootloader"
 
 {
     echo "ferrion-boot-manifest 1"

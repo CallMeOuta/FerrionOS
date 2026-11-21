@@ -34,7 +34,7 @@ Every template expands to a bash script, and `template = "custom"` supplies its 
 - The script starts in the build directory, `${COOKBOOK_BUILD}`. The source is `${COOKBOOK_SOURCE}`, the recipe directory `${COOKBOOK_RECIPE}`, and the dependencies are under `${COOKBOOK_SYSROOT}`.
 - Whatever ends up under `${COOKBOOK_STAGE}` is the package. Install under `usr/` (`${COOKBOOK_STAGE}/usr/bin`): in the image `/bin` and `/lib` are symlinks into `/usr`.
 - Linking is static unless the script calls `DYNAMIC_INIT` first. The templates other than `custom` call it for you.
-- The same script runs for four architectures. Take the triple from `${TARGET}` and `${GNU_TARGET}` and keep architecture names out of it.
+- The same script runs for `x86_64`, `aarch64` and `riscv64gc`. Take the triple from `${TARGET}` and `${GNU_TARGET}` and keep architecture names out of it.
 - It runs under `bash -e` with an error trap, so the first failing command ends the cook.
 - Afterwards the cookbook strips the executables and libraries in the stage and removes `*.la` files.
 

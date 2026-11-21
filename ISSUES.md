@@ -5,7 +5,7 @@ Report problems using the [bug report form](https://github.com/CallMeOuta/Ferrio
 ## What to include
 
 * The commit you built (`git rev-parse HEAD`), or the image you downloaded and its date.
-* The architecture (`x86_64`, `i586`, `aarch64` or `riscv64gc`) and the config (`CONFIG_NAME`, for example `desktop` or `minimal`).
+* The architecture (`x86_64`, `aarch64` or `riscv64gc`) and the config (`CONFIG_NAME`, for example `desktop` or `minimal`).
 * Where it ran: the emulator and its version (`qemu-system-x86_64 --version`), or the hardware model.
 * The exact commands you ran, from a fresh clone where possible.
 * The whole log. For a build, `make all 2>&1 | tee build.log` keeps one. For a boot, `make qemu qemu_serial_logfile=serial.log` writes the serial console to a file. A screenshot shows what a log cannot, such as a wrong screen.

@@ -57,7 +57,6 @@ Read the [Debug Methods](#debug-methods) and [Boot](#boot) sections for more det
 - If possible verify if your boot problem happens in UEFI and BIOS (UEFI has BIOS emulation which is called "CSM mode" and can be enabled in the UEFI settings)
 - Photos are safer and faster to send boot logs than boot log text written by hand, which is error-prone and time consuming
 - Verify if your computer has enough RAM to load the whole FerrionOS image: in live mode the bootloader loads the image into memory, because data streaming from USB is not supported yet. If it has 1GB or less of RAM, use the `server`, `desktop-minimal` or `desktop` configuration to avoid OOM panics
-- If you have a very weak 64-bit Intel or AMD CPU (single core and L cache smaller than 1MB, like Intel Atom CPUs released before 2010) and 1GB or less of RAM, a 32-bit image with the `server`, `desktop-minimal` or `desktop` configuration is the path inherited from upstream to avoid OOM panics. FerrionOS publishes no images: build one with `ARCH=i586`. FerrionOS has not verified the i586 architecture
 
 Read the [Debug Methods](#debug-methods) and [Boot](#boot) sections for more details.
 

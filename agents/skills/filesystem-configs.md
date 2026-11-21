@@ -18,7 +18,7 @@ The schema is `redox_installer::Config`, in upstream's installer crate and not i
 
 - Only the file named by `FILESYSTEM_CONFIG` is a make prerequisite. After editing a config that others include (`base.toml`, `dev-accounts.toml`, `minimal.toml`, `server.toml`, `desktop.toml`), `make all` sees nothing new. Run `make rebuild`, or `make image` when only files, users or sizes changed.
 - A config that others include changes every image built from them. `rg -l '<file>\.toml"' config` lists its direct includers.
-- The architecture directories are `config/x86_64`, `config/i586`, `config/aarch64` and `config/riscv64gc`. `config/<arch>/ci.toml` is the package list the build server cooks with `make ci-pkg`; its header asks to comment a broken package out instead of deleting its line.
+- The architecture directories are `config/x86_64`, `config/aarch64` and `config/riscv64gc`. `config/<arch>/ci.toml` is the package list the build server cooks with `make ci-pkg`; its header asks to comment a broken package out instead of deleting its line.
 
 ## Check it
 

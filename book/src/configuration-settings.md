@@ -42,7 +42,7 @@ Three important Makefile variables of interest are `ARCH`, `CONFIG_NAME`, and `B
 
 | Variable | Definition |
 |:---------|:-----------|
-|`ARCH`| Specifies the [CPU architecture](#cpu-architecture-codenames) that the system is to be built for: `x86_64`, `i586`, `aarch64` or `riscv64gc`. The default value is the CPU architecture of the host, as `uname -m` prints it. |
+|`ARCH`| Specifies the [CPU architecture](#cpu-architecture-codenames) that the system is to be built for: `x86_64`, `aarch64` or `riscv64gc`. The default value is the CPU architecture of the host, as `uname -m` prints it. |
 | `CONFIG_NAME` | Determines the name of the filesystem configuration, and is normally used to construct the `FILESYSTEM_CONFIG` name (the `desktop` variant is used by default). |
 | `BOARD` | For [supported QEMU single board computers](https://www.qemu.org/docs/master/system/targets.html) such as Raspberry Pi 3B+ (`raspi3bp`) that require special configuration. Defaults to empty. |
 | `FILESYSTEM_CONFIG` | Determines the filesystem configuration file location. See the [Filesystem Configuration](#filesystem-configuration) section below. The default value is `config/$ARCH/$CONFIG_NAME.toml` if that file exists and `config/$CONFIG_NAME.toml` otherwise, or `config/$ARCH/$BOARD/$CONFIG_NAME.toml` if `$BOARD` is set, but this can be changed if the desired configuration file is in a different location. |
@@ -56,7 +56,7 @@ Three important Makefile variables of interest are `ARCH`, `CONFIG_NAME`, and `B
 | `REPO_NONSTOP` | Enable the nonstop mode of Cookbook where recipe build failure will not stop the compilation of other recipes. |
 | `FILESYSTEM_SIZE` | The size in MiB of the filesystem contained in the final FerrionOS image. See the [Filesystem Size](#filesystem-size) section before changing it. |
 | `REDOXFS_MKFS_FLAGS` | Flags to `redoxfs-mkfs`, the program that creates a RedoxFS filesystem, used when `$(BUILD)/filesystem.img` is built (`mk/disk.mk`). The `harddrive.img` and `redox-live.iso` images are created by the installer and do not use them. With the `--encrypt` option, `redoxfs-mkfs` asks for a password and creates an encrypted filesystem. |
-| `VERIFIED_BOOT` | If set to 1, which is the default (0 for `i586`), `harddrive.img` is built as a verified-boot image: the build signs its kernel and `initfs`, and its UEFI bootloader starts no other ([Verified Boot](./boot-process.md#verified-boot)). The signing needs FUSE, OpenSSL 3 and Python 3 on the host, and it stops the build when `FSTOOLS_NO_MOUNT=1` is set. Set it to 0 (`VERIFIED_BOOT=0`) for an image whose bootloader verifies nothing. Live images are not covered. |
+| `VERIFIED_BOOT` | If set to 1, which is the default, `harddrive.img` is built as a verified-boot image: the build signs its kernel and `initfs`, and its UEFI bootloader starts no other ([Verified Boot](./boot-process.md#verified-boot)). The signing needs FUSE, OpenSSL 3 and Python 3 on the host, and it stops the build when `FSTOOLS_NO_MOUNT=1` is set. Set it to 0 (`VERIFIED_BOOT=0`) for an image whose bootloader verifies nothing. Live images are not covered. |
 | `VERIFIED_BOOT_KEYS` | The directory of the verified-boot development key pair, which the first build creates. The default value is `build/verified-boot`. |
 | `VERIFIED_BOOT_SIGNER` | A PKCS#11 URI of an Ed25519 key on a hardware token, which then signs the image instead of the development key. Empty by default; `scripts/verified-boot-sign.sh` describes it. |
 | `PODMAN_BUILD` | If set to 0 (`PODMAN_BUILD?=0`), the build system will use the build environment from your Linux distribution or Unix-like system instead of Podman, see the [Native Build](./building-redox.md) page for more information. The default value is 1, a Podman build. If used in the `.config` file it *must* include the `?` symbol in the end of the variable name to work correctly (`PODMAN_BUILD?=1`) |
@@ -76,10 +76,10 @@ The purpose of the `.config` file is to allow default configuration settings to 
 
 To permanently override the settings in the [`mk/config.mk`](#mkconfigmk) section, add a `.config` file to the FerrionOS directory (i.e., where `make` commands are run) and set the overriding values in that file. `mk/config.mk` includes the file as a makefile, so it uses the syntax of `make`: `VARIABLE?=value` for a build variable, and `export VARIABLE=value` for an environment variable.
 
-For example, the following configuration specifies the `desktop-minimal` image variant will be built for the `i586` CPU architecture. These settings will be applied implicitly to all subsequent `make` commands:
+For example, the following configuration specifies the `desktop-minimal` image variant will be built for the `x86_64` CPU architecture. These settings will be applied implicitly to all subsequent `make` commands:
 
 ```
-ARCH?=i586
+ARCH?=x86_64
 CONFIG_NAME?=desktop-minimal
 ```
 
@@ -195,7 +195,7 @@ QEMUFLAGS?=<extra-qemu-flags>
 - `net`: `no` removes the network card. `redir` uses the e1000 card and forwards the host ports 8022 and 8080 to the ports 22 and 80 of FerrionOS.
 - `netboot=yes` starts iPXE (`/usr/lib/ipxe/ipxe-amd64.efi` on the host), with the build directory served over TFTP and `redox.ipxe` as the boot file.
 - `bridge` attaches the network card to the host bridge that it names.
-- `uefi=no` boots without the UEFI firmware, and `i586` always does.
+- `uefi=no` boots without the UEFI firmware.
 - `live=yes` boots `redox-live.iso` instead of `harddrive.img`.
 - `usb=no` leaves out the xHCI USB controller.
 - `serial=no` leaves out the serial port and connects the debug console (I/O port 0x402) to the terminal instead.
@@ -221,7 +221,7 @@ make CONFIG_NAME=demo qemu
 Some environment variables can also be set for the lifetime of the current shell by setting them at the command line:
 
 ```sh
-export ARCH=i586; make all
+export ARCH=x86_64; make all
 ```
 
 Overriding settings in this way is only temporary, however. Additionally, a [Podman Build](./podman-build.md) passes only these variables from the command line or the environment on to the container (`PODMAN_CONFIG` in `mk/podman.mk`): `ARCH`, `BOARD`, `CONFIG_NAME`, `FILESYSTEM_CONFIG`, `PREFIX_BINARY`, `CI`, `COOKBOOK_MAKE_JOBS`, `COOKBOOK_LOGS`, `COOKBOOK_COMPRESSED`, `COOKBOOK_VERBOSE`, `COOKBOOK_VERBOSE_CMD`, `COOKBOOK_CLEAN_TARGET`, `REPO_APPSTREAM`, `REPO_BINARY`, `REPO_NONSTOP`, `REPO_OFFLINE`, `TESTBIN`, `HOSTED_REDOX`, `PREFIX_USE_UPSTREAM_RUST_COMPILER`, `VERIFIED_BOOT`, `VERIFIED_BOOT_KEYS` and `VERIFIED_BOOT_SIGNER`. Every other setting that the build in the container reads must be set in [`.config`](#config), which is read in the container too.
@@ -258,7 +258,7 @@ The `TARGET` parameter may be any valid `make` target. Additional variable setti
 
 | Option | Description |
 |:-------|:------------|
-| `-a <ARCH>` | The CPU architecture you are building for, `x86_64`, `i586`, `aarch64` or `riscv64gc`. The options `-X`, `-A` and `-6` can be used as shorthands for `-a x86_64`, `-a aarch64` and `-a i586`, respectively. The usage text of the script also lists `-5` and `-R`, but its option parser (`getopts ":c:f:a:dhXA6"`) rejects them. |
+| `-a <ARCH>` | The CPU architecture you are building for: `x86_64`, `aarch64` or `riscv64gc`. |
 | `-c <CONFIG_NAME>` | The name of the filesystem configuration which appears in the name of the image being built. |
 | `-f <FILESYSTEM_CONFIG>` | Determines the filesystem configuration file location, which can be in any location but is normally in directory `config/$ARCH`.<br><br>📝 **Note:** If you *do* specify `-f <FILESYSTEM_CONFIG>`, the file path determines the other values. `CONFIG_NAME` is always the *basename* of the file without `.toml`, also if `-c` is given. Without `-a`, `ARCH` is the name of the directory that holds the file, and the script does not check it: for a file outside of `config/$ARCH`, specify `-a ARCH`. |
 
@@ -288,7 +288,6 @@ The build system knows the CPU architectures below, and `ARCH` takes exactly the
 
 | CPU Architecture | Other Aliases |
 |:---------------- |:----------- |
-| `i586` | x86 (32-bit), IA32 , `x86` |
 | `x86_64` | x86 (64-bit), `x86-64`, `amd64`, `x64` |
 | `aarch64` | ARM (64-bit), ARMv8, `ARM64` |
 | `riscv64gc` | RISC-V (64-bit) |

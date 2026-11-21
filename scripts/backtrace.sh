@@ -5,14 +5,14 @@
 
 usage()
 {
-    echo "Usage: $0 -r recipe [ -e command_name ] [ -R ] [ -X | -6 | -A ] [[ -b backtracefile ] | [ addr1 ... ]]"
+    echo "Usage: $0 -r recipe [ -e command_name ] [ -R ] [ -X | -A ] [[ -b backtracefile ] | [ addr1 ... ]]"
     echo
     echo "Print the backtrace contained in the backtracefile."
     echo "Symbols are taken from the executable for the given recipe."
     echo "If no backtracefile is given, decode the given addresses instead."
     echo "This command must be run in the build system's root directory."
     echo
-    echo "-X for x86_64, -6 for i686, -A for aarch64 (x86_64 is the default)."
+    echo "-X for x86_64, -A for aarch64 (x86_64 is the default)."
     echo "To read from stdin, use '-b -'"
     echo "The name of the executable must match what Cargo believes it to be."
     echo "If the executalbe is named 'recipe_command', just use 'command' as the name."
@@ -25,12 +25,11 @@ usage()
 
 ARCH="x86_64"
 
-while getopts ":b:e:r:hRXA6" opt
+while getopts ":b:e:r:hRXA" opt
 do
     case "$opt" in
         X) ARCH="x86_64";;
         A) ARCH="aarch64";;
-        6) ARCH="i686";;
         b) INFILE="$OPTARG";;
         e) COMMAND="$OPTARG";;
         i) INST="$OPTARG";;

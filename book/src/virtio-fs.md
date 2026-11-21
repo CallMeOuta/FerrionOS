@@ -60,7 +60,7 @@ qemu-system-x86_64 -device help | grep vhost-user-fs
 
     When it finds none, `make qemu` and `make ch` first download a static `virtiofsd` into the `build/virtiofsd/<host arch>/` directory, and `make virtiofsd-fetch` only does that download. This happens on x86_64 Linux hosts, on other hosts `make` stops with an error. The download is the CI build of the `main` branch of virtiofsd: it is not pinned to a release and not checked against a checksum, as the `mk/virtiofs.mk` file notes. Prefer the package of your distribution.
 
-- A FerrionOS image that includes the `virtio-fsd` driver. It's part of the `base` recipe, except on 32-bit x86 (i586), where it isn't built yet. If FerrionOS doesn't show your share, rebuild the image with the `make rebuild` command.
+- A FerrionOS image that includes the `virtio-fsd` driver. It's part of the `base` recipe. If FerrionOS doesn't show your share, rebuild the image with the `make rebuild` command.
 
 ## Sharing Directories With The Build System
 

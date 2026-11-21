@@ -21,7 +21,7 @@ Three patches implement the quiet boot. The bootloader patch (`recipes/core/boot
 
 ## Verified Boot
 
-A hard-drive image built with the default settings is a verified-boot image: its UEFI bootloader starts only the kernel and the `initfs` that the image was built with. The build variable is `VERIFIED_BOOT`, which is 1 by default (`mk/config.mk`) and 0 for i586, which boots through BIOS only.
+A hard-drive image built with the default settings is a verified-boot image: its UEFI bootloader starts only the kernel and the `initfs` that the image was built with. The build variable is `VERIFIED_BOOT`, which is 1 by default (`mk/config.mk`).
 
 The build writes a manifest with the hashes of both files, and its signature, into the image, and puts the public key into the image's bootloader (`scripts/verified-boot-sign.sh`, which needs FUSE, OpenSSL 3 and Python 3 on the host).
 

@@ -69,7 +69,7 @@ The `make` targets are documented in the comments of `Makefile` and `mk/*.mk`, a
 - `config/x86_64/desktop.toml` - The `desktop` configuration of x86_64: the shared one with the fish, zsh and Nushell shells added, and Nushell as the login shell of `user`.
 - `config/riscv64gc/desktop.toml` - The `desktop` configuration of RISC-V: the shared one without NetSurf.
 - `config/desktop-contain.toml` - `desktop` variant that starts the graphical login through `contain_orblogin`, a part of the `contain` sandbox tool, which aims at limiting the schemes and files that a session can reach. FerrionOS has not verified it, see [Security](./security.md).
-- `config/dev.toml` - The variant with development tools included (`config/aarch64/dev.toml` and `config/i586/dev.toml` adapt it to those CPU architectures).
+- `config/dev.toml` - The variant with development tools included (`config/aarch64/dev.toml` adapts it to that CPU architecture).
 - `config/$ARCH/demo.toml` - The variant with `desktop` and optional programs and games.
 - `config/x86_64/rustconf2025.toml` - `demo` variant with two more packages, a demonstration configuration inherited from upstream
 - `config/wayland.toml` - Configuration for Wayland sessions and applications
@@ -225,7 +225,7 @@ All recipe targets also support multiple recipe entries by separating each recip
 - `make qemu usb=no` - Start QEMU without the xHCI USB controller.
 - `make qemu uefi=no` - Boot without the UEFI firmware, which is the default on x86_64 and aarch64. On x86_64 this is a BIOS boot, which shows the menu of the bootloader.
 - `make qemu live=yes` - Boot the live image `redox-live.iso` instead of `harddrive.img`. The bootloader loads the live image whole into memory.
-- `make qemu disk=nvme` - Boot FerrionOS from a NVMe interface (high-performance SSD emulation). This is the default, except for i586 and the `raspi3bp` board.
+- `make qemu disk=nvme` - Boot FerrionOS from a NVMe interface (high-performance SSD emulation). This is the default, except for the `raspi3bp` board.
 - `make qemu disk=usb` - Boot FerrionOS from a virtual USB device.
 - `make qemu disk=cdrom` - Boot FerrionOS from a virtual CD-ROM disk.
 - `make qemu kvm=no` - Start QEMU without the [Linux KVM](https://en.wikipedia.org/wiki/Kernel-based_Virtual_Machine) acceleration if it's not supported.
@@ -500,7 +500,6 @@ List the recipe executables to find duplicates and conflicts.
 
 - By default the script will only verify duplicates, if the `-a` option is used it will print the executable names of all compiled recipes
 - The `-arm64` option will show the ARM64 recipe executables
-- The `-i686` option looks in `target/i686-unknown-redox`, a target name that the build no longer produces (32-bit x86 is `i586-unknown-redox`)
 
 ```sh
 scripts/executables.sh

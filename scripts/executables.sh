@@ -4,8 +4,8 @@
 
 usage() {
     echo "List executable names to find duplicates"
-    echo "Usage: $0 [-h] [-a] [-arm64 | -i686] [recipes]"
-    echo "Default architecture is x86_64, -arm64 is aarch64, -i686 is i686"
+    echo "Usage: $0 [-h] [-a] [-arm64] [recipes]"
+    echo "Default architecture is x86_64, -arm64 is aarch64"
     echo "Only duplicates are listed unless -a is specified"
     echo "-h is this message"
     exit
@@ -21,9 +21,6 @@ do
     if [ "$arg" == "-arm64" ]
     then
         target="aarch64-unknown-redox"
-    elif [ "$arg" == "-i686" ]
-    then
-        target="i686-unknown-redox"
     elif [ "$arg" == "-a" ]
     then
         uniq="cat"

@@ -58,6 +58,7 @@ popd
 
 COOKBOOK_CONFIGURE_FLAGS+=(
     --enable-win64
+    # Windows guest architectures via WoW64 on a 64-bit Unix host; no 32-bit Unix libraries.
 	--enable-archs=x86_64,i386,arm
 	--disable-kerberos
 	--disable-tests
