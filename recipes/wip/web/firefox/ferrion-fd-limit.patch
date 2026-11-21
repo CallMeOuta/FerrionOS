@@ -1,0 +1,18 @@
+diff --git a/ipc/chromium/src/base/process_util_posix.cc b/ipc/chromium/src/base/process_util_posix.cc
+index c74c048f445..a1c7ab93afe 100644
+--- a/ipc/chromium/src/base/process_util_posix.cc
++++ b/ipc/chromium/src/base/process_util_posix.cc
+@@ -152,6 +152,13 @@ void CloseSuperfluousFds(void* aCtx, bool (*aShouldPreserve)(void*, int)) {
+     max_fds = nofile.rlim_cur;
+   }
+ 
++#if defined(XP_REDOX)
++  // No descriptor directory exists to enumerate. Avoid turning an unlimited
++  // rlimit into INT_MAX close calls; use the sysconf(_SC_OPEN_MAX) bound.
++  // Higher descriptors cannot be discovered on this fallback path.
++  if (max_fds == RLIM_INFINITY) max_fds = kSystemDefaultMaxFds;
++#endif
++
+   if (max_fds > INT_MAX) max_fds = INT_MAX;
+ 
+   DirReaderPosix fd_dir(kFDDir);

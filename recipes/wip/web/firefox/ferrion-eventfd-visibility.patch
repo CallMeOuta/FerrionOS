@@ -1,0 +1,12 @@
+diff --git a/config/system-headers.mozbuild b/config/system-headers.mozbuild
+index 88bd14ffc04..e65db1e5a22 100644
+--- a/config/system-headers.mozbuild
++++ b/config/system-headers.mozbuild
+@@ -814,6 +814,7 @@ system_headers = [
+     "sys/elf.h",
+     "sys/endian.h",
+     "sys/epoll.h",
++    "sys/eventfd.h",
+     "sys/fault.h",
+     "sys/fcntl.h",
+     "sys/file.h",

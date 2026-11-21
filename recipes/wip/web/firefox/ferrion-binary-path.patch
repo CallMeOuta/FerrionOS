@@ -1,0 +1,18 @@
+diff --git a/xpcom/build/BinaryPath.h b/xpcom/build/BinaryPath.h
+index 41d619efdd0..7eb3970b327 100644
+--- a/xpcom/build/BinaryPath.h
++++ b/xpcom/build/BinaryPath.h
+@@ -147,7 +147,13 @@ class BinaryPath {
+       return NS_ERROR_FAILURE;
+     }
+ 
++#if defined(XP_REDOX)
++    // Content processes execute this path with -contentproc, so it must name
++    // the real executable, not a placeholder in its directory.
++    snprintf(aResult, MAXPATHLEN, "%s/%s", libDir, "firefox");
++#else
+     snprintf(aResult, MAXPATHLEN, "%s/%s", libDir, "dummy");
++#endif
+     aResult[MAXPATHLEN - 1] = '\0';
+     return NS_OK;
+   }
