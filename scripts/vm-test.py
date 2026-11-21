@@ -679,12 +679,26 @@ class VM:
         self.scratch.rmdir()
 
 
+def firmware_status_lines(frame):
+    """True when `frame` shows the firmware's logo with lines of text above it.
+
+    OVMF prints its own status lines ("BdsDxe: loading Boot0002 ...", "BdsDxe: starting ...") at
+    the top of the screen above its logo on every boot, before the bootloader runs and clears the
+    screen; a screenshot catches them now and then. Below the top eighth the frame must be the
+    firmware's logo frame; text after the bootloader has cleared the screen still counts as text.
+    """
+    top = frame.width * (frame.height // 8) * 3
+    return Frame(frame.width, frame.height, bytes(top) + frame.rgb[top:]).kind() == "firmware"
+
+
 def test_boot(vm, args):
     """No text from power-on to the graphical login, and the login arrives in time."""
     seen = []
     while vm.elapsed() < args.timeout:
         frame = vm.screenshot()
         kind = frame.kind()
+        if kind == "text" and firmware_status_lines(frame):
+            kind = "firmware"
         if not seen or seen[-1][1] != kind:
             seen.append((round(vm.elapsed(), 1), kind))
             if kind in ("login", "text"):
