@@ -44,6 +44,7 @@ nsmgr-bounds-probe = {}
 # Run as `user`, it checks that the display driver refuses dumb-buffer mappings and sizes outside
 # a buffer or the driver's limits and keeps working; scripts/vm-test.py graphics-bounds runs it.
 graphics-bounds-probe = {}
+gpu-probe-context = {}
 # Run as root (a `user` login may not create a scheme), it checks that a short read from a
 # user-space scheme leaves the rest of the caller's buffer untouched; scripts/vm-test.py
 # scheme-short-read runs it.

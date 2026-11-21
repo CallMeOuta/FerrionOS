@@ -4566,6 +4566,105 @@ def test_mesa_cpu(vm, args):
     return True, "Mesa CPU versions and both exact frames checked"
 
 
+GPU_CONTEXT_TRACE = ("virtio_gpu_features", "virtio_gpu_cmd_ctx_create", "virtio_gpu_cmd_ctx_destroy")
+VENUS_CAPSET_SHA256 = "11069f17d3858d6b725a3b2b2b810fafc6ae6529ccdedf45bab62acdcb342609"
+
+
+def reference_venus_capset():
+    """The Venus capset's sha256 from this checkout's newest reference-guest record, and where it came from."""
+    for record in sorted((ROOT / "build" / "gpu-reference").glob("run-*/result.json"), reverse=True):
+        try:
+            variants = json.loads(record.read_text()).get("variants", [])
+        except (OSError, ValueError, AttributeError):
+            continue
+        for variant in variants:
+            for run in variant.get("runs", []):
+                capset = (run.get("guest") or {}).get("venus_capset") or {}
+                if re.fullmatch(r"[0-9a-f]{64}", str(capset.get("sha256", ""))):
+                    return capset["sha256"], str(record.relative_to(ROOT))
+    return VENUS_CAPSET_SHA256, "the reference guest's record of 2026-11-21"
+
+
+def test_gpu_context(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-context on a 3D device (gpu=venus unless --make names another): render handles on the GPU's render scheme give Venus contexts named after the probe, the capsets include 1, 2 and 4 and the Venus capset's sha256 equals the reference guest's, display requests are refused, a second handle reaches neither the first's context nor its numbers, and QEMU's trace shows virgl acknowledged and each context created and destroyed with its own handle."""
+    tag = "gpu-probe-context"
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    status, output = guest_run(vm, "gc", tag, 120)
+    _, schemes = guest_run(vm, "gl", "ls /scheme", 30)
+    log = vm.out / "gpu-context.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    reasons = []
+    fields = dict(re.findall(rf"(?m)^{tag}: (render|capsets|context-name|context-name-second|context-name-third) (\S+)",
+                             output))
+    capset = re.search(rf"(?m)^{tag}: venus-capset size (\d+) sha256 ([0-9a-f]{{64}})", output)
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):", output)
+    if "render" not in fields:
+        reasons.append("the probe found no render name")
+    elif status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed checks: {', '.join(failed) or 'no result line'}")
+    if "render" in fields:
+        listed = schemes.split()
+        if fields["render"] not in listed or "display.virtio-gpu" not in listed:
+            reasons.append("/scheme no longer lists the render and display names after the probe")
+    ids = sorted(int(i) for i in fields.get("capsets", "").split(",") if i.isdigit())
+    if "render" in fields and not {1, 2, 4} <= set(ids):
+        reasons.append(f"capsets {ids}, not 1, 2 and 4")
+    want_sha, reference = reference_venus_capset()
+    if "render" in fields and (not capset or capset.group(2) != want_sha):
+        reasons.append(f"Venus capset sha256 {capset.group(2) if capset else 'missing'}, the reference "
+                       f"({reference}) is {want_sha}")
+
+    names = [fields.get(key) for key in ("context-name", "context-name-second", "context-name-third")]
+    deadline = time.monotonic() + 10
+    while True:
+        trace = vm.trace()
+        destroyed = [int(m.group(1), 16) for line in trace
+                     if (m := re.search(r"virtio_gpu_cmd_ctx_destroy\b.*?\bctx (0x[0-9a-f]+)", line))]
+        if len(destroyed) >= 3 or time.monotonic() >= deadline or "render" not in fields:
+            break
+        time.sleep(0.5)
+    features = [line for line in trace if re.search(r"\bvirtio_gpu_features\b", line)]
+    events = []
+    for line in trace:
+        if m := re.search(r"virtio_gpu_cmd_ctx_create\b.*?\bctx (0x[0-9a-f]+), name (.*)$", line):
+            events.append(("create", int(m.group(1), 16), m.group(2).strip()))
+        elif m := re.search(r"virtio_gpu_cmd_ctx_destroy\b.*?\bctx (0x[0-9a-f]+)", line):
+            events.append(("destroy", int(m.group(1), 16), None))
+    (vm.out / "gpu-context-trace.txt").write_text("\n".join(features + [f"{kind} {ctx:#x} {name or ''}"
+                                                                      for kind, ctx, name in events]) + "\n")
+    if not any(re.search(r"\bvirgl 1\b", line) for line in features):
+        reasons.append("QEMU's trace has no `virtio_gpu_features virgl 1`")
+    created = [(ctx, name) for kind, ctx, name in events if kind == "create"]
+    if not created:
+        reasons.append("QEMU's trace has no virtio_gpu_cmd_ctx_create line")
+    elif all(names):
+        contexts = []
+        for name in names:
+            matching = [ctx for ctx, created_name in created if created_name == name]
+            if len(matching) != 1:
+                reasons.append(f"{len(matching)} contexts named {name} in QEMU's trace, not 1")
+            contexts.append(matching[0] if matching else None)
+        if None not in contexts:
+            first, second, third = contexts
+            order = [(kind, ctx) for kind, ctx, _ in events if ctx in contexts]
+            if len(set(contexts)) != 3:
+                reasons.append(f"the three handles' contexts share a number: {[hex(c) for c in contexts]}")
+            elif order.count(("destroy", first)) != 1 or order.count(("destroy", second)) != 1 \
+                    or order.count(("destroy", third)) != 1:
+                reasons.append(f"each context is not destroyed once: {order}")
+            elif not (order.index(("create", first)) < order.index(("create", second))
+                      < order.index(("destroy", second)) < order.index(("destroy", first))):
+                reasons.append(f"the second handle's close did not leave the first's context alone: {order}")
+    elif "render" in fields:
+        reasons.append("the probe printed no context names")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, (f"{fields['render']}: capsets {','.join(map(str, ids))}, Venus capset sha256 matches {reference}; "
+                  f"trace: virgl 1, contexts {', '.join(names)} created and each destroyed with its own handle; "
+                  f"{output.count(f'{tag}: pass ')} probe checks passed")
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -4603,6 +4702,7 @@ TESTS["gtk-window"] = test_gtk_window
 TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
+TESTS["gpu-context"] = test_gpu_context
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -4673,6 +4773,11 @@ def main():
             last_capture = None
             trace_lines = 0
             make = ("gpu=multi",) if name == "gpu-heads" else ()
+            run_args = args
+            if name == "gpu-context":
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=venus",)
+                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_CONTEXT_TRACE]})
             try:
                 qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
                 host = host_versions(qemu)
@@ -4682,9 +4787,9 @@ def main():
                 if name in OWN_IMAGE:
                     ok, note = OWN_IMAGE[name](args, out)
                 else:
-                    vm = VM(args, out, tpm=name == "tpm", make=make,
+                    vm = VM(run_args, out, tpm=name == "tpm", make=make,
                             qemu_flags=RAND_FIRMWARE if name == "rand-seed" else "")
-                    ok, note = TESTS[name](vm, args)
+                    ok, note = TESTS[name](vm, run_args)
                 verdict = "PASS" if ok else "FAIL"
             except Blocked as error:
                 verdict, note = "BLOCKED", str(error)
@@ -4700,7 +4805,7 @@ def main():
             blocked += verdict == "BLOCKED"
             result = {"test": name, "run": run, "verdict": verdict, "note": note, "host": host,
                       "make": [*args.make, *make], "capture_sources": captures, "last_capture_source": last_capture,
-                      "trace_events": args.trace, "trace_lines": trace_lines}
+                      "trace_events": run_args.trace, "trace_lines": trace_lines}
             (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
             print(f"{verdict} {name} {run}/{args.repeat}: {note}", flush=True)
     sys.exit(1 if failures else 2 if blocked else 0)
