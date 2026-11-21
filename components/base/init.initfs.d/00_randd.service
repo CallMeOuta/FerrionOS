@@ -5,4 +5,8 @@ default_dependencies = false
 [service]
 cmd = "randd"
 args = ["rand"]
+inherit_envs = ["RNG_SEED_ADDR", "RNG_SEED_SIZE"]
 type = { scheme = "rand" }
+# Reads the firmware's random seed from the physical address the bootloader passes and
+# overwrites it, then enters the null namespace before it serves a read.
+hardware = true

@@ -1,4 +1,10 @@
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::arch::asm;
+use std::fs::OpenOptions;
+use std::os::fd::AsRawFd;
+use std::sync::atomic;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, hint, ptr};
 
 use rand_chacha::ChaCha20Rng;
 use rand_core::RngCore;
@@ -8,12 +14,12 @@ use redox_scheme::scheme::SchemeSync;
 use redox_scheme::{CallerCtx, OpenResult, Socket};
 use scheme_utils::{Blocking, FpathWriter, HandleMap};
 use syscall::data::Stat;
-use syscall::flag::{EventFlags, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_WRONLY};
+use syscall::flag::{EventFlags, O_ACCMODE, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_WRONLY};
 use syscall::schemev2::NewFdFlags;
-use syscall::{Error, Result, EACCES, EBADF, EEXIST, ENOENT, EPERM, MODE_CHR};
+use syscall::{
+    Error, Result, EACCES, EBADF, EEXIST, ENOENT, EPERM, MODE_CHR, MODE_FILE, PAGE_SIZE,
+};
 
-// Create an RNG Seed to create initial seed from the rdrand intel instruction
-#[rustfmt::skip]
 use rand_core::SeedableRng;
 use sha2::{Digest, Sha256};
 
@@ -25,59 +31,294 @@ use sha2::{Digest, Sha256};
 // Rand crate recommends at least 256 bits of entropy to seed the RNG
 const SEED_BYTES: usize = 32;
 
-/// Create a true random seed for the RNG if hardware support is present.
-/// On Intel x64 from rdrand instruction.
-/// On AArch64 from RNDRRS system register.
-/// Will seed with a zero (insecure) if getting support is not present.
-fn create_rdrand_seed() -> [u8; SEED_BYTES] {
-    let mut rng = [0; SEED_BYTES];
-    let mut have_seeded = false;
-    #[cfg(target_arch = "x86_64")]
-    {
-        if CpuId::new().get_feature_info().unwrap().has_rdrand() {
-            for i in 0..SEED_BYTES / 8 {
-                // We get 8 bytes at a time from rdrand instruction
-                let rand: u64;
-                unsafe {
-                    asm!("rdrand rax", out("rax") rand);
-                }
+/// Overwrites a buffer that held seed material with zeros. The writes are volatile so the
+/// compiler keeps them although nothing reads the buffer afterwards.
+fn wipe(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        unsafe { ptr::write_volatile(byte, 0) };
+    }
+    atomic::compiler_fence(atomic::Ordering::SeqCst);
+}
 
-                rng[i * 8..(i * 8 + 8)].copy_from_slice(&rand.to_le_bytes());
-            }
-            have_seeded = true;
+/// The inputs of the generator's key (FerrionOS). Every source is hashed into one SHA-256
+/// digest, each with its name and length, so that no source alone decides the key: a source
+/// that fails, or is known to an attacker, leaves the others' contribution intact.
+struct Seeder {
+    digest: Sha256,
+    /// The sources mixed in, in order.
+    sources: Vec<&'static str>,
+    /// Whether one of them is a hardware or firmware generator.
+    strong: bool,
+}
+
+impl Seeder {
+    fn new() -> Self {
+        let mut digest = Sha256::new();
+        digest.input(b"FerrionOS randd seed v1");
+        Seeder {
+            digest,
+            sources: Vec::new(),
+            strong: false,
         }
     }
-    #[cfg(target_arch = "aarch64")]
+
+    fn add(&mut self, name: &'static str, strong: bool, data: &[u8]) {
+        self.digest.input((name.len() as u64).to_le_bytes());
+        self.digest.input(name.as_bytes());
+        self.digest.input((data.len() as u64).to_le_bytes());
+        self.digest.input(data);
+        self.sources.push(name);
+        self.strong |= strong;
+    }
+
+    fn finish(self) -> ([u8; SEED_BYTES], Vec<&'static str>, bool) {
+        let mut seed = [0; SEED_BYTES];
+        seed.copy_from_slice(self.digest.result().as_slice());
+        (seed, self.sources, self.strong)
+    }
+}
+
+/// Mixes in four 64-bit values from the CPU instruction `name`. It is left out when a value never
+/// came or all four are equal: a broken generator returns one value over and over.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn add_cpu_words(seeder: &mut Seeder, name: &'static str, read: fn() -> Option<u64>) {
+    let mut words = [0u64; SEED_BYTES / 8];
+    let mut complete = true;
+    for word in &mut words {
+        match read() {
+            Some(value) => *word = value,
+            None => complete = false,
+        }
+    }
+    if !complete || words.iter().all(|word| *word == words[0]) {
+        println!("randd: {name} is present but returned no usable values; left out");
+        return;
+    }
+    let mut bytes = [0; SEED_BYTES];
+    for (chunk, word) in bytes.chunks_exact_mut(8).zip(words) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    seeder.add(name, true, &bytes);
+    wipe(&mut bytes);
+}
+
+/// RDRAND. A clear carry flag means no value was ready; Intel's DRNG Software Implementation
+/// Guide has software retry up to 10 times and then report a failure.
+#[cfg(target_arch = "x86_64")]
+fn rdrand_u64() -> Option<u64> {
+    for _ in 0..10 {
+        let value: u64;
+        let ok: u8;
+        unsafe {
+            asm!("rdrand {value}", "setc {ok}", value = out(reg) value, ok = out(reg_byte) ok, options(nomem, nostack));
+        }
+        if ok != 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// RDSEED. It runs out of values more often than RDRAND; the same guide has software retry
+/// with a pause between attempts.
+#[cfg(target_arch = "x86_64")]
+fn rdseed_u64() -> Option<u64> {
+    for _ in 0..100 {
+        let value: u64;
+        let ok: u8;
+        unsafe {
+            asm!("rdseed {value}", "setc {ok}", value = out(reg) value, ok = out(reg_byte) ok, options(nomem, nostack));
+        }
+        if ok != 0 {
+            return Some(value);
+        }
+        hint::spin_loop();
+    }
+    None
+}
+
+/// The CPU's random-number instructions: RDSEED and RDRAND on x86_64.
+#[cfg(target_arch = "x86_64")]
+fn cpu_sources(seeder: &mut Seeder) {
+    let cpuid = CpuId::new();
+    if cpuid
+        .get_extended_feature_info()
+        .is_some_and(|info| info.has_rdseed())
     {
-        fn is_cpu_feature_detected(feature: &str) -> bool {
-            if let Ok(cpu) = std::fs::read_to_string("/scheme/sys/cpu") {
-                let found = cpu
-                    .lines()
-                    .find_map(|s| s.strip_prefix("Features:"))
-                    .and_then(|s| s.split(" ").find(|s| s == &feature))
-                    .is_some();
-                return found;
-            }
-            false
-        }
-        if is_cpu_feature_detected("rand") {
-            let mut failure = false;
-            for i in 0..SEED_BYTES / 8 {
-                // We get 8 bytes at a time from RNDRRS register
-                let rand: u64;
-                unsafe {
-                    asm!("mrs {}, s3_3_c2_c4_1", out(reg) rand); // rndrrs
-                }
-                failure |= rand == 0;
-                rng[i * 8..(i * 8 + 8)].copy_from_slice(&rand.to_le_bytes());
-            }
-            have_seeded = !failure;
-        }
-    } // TODO integrate alternative entropy sources
-    if !have_seeded {
-        println!("randd: Seeding failed, no entropy source.  Random numbers on this platform are NOT SECURE");
+        add_cpu_words(seeder, "rdseed", rdseed_u64);
     }
-    rng
+    if cpuid
+        .get_feature_info()
+        .is_some_and(|info| info.has_rdrand())
+    {
+        add_cpu_words(seeder, "rdrand", rdrand_u64);
+    }
+}
+
+/// RNDRRS, the reseeded random number of FEAT_RNG. A set Z flag means no value was ready.
+#[cfg(target_arch = "aarch64")]
+fn rndrrs_u64() -> Option<u64> {
+    for _ in 0..10 {
+        let value: u64;
+        let ok: u64;
+        unsafe {
+            asm!("mrs {value}, s3_3_c2_c4_1", "cset {ok}, ne", value = out(reg) value, ok = out(reg) ok, options(nomem, nostack));
+        }
+        if ok != 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// The CPU's random-number instruction: RNDRRS on aarch64.
+#[cfg(target_arch = "aarch64")]
+fn cpu_sources(seeder: &mut Seeder) {
+    fn is_cpu_feature_detected(feature: &str) -> bool {
+        if let Ok(cpu) = std::fs::read_to_string("/scheme/sys/cpu") {
+            let found = cpu
+                .lines()
+                .find_map(|s| s.strip_prefix("Features:"))
+                .and_then(|s| s.split(" ").find(|s| s == &feature))
+                .is_some();
+            return found;
+        }
+        false
+    }
+    if is_cpu_feature_detected("rand") {
+        add_cpu_words(seeder, "rndrrs", rndrrs_u64);
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn cpu_sources(_seeder: &mut Seeder) {}
+
+/// The seed the UEFI bootloader read from the firmware's EFI_RNG_PROTOCOL (FerrionOS). The
+/// bootloader leaves it in a reserved page of physical memory and passes the page's address and
+/// the seed's size as RNG_SEED_ADDR and RNG_SEED_SIZE, which init hands to randd alone; the
+/// bytes themselves are in no environment. randd copies them once and overwrites the page with
+/// zeros, so nothing that maps physical memory later finds them.
+fn firmware_seed() -> Option<[u8; SEED_BYTES]> {
+    let hex = |name: &str| {
+        env::var(name)
+            .ok()
+            .and_then(|value| usize::from_str_radix(&value, 16).ok())
+    };
+    let (addr, size) = (hex("RNG_SEED_ADDR")?, hex("RNG_SEED_SIZE")?);
+    if addr == 0 || addr % PAGE_SIZE != 0 || size != SEED_BYTES {
+        println!("randd: ignoring a firmware seed of {size} bytes at {addr:#x}");
+        return None;
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/scheme/memory/physical")
+    {
+        Ok(file) => file,
+        Err(err) => {
+            println!("randd: cannot open physical memory for the firmware seed: {err}");
+            return None;
+        }
+    };
+    unsafe {
+        let page = match libredox::call::mmap(libredox::call::MmapArgs {
+            addr: ptr::null_mut(),
+            length: PAGE_SIZE,
+            prot: libredox::flag::PROT_READ | libredox::flag::PROT_WRITE,
+            flags: libredox::flag::MAP_SHARED,
+            fd: file.as_raw_fd() as usize,
+            offset: addr as u64,
+        }) {
+            Ok(page) => page as *mut u8,
+            Err(err) => {
+                println!("randd: cannot map the firmware seed: {err}");
+                return None;
+            }
+        };
+        let bytes = std::slice::from_raw_parts_mut(page, size);
+        let mut seed = [0; SEED_BYTES];
+        seed.copy_from_slice(bytes);
+        wipe(bytes);
+        let _ = libredox::call::munmap(page.cast(), PAGE_SIZE);
+        Some(seed)
+    }
+}
+
+/// A cycle or tick counter for timing jitter.
+#[cfg(target_arch = "x86_64")]
+fn counter() -> u64 {
+    let (low, high): (u32, u32);
+    unsafe { asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack)) };
+    (u64::from(high) << 32) | u64::from(low)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn counter() -> u64 {
+    let value: u64;
+    unsafe { asm!("mrs {}, cntvct_el0", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn counter() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos() as u64)
+}
+
+/// Timing jitter: how long a memory-bound loop takes, measured many times, plus the counter and
+/// the clock at the start. It differs between boots and machines but is no generator: alone it
+/// does not make the output secure, so it never counts as a hardware or firmware source.
+fn jitter() -> Vec<u8> {
+    const ROUNDS: usize = 4096;
+    let mut samples = Vec::with_capacity((ROUNDS + 2) * 8);
+    samples.extend_from_slice(&counter().to_le_bytes());
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos() as u64);
+    samples.extend_from_slice(&clock.to_le_bytes());
+    let mut memory = vec![0u8; 64 * 1024];
+    let mut index = 0usize;
+    for round in 0..ROUNDS {
+        let before = counter();
+        for step in 0..64 {
+            index = (index.wrapping_mul(31) + step + usize::from(memory[index])) % memory.len();
+            memory[index] = memory[index].wrapping_add(round as u8);
+        }
+        hint::black_box(&memory);
+        let delta = counter().wrapping_sub(before);
+        // The time taken steers the next round's memory accesses.
+        index = (index + delta as usize) % memory.len();
+        samples.extend_from_slice(&delta.to_le_bytes());
+    }
+    samples
+}
+
+/// Builds the generator's key from every source this machine has, and logs which. Without a
+/// hardware or firmware source the key rests on timing jitter alone, which is logged loudly.
+fn create_seed() -> ([u8; SEED_BYTES], Vec<&'static str>, bool) {
+    let mut seeder = Seeder::new();
+    cpu_sources(&mut seeder);
+    if let Some(mut seed) = firmware_seed() {
+        seeder.add("firmware", true, &seed);
+        wipe(&mut seed);
+    }
+    let mut samples = jitter();
+    seeder.add("jitter", false, &samples);
+    wipe(&mut samples);
+    let (seed, sources, strong) = seeder.finish();
+    if strong {
+        println!(
+            "randd: seeded from a hardware or firmware source: {}",
+            sources.join(", ")
+        );
+    } else {
+        println!(
+            "randd: NOT SEEDED from a hardware or firmware source, only from {}. Random numbers on this platform are NOT SECURE until a hardware source writes to /scheme/rand/hardware",
+            sources.join(", ")
+        );
+    }
+    (seed, sources, strong)
 }
 
 /// Contains information about an open file
@@ -93,6 +334,11 @@ impl OpenFileInfo {
 
 enum Handle {
     File(OpenFileInfo),
+    /// `/scheme/rand/hardware`: root writes the output of a hardware generator here, such as a
+    /// TPM's (FerrionOS).
+    Hardware,
+    /// `/scheme/rand/status`: which sources the key came from (FerrionOS).
+    Status,
     SchemeRoot,
 }
 
@@ -112,15 +358,53 @@ struct RandScheme {
     // https://docs.rs/rand/0.5.0/rand/prng/chacha/struct.ChaChaRng.html
     // Allows 2^64 streams of random numbers, which we will equate with file numbers
     handles: HandleMap<Handle>,
+    /// The sources mixed into the key, in order (FerrionOS).
+    sources: Vec<&'static str>,
+    /// Whether one of the sources is a hardware or firmware generator.
+    seeded: bool,
+    /// The number of writes to `/scheme/rand` and `/scheme/rand/urandom` mixed in.
+    writes: u64,
 }
 
 impl RandScheme {
     /// Create new rand scheme from a message socket
     fn new() -> RandScheme {
+        let (mut seed, sources, seeded) = create_seed();
+        let prng = ChaCha20Rng::from_seed(seed);
+        wipe(&mut seed);
         RandScheme {
-            prng: ChaCha20Rng::from_seed(create_rdrand_seed()),
+            prng,
             handles: HandleMap::new(),
+            sources,
+            seeded,
+            writes: 0,
         }
+    }
+
+    /// The text of `/scheme/rand/status`.
+    fn status(&self) -> String {
+        format!(
+            "seeded: {}\nsources: {}\nwrites: {}\n",
+            if self.seeded { "yes" } else { "no" },
+            self.sources.join(" "),
+            self.writes
+        )
+    }
+
+    /// Mixes written bytes into the key together with 32 bytes of the current output.
+    fn mix_in(&mut self, buf: &[u8]) {
+        let mut rng_buf: [u8; SEED_BYTES] = [0; SEED_BYTES];
+        self.prng.fill_bytes(&mut rng_buf);
+        let mut digest = Sha256::new();
+        digest.input(&rng_buf);
+        digest.input(buf);
+        let mut hash = digest.result();
+        let mut seed = [0; SEED_BYTES];
+        seed.copy_from_slice(hash.as_slice());
+        self.prng = ChaCha20Rng::from_seed(seed);
+        wipe(&mut rng_buf);
+        wipe(&mut seed);
+        wipe(hash.as_mut_slice());
     }
 
     /// Gets the open file info for a file descriptor if it is open - error otherwise.
@@ -138,29 +422,37 @@ impl RandScheme {
         }
         Ok(())
     }
-    /// Reseed the CSPRNG with the supplied entropy.
-    /// TODO add this to an entropy pool and give a limited estimate to the amount of entropy
-    /// TODO consider having trusted and untrusted entropy URIs, with different permissions.
-    fn reseed_prng(&mut self, entropy: &[u8]) {
-        // Need to fill a fixed size array for the from_seed, so we'll do 256 bit
-        // array and has the entropy into it.
-        let mut digest = Sha256::new();
-        digest.input(entropy);
-        let hash = digest.result();
-        let mut entropy_array: [u8; SEED_BYTES] = [0; SEED_BYTES];
-        entropy_array.copy_from_slice(hash.as_slice());
-        self.prng = ChaCha20Rng::from_seed(entropy_array);
-    }
 
     fn open_inner(&mut self, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
-        // We are only allowing
-        // reads/writes from /scheme/rand/ and /scheme/rand/urandom - the root directory on its own is passed as an empty slice
-        if !path.is_empty() && path != "/urandom" {
-            return Err(Error::new(ENOENT));
-        }
-
         if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
             return Err(Error::new(EEXIST));
+        }
+
+        // We are only allowing
+        // reads/writes from /scheme/rand/ and /scheme/rand/urandom - the root directory on its own is passed as an empty slice
+        // FerrionOS adds /scheme/rand/status, read-only, and /scheme/rand/hardware, write-only
+        // and for root alone. An open without an access mode is relibc's O_STAT or O_PATH lookup.
+        let access = flags & O_ACCMODE;
+        let handle = match path.trim_matches('/') {
+            "" | "urandom" => None,
+            "status" if access == O_RDONLY || access == 0 => Some(Handle::Status),
+            "hardware" if access == O_WRONLY || access == 0 => Some(Handle::Hardware),
+            "status" | "hardware" => return Err(Error::new(EACCES)),
+            _ => return Err(Error::new(ENOENT)),
+        };
+        if let Some(handle) = handle {
+            if matches!(handle, Handle::Hardware) && ctx.uid != 0 {
+                return Err(Error::new(EPERM));
+            }
+            // The status text is a file read from the offset the kernel keeps.
+            let flags = match handle {
+                Handle::Status => NewFdFlags::POSITIONED,
+                _ => NewFdFlags::empty(),
+            };
+            return Ok(OpenResult::ThisScheme {
+                number: self.handles.insert(handle),
+                flags,
+            });
         }
 
         let open_file_info = OpenFileInfo { o_flags: flags };
@@ -205,10 +497,20 @@ impl SchemeSync for RandScheme {
         &mut self,
         id: usize,
         buf: &mut [u8],
-        _offset: u64,
+        offset: u64,
         _fcntl_flags: u32,
         _ctx: &CallerCtx,
     ) -> Result<usize> {
+        if let Handle::Status = self.handles.get(id)? {
+            let status = self.status();
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(status.len());
+            let count = buf.len().min(status.len() - start);
+            buf[..count].copy_from_slice(&status.as_bytes()[start..start + count]);
+            return Ok(count);
+        }
+
         // Check fd and permissions
         self.can_perform_op_on_fd(id, O_RDONLY)?;
 
@@ -228,6 +530,21 @@ impl SchemeSync for RandScheme {
         _fcntl_flags: u32,
         _ctx: &CallerCtx,
     ) -> Result<usize> {
+        if let Handle::Hardware = self.handles.get(id)? {
+            self.mix_in(buf);
+            if !self.sources.contains(&"hardware") {
+                self.sources.push("hardware");
+            }
+            if !self.seeded && buf.len() >= SEED_BYTES {
+                self.seeded = true;
+                println!(
+                    "randd: seeded from a hardware or firmware source: {}",
+                    self.sources.join(", ")
+                );
+            }
+            return Ok(buf.len());
+        }
+
         // Check fd and permissions
         self.can_perform_op_on_fd(id, O_WRONLY)?;
 
@@ -237,13 +554,8 @@ impl SchemeSync for RandScheme {
         // that as the resulting numbers would be predictable based on this input
         // we'll take 512 bits (arbitrary) from the current PRNG, and seed with that
         // and the supplied data.
-
-        let mut rng_buf: [u8; SEED_BYTES] = [0; SEED_BYTES];
-        self.prng.fill_bytes(&mut rng_buf);
-        let mut rng_vec = Vec::new();
-        rng_vec.extend(&rng_buf);
-        rng_vec.extend(buf);
-        self.reseed_prng(&rng_vec);
+        self.mix_in(buf);
+        self.writes += 1;
         Ok(buf.len())
     }
 
@@ -259,8 +571,15 @@ impl SchemeSync for RandScheme {
         FpathWriter::with(buf, "rand", |_| Ok(()))
     }
 
-    fn fstat(&mut self, _file: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
-        stat.st_mode = 0o644 | MODE_CHR;
+    fn fstat(&mut self, file: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
+        stat.st_mode = match self.handles.get(file)? {
+            Handle::Status => {
+                stat.st_size = self.status().len() as u64;
+                0o444 | MODE_FILE
+            }
+            Handle::Hardware => 0o200 | MODE_CHR,
+            _ => 0o644 | MODE_CHR,
+        };
         stat.st_uid = 0;
         stat.st_gid = 0;
 
