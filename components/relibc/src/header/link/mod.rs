@@ -1,5 +1,9 @@
 use crate::{
-    ld_so::{dso::ProgramHeader, tcb::Tcb},
+    ld_so::{
+        dso::ProgramHeader,
+        linker::{Linker, lock_loader},
+        tcb::Tcb,
+    },
     platform::types::{c_char, c_int, c_ulonglong, c_void, size_t},
 };
 
@@ -32,8 +36,6 @@ pub unsafe extern "C" fn dl_iterate_phdr(
         return 0;
     }
 
-    unsafe {
-        let linker = (*tcb.linker_ptr).lock();
-        linker.dl_iterate_phdr(callback, data)
-    }
+    let _serial = lock_loader();
+    unsafe { Linker::dl_iterate_phdr(&*tcb.linker_ptr, callback, data) }
 }

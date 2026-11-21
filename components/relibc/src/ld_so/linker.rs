@@ -12,7 +12,7 @@ use object::{
     read::elf::{Rela as _, Sym},
 };
 
-use core::ptr;
+use core::{cell::Cell, ptr};
 
 use crate::{
     c_str::{CStr, CString},
@@ -31,7 +31,7 @@ use crate::{
         Pal, Sys,
         types::{c_int, c_void},
     },
-    sync::rwlock::RwLock,
+    sync::{Mutex, MutexGuard, rwlock::RwLock},
 };
 
 #[cfg(not(target_arch = "x86"))]
@@ -83,6 +83,36 @@ impl DlError {
 pub type Result<T> = core::result::Result<T, DlError>;
 
 pub(super) static GLOBAL_SCOPE: RwLock<Scope> = RwLock::new(Scope::global());
+
+// Hold across callbacks; the separate Linker mutex protects bookkeeping only.
+// Same-thread reentry skips this gate without recursively borrowing Linker.
+static LOADER_SERIAL: Mutex<()> = Mutex::new(());
+
+#[thread_local]
+static LOADER_ENTERED: Cell<bool> = Cell::new(false);
+
+pub(crate) struct LoaderGuard {
+    serial: Option<MutexGuard<'static, ()>>,
+}
+
+pub(crate) fn lock_loader() -> LoaderGuard {
+    let serial = if LOADER_ENTERED.get() {
+        None
+    } else {
+        let guard = LOADER_SERIAL.lock();
+        LOADER_ENTERED.set(true);
+        Some(guard)
+    };
+    LoaderGuard { serial }
+}
+
+impl Drop for LoaderGuard {
+    fn drop(&mut self) {
+        if self.serial.is_some() {
+            LOADER_ENTERED.set(false);
+        }
+    }
+}
 
 struct MmapFile {
     fd: i32,
@@ -417,7 +447,7 @@ impl Linker {
     }
 
     pub fn load_program(&mut self, path: &str, base_addr: Option<usize>) -> Result<usize> {
-        let dso = self.load_object(
+        let (dso, new_objects) = self.load_object(
             path,
             None,
             base_addr,
@@ -429,6 +459,9 @@ impl Linker {
             },
             ScopeKind::Global,
         )?;
+        for obj in &new_objects {
+            obj.run_init();
+        }
         Ok(dso.entry_point)
     }
 
@@ -438,7 +471,7 @@ impl Linker {
         resolve: Resolve,
         scope: ScopeKind,
         noload: bool,
-    ) -> Result<Arc<DSO>> {
+    ) -> Result<(Arc<DSO>, Vec<Arc<DSO>>)> {
         log::trace!(
             "[ld.so] load_library(name={:?}, resolve={:#?}, scope={:#?}, noload={})",
             name,
@@ -473,7 +506,7 @@ impl Linker {
                         self.scope_debug();
                     }
 
-                    Ok(obj.clone())
+                    Ok((obj.clone(), Vec::new()))
                 } else if !noload {
                     let parent_runpath = self
                         .objects
@@ -499,7 +532,7 @@ impl Linker {
             }
 
             None => match self.objects.get(&ROOT_ID) {
-                Some(obj) => Ok(obj.clone()),
+                Some(obj) => Ok((obj.clone(), Vec::new())),
                 None => Err(DlError::NotFound),
             },
         }
@@ -555,14 +588,25 @@ impl Linker {
     }
 
     pub unsafe fn dl_iterate_phdr(
-        &self,
+        linker: &Mutex<Self>,
         callback: dl_iterate_phdr_callback,
         data: *mut c_void,
     ) -> c_int {
         let Some(cb) = callback else {
             return 0;
         };
-        for obj in self.objects.values() {
+        let mut last_id = 0;
+        loop {
+            let next = linker
+                .lock()
+                .objects
+                .range(last_id + 1..)
+                .next()
+                .map(|(_, obj)| obj.clone());
+            let Some(obj) = next else {
+                return 0;
+            };
+            last_id = obj.id;
             let mut info = dl_phdr_info {
                 dlpi_addr: if obj.pie { obj.base as usize } else { 0 },
                 dlpi_name: obj.path_c.as_ptr(),
@@ -581,11 +625,9 @@ impl Linker {
                 return res;
             }
         }
-
-        0
     }
 
-    pub fn unload(&mut self, obj: Arc<DSO>) {
+    pub fn unload(&mut self, obj: Arc<DSO>, unloaded: &mut Vec<Arc<DSO>>) {
         if !obj.dlopened {
             return;
         }
@@ -614,23 +656,17 @@ impl Linker {
                 if let Some(name) = self.name_to_object_id_map.get(*dep)
                     && let Some(object_name) = self.objects.get(name)
                 {
-                    self.unload(object_name.clone());
+                    self.unload(object_name.clone(), unloaded);
                 }
             }
             self.name_to_object_id_map.remove(&obj.name);
             assert!(Arc::strong_count(&obj) == 1);
-            drop(obj);
+            unloaded.push(obj);
         }
-
-        // obj is dropped here.
     }
 
-    pub fn fini(&self) {
-        for obj in self.objects.values() {
-            unsafe {
-                obj.run_fini();
-            }
-        }
+    pub fn loaded_objects(&self) -> Vec<Arc<DSO>> {
+        self.objects.values().cloned().collect()
     }
 
     fn load_object(
@@ -641,7 +677,7 @@ impl Linker {
         dlopened: bool,
         resolve: Resolve,
         scope: ScopeKind,
-    ) -> Result<Arc<DSO>> {
+    ) -> Result<(Arc<DSO>, Vec<Arc<DSO>>)> {
         let resolve = if cfg!(target_arch = "x86_64") {
             resolve
         } else {
@@ -783,19 +819,15 @@ impl Linker {
             obj.relocate(objects_data[i].as_deref(), resolve).unwrap();
         }
 
-        for obj in new_objects.into_iter() {
-            // SAFETY: `obj` and its dependencies have been successfuly loaded.
-            unsafe {
-                obj.mark_ready();
-            }
-            self.run_init(&obj);
-            self.register_object(obj);
+        // Publish the complete batch before any constructor can reenter dlopen.
+        for obj in &new_objects {
+            self.register_object(obj.clone());
         }
 
         _r_debug.lock().state = RTLDState::RtConsistent;
         _dl_debug_state();
 
-        Ok(loaded_dso)
+        Ok((loaded_dso, new_objects))
     }
 
     fn register_object(&mut self, obj: Arc<DSO>) {
@@ -1049,21 +1081,6 @@ impl Linker {
         };
 
         Ok(file)
-    }
-
-    fn run_init(&self, obj: &DSO) {
-        use crate::platform::{self, types::c_char};
-
-        if let Some((symbol, SymbolBinding::Global)) = obj.get_sym("__relibc_init_environ") {
-            unsafe {
-                symbol
-                    .as_ptr()
-                    .cast::<*mut *mut c_char>()
-                    .write(platform::environ);
-            }
-        }
-
-        obj.run_init();
     }
 
     fn scope_debug(&self) {

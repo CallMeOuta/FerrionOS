@@ -11,13 +11,13 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use crate::{
     c_str::CStr,
     ld_so::{
         dso::DSO,
-        linker::{DlError, Resolve, ScopeKind},
+        linker::{DlError, Resolve, ScopeKind, lock_loader},
         tcb::Tcb,
     },
     platform::types::{c_char, c_int, c_void},
@@ -85,6 +85,7 @@ pub unsafe extern "C" fn dladdr(addr: *const c_void, dlip: *mut Dl_info_t) -> c_
         return 0;
     }
 
+    let _serial = lock_loader();
     let linker = unsafe { (*tcb.linker_ptr).lock() };
 
     let dlip_mut = unsafe { dlip.as_mut() };
@@ -141,10 +142,18 @@ pub unsafe extern "C" fn dlopen(cfilename: *const c_char, flags: c_int) -> *mut 
         return ptr::null_mut();
     }
 
-    let mut linker = unsafe { (*tcb.linker_ptr).lock() };
+    let _serial = lock_loader();
+    let result = unsafe { (*tcb.linker_ptr).lock() }
+        .load_library(filename, resolve, scope, noload);
 
-    match linker.load_library(filename, resolve, scope, noload) {
-        Ok(handle) => Arc::into_raw(handle).cast::<c_void>().cast_mut(),
+    match result {
+        Ok((handle, new_objects)) => {
+            for obj in &new_objects {
+                obj.run_init();
+            }
+            handle.run_init();
+            Arc::into_raw(handle).cast::<c_void>().cast_mut()
+        }
         Err(error) => {
             set_last_error(error);
             ptr::null_mut()
@@ -177,6 +186,7 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *m
         return ptr::null_mut();
     }
 
+    let _serial = lock_loader();
     let linker = unsafe { (*tcb.linker_ptr).lock() };
 
     match linker.get_sym(handle, symbol_str) {
@@ -206,9 +216,15 @@ pub unsafe extern "C" fn dlclose(handle: *mut c_void) -> c_int {
         return -1;
     }
 
-    let mut linker = unsafe { (*tcb.linker_ptr).lock() };
+    let _serial = lock_loader();
     let obj = unsafe { Arc::from_raw(handle.cast::<DSO>()) };
-    linker.unload(obj);
+    let mut unloaded = Vec::new();
+    let mut linker = unsafe { (*tcb.linker_ptr).lock() };
+    linker.unload(obj, &mut unloaded);
+    drop(linker);
+    while let Some(obj) = unloaded.pop() {
+        drop(obj);
+    }
     0
 }
 

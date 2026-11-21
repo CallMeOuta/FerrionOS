@@ -202,7 +202,10 @@ pub unsafe fn fini() {
     if let Some(tcb) = unsafe { Tcb::current() }
         && !tcb.linker_ptr.is_null()
     {
-        let linker = unsafe { (*tcb.linker_ptr).lock() };
-        linker.fini();
+        let _serial = linker::lock_loader();
+        let objects = unsafe { (*tcb.linker_ptr).lock() }.loaded_objects();
+        for obj in &objects {
+            unsafe { obj.run_fini() };
+        }
     }
 }

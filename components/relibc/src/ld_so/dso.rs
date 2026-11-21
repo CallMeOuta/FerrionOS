@@ -389,8 +389,8 @@ pub struct DSO {
     /// Position Independent Executable.
     pub pie: bool,
 
-    /// Whether this DSO *and* its dependencies have been successfully loaded.
-    is_ready: AtomicBool,
+    /// Whether constructors have been called, or are running.
+    init_called: AtomicBool,
 
     /// Is this DSO for ld.so?
     is_me: bool,
@@ -452,7 +452,7 @@ impl DSO {
                 dynamic,
                 scope: spin::Once::new(),
                 pie: true,
-                is_ready: AtomicBool::new(false),
+                init_called: AtomicBool::new(false),
                 is_me: true,
             },
             tcb_master,
@@ -518,7 +518,7 @@ impl DSO {
             pie: is_pie_enabled(&elf),
             dynamic,
             scope: spin::Once::new(),
-            is_ready: AtomicBool::new(false),
+            init_called: AtomicBool::new(false),
             is_me: false,
         };
 
@@ -526,8 +526,8 @@ impl DSO {
     }
 
     #[inline]
-    pub unsafe fn mark_ready(&self) {
-        self.is_ready.store(true, Ordering::SeqCst);
+    pub fn init_called(&self) -> bool {
+        self.init_called.load(Ordering::SeqCst)
     }
 
     #[inline]
@@ -630,13 +630,37 @@ impl DSO {
         }
     }
 
+    /// Caller must serialize loading without holding the Linker state mutex.
     pub fn run_init(&self) {
+        if self.init_called() {
+            return;
+        }
+        if let Scope::Local { objs, .. } = self.scope() {
+            for dependency in objs {
+                dependency.run_init();
+            }
+        }
+        // A dependency's constructor may already have initialized this object.
+        if self.init_called.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Some((symbol, SymbolBinding::Global)) = self.get_sym("__relibc_init_environ") {
+            unsafe {
+                symbol
+                    .as_ptr()
+                    .cast::<*mut *mut c_char>()
+                    .write(crate::platform::environ);
+            }
+        }
         for f in self.dynamic.init_array {
             unsafe { f() }
         }
     }
 
     pub unsafe fn run_fini(&self) {
+        if !self.init_called() {
+            return;
+        }
         for f in self.dynamic.fini_array.iter().rev() {
             unsafe { f() }
         }
@@ -1517,12 +1541,8 @@ impl Drop for DSO {
         if self.is_me {
             return;
         }
-        if self.is_ready.load(Ordering::SeqCst) {
-            // `run_fini` should not be called if we are being prematurely
-            // dropped (e.g. failed to satisfy dependencies).
-            unsafe {
-                self.run_fini();
-            }
+        unsafe {
+            self.run_fini();
         }
     }
 }
