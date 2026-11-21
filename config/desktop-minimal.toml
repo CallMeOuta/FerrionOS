@@ -14,6 +14,28 @@ orbital = {}
 orbterm = {}
 orbutils = {}
 
+# The orbutils package's launcher entry for the image viewer, with a description
+# that names no OS; written after the packages (postinstall) so that it wins.
+[[files]]
+path = "/usr/share/ui/apps/60_viewer"
+data = """
+name=Viewer
+binary=/usr/bin/viewer
+icon=/usr/share/icons/apps/multimedia-photo-viewer.png
+accept=*.bmp
+accept=*.gif
+accept=*.jpg
+accept=*.jpeg
+accept=*.png
+accept=*.webp
+author=Jeremy Soller
+description=Image viewer
+"""
+postinstall = true
+
+# inputd numbers virtual terminals in the order they open: 1 for the boot log,
+# then 2, 3, ... Orbital switches to the number in VT, so it starts after
+# 30_console.target, whose fbcond@2 has taken VT 2 by the time init moves on.
 [[files]]
 path = "/usr/lib/init.d/20_orbital"
 data = """

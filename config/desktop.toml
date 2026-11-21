@@ -26,3 +26,29 @@ pop-icon-theme = {}
 shared-mime-info = {}
 # orbterm from desktop-minimal should be ignored
 orbterm = "ignore"
+
+# Launcher entries of the netsurf and installer-gui packages, with descriptions
+# that name FerrionOS; written after the packages (postinstall) so that they win.
+[[files]]
+path = "/usr/share/ui/apps/00_netsurf"
+data = """
+name=Netsurf
+binary=/usr/bin/netsurf-fb
+icon=/usr/share/icons/apps/internet-web-browser.png
+accept=*.html
+author=The Netsurf Developers
+description=Web browser
+"""
+postinstall = true
+
+[[files]]
+path = "/usr/share/ui/apps/redox-installer-gui"
+data = """
+name=FerrionOS Installer
+category=System
+binary=/usr/bin/redox_installer_gui
+icon=/usr/share/icons/Pop/48x48/apps/system-os-installer.svg
+author=Jeremy Soller
+description=GUI installer for FerrionOS
+"""
+postinstall = true

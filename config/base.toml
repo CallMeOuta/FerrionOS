@@ -65,7 +65,25 @@ schemes = [
 
 [[files]]
 path = "/etc/hostname"
-data = "redox"
+data = "ferrion"
+
+# Replaces the netdb package's /etc/hosts, whose last line names the upstream
+# hostname; written after the packages (postinstall) so that it wins.
+[[files]]
+path = "/etc/hosts"
+data = """
+#
+# /etc/hosts: static lookup table for host names
+#
+
+#<ip-address>	<hostname.domain.org>	<hostname>
+127.0.0.1	localhost.localdomain	localhost
+::1		localhost.localdomain	localhost
+127.0.0.1	ferrion.localdomain	ferrion
+
+# End of file
+"""
+postinstall = true
 
 ## Default net configuration (optimized for QEMU)
 [[files]]
@@ -101,10 +119,12 @@ NAME="FerrionOS"
 VERSION_ID="0.9.0"
 VERSION="0.9.0"
 ID="ferrionos"
-# os-release's field for derivatives: tools that look for Redox still match.
+# os-release's field for derivatives: tools that look for redox-os still match.
 ID_LIKE="redox-os"
 
-DOCUMENTATION_URL="https://doc.redox-os.org/book/"
+HOME_URL="https://github.com/CallMeOuta/FerrionOS"
+DOCUMENTATION_URL="https://callmeouta.github.io/FerrionOS/"
+BUG_REPORT_URL="https://github.com/CallMeOuta/FerrionOS/issues"
 """
 # VARIANT and BUILD_ID are appended by redox_installer when creating images.
 

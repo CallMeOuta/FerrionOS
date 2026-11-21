@@ -1,0 +1,42 @@
+FerrionOS change to the Redox kernel (MIT licence, kept), made against upstream commit e7f1d4231d0f4b55fbef229d9cd9459302c101f4:
+- the first kernel log line names FerrionOS on every architecture; uname -s still answers Redox (src/scheme/sys/uname.rs is unchanged).
+
+diff --git a/src/arch/aarch64/start.rs b/src/arch/aarch64/start.rs
+index ee6f9cf0..f96a748c 100644
+--- a/src/arch/aarch64/start.rs
++++ b/src/arch/aarch64/start.rs
+@@ -88,7 +88,7 @@ unsafe extern "C" fn start(args_ptr: *const KernelArgs) -> ! {
+                 dtb::serial::init_early(dtb);
+             }
+ 
+-            info!("Redox OS starting...");
++            info!("FerrionOS starting...");
+             args.print();
+ 
+             // Initialize RMM
+diff --git a/src/arch/riscv64/start.rs b/src/arch/riscv64/start.rs
+index 88f2f7c5..e6b4833c 100644
+--- a/src/arch/riscv64/start.rs
++++ b/src/arch/riscv64/start.rs
+@@ -98,7 +98,7 @@ unsafe extern "C" fn start(args_ptr: *const KernelArgs) -> ! {
+                 init_early(dtb);
+             }
+ 
+-            info!("Redox OS starting...");
++            info!("FerrionOS starting...");
+             args.print();
+ 
+             if let Ok((dtb, _)) = &dtb {
+diff --git a/src/arch/x86_shared/start.rs b/src/arch/x86_shared/start.rs
+index 2758c9f5..1f3246c8 100644
+--- a/src/arch/x86_shared/start.rs
++++ b/src/arch/x86_shared/start.rs
+@@ -90,7 +90,7 @@ unsafe extern "C" fn start(args_ptr: *const KernelArgs, stack_end: usize) -> ! {
+         // Set up graphical debug
+         graphical_debug::init(args.env());
+ 
+-        info!("Redox OS starting...");
++        info!("FerrionOS starting...");
+         args.print();
+ 
+         // Set up GDT

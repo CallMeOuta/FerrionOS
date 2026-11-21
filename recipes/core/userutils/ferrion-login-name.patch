@@ -1,0 +1,47 @@
+FerrionOS change to userutils (MIT licence, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88:
+- login prompts with the name in /etc/hostname ("<hostname> login:") instead of a fixed name, falling back to localhost;
+- res/motd and res/issue greet with FerrionOS, and the packaged issue names no accounts (a config adds its own banner with its accounts).
+
+diff --git a/res/issue b/res/issue
+index 6a963d8..e9fa0eb 100644
+--- a/res/issue
++++ b/res/issue
+@@ -1,6 +1,2 @@
+-########## Redox OS ##########
+-# Login with the following:  #
+-# `user`                     #
+-# `root`:`password`          #
+-##############################
++########## FerrionOS #########
+  
+diff --git a/res/motd b/res/motd
+index 5cd097a..70f6a73 100644
+--- a/res/motd
++++ b/res/motd
+@@ -1,2 +1,2 @@
+-Welcome to Redox OS!
++Welcome to FerrionOS!
+  
+diff --git a/src/bin/login.rs b/src/bin/login.rs
+index 0c0018d..d48c225 100644
+--- a/src/bin/login.rs
++++ b/src/bin/login.rs
+@@ -132,10 +132,17 @@ pub fn main() {
+         stdout.flush().r#try(&mut stderr);
+     }
+ 
++    let hostname = std::fs::read_to_string("/etc/hostname")
++        .map(|name| name.trim().to_owned())
++        .ok()
++        .filter(|name| !name.is_empty())
++        .unwrap_or_else(|| "localhost".to_owned());
++    let prompt = format!("\x1B[1m{hostname} login:\x1B[0m ");
++
+     loop {
+         let user = liner::Context::new()
+             .read_line(
+-                liner::Prompt::from("\x1B[1mredox login:\x1B[0m "),
++                liner::Prompt::from(prompt.clone()),
+                 None,
+                 &mut liner::BasicCompleter::new(Vec::<String>::new()),
+             )
