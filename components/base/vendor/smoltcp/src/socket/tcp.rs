@@ -101,6 +101,10 @@ impl core::error::Error for RecvError {}
 /// A TCP socket ring buffer.
 pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
 
+/// Chooses the initial sequence number of a TCP connection from its local and remote
+/// endpoints and the interface's time; see `Interface::set_tcp_isn_generator`.
+pub type IsnGenerator = fn(local: IpEndpoint, remote: IpEndpoint, now: Instant) -> u32;
+
 /// The state of a TCP socket, according to [RFC 793].
 ///
 /// [RFC 793]: https://tools.ietf.org/html/rfc793
@@ -1060,20 +1064,24 @@ impl<'a> Socket<'a> {
         });
         self.set_state(State::SynSent);
 
-        let seq = Self::random_seq_no(cx);
+        let seq = Self::random_seq_no(cx, local_endpoint, remote_endpoint);
         self.local_seq_no = seq;
         self.remote_last_seq = seq;
         Ok(())
     }
 
     #[cfg(test)]
-    fn random_seq_no(_cx: &mut Context) -> TcpSeqNumber {
+    fn random_seq_no(_cx: &mut Context, _local: IpEndpoint, _remote: IpEndpoint) -> TcpSeqNumber {
         TcpSeqNumber(10000)
     }
 
     #[cfg(not(test))]
-    fn random_seq_no(cx: &mut Context) -> TcpSeqNumber {
-        TcpSeqNumber(cx.rand().rand_u32() as i32)
+    fn random_seq_no(cx: &mut Context, local: IpEndpoint, remote: IpEndpoint) -> TcpSeqNumber {
+        let seq = match cx.tcp_isn_generator() {
+            Some(generator) => generator(local, remote, cx.now()),
+            None => cx.rand().rand_u32(),
+        };
+        TcpSeqNumber(seq as i32)
     }
 
     /// Close the transmit half of the full-duplex connection.
@@ -1912,11 +1920,10 @@ impl<'a> Socket<'a> {
                     }
                 }
 
-                self.tuple = Some(Tuple {
-                    local: IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port),
-                    remote: IpEndpoint::new(ip_repr.src_addr(), repr.src_port),
-                });
-                self.local_seq_no = Self::random_seq_no(cx);
+                let local = IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port);
+                let remote = IpEndpoint::new(ip_repr.src_addr(), repr.src_port);
+                self.tuple = Some(Tuple { local, remote });
+                self.local_seq_no = Self::random_seq_no(cx, local, remote);
                 self.remote_seq_no = repr.seq_number + 1;
                 self.remote_last_seq = self.local_seq_no;
                 self.remote_has_sack = repr.sack_permitted;

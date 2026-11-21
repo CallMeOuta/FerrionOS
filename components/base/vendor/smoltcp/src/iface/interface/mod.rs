@@ -129,6 +129,8 @@ pub struct InterfaceInner {
     caps: DeviceCapabilities,
     now: Instant,
     rand: Rand,
+    #[cfg(feature = "socket-tcp")]
+    tcp_isn_generator: Option<crate::socket::tcp::IsnGenerator>,
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     neighbor_cache: NeighborCache,
@@ -297,6 +299,8 @@ impl Interface {
                 #[cfg(feature = "proto-ipv6-slaac")]
                 slaac_updated: Instant::from_millis(0),
                 rand,
+                #[cfg(feature = "socket-tcp")]
+                tcp_isn_generator: None,
             },
         }
     }
@@ -306,6 +310,18 @@ impl Interface {
     /// The context is needed for some socket methods.
     pub fn context(&mut self) -> &mut InterfaceInner {
         &mut self.inner
+    }
+
+    /// Choose TCP initial sequence numbers with `generator` instead of the interface's
+    /// random number generator, or with the generator again for `None`.
+    ///
+    /// The generator is called for each connection the interface's TCP sockets open or
+    /// accept, with the connection's local and remote endpoints and the interface's time.
+    /// RFC 6528 describes a generator whose numbers an observer of other connections
+    /// cannot predict.
+    #[cfg(feature = "socket-tcp")]
+    pub fn set_tcp_isn_generator(&mut self, generator: Option<crate::socket::tcp::IsnGenerator>) {
+        self.inner.tcp_isn_generator = generator;
     }
 
     /// Get the HardwareAddress address of the interface.
@@ -830,6 +846,11 @@ impl InterfaceInner {
     #[allow(unused)] // unused depending on which sockets are enabled
     pub(crate) fn now(&self) -> Instant {
         self.now
+    }
+
+    #[cfg(feature = "socket-tcp")]
+    pub(crate) fn tcp_isn_generator(&self) -> Option<crate::socket::tcp::IsnGenerator> {
+        self.tcp_isn_generator
     }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
