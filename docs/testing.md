@@ -66,6 +66,8 @@ The AU2 stream interface is stereo float32 little-endian at 44,100 Hz, opened at
 
 The first reference baseline used Debian 13: Mesa 25.0.7 reported Venus API 1.3.269, conformance 1.3.0.0 and 113 Intel device extensions; a Mesa 26.2.6 overlay reported API 1.4.334, conformance 1.4.0.0 and 178 extensions. Both produced scene hash `47972063c7a47bfb` with zero differing pixels and the same 160-byte Venus capset SHA-256, `11069f17d3858d6b725a3b2b2b810fafc6ae6529ccdedf45bab62acdcb342609`. Its kernel 6.12 could not use Intel native contexts. These are historical host-specific measurements, not expected capability counts for every host. The reference now uses Fedora; the separate Linux compatibility layer's Debian pin is unchanged.
 
+FerrionOS's own side of that device is checked with `python3 scripts/vm-test.py gpu-context --repeat 10 --timeout 120` on the x86_64 desktop image. It boots with `gpu=venus`, so it answers `BLOCKED` on a host that cannot, and runs `gpu-probe-context` as root, which opens render handles on `/scheme/gpu.virtio-gpu` and creates a Venus context on each through the DRM requests Venus makes. It compares the Venus capset's sha256 with the newest record of `scripts/gpu-reference-guest.py` under `build/gpu-reference/`, or with the value above when there is none, and reads QEMU's trace for the acknowledged virgl feature and each context's creation and destruction; the script's header says what passes. It proves a context on the host, not that anything is drawn.
+
 ## What upstream's CI ran
 
 Upstream gates its merge requests on a `.gitlab-ci.yml` that is not part of this checkout, and FerrionOS has no CI of its own yet. The upstream jobs, read on 2026-11-20:

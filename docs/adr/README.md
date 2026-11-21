@@ -31,3 +31,4 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0025](0025-tests-without-unit-tests.md) | Changes are proven by VM checks, differential tests and simulation, not unit tests |
 | [0026](0026-measured-targets.md) | Work is stated as a measured target |
 | [0027](0027-monorepo.md) | The kernel, relibc, base and RedoxFS move into this repository |
+| [0028](0028-gpu-render-handles.md) | A GPU's render handle, its Venus context, and the check that proves them |
