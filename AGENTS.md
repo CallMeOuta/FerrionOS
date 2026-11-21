@@ -19,6 +19,7 @@ Read the matching guide before starting:
 - Choosing a check, or about to start a build: [`docs/testing.md`](docs/testing.md)
 - How a `make` run becomes an image, where a setting comes from, what a target name means: [`docs/build-system.md`](docs/build-system.md)
 - What still comes from upstream's servers and repositories: [`docs/upstream.md`](docs/upstream.md)
+- Writing a commit message, or any text a user or reader sees, or reusing work linked from an issue: [`docs/code-policy.md`](docs/code-policy.md)
 - Roadmaps, when `plans/` exists on this machine (it is kept out of git, so a clone has none): `plans/kernel-roadmap.md` before setting up hosting or forks or starting kernel, relibc or RedoxFS work; `plans/product-roadmap.md` before deciding what to build next for users; `plans/linux-driver-compat.md` before porting a Linux driver; `plans/performance-roadmap.md` before changing a build flag, a hot path or a hardening default; `plans/security-roadmap.md` before any change listed under Security. Never commit them.
 
 Documentation is split by genre. `agents/skills/` holds task procedure and `docs/` holds reference on how the build system is shaped; both are for anyone working on the codebase. The roadmaps in `plans/` stay local to the maintainer's machine. User documentation is the FerrionOS Book in `book/` (mdBook, published at https://callmeouta.github.io/FerrionOS/), and it follows the same naming rule.
@@ -27,8 +28,8 @@ Documentation is split by genre. `agents/skills/` holds task procedure and `docs
 
 - The code in this repository is the source of truth. The book in `book/` lags behind it: where they disagree, follow the code.
 - A failure that also happens without your change is pre-existing. Report it with its log and move on.
-- Code brought in from another project keeps its licence notice and names its source.
-- A single source of truth stays in code, and documents point at it instead of copying it: make targets in the comments of `Makefile` and `mk/*.mk`, build variables in `mk/config.mk`, emulator options in `mk/qemu.mk`, cookbook commands and `COOKBOOK_*` variables in `REPO_HELP_STR` (`src/bin/repo/main.rs`), recipe keys in `src/recipe.rs`. Update those when behaviour changes.
+- Code brought in from another project keeps its license notice and names its source.
+- A single source of truth stays in code, and documents point at it instead of copying it: make targets in the comments of `Makefile` and `mk/*.mk`, build variables in `mk/config.mk`, emulator options in `mk/qemu.mk`, cookbook commands and `COOKBOOK_*` variables in `REPO_HELP_STR` (`src/bin/repo/main.rs`), recipe keys in `src/recipe.rs`. Update those when behavior changes.
 
 # Security
 
@@ -47,7 +48,7 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
 
 - Write `FerrionOS` wherever text names the OS or project this repository builds: prose, comments, messages, package descriptions, labels a user sees.
 - The name of the upstream project is never written in FerrionOS's text: prose, comments, messages, package descriptions, docs and links. Where the fact matters, write "upstream" ("the upstream project", "upstream's packages"). There are three exceptions:
-  1. Legal notices: the copyright line in `LICENSE`, copyright and licence headers in code and in `*.patch` files, and `authors` in `Cargo.toml` files.
+  1. Legal notices: the copyright line in `LICENSE`, copyright and license headers in code and in `*.patch` files, and `authors` in `Cargo.toml` files.
   2. Identifiers and strings that other software matches, which would break if renamed: target triples such as `x86_64-unknown-redox`, crate, package, recipe, file and directory names (RedoxFS, relibc, `redox_syscall`, `redox.patch`), make and environment variables (`HOSTED_REDOX`), the `uname -s` value the kernel reports and code compares, `ID_LIKE` in os-release, and URLs that code or a recipe fetches. Prose may name a component by its identifier. Before renaming such a string, `rg` it across the repository, then rename every use together or keep it.
   3. Files applied byte-exact from upstream: `*.patch` files and anything under a recipe's `source/`, which are never edited.
 - `README.md` has one sentence saying FerrionOS began as a fork and is not affiliated with the upstream project; it is the only other place the name appears.

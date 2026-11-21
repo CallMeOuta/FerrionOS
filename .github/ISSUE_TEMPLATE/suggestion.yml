@@ -1,0 +1,66 @@
+name: Suggest an improvement
+description: Suggest a feature, a design change or a documentation improvement, optionally with reference work of your own.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        FerrionOS does not accept pull requests from non-maintainers. Describe the improvement here, and link to your own work if you have some: the maintainers use it as a reference. Read [CONTRIBUTING.md](https://github.com/CallMeOuta/FerrionOS/blob/master/CONTRIBUTING.md#reference-work) first.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of improvement
+      options:
+        - Feature or design
+        - Documentation
+        - Performance
+        - Port of a program
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should change, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why
+      description: What problem it solves, or what it makes possible. For documentation, which page is wrong, unclear or missing, and what a reader needs from it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How it could work. For documentation, the text you propose, or the page and section it belongs in.
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference work
+      description: Links to your own work at a fixed revision (a commit or a tag in your fork), what it does, what you tested, and what is unfinished.
+  - type: dropdown
+    id: license
+    attributes:
+      label: License of the reference work
+      description: Work under the MIT license can be reused directly; work under another license is reused only as far as that license allows.
+      options:
+        - No reference work linked
+        - MIT, so the maintainers may reuse it in FerrionOS
+        - Another license (named in the reference section)
+    validations:
+      required: true
+  - type: input
+    id: credit
+    attributes:
+      label: Credit
+      description: The name and e-mail address to use as author or co-author if your work is reused, or leave it empty.
+  - type: checkboxes
+    id: rights
+    attributes:
+      label: Rights
+      options:
+        - label: I have the right to share any work I link here.
+          required: true

@@ -1,0 +1,93 @@
+name: Report a bug
+description: Create a report to help the maintainers reproduce and fix a bug.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report a security issue privately instead, as [SECURITY.md](https://github.com/CallMeOuta/FerrionOS/blob/master/SECURITY.md) describes. Read the [issue-reporting guidelines](https://github.com/CallMeOuta/FerrionOS/blob/master/ISSUES.md) first.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the problem in one or two short sentences.
+      placeholder: When I … in FerrionOS, …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happens
+      options:
+        - Building (make, the cookbook, a recipe)
+        - Booting
+        - The running system
+        - Documentation
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      options:
+        - x86_64
+        - aarch64
+        - i586
+        - riscv64gc
+    validations:
+      required: true
+  - type: input
+    id: config
+    attributes:
+      label: Config
+      description: The CONFIG_NAME you built, such as desktop or minimal.
+      placeholder: desktop
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit hash
+      description: The output of `git rev-parse HEAD` in the checkout you built.
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host and emulator
+      description: The build host's operating system, and the emulator and its version (`qemu-system-x86_64 --version`) or the hardware model it ran on.
+      placeholder: Arch Linux, QEMU 11.1.3 with KVM
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands and actions, from a fresh clone where possible.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reduced-test-case
+    attributes:
+      label: Reduced test case
+      description: The smallest setup that still shows the problem, as the [guidelines](https://github.com/CallMeOuta/FerrionOS/blob/master/ISSUES.md#how-you-can-write-a-reduced-test-case) describe. It may be the most important thing you can give the maintainers.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Attach the whole build log or serial log, and a screenshot when the screen shows the problem.

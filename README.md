@@ -25,11 +25,11 @@ A first `make all` builds the container, the toolchain and every package of the 
 ## Documentation
 
 - [The FerrionOS Book](book/src/SUMMARY.md), the user documentation
-- [Contributing](CONTRIBUTING.md)
+- [Participating](CONTRIBUTING.md): bug reports, suggestions, reference work and documentation; [reporting a security issue](SECURITY.md)
 - [Working on this repository](AGENTS.md): task guides in `agents/skills/`, reference in `docs/`
 - [How the build works](docs/build-system.md) and [how to check a change](docs/testing.md)
 - [What FerrionOS boots on today](docs/vm-baseline.md)
 
-## Licence
+## License
 
-FerrionOS's build system is released under the MIT licence: see [LICENSE](LICENSE). Components fetched at build time carry their own licences.
+FerrionOS's build system is released under the MIT license: see [LICENSE](LICENSE). Components fetched at build time carry their own licenses.

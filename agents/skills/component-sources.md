@@ -30,4 +30,4 @@ An edit under `source/` exists only in this checkout, inside another project's r
 
 Which of the two a component gets is the maintainer's decision. Ask when the task does not say. Once the recipe carries the change, clear the rule with `make cc.<name>` and prove it from a clean fetch with `make ucr.<name>`, which deletes `source/` first.
 
-Code taken from another project keeps its licence notice and names where it came from.
+Code taken from another project keeps its license notice and names where it came from.

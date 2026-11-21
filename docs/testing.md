@@ -12,7 +12,7 @@ What can be checked in this repository, cheapest first: what each check proves a
 | 4. Fetch | `make f.<recipe>` | The source URL answers, the `blake3` matches and the patches apply. | Network. |
 | 5. Cook | `make r.<recipe>` | The recipe builds and packages for one architecture. | The container or the native tools, the prefix, and its build dependencies cooked. |
 | 6. Image | `make image`, `make qemu`, `scripts/vm-test.py boot` | The config assembles into an image, and the image boots; with the script, that the boot stays quiet and reaches the login (see [`agents/skills/images-and-qemu.md`](../agents/skills/images-and-qemu.md)). | Every package of the config cooked. |
-| 7. In the OS | A config whose init script runs a suite (below) | Behaviour inside FerrionOS. | Rung 6. |
+| 7. In the OS | A config whose init script runs a suite (below) | Behavior inside FerrionOS. | Rung 6. |
 
 `make -n` still parses every makefile. With `PODMAN_BUILD=0`, which image targets also pass to a nested make, that parse calls `rustc`, and rustup then installs the pinned toolchain when it is missing.
 
