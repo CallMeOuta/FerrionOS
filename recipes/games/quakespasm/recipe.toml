@@ -17,7 +17,7 @@ dependencies = [
   "libogg",
   "liborbital",
   "libvorbis",
-  "mesa",
+  "libglvnd",
   # "sdl1",
   "sdl2",
   "zlib",
@@ -48,8 +48,9 @@ fi
 # Source is in Quake/ and icons are in Misc/
 rsync -av --delete "${COOKBOOK_SOURCE}/Quake/" "${COOKBOOK_SOURCE}/Misc" ./
 
-# According to frantic grepping, the FerrionOS build system doesn't apply patches to git
-git apply "${COOKBOOK_RECIPE}/redox.patch"
+# These patches target the copied build directory, with Quake/ stripped.
+patch --batch -p1 < "${COOKBOOK_RECIPE}/redox.patch"
+patch --batch -p1 < "${COOKBOOK_RECIPE}/ferrion-egl-link.patch"
 
 cookbook_configure
 """

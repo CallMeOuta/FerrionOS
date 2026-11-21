@@ -3,6 +3,7 @@ description = "Open-source Star Wars Jedi Academy and Jedi Outcast engine reimpl
 
 [source]
 git = "https://github.com/jackpot51/OpenJK"
+rev = "2f62a35ab28be4d023518d9a8a877f9097c515ab"
 upstream = "https://github.com/JACoders/OpenJK.git"
 
 [build]
@@ -11,7 +12,7 @@ dependencies = [
     "libjpeg",
     "liborbital",
     "libpng",
-    "mesa",
+    "libglvnd",
     "sdl2",
     "zlib",
 ]
@@ -24,7 +25,7 @@ COOKBOOK_CMAKE_FLAGS+=(
     -DJPEG_LIBRARY="-ljpeg"
     -DPNG_PNG_INCLUDE_DIR="${COOKBOOK_SYSROOT}/include"
     -DPNG_LIBRARY="-lpng"
-    -DSDL2_LIBRARIES="-lSDL2 -lorbital $("${TARGET}-pkg-config" --libs osmesa)"
+    -DSDL2_LIBRARIES="-lSDL2 $("${TARGET}-pkg-config" --libs opengl)"
     -DZLIB_INCLUDE_DIR="${COOKBOOK_SYSROOT}/include"
     -DZLIB_LIBRARY="-lz"
 )

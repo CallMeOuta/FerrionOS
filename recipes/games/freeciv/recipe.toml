@@ -15,7 +15,6 @@ dependencies = [
     "libjpeg",
     "libpng",
     "openssl3",
-    "mesa",
     "nghttp2",
     "sdl2",
     "sdl2-gfx",
@@ -35,7 +34,6 @@ export SDL2_LIBS="\
     -lSDL2_ttf \
     -lSDL2 \
     -lorbital \
-    $("${PKG_CONFIG}" --libs osmesa) \
     -ljpeg \
     -lpng \
     -lz \
