@@ -2,6 +2,15 @@
 
 QEMU?=qemu-system-$(QEMU_ARCH)
 QEMUFLAGS?=-d guest_errors -name "FerrionOS $(ARCH)"
+## gpu=venus opts into Venus; the default display device remains unchanged.
+## Host-visible GPU memory aperture for Venus (independent of guest RAM).
+QEMU_GPU_HOSTMEM?=4G
+## Display backend: gtk,gl=on for 3D, SDL for virtio-sdl, otherwise QEMU chooses; tests use egl-headless or none.
+QEMU_DISPLAY?=$(if $(filter venus virtio-gl,$(gpu)),gtk$(comma)gl=on,$(if $(filter virtio-sdl,$(gpu)),sdl$(comma)show-cursor=on))
+## EGL headless render node, such as /dev/dri/renderD128; empty lets QEMU choose.
+QEMU_RENDER_NODE?=
+## Vulkan ICD selection for Venus; defaults to the host's VK_DRIVER_FILES.
+QEMU_VK_DRIVER_FILES?=$(VK_DRIVER_FILES)
 netboot?=no
 redoxer?=no
 VGA_SUPPORTED=no
@@ -179,8 +188,8 @@ else
 endif
 
 # virtio-fs shares (share=...): the list is parsed in mk/virtiofs.mk.
-ifneq ($(strip $(share)),)
-	# vhost-user needs guest RAM to be shared with the virtiofsd processes, and
+ifneq ($(strip $(share) $(filter venus,$(gpu))),)
+	# Venus and vhost-user need guest RAM to be shared with the host renderer or virtiofsd, and
 	# the NUMA memdev must be exactly as large as -m. One backend serves all
 	# shares.
 	ifeq ($(UNAME),Linux)
@@ -189,6 +198,8 @@ ifneq ($(strip $(share)),)
 		QEMUFLAGS+=-object memory-backend-file,id=mem,size=$(QEMU_MEM)M,mem-path=/dev/shm,share=on
 	endif
 	QEMUFLAGS+=-numa node,memdev=mem
+endif
+ifneq ($(strip $(share)),)
 	QEMUFLAGS+=$(foreach i,$(share_idx),-chardev socket,id=vfs$(i),path=$(call vfs_sock,$(i)) -device vhost-user-fs-pci,queue-size=1024,chardev=vfs$(i),tag=$(call vfs_tag,$(i)))
 endif
 
@@ -238,39 +249,51 @@ else
 	endif
 endif
 
+ifneq ($(gpu),no)
+ifneq ($(strip $(QEMU_DISPLAY)),)
+	QEMUFLAGS+=-display $(QEMU_DISPLAY)$(if $(and $(filter egl-headless,$(QEMU_DISPLAY)),$(QEMU_RENDER_NODE)),$(comma)rendernode=$(QEMU_RENDER_NODE))
+endif
+endif
+
 ifeq ($(gpu),no)
 	QEMUFLAGS+=-nographic -vga none
 else ifeq ($(gpu),vga)
 	ifeq ($(VGA_SUPPORTED),yes)
-		QEMUFLAGS+=-vga std
+		QEMUFLAGS+=-vga none -device VGA,id=gpu0
 	else
-		QEMUFLAGS+=-vga none -device secondary-vga
+		QEMUFLAGS+=-vga none -device secondary-vga,id=gpu0
 	endif
 else ifeq ($(gpu),ramfb)
-	QEMUFLAGS+=-vga none -device ramfb
+	QEMUFLAGS+=-vga none -device ramfb,id=gpu0
 else ifeq ($(gpu),multi)
 	ifeq ($(VGA_SUPPORTED),yes)
-		QEMUFLAGS+=-display sdl -vga none -device virtio-vga,max_outputs=2
+		QEMUFLAGS+=-vga none -device virtio-vga,id=gpu0,max_outputs=2
 	else
-		QEMUFLAGS+=-display sdl -vga none -device virtio-gpu,max_outputs=2
+		QEMUFLAGS+=-vga none -device virtio-gpu,id=gpu0,max_outputs=2
 	endif
 else ifeq ($(gpu),virtio)
 	ifeq ($(VGA_SUPPORTED),yes)
-		QEMUFLAGS+=-vga none -device virtio-vga
+		QEMUFLAGS+=-vga none -device virtio-vga,id=gpu0
 	else
-		QEMUFLAGS+=-vga none -device virtio-gpu
+		QEMUFLAGS+=-vga none -device virtio-gpu,id=gpu0
 	endif
 else ifeq ($(gpu),virtio-sdl)
 	ifeq ($(VGA_SUPPORTED),yes)
-		QEMUFLAGS+=-vga none -device virtio-vga -display sdl,show-cursor=on
+		QEMUFLAGS+=-vga none -device virtio-vga,id=gpu0
 	else
-		QEMUFLAGS+=-vga none -device virtio-gpu -display sdl,show-cursor=on
+		QEMUFLAGS+=-vga none -device virtio-gpu,id=gpu0
+	endif
+else ifeq ($(gpu),venus)
+	ifeq ($(VGA_SUPPORTED),yes)
+		QEMUFLAGS+=-vga none -device virtio-vga-gl,id=gpu0,hostmem=$(QEMU_GPU_HOSTMEM),blob=true,venus=true
+	else
+		QEMUFLAGS+=-vga none -device virtio-gpu-gl,id=gpu0,hostmem=$(QEMU_GPU_HOSTMEM),blob=true,venus=true
 	endif
 else ifeq ($(gpu),virtio-gl)
 	ifeq ($(VGA_SUPPORTED),yes)
-		QEMUFLAGS+=-display gtk,gl=on -vga none -device virtio-vga-gl
+		QEMUFLAGS+=-vga none -device virtio-vga-gl,id=gpu0
 	else
-		QEMUFLAGS+=-display gtk,gl=on -vga none -device virtio-gpu-gl
+		QEMUFLAGS+=-vga none -device virtio-gpu-gl,id=gpu0
 	endif
 endif
 
@@ -315,7 +338,15 @@ ifeq ($(UNAME),Linux)
 		ifeq ($(QEMU_ON_WINDOWS),1)
 			QEMUFLAGS+=-accel whpx,kernel-irqchip=off -cpu Broadwell,x2apic=off
 		else
-			QEMUFLAGS+=-enable-kvm -cpu host
+			ifeq ($(gpu),venus)
+				ifneq ($(shell grep -m1 -w GenuineIntel /proc/cpuinfo 2>/dev/null),)
+					QEMUFLAGS+=-accel kvm,honor-guest-pat=on -cpu host
+				else
+					QEMUFLAGS+=-enable-kvm -cpu host
+				endif
+			else
+				QEMUFLAGS+=-enable-kvm -cpu host
+			endif
 		endif
 	else
 		QEMUFLAGS+=-cpu $(QEMU_CPU)
@@ -382,6 +413,10 @@ $(BUILD)/raspi3bp_uboot.rom:
 
 $(BUILD)/qemu_uboot.rom:
 	wget -O $@ https://gitlab.redox-os.org/Ivan/redox_firmware/-/raw/main/platform/qemu/qemu_arm64/u-boot-qemu-arm64.bin
+
+ifneq ($(strip $(QEMU_VK_DRIVER_FILES)),)
+qemu: export VK_DRIVER_FILES:=$(QEMU_VK_DRIVER_FILES)
+endif
 
 qemu: qemu-deps
 ifeq ($(wildcard $(MOUNT_DIR)),)
