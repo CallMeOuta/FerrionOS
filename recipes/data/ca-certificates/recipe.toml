@@ -3,6 +3,7 @@ description = "TLS certificate authorities, from the Mozilla CA Certificate Prog
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/ca-certificates.git"
+rev = "6c166474d83f918c407843c11d0ca86b69acc220"
 
 [build]
 template = "custom"
