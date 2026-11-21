@@ -56,7 +56,6 @@ pub const RAND_MAX: c_int = 2_147_483_647;
 /// Maximum number of bytes in a character specified by the current locale.
 pub const MB_CUR_MAX: c_int = 4;
 
-static ATEXIT_FUNCS: RawCell<[Option<extern "C" fn()>; 32]> = RawCell::new([None; 32]);
 static AT_QUICK_EXIT_FUNCS: RawCell<[Option<extern "C" fn()>; 32]> = RawCell::new([None; 32]);
 static L64A_BUFFER: RawCell<[c_char; 7]> = RawCell::new([0; 7]); // up to 6 digits plus null terminator
 static mut RNG: Option<XorShiftRng> = None;
@@ -169,14 +168,7 @@ pub unsafe extern "C" fn at_quick_exit(func: Option<extern "C" fn()>) -> c_int {
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/atexit.html>.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atexit(func: Option<extern "C" fn()>) -> c_int {
-    for i in 0..unsafe { ATEXIT_FUNCS.unsafe_ref().len() } {
-        if unsafe { ATEXIT_FUNCS.unsafe_ref() }[i].is_none() {
-            (unsafe { ATEXIT_FUNCS.unsafe_mut() })[i] = func;
-            return 0;
-        }
-    }
-
-    1
+    func.map_or(0, crate::cxa::atexit)
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/atof.html>.
@@ -358,11 +350,8 @@ pub unsafe extern "C" fn exit(status: c_int) -> ! {
         static __fini_array_end: extern "C" fn();
     }
 
-    for i in (0..unsafe { ATEXIT_FUNCS.unsafe_ref().len() }).rev() {
-        if let Some(func) = unsafe { ATEXIT_FUNCS.unsafe_ref() }[i] {
-            (func)();
-        }
-    }
+    // Every `atexit` and `__cxa_atexit` callback, last registered first.
+    unsafe { crate::cxa::__cxa_finalize(ptr::null_mut()) };
 
     // Look for the neighbor functions in memory until the end
     let mut f = core::ptr::from_ref(unsafe { &__fini_array_end });

@@ -1549,6 +1549,13 @@ impl Drop for DSO {
         unsafe {
             self.run_fini();
         }
+        // Exit callbacks left in this object would jump into unmapped memory
+        // at exit: after its destructors, run and drop them, as glibc's
+        // `__cxa_finalize` does for an object that `dlclose` unloads.
+        if let Some(mmap) = &self.mmap {
+            let start = mmap.as_ptr() as usize;
+            crate::cxa::finalize_object(start..start + mmap.size());
+        }
     }
 }
 
