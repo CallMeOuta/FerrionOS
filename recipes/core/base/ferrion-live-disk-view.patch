@@ -1,0 +1,71 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f, applied after ferrion-lockdown.patch (security roadmap S13):
+- lived serves a second disk, /scheme/disk.live/1: the boot image as the bootloader loaded it, read-only (writes fail with EROFS; the disk scheme has no truncation), and open to root only like /scheme/disk.live/0.
+- it reads the loaded image itself, which the live session never writes (its writes go to disk 0's overlay), so it is not a copy of a mounted filesystem: a clone of it is the unmodified boot image, consistent, without anything the live session wrote.
+- the installer's fast install clones it, since the live root filesystem holds disk 0's only handle and physical memory is open to drivers only.
+
+diff --git a/drivers/storage/lived/src/main.rs b/drivers/storage/lived/src/main.rs
+index 72976749..2f7595c4 100644
+--- a/drivers/storage/lived/src/main.rs
++++ b/drivers/storage/lived/src/main.rs
+@@ -17,6 +17,10 @@ struct LiveDisk {
+     original: &'static [u8],
+     //TODO: drop overlay blocks if they match the original
+     overlay: HashMap<u64, Box<[u8]>>,
++    /// FerrionOS: the boot image as the bootloader loaded it, without the live session's writes.
++    /// The installer clones it, since the live root filesystem holds the writable disk's only
++    /// handle and physical memory is open to drivers only.
++    read_only: bool,
+ }
+ 
+ impl LiveDisk {
+@@ -46,8 +50,17 @@ impl LiveDisk {
+         Ok(LiveDisk {
+             original,
+             overlay: HashMap::new(),
++            read_only: false,
+         })
+     }
++
++    fn pristine(&self) -> LiveDisk {
++        LiveDisk {
++            original: self.original,
++            overlay: HashMap::new(),
++            read_only: true,
++        }
++    }
+ }
+ 
+ impl Disk for LiveDisk {
+@@ -82,6 +95,9 @@ impl Disk for LiveDisk {
+         if block as usize * PAGE_SIZE + buffer.len() > self.original.len() {
+             return Err(syscall::Error::new(EINVAL));
+         }
++        if self.read_only {
++            return Err(syscall::Error::new(EROFS));
++        }
+         for chunk in buffer.chunks(PAGE_SIZE) {
+             self.overlay.entry(block).or_insert_with(|| {
+                 let offset = block as usize * PAGE_SIZE;
+@@ -137,16 +153,15 @@ fn daemon(daemon: daemon::Daemon) -> ! {
+         }
+     };
+ 
++    let live = LiveDisk::new(phys, size).unwrap_or_else(|err| {
++        eprintln!("failed to initialize livedisk scheme: {}", err);
++        std::process::exit(1)
++    });
++    let pristine = live.pristine();
+     let mut scheme = DiskScheme::new(
+         Some(daemon),
+         "disk.live".to_owned(),
+-        BTreeMap::from([(
+-            0,
+-            LiveDisk::new(phys, size).unwrap_or_else(|err| {
+-                eprintln!("failed to initialize livedisk scheme: {}", err);
+-                std::process::exit(1)
+-            }),
+-        )]),
++        BTreeMap::from([(0, live), (1, pristine)]),
+         &TrivialExecutor,
+     );
+ 
