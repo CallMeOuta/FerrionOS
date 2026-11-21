@@ -21,7 +21,7 @@ unsafe extern "C" {
 }
 
 // (Linux bit, relibc bit) per field, from Linux's asm-generic/termbits.h and relibc's
-// src/header/termios/{constants,redox}.rs.
+// src/header/termios/constants.rs and src/header/termios/redox.rs.
 const IFLAG: [(u32, u32); 11] = [
     (0o1, 0o1),         // IGNBRK
     (0o2, 0o2),         // BRKINT
