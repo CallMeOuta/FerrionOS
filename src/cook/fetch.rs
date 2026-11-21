@@ -867,6 +867,11 @@ pub(crate) fn fetch_apply_patches(
     let _: () = if let Some(script) = script {
         let mut command = Command::new("bash");
         command.arg("-ex");
+        command.env(
+            "COOKBOOK_ROOT",
+            std::env::current_dir()
+                .map_err(wrap_io_err!(Path::new("."), "Finding cookbook root"))?,
+        );
         command.current_dir(source_dir_tmp);
         run_command_stdin(
             command,
