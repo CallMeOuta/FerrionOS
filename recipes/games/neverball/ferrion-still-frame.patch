@@ -1,0 +1,60 @@
+FerrionOS: Add an optional fixed frame for graphics comparisons.
+Source: https://neverball.org/neverball-1.6.0.tar.gz (ball/main.c).
+
+--- a/ball/main.c
++++ b/ball/main.c
+@@ -317,10 +317,12 @@
+ static char *opt_data;
+ static char *opt_replay;
+ static char *opt_level;
++static int opt_still;
+ 
+ #define opt_usage                                                     \
+     "Usage: %s [options ...]\n"                                       \
+     "Options:\n"                                                      \
++    "      --still               draw one fixed frame for comparison.\n" \
+     "  -h, --help                show this usage message.\n"          \
+     "  -v, --version             show version.\n"                     \
+     "  -d, --data <dir>          use 'dir' as game data directory.\n" \
+@@ -342,6 +344,12 @@
+         {
+             printf(opt_usage, argv[0]);
+             exit(EXIT_SUCCESS);
++        }
++
++        if (strcmp(argv[i], "--still") == 0)
++        {
++            opt_still = 1;
++            continue;
+         }
+ 
+         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0)
+@@ -574,11 +582,27 @@
+     else
+         goto_state(&st_title);
+ 
++    /* FerrionOS frame comparison: identical simulation time on every run. */
++    if (opt_still)
++    {
++        int frame;
++        st_paint(0.0f);
++        for (frame = 0; frame < 60; frame++)
++            st_timer(1.0f / 60.0f);
++        hmd_step();
++        st_paint(1.0f);
++        video_swap();
++        puts("NEVERBALL_FRAME_READY");
++        fflush(stdout);
++        while (loop())
++            SDL_Delay(10);
++    }
++
+     /* Run the main game loop. */
+ 
+     t0 = SDL_GetTicks();
+ 
+-    while (loop())
++    while (!opt_still && loop())
+     {
+         if ((t1 = SDL_GetTicks()) > t0)
+         {

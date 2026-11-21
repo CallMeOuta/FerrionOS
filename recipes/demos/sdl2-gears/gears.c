@@ -323,6 +323,10 @@ void cleanup()
 
 int main(int argc, char *argv[])
 {
+    int still = argc == 2 && SDL_strcmp(argv[1], "--still") == 0;
+    if (still)
+        delta = 0.0f;
+
     // Main
     printf("Initializing SDL\n");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
@@ -437,6 +441,12 @@ int main(int argc, char *argv[])
     while (running)
     {
         idle();
+        if (still == 1)
+        {
+            printf("GEARS_FRAME_READY\n");
+            fflush(stdout);
+            still = 2;
+        }
 
         // Loop track
         Mix_PlayingMusic();
