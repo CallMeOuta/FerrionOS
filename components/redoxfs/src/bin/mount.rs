@@ -162,13 +162,67 @@ fn print_usage_exit() -> ! {
 
 fn usage() {
     eprintln!(
-        "redoxfs [--no-daemon|-d] [--key-file PATH] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
+        "redoxfs [--no-daemon|-d] [--key-file PATH] [--read-only] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
     );
+    eprintln!("redoxfs [--no-daemon|-d] --memory MIB [mountpoint]");
 }
 
 enum DiskId {
     Path(String),
     Uuid(Uuid),
+    /// An image served without writing to it (FerrionOS, the Linux layer's root).
+    ReadOnly(String),
+    /// A new file system of this many bytes in memory, gone when the daemon exits.
+    Memory(u64),
+}
+
+/// Opens the image at `path` for reading only. The disk is never written: transactions are
+/// dropped instead of committed and the scheme refuses every change with EROFS.
+fn filesystem_read_only(path: &str) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
+    let disk: Box<dyn Disk> = match DiskFile::open_read_only(path) {
+        Ok(disk) => Box::new(disk),
+        Err(err) => {
+            log::error!("failed to open image {} for reading: {}", path, err);
+            return None;
+        }
+    };
+    match redoxfs::FileSystem::open(DiskCache::new(disk), None, None, false) {
+        Ok(mut filesystem) => {
+            filesystem.read_only = true;
+            Some((path.to_string(), filesystem))
+        }
+        Err(err) => {
+            log::error!("failed to open filesystem {}: {}", path, err);
+            None
+        }
+    }
+}
+
+/// Creates an empty file system of `size` bytes in memory whose root directory anyone may write
+/// to, with the sticky bit, as `/tmp`.
+fn filesystem_in_memory(size: u64) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
+    let disk: Box<dyn Disk> = Box::new(redoxfs::DiskMemory::new(size));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut filesystem =
+        match redoxfs::FileSystem::create(DiskCache::new(disk), None, now.as_secs(), now.subsec_nanos()) {
+            Ok(filesystem) => filesystem,
+            Err(err) => {
+                log::error!("failed to create a file system in memory: {}", err);
+                return None;
+            }
+        };
+    let opened = filesystem.tx(|tx| {
+        let mut root = tx.read_tree(redoxfs::TreePtr::<redoxfs::Node>::root())?;
+        root.data_mut().set_mode(redoxfs::Node::MODE_DIR | 0o1777);
+        tx.sync_tree(root)
+    });
+    if let Err(err) = opened {
+        log::error!("failed to open the root of the file system in memory: {}", err);
+        return None;
+    }
+    Some((format!("memory:{size}"), filesystem))
 }
 
 fn filesystem_by_path(
@@ -370,6 +424,8 @@ fn daemon(
     let filesystem_opt = match *disk_id {
         DiskId::Path(ref path) => filesystem_by_path(path, block_opt, true, boot_password_opt),
         DiskId::Uuid(ref uuid) => filesystem_by_uuid(uuid, block_opt, boot_password_opt),
+        DiskId::ReadOnly(ref path) => filesystem_read_only(path),
+        DiskId::Memory(size) => filesystem_in_memory(size),
     };
     drop(boot_password);
 
@@ -403,6 +459,12 @@ fn daemon(
         DiskId::Uuid(ref uuid) => {
             log::error!("not able to mount uuid {}", uuid.hyphenated());
         }
+        DiskId::ReadOnly(ref path) => {
+            log::error!("not able to mount path {} for reading", path);
+        }
+        DiskId::Memory(size) => {
+            log::error!("not able to mount {} bytes of memory", size);
+        }
     }
 
     if let Some(ref mut write) = write {
@@ -429,10 +491,20 @@ fn main() {
     let mut mountpoint: Option<String> = None;
     let mut block_opt: Option<u64> = None;
     let mut key_file = None;
+    let mut read_only = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--no-daemon" | "-d" => daemonise = false,
+            "--read-only" => read_only = true,
+            "--memory" if disk_id.is_none() => {
+                let mib = args
+                    .next()
+                    .and_then(|mib| mib.parse::<u64>().ok())
+                    .filter(|&mib| (1..=4096).contains(&mib))
+                    .unwrap_or_else(|| print_err_exit("--memory needs a size in MiB, 1 to 4096"));
+                disk_id = Some(DiskId::Memory(mib << 20));
+            }
             "--key-file" => {
                 key_file = Some(
                     args.next()
@@ -465,8 +537,11 @@ fn main() {
         }
     }
 
-    let Some(disk_id) = disk_id else {
-        print_err_exit("no disk provided");
+    let disk_id = match disk_id {
+        Some(DiskId::Path(path)) if read_only => DiskId::ReadOnly(path),
+        Some(_) if read_only => print_err_exit("--read-only takes an image path"),
+        Some(disk_id) => disk_id,
+        None => print_err_exit("no disk provided"),
     };
 
     let Some(mountpoint) = mountpoint else {

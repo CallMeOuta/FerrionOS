@@ -18,7 +18,7 @@ use syscall::data::{Stat, StatVfs, StdFsCallMeta, TimeSpec};
 use syscall::dirent::DirentBuf;
 use syscall::error::{
     EACCES, EBADF, EBUSY, EEXIST, EINVAL, EIO, EISDIR, ELOOP, ENOENT, ENOTDIR, ENOTEMPTY,
-    EOPNOTSUPP, EPERM, EXDEV, Error, Result,
+    EOPNOTSUPP, EPERM, EROFS, EXDEV, Error, Result,
 };
 use syscall::flag::{
     EventFlags, MapFlags, O_ACCMODE, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_RDWR,
@@ -124,6 +124,15 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
                 )?
             },
         })
+    }
+
+    /// EROFS when the file system is served read-only (`redoxfs --read-only`).
+    fn writable(&self) -> Result<()> {
+        if self.fs.read_only {
+            Err(Error::new(EROFS))
+        } else {
+            Ok(())
+        }
     }
 
     /// Resolve a symbolic link of given `node`. `full_path` must be non-canonicalized path from root node.
@@ -895,6 +904,9 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         _fcntl_flags: u32,
         ctx: &CallerCtx,
     ) -> Result<OpenResult> {
+        if flags & (O_CREAT | O_TRUNC) != 0 || flags & O_WRONLY == O_WRONLY {
+            self.writable()?;
+        }
         let path = RedoxReference::new(path).ok_or(Error::new(EINVAL))?;
         let path_to_open = match Handle::get_resource_or(self.handles.get(&dirfd))? {
             // If pathname is absolute, then dirfd is ignored.
@@ -905,6 +917,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     }
 
     fn unlinkat(&mut self, dirfd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<()> {
+        self.writable()?;
         let (_pid, uid, gid) = get_uid_gid_from_pid(&self.proc_creds_capability, ctx.pid)?;
         let path = RedoxReference::new(path).ok_or(Error::new(EINVAL))?;
         let path = match Handle::get_resource_or(self.handles.get(&dirfd))? {
@@ -940,6 +953,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         _ctx: &CallerCtx,
     ) -> Result<usize> {
         // println!("Write {}, {:X} {}", id, buf.as_ptr() as usize, buf.len());
+        self.writable()?;
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
         self.fs.tx(|tx| file.write(&mut self.fmap, buf, offset, tx))
     }
@@ -951,11 +965,13 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     }
 
     fn fchmod(&mut self, id: usize, mode: u16, _ctx: &CallerCtx) -> Result<()> {
+        self.writable()?;
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
         self.fs.tx(|tx| file.fchmod(mode, tx))
     }
 
     fn fchown(&mut self, id: usize, new_uid: u32, new_gid: u32, _ctx: &CallerCtx) -> Result<()> {
+        self.writable()?;
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
         self.fs.tx(|tx| file.fchown(new_uid, new_gid, tx))
     }
@@ -1003,6 +1019,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     }
 
     fn flink(&mut self, id: usize, url: &str, ctx: &CallerCtx) -> Result<usize> {
+        self.writable()?;
         self.flink_internal(id, TreePtr::root(), url, 0, ctx.uid, ctx.gid)
     }
 
@@ -1014,6 +1031,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         flags: u32,
         ctx: &CallerCtx,
     ) -> Result<usize> {
+        self.writable()?;
         let dir_ptr = match Handle::get_resource_or(self.handles.get(&dirid))? {
             Some(res) => res.node_ptr(),
             None => TreePtr::root(),
@@ -1023,6 +1041,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     }
 
     fn frename(&mut self, id: usize, url: &str, ctx: &CallerCtx) -> Result<usize> {
+        self.writable()?;
         let file = Handle::get_resource(self.handles.get(&id))?;
         let old_path = file.path().to_string();
         self.frename_internal(
@@ -1045,6 +1064,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         flags: u32,
         ctx: &CallerCtx,
     ) -> Result<usize> {
+        self.writable()?;
         let old_dir_ptr = match Handle::get_resource_or(self.handles.get(&old_dir))? {
             Some(res) => res.node_ptr(),
             None => TreePtr::root(),
@@ -1094,12 +1114,14 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
 
     fn ftruncate(&mut self, id: usize, len: u64, _ctx: &CallerCtx) -> Result<()> {
         // println!("Ftruncate {}, {}", id, len);
+        self.writable()?;
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
         self.fs.tx(|tx| file.truncate(len, tx))
     }
 
     fn futimens(&mut self, id: usize, times: &[TimeSpec], _ctx: &CallerCtx) -> Result<()> {
         // println!("Futimens {}, {}", id, times.len());
+        self.writable()?;
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
         self.fs.tx(|tx| file.utimens(times, tx))
     }
@@ -1122,6 +1144,9 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         flags: MapFlags,
         _ctx: &CallerCtx,
     ) -> Result<usize> {
+        if flags.contains(MapFlags::MAP_SHARED) && flags.contains(MapFlags::PROT_WRITE) {
+            self.writable()?;
+        }
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
         let fmaps = &mut self.fmap;
 
@@ -1178,6 +1203,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         let uid = ctx.uid;
         let gid = ctx.gid;
 
+        self.writable()?;
         let parent_resource = Handle::get_resource(self.handles.get(&sendfd_request.id()))?;
 
         let mut other_scheme_fd = usize::MAX;

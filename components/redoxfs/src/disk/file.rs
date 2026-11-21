@@ -51,6 +51,12 @@ impl DiskFile {
         Ok(DiskFile { file })
     }
 
+    /// Opens an image that is never written; a write fails with EIO.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<DiskFile> {
+        let file = OpenOptions::new().read(true).open(path).or_eio()?;
+        Ok(DiskFile { file })
+    }
+
     pub fn create(path: impl AsRef<Path>, size: u64) -> Result<DiskFile> {
         let file = OpenOptions::new()
             .read(true)

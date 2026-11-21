@@ -29,6 +29,9 @@ pub struct FileSystem<D: Disk> {
     pub(crate) cipher_opt: Option<Xts128<Aes128>>,
     pub(crate) compress_cache: Vec<u8>,
     pub node_usages: BTreeMap<u32, u64>,
+    /// A file system that is only read: transactions are dropped instead of committed, so that
+    /// nothing (an access time included) is written to the disk. Set after `open`.
+    pub read_only: bool,
 }
 
 impl<D: Disk> FileSystem<D> {
@@ -118,6 +121,7 @@ impl<D: Disk> FileSystem<D> {
                 cipher_opt,
                 compress_cache: compress_cache(),
                 node_usages: BTreeMap::new(),
+                read_only: false,
             };
 
             unsafe { fs.reset_allocator()? };
@@ -212,6 +216,7 @@ impl<D: Disk> FileSystem<D> {
             cipher_opt,
             compress_cache: compress_cache(),
             node_usages: BTreeMap::new(),
+            read_only: false,
         };
 
         // Write header generation zero
@@ -274,9 +279,12 @@ impl<D: Disk> FileSystem<D> {
 
     /// start a filesystem transaction, required for making any changes
     pub fn tx<F: FnOnce(&mut Transaction<D>) -> Result<T>, T>(&mut self, f: F) -> Result<T> {
+        let read_only = self.read_only;
         let mut tx = Transaction::new(self);
         let t = f(&mut tx)?;
-        tx.commit(false)?;
+        if !read_only {
+            tx.commit(false)?;
+        }
         Ok(t)
     }
 
