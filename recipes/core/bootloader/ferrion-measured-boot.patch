@@ -1,0 +1,304 @@
+FerrionOS change to the upstream bootloader (MIT licence, kept), applied after ferrion-verified-boot.patch, made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8:
+- measured boot on UEFI, through the firmware's EFI_TCG2_PROTOCOL (HashLogExtendEvent), with no new dependency: PCR 7 gets the verified-boot key slot (EV_EFI_VARIABLE_AUTHORITY, variable FerrionBootKey of vendor GUID e569c1f1-7993-453b-8b3a-2109d5d9da22, all zero when verification is off); PCR 8 the boot entry's name (`normal`) and the boot environment without its framebuffer lines (EV_IPL); PCR 9 the manifest (verified boot only), the kernel and the initfs, each after verification and before use (EV_IPL, the event names the file); then EV_SEPARATOR into PCRs 8 and 9. A copy of the TCG event log reaches the kernel as TPM_EVENT_LOG_ADDR and TPM_EVENT_LOG_SIZE in the environment. Without the protocol nothing is measured and the boot is unchanged; when the firmware refuses a measurement the bootloader says so once and boots without further measurements. The BIOS bootloader gets a stub that measures nothing.
+
+diff --git a/src/main.rs b/src/main.rs
+index 49ad235..2222f7b 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -44,6 +44,24 @@ mod verify {
+     }
+ }
+ 
++// Measured boot runs on UEFI only, through the firmware's TCG2 protocol; the BIOS bootloader
++// gets a stub that measures nothing.
++#[cfg(any(target_arch = "riscv64", target_os = "uefi"))]
++mod measure;
++#[cfg(not(any(target_arch = "riscv64", target_os = "uefi")))]
++mod measure {
++    pub fn entry(_: &str) {}
++    pub fn environment(_: &[u8]) {}
++    pub fn file(_: &str, _: &[u8]) {}
++    pub fn separators() {}
++    pub fn event_log<O: crate::os::Os>(_: &O) -> Option<&'static [u8]> {
++        None
++    }
++}
++
++/// The boot entry this bootloader starts, measured into PCR 8. There is one entry today.
++const BOOT_ENTRY: &str = "normal";
++
+ const KIBI: usize = 1024;
+ const MIBI: usize = KIBI * KIBI;
+ 
+@@ -622,6 +640,7 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+         if let Some(manifest) = &manifest {
+             manifest.check_kernel(kernel);
+         }
++        measure::file("usr/lib/boot/kernel", kernel);
+         let (kernel_entry, kernel_64bit) = elf_entry(kernel);
+         unsafe {
+             KERNEL_64BIT = kernel_64bit;
+@@ -634,6 +653,7 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+         if let Some(manifest) = &manifest {
+             manifest.check_initfs(initfs_slice);
+         }
++        measure::file("usr/lib/boot/initfs", initfs_slice);
+ 
+         let memory = unsafe {
+             let total_size = initfs_slice.len().next_multiple_of(4096);
+@@ -725,6 +745,10 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+         if edit_env {
+             editor::edit_env(os, env_base, &mut w.i, max_env_size);
+         }
++        // Everything above, as the kernel will read it; the framebuffer lines below depend on
++        // the monitor and are left out.
++        measure::entry(BOOT_ENTRY);
++        measure::environment(&w.slice[..w.i]);
+ 
+         for output_i in 0..os.video_outputs() {
+             if let Some(mode) = mode_opts[output_i] {
+@@ -754,6 +778,11 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+                 }
+             }
+         }
++        measure::separators();
++        if let Some(log) = measure::event_log(os) {
++            writeln!(w, "TPM_EVENT_LOG_ADDR={:016x}", log.as_ptr() as usize).unwrap();
++            writeln!(w, "TPM_EVENT_LOG_SIZE={:016x}", log.len()).unwrap();
++        }
+         env_size = w.i;
+     }
+ 
+diff --git a/src/measure.rs b/src/measure.rs
+new file mode 100644
+index 0000000..ff4e43d
+--- /dev/null
++++ b/src/measure.rs
+@@ -0,0 +1,206 @@
++//! Measured boot (FerrionOS). Through the firmware's EFI_TCG2_PROTOCOL the bootloader extends TPM
++//! PCRs with what it hands to the kernel, and the firmware records each measurement in the TCG
++//! event log:
++//!
++//! - PCR 7: the verified-boot key slot, all zero when verification is off, as a
++//!   `EV_EFI_VARIABLE_AUTHORITY` event in the `UEFI_VARIABLE_DATA` layout, the way shim records
++//!   its built-in certificate;
++//! - PCR 8: the boot entry's name, then the boot environment without its framebuffer lines
++//!   (`EV_IPL`, the event holds the measured bytes);
++//! - PCR 9: the manifest (verified boot only), the kernel and the initfs, each after it passed
++//!   verification and before it is used (`EV_IPL`, the event names the file);
++//! - last, a separator in PCRs 8 and 9 (`EV_SEPARATOR`), so that nothing started later can pose
++//!   as the bootloader.
++//!
++//! The firmware hashes the data for every active PCR bank. Without the protocol (no TPM, or
++//! firmware without TCG2 support) nothing is measured and the boot goes on as before. A copy of
++//! the event log reaches the kernel as `TPM_EVENT_LOG_ADDR` and `TPM_EVENT_LOG_SIZE`.
++
++use alloc::vec::Vec;
++use core::sync::atomic::{AtomicBool, Ordering};
++use core::{ptr, slice};
++use std::proto::Protocol;
++use uefi::guid::Guid;
++use uefi::status::Status;
++
++use crate::os::Os;
++
++const TCG2_PROTOCOL_GUID: Guid = Guid(
++    0x607f766c,
++    0x7455,
++    0x42be,
++    [0x93, 0x0b, 0xe4, 0xd7, 0x6d, 0xb2, 0x72, 0x0f],
++);
++
++/// Names FerrionOS's own entries in the event log, as a variable's vendor GUID.
++const FERRION_GUID: Guid = Guid(
++    0xe569c1f1,
++    0x7993,
++    0x453b,
++    [0x8b, 0x3a, 0x21, 0x09, 0xd5, 0xd9, 0xda, 0x22],
++);
++
++// Event types from the TCG PC Client Platform Firmware Profile.
++const EV_SEPARATOR: u32 = 0x4;
++const EV_IPL: u32 = 0xd;
++const EV_EFI_VARIABLE_AUTHORITY: u32 = 0x8000_00e0;
++
++const EVENT_LOG_FORMAT_TCG_2: u32 = 0x2;
++
++#[allow(non_snake_case)]
++#[repr(C)]
++pub struct Tcg2Protocol {
++    GetCapability: usize,
++    GetEventLog: extern "efiapi" fn(
++        This: *mut Tcg2Protocol,
++        EventLogFormat: u32,
++        EventLogLocation: *mut u64,
++        EventLogLastEntry: *mut u64,
++        EventLogTruncated: *mut u8,
++    ) -> Status,
++    HashLogExtendEvent: extern "efiapi" fn(
++        This: *mut Tcg2Protocol,
++        Flags: u64,
++        DataToHash: u64,
++        DataToHashLen: u64,
++        EfiTcgEvent: *const u8,
++    ) -> Status,
++}
++
++struct Tcg2(&'static mut Tcg2Protocol);
++
++impl Protocol<Tcg2Protocol> for Tcg2 {
++    fn guid() -> Guid {
++        TCG2_PROTOCOL_GUID
++    }
++
++    fn new(inner: &'static mut Tcg2Protocol) -> Self {
++        Tcg2(inner)
++    }
++}
++
++/// Set when the firmware refused a measurement: the boot goes on without further ones.
++static FAILED: AtomicBool = AtomicBool::new(false);
++
++fn tcg2() -> Option<Tcg2> {
++    if FAILED.load(Ordering::Relaxed) {
++        return None;
++    }
++    Tcg2::locate_protocol().ok()
++}
++
++/// Extends `pcr` with the hash of `data` and logs `event` as an event of `event_type`.
++fn extend(pcr: u32, event_type: u32, data: &[u8], event: &[u8]) {
++    let Some(tcg2) = tcg2() else {
++        return;
++    };
++    // EFI_TCG2_EVENT, packed: Size, then the header (HeaderSize, HeaderVersion, PCRIndex,
++    // EventType), then the event data.
++    let mut buf = Vec::with_capacity(18 + event.len());
++    buf.extend_from_slice(&((18 + event.len()) as u32).to_le_bytes());
++    buf.extend_from_slice(&14u32.to_le_bytes());
++    buf.extend_from_slice(&1u16.to_le_bytes());
++    buf.extend_from_slice(&pcr.to_le_bytes());
++    buf.extend_from_slice(&event_type.to_le_bytes());
++    buf.extend_from_slice(event);
++    let this: *mut Tcg2Protocol = tcg2.0;
++    let status = (tcg2.0.HashLogExtendEvent)(
++        this,
++        0,
++        data.as_ptr() as u64,
++        data.len() as u64,
++        buf.as_ptr(),
++    );
++    if !status.is_success() {
++        FAILED.store(true, Ordering::Relaxed);
++        loud_println!(
++            "FerrionOS measured boot: the TPM refused a measurement into PCR {} ({:?}); booting without further measurements",
++            pcr,
++            status
++        );
++    }
++}
++
++/// PCR 7: the verified-boot key, as the variable `FerrionBootKey` of `FERRION_GUID`.
++pub fn boot_key(key: &[u8; 32]) {
++    const NAME: &str = "FerrionBootKey";
++    let mut data = Vec::new();
++    data.extend_from_slice(&FERRION_GUID.0.to_le_bytes());
++    data.extend_from_slice(&FERRION_GUID.1.to_le_bytes());
++    data.extend_from_slice(&FERRION_GUID.2.to_le_bytes());
++    data.extend_from_slice(&FERRION_GUID.3);
++    data.extend_from_slice(&(NAME.len() as u64).to_le_bytes());
++    data.extend_from_slice(&(key.len() as u64).to_le_bytes());
++    for unit in NAME.encode_utf16() {
++        data.extend_from_slice(&unit.to_le_bytes());
++    }
++    data.extend_from_slice(key);
++    extend(7, EV_EFI_VARIABLE_AUTHORITY, &data, &data);
++}
++
++/// PCR 8: the name of the boot entry the bootloader starts.
++pub fn entry(name: &str) {
++    extend(8, EV_IPL, name.as_bytes(), name.as_bytes());
++}
++
++/// PCR 8: the boot environment the kernel receives, without the framebuffer lines.
++pub fn environment(env: &[u8]) {
++    extend(8, EV_IPL, env, env);
++}
++
++/// PCR 9: a file loaded from RedoxFS; the event holds its path.
++pub fn file(path: &str, data: &[u8]) {
++    extend(9, EV_IPL, data, path.as_bytes());
++}
++
++/// PCRs 8 and 9: the end of the bootloader's measurements.
++pub fn separators() {
++    for pcr in [8, 9] {
++        extend(pcr, EV_SEPARATOR, &[0; 4], &[0; 4]);
++    }
++}
++
++/// The size of the crypto-agile event (TCG_PCR_EVENT2) at `at`, or None for a digest algorithm
++/// this bootloader does not know.
++unsafe fn event2_size(at: *const u8) -> Option<usize> {
++    let read_u32 = |offset: usize| unsafe { ptr::read_unaligned(at.add(offset) as *const u32) };
++    let mut offset = 12;
++    for _ in 0..read_u32(8) {
++        let alg = unsafe { ptr::read_unaligned(at.add(offset) as *const u16) };
++        offset += 2 + match alg {
++            0x0004 => 20,          // SHA-1
++            0x000b | 0x0012 => 32, // SHA-256, SM3-256
++            0x000c => 48,          // SHA-384
++            0x000d => 64,          // SHA-512
++            _ => return None,
++        };
++    }
++    Some(offset + 4 + read_u32(offset) as usize)
++}
++
++/// A copy of the firmware's event log, in memory the kernel keeps, taken after the separators.
++/// The firmware's own log lives in boot-services memory, which the kernel reuses.
++pub fn event_log<O: Os>(os: &O) -> Option<&'static [u8]> {
++    let tcg2 = tcg2()?;
++    let (mut location, mut last, mut truncated) = (0u64, 0u64, 0u8);
++    let this: *mut Tcg2Protocol = tcg2.0;
++    let status = (tcg2.0.GetEventLog)(
++        this,
++        EVENT_LOG_FORMAT_TCG_2,
++        &mut location,
++        &mut last,
++        &mut truncated,
++    );
++    if !status.is_success() || location == 0 || last <= location {
++        return None;
++    }
++    let size = (last - location) as usize + unsafe { event2_size(last as *const u8)? };
++    let copy = os.alloc_zeroed_page_aligned(size);
++    if copy.is_null() {
++        return None;
++    }
++    unsafe {
++        ptr::copy_nonoverlapping(location as *const u8, copy, size);
++        Some(slice::from_raw_parts(copy, size))
++    }
++}
+diff --git a/src/verify.rs b/src/verify.rs
+index a0ddbda..0b20483 100644
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -94,6 +94,8 @@ impl Manifest {
+     /// before reading anything else in the manifest; refuses to go on when either fails.
+     pub fn load<O: Os>(os: &O, fs: &mut redoxfs::FileSystem<O::D>) -> Option<Manifest> {
+         let key = key();
++        // Measured with or without a key: all zero records that this boot verifies nothing.
++        crate::measure::boot_key(&key);
+         if key == [0; 32] {
+             return None;
+         }
+@@ -118,6 +120,7 @@ impl Manifest {
+                 SIGNATURE
+             ));
+         }
++        crate::measure::file(MANIFEST, text);
+ 
+         let text = core::str::from_utf8(text)
+             .unwrap_or_else(|_| refuse(format_args!("the manifest is not text")));
