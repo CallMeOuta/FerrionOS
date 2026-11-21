@@ -7,7 +7,7 @@ upstream = "https://gitlab.freedesktop.org/mesa/mesa"
 branch = "redox-24.0"
 rev = "9850ea1ad7d687240757ebf9a73760ceb4ba28a9"
 shallow_clone = true
-patches = ["ferrion-libsync-wait.patch", "ferrion-driver-lifetime.patch"]
+patches = ["ferrion-libsync-wait.patch", "ferrion-driver-lifetime.patch", "ferrion-native-window.patch"]
 [build]
 template = "custom"
 dependencies = [

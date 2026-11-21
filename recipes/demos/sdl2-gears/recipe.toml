@@ -4,6 +4,7 @@ description = "Mesa3D \"gears\" OpenGL demo ported to SDL2 windowing"
 [build]
 template = "custom"
 dependencies = [
+    "libglvnd",
     "sdl2-image",
     "sdl2-mixer",
     "sdl2-ttf",
@@ -13,7 +14,7 @@ DYNAMIC_INIT
 mkdir -p "${COOKBOOK_STAGE}/usr/games/sdl2_gears"
 ${CXX} -O2 -I "${COOKBOOK_SYSROOT}/include" $LDFLAGS ${COOKBOOK_RECIPE}/gears.c \
     -o sdl2_gears -dynamic \
-    -lSDL2_image -lSDL2_mixer -lSDL2_ttf $("${PKG_CONFIG}" --libs osmesa) \
+    -lSDL2_image -lSDL2_mixer -lSDL2_ttf $("${PKG_CONFIG}" --libs opengl egl) \
     -lSDL2 -lorbital -lfreetype -lpng -lvorbisfile -lvorbis -logg -lz
 cp -rv "${COOKBOOK_RECIPE}/assets" "${COOKBOOK_STAGE}/usr/games/sdl2_gears/"
 cp -v sdl2_gears "${COOKBOOK_STAGE}/usr/games/sdl2_gears/"

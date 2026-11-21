@@ -1,0 +1,20 @@
+FerrionOS: Preserve the caller-owned native window descriptor.
+Source: https://gitlab.redox-os.org/redox-os/mesa.git at 9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
+
+--- a/src/egl/drivers/dri2/platform_redox.c
++++ b/src/egl/drivers/dri2/platform_redox.c
+@@ -205,7 +205,13 @@
+         goto cleanup_surface;
+     }
+ 
+-    dri2_surf->orb_window = orb_window_from_fd((int)native_window);
++    /* EGL borrows the native window; liborbital owns its descriptor. */
++    int window_fd = dup((int)(intptr_t)native_window);
++    if (window_fd < 0) {
++        _eglError(EGL_BAD_NATIVE_WINDOW, "Unable to duplicate window descriptor");
++        goto cleanup_surface;
++    }
++    dri2_surf->orb_window = orb_window_from_fd(window_fd);
+     dri2_surf->base.Width = orb_window_width(dri2_surf->orb_window);
+     dri2_surf->base.Height = orb_window_height(dri2_surf->orb_window);
+ 

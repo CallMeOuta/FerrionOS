@@ -147,11 +147,16 @@ static int egl_dispatch(void)
     return result;
 }
 
+int sdl_lifecycle(void);
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "egl-dispatch") == 0) {
         return egl_dispatch();
     }
-    fputs("Usage: gpu-probe egl-dispatch\n", stderr);
+    if (argc == 2 && strcmp(argv[1], "sdl-lifecycle") == 0) {
+        return sdl_lifecycle();
+    }
+    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle\n", stderr);
     return 2;
 }

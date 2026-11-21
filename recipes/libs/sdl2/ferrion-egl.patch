@@ -1,0 +1,255 @@
+FerrionOS: Use EGL for SDL2 Orbital contexts and window presentation.
+Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f35f3047c55cf381a82.
+
+--- a/cmake/sdlchecks.cmake
++++ b/cmake/sdlchecks.cmake
+@@ -940,7 +940,10 @@
+         set(SDL_VIDEO_DRIVER_ORBITAL 1)
+         file(GLOB ORBITAL_VIDEO_SOURCES ${SDL2_SOURCE_DIR}/src/video/orbital/*.c)
+         list(APPEND SOURCE_FILES ${ORBITAL_VIDEO_SOURCES})
+-      list(APPEND EXTRA_LIBS orbital OSMesa)
++      set(SDL_VIDEO_OPENGL 1)
++      set(SDL_VIDEO_OPENGL_EGL 1)
++      set(HAVE_OPENGL TRUE)
++      list(APPEND EXTRA_LIBS orbital EGL)
+     endif()
+   endif()
+ endmacro()
+--- a/src/video/orbital/SDL_orbitalopengl.c
++++ b/src/video/orbital/SDL_orbitalopengl.c
+@@ -18,129 +18,88 @@
+      misrepresented as being the original software.
+   3. This notice may not be removed or altered from any source distribution.
+ */
++/* FerrionOS uses SDL's EGL helpers and Mesa's Orbital window surface. */
+ #include "../../SDL_internal.h"
+ 
+ #include "SDL_orbitalopengl.h"
+ #include "SDL_orbitalvideo.h"
++#include <orbital.h>
+ 
+-#include <GL/osmesa.h>
+-#include <orbital.h>
+-#include <assert.h>
++/* Platform value provided by Mesa's Orbital port. */
++#define EGL_PLATFORM_REDOX_EXT 0x31D9
+ 
+-/* Passing a NULL path means load pointers from the application */
+ int ORBITAL_GL_LoadLibrary(_THIS, const char *path)
+ {
+-    return 0;
++    return SDL_EGL_LoadLibrary(_this, path, EGL_DEFAULT_DISPLAY, EGL_PLATFORM_REDOX_EXT);
+ }
+ 
+-void* ORBITAL_GL_GetProcAddress(_THIS, const char *proc)
++void *ORBITAL_GL_GetProcAddress(_THIS, const char *proc)
+ {
+-    return OSMesaGetProcAddress(proc);
++    return SDL_EGL_GetProcAddress(_this, proc);
+ }
+ 
+-int ORBITAL_GL_SwapWindow(_THIS, SDL_Window* window) {
+-    SDL_VideoData* video_data = _this->driverdata;
+-
+-    // It is currently required to flush for video data to be updated
+-    glFlush();
+-
+-    orb_window_sync(video_data->orb_window);
+-    return 0;
++int ORBITAL_GL_SwapWindow(_THIS, SDL_Window *window)
++{
++    SDL_VideoData *data = _this->driverdata;
++    return SDL_EGL_SwapBuffers(_this, data->egl_surface);
+ }
+ 
+-int ORBITAL_GL_MakeCurrent(_THIS, SDL_Window* window, SDL_GLContext ctx) {
+-    SDL_VideoData* video_data = _this->driverdata;
+-    OSMesaContext context = ctx;
+-
+-
+-    if (ctx == NULL)
+-        return -1;
+-
+-    assert(video_data != NULL);
+-
+-    if (video_data->mesa_context == context && video_data->mesa_buffer != NULL) {
+-        return 0; // no-op
+-    }
+-
+-    Uint32 width = orb_window_width(video_data->orb_window);
+-    Uint32 height = orb_window_height(video_data->orb_window);
+-    void* buffer = orb_window_data(video_data->orb_window);
+-
+-    if (!OSMesaMakeCurrent(context, buffer, GL_UNSIGNED_BYTE, width, height)) {
+-        fprintf(stderr, "OSMesaMakeCurrent failed\n");
+-        OSMesaDestroyContext(context);
+-        return -1;
+-    }
+-
+-    //fprintf(stderr, "OSMesaMakeCurrent done\n");
+-
+-    OSMesaPixelStore(OSMESA_Y_UP, 0);
+-    OSMesaColorClamp(GL_TRUE);
+-
+-    video_data->mesa_buffer = buffer;
+-    video_data->mesa_context = context;
+-
+-    fprintf(stderr, "SDL orbital OSMesa buffer binded to context\n");
+-
+-    return 0;
++int ORBITAL_GL_MakeCurrent(_THIS, SDL_Window *window, SDL_GLContext context)
++{
++    SDL_VideoData *data = _this->driverdata;
++    return SDL_EGL_MakeCurrent(_this, window ? data->egl_surface : EGL_NO_SURFACE, context);
+ }
+ 
+-
+-SDL_GLContext ORBITAL_GL_CreateContext(_THIS, SDL_Window* window) {
+-    // Fixme: verify _this->gl_config.double_buffer
+-    OSMesaContext ctx = OSMesaCreateContextExt(OSMESA_BGRA, _this->gl_config.depth_size, _this->gl_config.stencil_size, 0, NULL);
+-    if (ctx == NULL) {
+-        fprintf(stderr, "OSMesaCreateContextExt failed\n");
+-        return NULL;
++SDL_GLContext ORBITAL_GL_CreateContext(_THIS, SDL_Window *window)
++{
++    SDL_VideoData *data = _this->driverdata;
++    if (data->egl_surface == EGL_NO_SURFACE) {
++        data->egl_surface = SDL_EGL_CreateSurface(_this, (NativeWindowType)(uintptr_t)orb_window_fd(data->orb_window));
++        if (data->egl_surface == EGL_NO_SURFACE) {
++            return NULL;
++        }
+     }
+-
+-    fprintf(stderr, "SDL orbital OSMesa context created successfully\n");
+-
+-    return ORBITAL_GL_MakeCurrent(_this, window, ctx) >= 0 ? ctx : NULL;
++    return SDL_EGL_CreateContext(_this, data->egl_surface);
+ }
+ 
+-void ORBITAL_GL_DeleteContext(_THIS, SDL_GLContext context) {
+-    SDL_VideoData* video_data = _this->driverdata;
+-    assert(video_data != NULL);
+-
+-    if (video_data->mesa_context == context) {
+-        OSMesaMakeCurrent(NULL, NULL, GL_UNSIGNED_BYTE, 0, 0);
+-        video_data->mesa_context = NULL;
++void ORBITAL_GL_DeleteContext(_THIS, SDL_GLContext context)
++{
++    if (context == SDL_GL_GetCurrentContext()) {
++        SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, NULL);
+     }
+-    video_data->mesa_buffer = NULL;
+-    OSMesaDestroyContext(context);
++    SDL_EGL_DeleteContext(_this, context);
+ }
+ 
+-
+-int ORBITAL_GL_SetSwapInterval(_THIS, int interval) {
+-    // TODO: Implement this, if necessary?
+-    return 0;
++int ORBITAL_GL_SetSwapInterval(_THIS, int interval)
++{
++    return SDL_EGL_SetSwapInterval(_this, interval);
+ }
+ 
+-int ORBITAL_GL_GetSwapInterval(_THIS) {
+-    // TODO: Implement this, if necessary?
+-    return 0;
++int ORBITAL_GL_GetSwapInterval(_THIS)
++{
++    return SDL_EGL_GetSwapInterval(_this);
+ }
+ 
+-
+-void ORBITAL_GL_UnloadLibrary(_THIS) {
+-    // TODO: Implement this, if necessary?
++void ORBITAL_GL_UnloadLibrary(_THIS)
++{
++    SDL_EGL_UnloadLibrary(_this);
+ }
+ 
+-void ORBITAL_GL_SetSize(_THIS, int width, int height) {
+-    SDL_VideoData* video_data = _this->driverdata;
+-    assert(video_data != NULL);
+-
+-    if (video_data->mesa_context == NULL) {
++void ORBITAL_GL_SetSize(_THIS, int width, int height)
++{
++    SDL_VideoData *data = _this->driverdata;
++    SDL_GLContext context;
++    if (data->egl_surface == EGL_NO_SURFACE) {
+         return;
+     }
+-
+-    void* buffer = orb_window_data(video_data->orb_window);
+-
+-    if (!OSMesaMakeCurrent(video_data->mesa_context, buffer, GL_UNSIGNED_BYTE, width, height)) {
+-        fprintf(stderr, "ORBITAL_GL_SetSize: OSMesaMakeCurrent failed\n");
+-        return;
++    /* Reopen Mesa's view after liborbital remaps the resized window. */
++    context = SDL_GL_GetCurrentWindow() == data->window ? SDL_GL_GetCurrentContext() : NULL;
++    if (context) {
++        SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, NULL);
+     }
+-
+-    video_data->mesa_buffer = buffer;
++    SDL_EGL_DestroySurface(_this, data->egl_surface);
++    data->egl_surface = SDL_EGL_CreateSurface(_this, (NativeWindowType)(uintptr_t)orb_window_fd(data->orb_window));
++    if (context && data->egl_surface != EGL_NO_SURFACE) {
++        SDL_EGL_MakeCurrent(_this, data->egl_surface, context);
++    }
+ }
+--- a/src/video/orbital/SDL_orbitalvideo.h
++++ b/src/video/orbital/SDL_orbitalvideo.h
+@@ -30,7 +30,7 @@
+ #endif
+ 
+ #include "../SDL_sysvideo.h"
+-#include <GL/osmesa.h>
++#include "../SDL_egl_c.h"
+ 
+ /* Private display data */
+ 
+@@ -39,10 +39,7 @@
+     SDL_Window* window;
+     // Orbital window
+     void* orb_window;
+-    // Color buffer for mesa context
+-    void* mesa_buffer;
+-    // Mesa context
+-    OSMesaContext mesa_context;
++    EGLSurface egl_surface;
+ } SDL_VideoData;
+ 
+ #ifdef __cplusplus
+--- a/src/video/orbital/SDL_orbitalwindow.c
++++ b/src/video/orbital/SDL_orbitalwindow.c
+@@ -119,7 +119,6 @@
+ 
+     // Set size of orbital window
+     orb_window_set_size(video_data->orb_window, window->w, window->h);
+-    // Set size of mesa context
+     ORBITAL_GL_SetSize(_this, window->w, window->h);
+ }
+ 
+@@ -168,13 +167,16 @@
+ void ORBITAL_DestroyWindow(_THIS, SDL_Window* window) {
+     SDL_VideoData *video_data = (SDL_VideoData *)_this->driverdata;
+     assert(video_data != NULL);
++    if (video_data->egl_surface != EGL_NO_SURFACE) {
++        if (SDL_GL_GetCurrentWindow() == window) {
++            SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, NULL);
++        }
++        SDL_EGL_DestroySurface(_this, video_data->egl_surface);
++        video_data->egl_surface = EGL_NO_SURFACE;
++    }
+     if (video_data->orb_window != NULL) {
+         orb_window_destroy(video_data->orb_window);
+         video_data->orb_window = NULL;
+-    }
+-    if (video_data->mesa_context != NULL) {
+-        ORBITAL_GL_DeleteContext(_this, video_data->mesa_context);
+-        video_data->mesa_context = NULL;
+     }
+     video_data->window = NULL;
+ }
