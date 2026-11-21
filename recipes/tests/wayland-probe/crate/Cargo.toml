@@ -1,0 +1,16 @@
+[package]
+name = "wayland-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "FerrionOS Wayland display, frame pacing and keyboard probe"
+
+[dependencies]
+libc = "0.2"
+tempfile = { version = "3.27.0", default-features = false }
+# Keep both protocol crates on the same fork revision, with the Rust backend.
+wayland-client = { git = "https://github.com/jackpot51/wayland-rs", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2", default-features = false }
+wayland-protocols = { git = "https://github.com/jackpot51/wayland-rs", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2", default-features = false, features = ["client"] }
+
+[workspace]

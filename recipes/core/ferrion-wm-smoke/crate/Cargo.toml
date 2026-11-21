@@ -1,0 +1,22 @@
+[package]
+name = "ferrion-wm-smoke"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+ferrion-wm-backend = { path = "../../ferrion-wm-backend/crate", features = ["smithay"] }
+smithay = { git = "https://github.com/jackpot51/smithay", rev = "13488e2fc469841763495f89db832429534d82f5", default-features = false, features = ["desktop", "wayland_frontend", "renderer_pixman"] }
+pixman = { version = "0.2.1", features = ["drm-fourcc", "sync"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+libc = "0.2"
+[patch.crates-io]
+wayland-backend = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }
+wayland-client = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }
+wayland-cursor = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }
+wayland-protocols = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }
+wayland-protocols-wlr = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }
+wayland-protocols-misc = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }
+wayland-server = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }
+wayland-sys = { git = "https://github.com/jackpot51/wayland-rs.git", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2" }

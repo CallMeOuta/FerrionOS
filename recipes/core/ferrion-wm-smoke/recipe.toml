@@ -1,0 +1,11 @@
+[package]
+description = "FerrionOS CPU compositor smoke test"
+
+[build]
+template = "custom"
+dependencies = ["pixman", "libxkbcommon", "libffi"]
+script = """
+DYNAMIC_INIT
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

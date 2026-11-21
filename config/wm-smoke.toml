@@ -1,0 +1,22 @@
+# DD1: a CPU-rendered Wayland client on its own inputd virtual terminal.
+include = ["desktop-minimal.toml"]
+
+[general]
+filesystem_size = 512
+
+[packages]
+ferrion-wm-smoke = "source"
+wayland-probe = "source"
+pixman = {}
+libxkbcommon = {}
+xkeyboard-config = {}
+libffi = {}
+
+# Test-only session replaces Orbital and starts the compositor as root, with
+# input/display access inherited from init; no normal desktop default changes.
+[[files]]
+path = "/usr/lib/init.d/20_orbital"
+data = """
+requires_weak 30_console.target
+nowait VT=3 XDG_RUNTIME_DIR=/tmp/ferrion-wm ferrion-wm-smoke
+"""

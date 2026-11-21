@@ -57,7 +57,8 @@
 #           200 zero-timeout polls of empty pipes leave the kernel's event
 #           subscriber count where it was (x86_64 desktop)
 #   desktop-regions  compares the settled desktop with the flat first-run target's region probes
-#   wayland-client  checks the DD1 CPU compositor's pixels, keyboard and frame/cursor timings
+#   wayland-client  checks DD1 pixels, keyboard, frame median and independent cursor dispatch
+#   pointer-latency checks the strict cursor maximum under 2 ms; use --repeat 10
 #   cli-tools  checks sed, awk and gzip tar creation/extraction with -C on the desktop
 #   sudo-notty  logs in as `user` on the serial console and runs sudo with no
 #           terminal on any standard descriptor: no panic, and exit 0 because
@@ -873,6 +874,30 @@ def test_dlopen_tls(vm, args):
     return True, "dlopened library TLS was initialized, writable and readable in a later pthread"
 
 
+def test_cond_clock(vm, args):
+    """Checks that pthread condition variables honor realtime and monotonic deadline clocks by waiting for a helper's signal (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("bash -c 'cond-clock-probe; echo cond-clock-exit-$?'\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)cond-clock-exit-(\d+)\s", 30, since)
+    output = found.group(1) if found else vm.text(since)
+    status = int(found.group(2)) if found else None
+    log = vm.out / "cond-clock.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    if status is None:
+        return False, f"condition clock probe did not exit within 30s; see {log}"
+    if status != 0 or "cond-clock-probe: FAIL" in output:
+        return False, f"condition clock probe failed (exit {status}); see {log}"
+    expected = ("realtime-signal", "monotonic-signal")
+    missing = [name for name in expected if f"cond-clock-probe: pass {name}" not in output]
+    if missing or not re.search(r"cond-clock-probe: PASS\r?\n", output):
+        return False, f"incomplete condition clock results (missing {missing}); see {log}"
+    return True, "realtime and monotonic condition deadlines both waited for their signals"
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -1001,6 +1026,96 @@ def test_event_poll(vm, args):
     if status != 0:
         return False, f"probe exit {status}: {detail}; see {log}"
     return True, detail
+
+
+def guest_run(vm, tag, line, timeout):
+    """Runs a line through bash on the serial console; returns (exit status or None, output)."""
+    since = vm.mark()
+    # The status is echoed inside bash: `user`'s login shell is not POSIX.
+    vm.type(f"bash -c '{line}; echo {tag}-end-$?'\n")
+    found = vm.wait_serial(rf"(?s)\n(.*){tag}-end-(\d+)", timeout, since)
+    return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+
+def test_foreign_call(vm, args):
+    """Linux layer LC1: as `user`, foreign-call-probe checks the kernel's foreign-call hook (bad registrations refused, registers, flags, XMM0 and FS/GS intact, per-thread, cleared by exec, native signals at the boundary), then `linux-run` runs linux-probe, a C-library-free Linux program checking FS, XMM and register crossings, Linux signal frames, the alternate stack, masking and clone. Both print their call costs."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    results = {}
+    for tag, line in (("fcp", "foreign-call-probe"),
+                      ("lp", "linux-run /usr/share/foreign-call-probe/linux-probe")):
+        results[tag] = guest_run(vm, tag, line, 180)
+    log = vm.out / "foreign-call.txt"
+    log.write_text("".join(f"[{tag}] exit {status}\n{output}\n" for tag, (status, output) in results.items()))
+    lines = re.findall(r"(?:foreign-call-probe|linux-probe): (?:pass|FAIL|bench) .*", results["fcp"][1] + results["lp"][1])
+    failed = [line.strip() for line in lines if ": FAIL " in line]
+    bench = "; ".join(line.split(": bench ", 1)[1].strip() for line in lines if ": bench " in line)
+    problems = [f"{name} exit {results[tag][0]}" for tag, name in (("fcp", "foreign-call-probe"), ("lp", "linux-probe"))
+                if results[tag][0] != 0]
+    if problems or failed:
+        return False, f"{', '.join(problems)}: {'; '.join(failed) or 'no FAIL line'}; see {log}"
+    return True, f"{sum(': pass ' in line for line in lines)} checks passed; {bench}"
+
+
+LINUX_HELLOS = ["hello-raw", "hello-musl-static", "hello-glibc-static", "hello-go"]
+
+
+def test_linux_hello(vm, args):
+    """Linux layer LC1: the four pinned static Linux hello programs (hash-checked in their recipe stage first) print `hello from linux`, write nothing to stderr and exit 0 under `linux-run`; run directly, as a negative control, none of them does that (a hang is killed after 5 s); a bare ELF32 header is refused with ENOEXEC. With --make QEMU_CPU=core2duo (no FSGSBASE) linux-run must instead refuse to start, saying why."""
+    stage = ROOT / "recipes/tests/linux-hello-fixtures/target" / f"{args.arch}-unknown-redox" / "stage/usr/share/linux-hello"
+    sums = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=stage, capture_output=True, text=True)
+    if sums.returncode != 0:
+        return False, f"fixture hashes in {stage} do not match: {sums.stdout.strip()} {sums.stderr.strip()}"
+    no_fsgsbase = any(m.replace(" ", "") == "QEMU_CPU=core2duo" for m in args.make)
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    d = "/usr/share/linux-hello"
+    report, problems, log = [], [], []
+    for name in LINUX_HELLOS:
+        status, out = guest_run(vm, f"lr{len(log)}",
+                                f"linux-run {d}/{name} >/tmp/lh.out 2>/tmp/lh.err; s=$?; "
+                                "[ \"$(cat /tmp/lh.out; echo x)\" = \"$(printf \"hello from linux\\nx\")\" ] && o=same || o=differs; "
+                                "[ -s /tmp/lh.err ] && e=written || e=empty; "
+                                "echo lh-result $s $o $e; head -c 300 /tmp/lh.err; (exit $s)", 120)
+        log.append(f"[linux-run {name}] exit {status}\n{out}\n")
+        found = re.search(r"lh-result (\d+) (same|differs) (empty|written)", out)
+        verdict = found.groups() if found else ("none", "none", "none")
+        if no_fsgsbase:
+            if "cannot run Linux programs on this machine" not in out or verdict[0] != "126":
+                problems.append(f"{name}: no FSGSBASE refusal ({verdict})")
+        elif verdict != ("0", "same", "empty"):
+            problems.append(f"{name} under linux-run: status {verdict[0]}, stdout {verdict[1]}, stderr {verdict[2]}")
+        report.append(f"{name} {verdict[0]}")
+    if not no_fsgsbase:
+        for name in LINUX_HELLOS:
+            status, out = guest_run(vm, f"dx{len(log)}",
+                                    f"{d}/{name} >/tmp/dx.out 2>&1 & p=$!; for i in $(seq 10); do sleep 0.5; "
+                                    "kill -0 $p 2>/dev/null || break; done; kill -9 $p 2>/dev/null && k=killed || k=ended; "
+                                    "wait $p; s=$?; [ \"$(cat /tmp/dx.out; echo x)\" = \"$(printf \"hello from linux\\nx\")\" ] "
+                                    "&& o=same || o=differs; echo dx-result $s $o $k; head -c 300 /tmp/dx.out | od -c | head -5", 60)
+            log.append(f"[direct {name}] exit {status}\n{out}\n")
+            found = re.search(r"dx-result (\d+) (same|differs) (killed|ended)", out)
+            if not found:
+                problems.append(f"direct {name}: no result")
+            elif found.group(1) == "0" and found.group(2) == "same":
+                problems.append(f"direct {name} printed the expected text and exited 0: the control proves nothing")
+            else:
+                report.append(f"direct {name}: status {found.group(1)}, output {found.group(2)}, {found.group(3)}")
+        status, out = guest_run(vm, "e32", "printf \"\\177ELF\\001\\001\\001\" >/tmp/e32; head -c 64 /dev/zero >>/tmp/e32; "
+                                "linux-run /tmp/e32", 60)
+        log.append(f"[elf32] exit {status}\n{out}\n")
+        if status != 126 or "ENOEXEC" not in out:
+            problems.append(f"ELF32 header: exit {status}, no ENOEXEC")
+        else:
+            report.append("ELF32 refused with ENOEXEC")
+    (vm.out / "linux-hello.txt").write_text("".join(log))
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'linux-hello.txt'}"
+    return True, "; ".join(report)
 
 
 def test_sudo_notty(vm, args):
@@ -1175,10 +1290,11 @@ def test_screenshots(vm, args):
     return True, f"saved {len(saved)} screenshots in {vm.out}: {saved}"
 
 
-def run_wayland_client(args, out):
+def run_wayland_client(args, out, *, pointer_latency=False):
     """Checks the DD1 pixman compositor with a cursor-capable virtio display and QMP input."""
     with tempfile.TemporaryDirectory(prefix="ferrion-dd-qmp-") as directory:
         path = Path(directory) / "qmp.sock"
+        boot_load = os.getloadavg()
         vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off", make=("gpu=virtio",))
         try:
             with socket.socket(socket.AF_UNIX) as connection:
@@ -1200,20 +1316,48 @@ def run_wayland_client(args, out):
                                 return reply["return"]
 
                     qmp("qmp_capabilities")
-                    return test_wayland_client(vm, args, qmp)
+                    ok, note = test_wayland_client(vm, args, qmp, boot_load, pointer_latency=pointer_latency)
+                    if not pointer_latency and out.name == f"wayland-client-{args.repeat}":
+                        measurements = [
+                            json.loads((out.parent / f"wayland-client-{run}" / "measurements.json").read_text())
+                            for run in range(1, args.repeat + 1)
+                        ]
+                        completions = sum(r["pointers_completed_during_present"] for r in measurements)
+                        (out.parent / "wayland-client-series.json").write_text(json.dumps({
+                            "boots": args.repeat, "pointers_completed_during_present": completions,
+                            "independent_cursor_dispatch": completions > 0,
+                        }, indent=2) + "\n")
+                        if not completions:
+                            return False, note + "; no cursor operation completed inside a frame interval in this series"
+                        note += f"; series has {completions} cursor completions inside frame intervals"
+                    return ok, note
         finally:
             vm.close()
 
+def run_pointer_latency(args, out):
+    return run_wayland_client(args, out, pointer_latency=True)
 
-def test_wayland_client(vm, args, qmp):
+
+
+def test_wayland_client(vm, args, qmp, boot_load, *, pointer_latency=False):
     """Checks a native-VT pixman Wayland client and input while a slow client renders."""
     import statistics
+    import math
 
     problems = []
+    host_load = [{"phase": "boot", "elapsed_s": 0, "load_average": boot_load}]
+    injections = []
+
+    def sample_load(phase):
+        sample = {"phase": phase, "elapsed_s": vm.elapsed(), "load_average": os.getloadavg()}
+        host_load.append(sample)
+        return sample
+
     for marker in ("DD1_COMPOSITOR_READY", "DD1_CLIENT_READY", "DD1_SLOW_CLIENT_READY"):
         if not vm.wait_serial(marker, args.timeout):
             problems.append(f"missing {marker}")
             break
+    sample_load("clients-ready")
     if not problems:
         for key in "abc":
             vm.command(f"sendkey {key}")
@@ -1221,7 +1365,9 @@ def test_wayland_client(vm, args, qmp):
                 problems.append(f"key {key} did not reach the client")
         # The guest selects vmmouse's absolute device; HMP relative motion does
         # not reach it. QMP sends absolute coordinates through the real device.
-        for step in range(24):
+        for step in range(100):
+            injections.append({"step": step, "x": 1000 + step * 100, "y": 1000 + step * 100,
+                               "host": sample_load("pointer-injection")})
             qmp("input-send-event", {"events": [
                 {"type": "abs", "data": {"axis": "x", "value": 1000 + step * 100}},
                 {"type": "abs", "data": {"axis": "y", "value": 1000 + step * 100}},
@@ -1250,42 +1396,68 @@ def test_wayland_client(vm, args, qmp):
             if any(abs(a - b) > 2 for a, b in zip(actual, expected)):
                 problems.append(f"{name} ({x},{y}) #{actual.hex()}, expected #{expected.hex()}")
     text = vm.text()
+    sample_load("capture")
     commits = {(client, int(sequence)): int(timestamp)
                for client, sequence, timestamp in re.findall(
                    r"DD1_CLIENT_COMMIT client=(normal|slow) frame=(\d+) monotonic_ns=(\d+)", text)}
     frames = []
-    for client, sequence, dispatch, timestamp, present in re.findall(
-            r"DD1_FRAME client=(normal|slow) frame=(\d+) dispatch_to_present_us=(\d+) monotonic_ns=(\d+) present_us=(\d+)", text):
+    for client, sequence, dispatch, timestamp, present, started in re.findall(
+            r"DD1_FRAME client=(normal|slow) frame=(\d+) dispatch_to_present_us=(\d+) monotonic_ns=(\d+) present_us=(\d+) present_started_us=(\d+)", text):
         committed = commits.get((client, int(sequence)))
         if committed is None or committed > int(timestamp):
             problems.append(f"{client} frame {sequence} lacks an ordered client commit timestamp")
             continue
         frames.append({"client": client, "frame": int(sequence), "commit_ns": committed,
                        "present_ns": int(timestamp), "commit_to_present_us": (int(timestamp) - committed) / 1000,
-                       "dispatch_to_present_us": int(dispatch), "present_us": int(present)})
+                       "dispatch_to_present_us": int(dispatch), "present_us": int(present),
+                       "present_started_us": int(started)})
     pointers = [{"read_us": int(read), "completed_us": int(done), "elapsed_us": int(delay),
                  "x": int(x), "y": int(y)}
                 for read, done, delay, x, y in re.findall(
                     r"DD1_POINTER read_us=(\d+) completed_us=(\d+) elapsed_us=(\d+) x=(-?\d+) y=(-?\d+)", text)]
+    present_intervals = {(f["present_started_us"], f["present_us"]) for f in frames}
+    for index, pointer in enumerate(pointers):
+        pointer["completed_during_present"] = any(
+            start <= pointer["read_us"] <= pointer["completed_us"] < end for start, end in present_intervals)
+        if len(pointers) == len(injections):
+            pointer["injection_step"] = index
     normal_frames = [f["commit_to_present_us"] for f in frames if f["client"] == "normal"]
     median = statistics.median(normal_frames) if normal_frames else None
     if len(normal_frames) < 60:
         problems.append(f"only {len(normal_frames)} presented normal-client commits, expected at least 60")
     if median is not None and median > 16_700:
         problems.append(f"commit-to-present median {median}us exceeds 16700us")
-    if len(pointers) < 12:
-        problems.append(f"only {len(pointers)} cursor movements, expected at least 12")
-    if any(p["elapsed_us"] >= 2000 for p in pointers):
-        problems.append("cursor read-to-plane ioctl reached or exceeded 2000us")
+    if len(pointers) != 100:
+        problems.append(f"{len(pointers)} cursor movements, expected exactly 100")
+    if not pointers:
+        problems.append("no pointer timing samples")
+    pointer_problems = (["cursor read-to-plane ioctl reached or exceeded 2000us"]
+                        if any(p["elapsed_us"] >= 2000 for p in pointers) else [])
     slow_frames = len(re.findall(r"DD1_FRAME_SUBMITTED client=slow frame=", text))
     if slow_frames < 2:
         problems.append("slow client did not continue rendering")
+    def timing_summary(samples):
+        ordered = sorted(samples)
+        return ({"p50": statistics.median(ordered), "p99": ordered[math.ceil(len(ordered) * 0.99) - 1],
+                 "max": ordered[-1]} if ordered else None)
+    functional_problems = problems.copy()
+    if pointer_latency:
+        problems.extend(pointer_problems)
+
     result = {"renderer": "pixman", "transport": "rust", "width": frame.width, "height": frame.height,
               "frames": frames, "pointers": pointers, "frame_median_us": median,
               "slow_frames": slow_frames, "problems": problems,
+              "check": "pointer-latency" if pointer_latency else "wayland-client",
+              "functional_problems": functional_problems, "pointer_latency_problems": pointer_problems,
+              "host_cpu_count": os.cpu_count(), "host_load": host_load, "pointer_injections": injections,
+              "frame_us": timing_summary(normal_frames),
+              "pointer_us": timing_summary(p["elapsed_us"] for p in pointers),
+              "pointers_completed_during_present": sum(p["completed_during_present"] for p in pointers),
               "timing_scope": "client commit to display handoff via CLOCK_MONOTONIC; input read to cursor ioctl completion, not scanout"}
-    (vm.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-    return not problems, "; ".join(problems) if problems else f"pixels and abc match; median {median}us; see {vm.out}"
+    (vm.out / "measurements.json").write_text(json.dumps(result, indent=2) + "\n")
+    note = (f"cursor max {result['pointer_us']['max']}us across {len(pointers)} samples"
+            if pointer_latency and pointers else f"pixels and abc match; median {median}us")
+    return not problems, "; ".join(problems) if problems else f"{note}; see {vm.out}"
 
 
 def test_desktop_regions(vm, args):
@@ -3226,10 +3398,14 @@ TESTS["resolver"] = test_resolver
 TESTS["cli-tools"] = test_cli_tools
 TESTS["dlopen-ctor"] = test_dlopen_ctor
 TESTS["dlopen-tls"] = test_dlopen_tls
+TESTS["cond-clock"] = test_cond_clock
 TESTS["fd-primitives"] = test_fd_primitives
+TESTS["foreign-call"] = test_foreign_call
+TESTS["linux-hello"] = test_linux_hello
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["wayland-client"] = run_wayland_client
+OWN_IMAGE["pointer-latency"] = run_pointer_latency
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
 OWN_IMAGE["net-hardening"] = test_net_hardening

@@ -1,0 +1,14 @@
+[package]
+description = "FerrionOS inputd and CPU DRM compositor backend"
+
+[build]
+template = "custom"
+script = """
+# Library source is path-linked by ferrion-wm; this recipe checks the native
+# backend without installing a second compositor or any runtime binary.
+"${COOKBOOK_CARGO}" build \
+    --manifest-path "${COOKBOOK_RECIPE}/crate/Cargo.toml" \
+    --lib ${build_flags} -j "${COOKBOOK_MAKE_JOBS}" "${COOKBOOK_CARGO_FLAGS[@]}"
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm-backend"
+cp "${COOKBOOK_RECIPE}/crate/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm-backend/LICENSE"
+"""
