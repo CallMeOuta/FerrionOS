@@ -5,8 +5,11 @@ git = "https://github.com/baldurk/renderdoc"
 rev = "5f95fb95a2a225a092372e7bd0bfd2073525d3ac"
 [build]
 template = "cmake"
+cmakeflags = [
+    "-DENABLE_XCB=OFF",
+    "-DENABLE_XLIB=OFF",
+]
 dependencies = [
-    "libxcb",
     "mesa",
     "qt5-base",
     "pcre",

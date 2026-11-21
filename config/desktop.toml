@@ -20,6 +20,9 @@ file = {}
 freefont = {}
 hicolor-icon-theme = {}
 installer-gui = {}
+# From source: the cosmic apps need it, and upstream's prebuilt package also
+# carries the X11 part; the recipe builds it with X11 disabled.
+libxkbcommon = "source"
 netsurf = {}
 patchelf = {}
 pop-icon-theme = {}

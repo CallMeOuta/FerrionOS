@@ -10,13 +10,9 @@ cmakeflags = [
     "-DBOX2D_BENCHMARKS=ON",
     "-DBOX2D_VALIDATE=OFF",
     "-DBOX2D_UNIT_TESTS=OFF",
+    "-DGLFW_BUILD_X11=OFF",
 ]
 dependencies = [
     "libwayland",
     "libxkbcommon",
-    "libx11",
-    "libxrandr",
-    "libxinerama",
-    "libxcursor",
-    "libxi",
 ]

@@ -17,8 +17,6 @@ prompt = false
 # dev-essential = {}
 # dev-redox = {}
 # redox-tests = {}
-# x11-minimal = {}
-# x11-full = {}
 
 # Normal packages below
 

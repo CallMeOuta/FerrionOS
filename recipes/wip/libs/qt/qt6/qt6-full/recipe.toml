@@ -11,13 +11,6 @@ dependencies = [
     "freetype2",
     #"mesa",
     "libxkbcommon",
-    "libxcb",
-    "libx11",
-    "libxrender",
-    "libxext",
-    "libxfixes",
-    "libsm",
-    "libice",
     "glib",
     "gstreamer",
     "openssl3",
@@ -28,6 +21,7 @@ COOKBOOK_CONFIGURE_FLAGS+=(
     -no-opengl
     -no-feature-accessibility
     -openssl-linked
+    -no-xcb
 )
 cookbook_configure
 cookbook_cmake

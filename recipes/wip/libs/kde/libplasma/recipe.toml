@@ -7,16 +7,11 @@ shallow_clone = true
 template = "cmake"
 cmakeflags = [
     "-DENABLE_ACTIVITIES=OFF",
+    "-DWITHOUT_X11=ON",
 ]
 dev-dependencies = ["host:ecm"]
 dependencies = [
     "qt6-base",
-    "libx11",
-    "libxcb",
-    "libxcomposite",
-    "libxdamage",
-    "libxfixes",
-    "libxrender",
     "kconfig6",
     "kcoreaddons6",
     "kguiaddons6",

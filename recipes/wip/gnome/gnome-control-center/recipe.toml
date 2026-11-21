@@ -9,7 +9,7 @@ mesonflags = [
     "-Dibus=false",
     "-Dsnap=false",
     "-Dtests=false",
-    "-Dx11=true",
+    "-Dx11=false",
 ]
 #dependencies = [
  #   "library1",

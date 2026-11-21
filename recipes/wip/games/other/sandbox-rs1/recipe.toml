@@ -5,7 +5,6 @@ git = "https://github.com/hakolao/sandbox"
 template = "custom"
 dependencies = [
     "libvulkan",
-    "libxcb",
 ]
 script = """
 cookbook_cargo_packages sandbox

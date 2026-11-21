@@ -7,6 +7,10 @@ patches = ["redox.patch"]
 
 [build]
 template = "meson"
+mesonflags = [
+    "-Dbackends=drm,libinput",
+    "-Dxwayland=disabled",
+]
 dependencies = [
     "cairo",
     "expat",
@@ -17,16 +21,9 @@ dependencies = [
     "libpng",
     "libpthread-stubs",
     "libwayland",
-    "libx11",
-    "libxau",
-    "libxcb",
-    "libxext",
-    "libxfixes",
     "libxkbcommon",
-    "libxxf86vm",
-    "mesa-x11",
+    "mesa",
     "pixman",
     "wayland-protocols",
-    "x11proto",
     "zlib",
 ]

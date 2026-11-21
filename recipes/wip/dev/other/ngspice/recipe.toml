@@ -7,7 +7,7 @@ template = "custom"
 script = """
 cd release
 COOKBOOK_CONFIGURE_FLAGS+=(
-    --with-x
+    --without-x
     --with-readline=yes
     --disable-debug
 )

@@ -16,5 +16,4 @@ dependencies = [
     "qt6-declarative",
     "qt6-multimedia",
     "qt6-tools",
-    "libxcb",
 ]

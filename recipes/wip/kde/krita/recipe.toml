@@ -48,7 +48,6 @@ dependencies = [
 #     "openexr",
 #     "openjpeg",
 #     "sdl2",
-#     "libxi",
 #     "zlib",
 #     "libeigen",
 #     "libgsl",

@@ -23,11 +23,7 @@ dependencies = [
     "libjpeg",
     "liborbital",
     "libpng",
-    "libxfixes",
     "libxkbcommon",
-    "libxi",
-    "libxrandr",
-    "libx11",
     "libwayland",
     "mesa",
     "pango",
@@ -47,6 +43,7 @@ fi
 
 cookbook_meson \
     -Dexamples=false \
+    -Dx11_backend=false \
     -Dintrospection=false \
     -Dtests=false
 """

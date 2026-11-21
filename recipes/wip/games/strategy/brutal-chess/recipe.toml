@@ -7,6 +7,4 @@ dependencies = [
     "sdl1",
     "sdl1-image",
     "freetype2",
-    #"libxmu",
-    #"libxi",
 ]

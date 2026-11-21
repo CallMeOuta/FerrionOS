@@ -1,4 +1,4 @@
-#TODO waiting openjdk x11 feature creation
+#TODO waiting for OpenJDK's AWT on Wayland (Project Wakefield), the headless JDK opens no window
 # usage: https://multiphasicapps.net/doc/tip/assets/doc/usage-standalone.mkd
 [build]
 template = "custom"
@@ -9,4 +9,4 @@ echo "java -jar squirreljme.jar" > "${COOKBOOK_STAGE}"/usr/bin/squirreljme
 chmod +x "${COOKBOOK_STAGE}"/usr/bin/squirreljme
 """
 [package]
-dependencies = ["openjdk17.x11"]
+dependencies = ["openjdk17"]

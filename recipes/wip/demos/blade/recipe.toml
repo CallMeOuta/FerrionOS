@@ -1,4 +1,4 @@
-#TODO x11rb and rustix crates error
+#TODO rustix crate error; build without the x11 feature that pulls in x11rb
 [source]
 git = "https://github.com/kvark/blade"
 shallow_clone = true

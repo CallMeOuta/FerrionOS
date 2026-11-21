@@ -8,16 +8,11 @@ patches = [
 [build]
 dependencies = [
     "expat",
-    "libpthread-stubs",
-    "libx11",
-    "libxau",
-    "libxcb",
-    "x11proto",
 ]
 template = "meson"
 mesonflags = [
     #TODO: why does this require Linux?
     "-Depoll=enabled",
-    "-Dx11_autolaunch=enabled",
+    "-Dx11_autolaunch=disabled",
     "-Dverbose_mode=true",
 ]

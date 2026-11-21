@@ -22,7 +22,6 @@ cmakeflags = [
     "-DUSE_SYSTEM_ZSTD=ON",
 ]
 dependencies = [
-    #"mesa-x11",
     "qt6-base",
     "qt6-multimedia",
     "qt6-svg",

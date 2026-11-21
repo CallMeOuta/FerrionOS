@@ -1,7 +1,7 @@
+#TODO needs a recipe for kwin, KDE's Wayland compositor
 [package]
 dependencies = [
     "plasma-workspace",
-    "kwin-x11",
     "breeze",
     "breeze-icons",
 ]

@@ -6,19 +6,18 @@ patches = ["redox.patch"]
 [build]
 template = "custom"
 dev-dependencies = [
-    "libx11",
     "mesa",
 ]
 script = """
 DYNAMIC_INIT
 if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
-    # Forcing x11 via EGL
+    # EGL without X11
     COOKBOOK_MESON_FLAGS+=(-Degl=yes)
 else
     # No EGL, No wayland
     COOKBOOK_MESON_FLAGS+=(-Degl=no)
 fi
 
-COOKBOOK_MESON_FLAGS+=(-Dx11=true -Dtests=false)
+COOKBOOK_MESON_FLAGS+=(-Dx11=false -Dtests=false)
 cookbook_meson
 """

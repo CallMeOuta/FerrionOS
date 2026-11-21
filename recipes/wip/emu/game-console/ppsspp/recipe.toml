@@ -6,8 +6,8 @@ tar = "https://github.com/hrydgard/ppsspp/releases/download/v1.19.3/ppsspp-1.19.
 [build]
 template = "custom"
 dependencies = [
-    "mesa-x11",
-    "mesa-glu-x11",
+    "mesa",
+    "mesa-glu",
     "sdl2",
     "sdl2-ttf",
     "zlib",

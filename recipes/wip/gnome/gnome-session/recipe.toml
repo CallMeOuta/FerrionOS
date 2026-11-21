@@ -7,7 +7,7 @@ template = "meson"
 mesonflags = [
     "-Ddocbook=false",
     "-Dman=false",
-    "-Dx11=true",
+    "-Dx11=false",
 ]
 dependencies = [
     "gnome-desktop"

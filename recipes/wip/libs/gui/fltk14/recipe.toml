@@ -5,18 +5,21 @@
 tar = "https://github.com/fltk/fltk/releases/download/release-1.4.4/fltk-1.4.4-source.tar.bz2"
 [build]
 template = "configure"
+configureflags = [
+    "--disable-x11",
+]
 dependencies = [
+    "cairo",
+    "dbus",
+    "libwayland",
+    "libxkbcommon",
     "mesa-glu",
-    "libx11",
-    "libxft",
-    "libxcursor",
+    "pango",
+    "wayland-protocols",
     #"freeglut",
-    #"cairo",
     #"fontconfig",
     #"glew",
     #"libalsa",
     #"libjpeg",
     #"libpng",
-    #"libxinerama",
-    #"pango",
 ]

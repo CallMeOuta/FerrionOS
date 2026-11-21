@@ -9,16 +9,10 @@ autotools_recursive_regenerate
 
 [build]
 template = "configure"
-configureflags = ["--without-x-shm-fd"]
+configureflags = ["--without-x"]
 dependencies = [
     "freetype2",
     "libjpeg",
     "libpng",
-    "libpthread-stubs",
-    "libx11",
-    "libxau",
-    "libxcb",
-    "libxext",
-    "x11proto",
     "zlib",
 ]

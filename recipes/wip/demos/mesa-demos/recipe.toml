@@ -6,11 +6,12 @@ patches = [
 ]
 [build]
 template = "meson"
+mesonflags = [
+    "-Dx11=disabled",
+]
 dependencies = [
     "freeglut",
     "mesa",
-    #this is possible, but demos remain using wayland (freeglut)
-    #"mesa-x11",
     "wayland-protocols",
     "libdecor",
 ]

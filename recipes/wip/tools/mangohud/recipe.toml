@@ -7,9 +7,11 @@ template = "meson"
 mesonflags = [
     "-Dwith_xnvctrl=disabled",
     "-Dwith_dbus=disabled",
+    "-Dwith_wayland=enabled",
+    "-Dwith_x11=disabled",
 ]
 dependencies = [
-    "mesa-x11",
-    "libx11",
-    #"libxkbcommon",
+    "mesa",
+    "libwayland",
+    "libxkbcommon",
 ]

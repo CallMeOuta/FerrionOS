@@ -7,8 +7,6 @@ rev = "4e156b7cf37a380122aada30dacbf2b590ead76b"
 [build]
 template = "custom"
 dependencies = [
-    "libxi",
-    "libxext",
     "mesa-glu",
     "mesa",
     "curl",

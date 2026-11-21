@@ -1,4 +1,4 @@
-#TODO x11rb and rustic crate errors
+#TODO rustix crate error; build without the x11 feature that pulls in x11rb
 [source]
 git = "https://github.com/HactarCE/Hyperspeedcube"
 branch = "v1"

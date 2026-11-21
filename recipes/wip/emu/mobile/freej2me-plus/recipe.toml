@@ -1,4 +1,4 @@
-#TODO not tested yet
+#TODO not tested yet; waiting for OpenJDK's AWT on Wayland (Project Wakefield), the headless JDK opens no window
 [build]
 template = "custom"
 script = """
@@ -10,4 +10,4 @@ echo "java -jar freej2me.jar" > "${COOKBOOK_STAGE}"/usr/bin/freej2me
 chmod +x "${COOKBOOK_STAGE}"/usr/bin/freej2me
 """
 [package]
-dependencies = ["openjdk17.x11"]
+dependencies = ["openjdk17"]

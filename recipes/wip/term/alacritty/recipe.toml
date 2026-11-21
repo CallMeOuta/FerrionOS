@@ -7,10 +7,11 @@ template = "cargo"
 dependencies = [
     "freetype2",
     "fontconfig",
-    "libxcb",
+    "libwayland",
+    "libxkbcommon",
 ]
 cargopath = "alacritty"
 cargoflags = [
     "--no-default-features",
-    "--features x11",
+    "--features wayland",
 ]

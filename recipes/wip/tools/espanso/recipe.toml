@@ -1,5 +1,5 @@
 #TODO not compiled or tested
-# build instructions: https://espanso.org/docs/install/linux/#x11-compile
+# build instructions: https://espanso.org/docs/install/linux/#wayland-compile
 [source]
 git = "https://github.com/espanso/espanso"
 [build]
@@ -9,8 +9,7 @@ dependencies = [
     "dbus",
     "wxwidgets-gtk3",
     "openssl3",
-    "libx11",
-    "libxtst",
+    "libwayland",
 ]
 script = """
 DYNAMIC_INIT
@@ -20,7 +19,7 @@ package=espanso
             --package "${package}" \
             --release \
             --no-default-features \
-            --features=vendored-tls,modulo
+            --features=vendored-tls,modulo,wayland
         mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
         cp -v \
             "target/${TARGET}/release/${package}" \

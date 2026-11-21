@@ -27,6 +27,13 @@ Component sources cited here are the checkouts a fetch puts in `recipes/core/<na
 - The drivers in `drivers/` of `base` at `20f7573b`: five network drivers (`e1000d`, `ixgbed`, `rtl8139d`, `rtl8168d`, `virtio-netd`), one USB host-controller driver (`xhcid`), and for display `ihdgd` (Intel), `vesad` (the firmware framebuffer) and `virtio-gpud`. There is no Wi-Fi, Bluetooth or I2C driver. Emulate devices from that list, as the `net=` choices in `mk/qemu.mk` do.
 - Graphics are drawn by the CPU: `recipes/libs/mesa/recipe.toml` builds Mesa with the `swrast` Gallium and Vulkan drivers only, and a `virtio-vga-gl` guest draws in 2D only ([`vm-baseline.md`](vm-baseline.md)). The book says the same ([`book/src/graphics-windowing.md`](../book/src/graphics-windowing.md)).
 
+### Display
+
+- The window system is Orbital (`recipes/gui/orbital`): the desktop images start it from `/usr/lib/init.d/20_orbital` and it draws in software. Programs reach it through `liborbital` (`recipes/libs/liborbital`), SDL's Orbital backend (`-DSDL_ORBITAL=1` in `recipes/libs/sdl2/recipe.toml`) or winit's Orbital backend, which the COSMIC apps and iced use.
+- Wayland is experimental: `config/wayland.toml` starts `cosmic-comp` (or `smallvil`) as a compositor inside an Orbital window, with `libwayland` from `recipes/wip/wayland/libwayland`. Recipes for Wayland compositors and clients are in `recipes/wip/wayland/` and `recipes/wip/cosmic/`.
+- There is no X11: no X server, no Xwayland, no X11 client library or protocol headers. `config/x11.toml`, `recipes/wip/x11/` and the X11-only recipes were removed on 2026-11-20, ports build with X11 disabled, and `scripts/no-x11-check.py` fails when a recipe depends on an X11 library or a config installs one (`AGENTS.md`, Display). A program that can only draw through X11 has no path here.
+- Upstream's prebuilt packages of cairo, firefox, gstreamer, gtk3, libxkbcommon, mesa-demos, qemu, webkitgtk3 and zenity depend on X11 libraries (their `depends` in upstream's package repository, read 2026-11-20). The configs that install them set them to `"source"`, so `REPO_BINARY=1` builds them from these recipes, with X11 disabled, instead of fetching upstream's builds.
+
 ### Networking
 
 - IPv4 only: `netstack/Cargo.toml` of `base` at `20f7573b` builds smoltcp with `proto-ipv4` and no IPv6 feature. Turn IPv6 off in a port, as `recipes/net/curl` and `recipes/dev/git` do.

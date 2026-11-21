@@ -12,6 +12,11 @@ filesystem_size = 10000
 cookbook = {}
 bottom = "ignore"
 kibi = "ignore"
+# From source, with X11 disabled: upstream's prebuilt packages of these link
+# X11 libraries.
+cairo = "source"
+gtk3 = "source"
+qemu = "source"
 
 [[files]]
 path = "/usr/lib/init.d/30_console"

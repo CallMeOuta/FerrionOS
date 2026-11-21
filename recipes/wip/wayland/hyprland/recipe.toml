@@ -7,21 +7,17 @@ template = "custom"
 dependencies = [
     "libinput",
     "libxkbcommon",
-    "libxcb",
     "pango",
     "cairo",
     "pixman",
     "libwayland",
     "seatd",
-    "libxrender",
-    "libx11",
-    "libxcomposite",
-    "libxfixes",
 ]
 script = """
 DYNAMIC_INIT
 COOKBOOK_CMAKE_FLAGS+=(
     -DNO_SYSTEMD=ON
+    -DNO_XWAYLAND=ON
 )
 cookbook_cmake
 mkdir -pv "${COOKBOOK_STAGE}"/usr/share/wayland-sessions

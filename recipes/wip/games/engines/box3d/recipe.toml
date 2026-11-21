@@ -7,8 +7,6 @@ shallow_clone = true
 template = "custom"
 dependencies = [
     "gtk3",
-    "libxi",
-    "libxcursor",
 ]
 script = """
 DYNAMIC_INIT
@@ -17,6 +15,7 @@ COOKBOOK_CMAKE_FLAGS+=(
     -DBOX3D_BENCHMARKS=ON
     -DBOX3D_UNIT_TESTS=OFF
     -DBOX3D_VALIDATE=OFF
+    -DGLFW_BUILD_X11=OFF
     -DOPENGL_opengl_LIBRARY="/dev/null"
     -DOPENGL_glx_LIBRARY="/dev/null"
 )

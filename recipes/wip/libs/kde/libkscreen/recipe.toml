@@ -8,9 +8,6 @@ template = "cmake"
 dev-dependencies = ["host:ecm"]
 dependencies = [
     "qt6-base",
-    "libxcb",
-    "libxrandr",
-    #"wayland-scanner",
-    #"libwayland",
+    "libwayland",
     #"plasma-wayland-protocols",
 ]

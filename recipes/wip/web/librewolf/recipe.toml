@@ -18,7 +18,6 @@ dependencies = [
     "pango",
     "sqlite3",
     # "nss-nspr",
-    "startup-notification",
     "zlib",
     "ffmpeg6",
     "expat",

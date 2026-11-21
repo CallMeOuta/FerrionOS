@@ -1,5 +1,5 @@
 # Y9 version have unnecessary v8 JS dependency
-#TODO build and test
+#TODO build and test; only the server and the terminal game are built, the editor (asciiid) and the windowed game need a Wayland or Orbital port
 # build script: https://github.com/msokalski/asciicker/blob/y8/build.sh
 [source]
 git = "https://github.com/msokalski/asciicker"
@@ -9,19 +9,13 @@ shallow_clone = true
 template = "custom"
 dependencies = [
     "mesa",
-    "libx11",
-    "libxinerama",
     "libgpm",
 ]
 script = """
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 DYNAMIC_INIT
-"${COOKBOOK_MAKE}" -j "${COOKBOOK_MAKE_JOBS}" -f makefile_asciiid
 "${COOKBOOK_MAKE}" -j "${COOKBOOK_MAKE_JOBS}" -f makefile_server
-"${COOKBOOK_MAKE}" -j "${COOKBOOK_MAKE_JOBS}" -f makefile_game
 "${COOKBOOK_MAKE}" -j "${COOKBOOK_MAKE_JOBS}" -f makefile_game_term
-"${COOKBOOK_MAKE}" install DESTDIR="${COOKBOOK_STAGE}/usr" -f makefile_asciiid
 "${COOKBOOK_MAKE}" install DESTDIR="${COOKBOOK_STAGE}/usr" -f makefile_server
-"${COOKBOOK_MAKE}" install DESTDIR="${COOKBOOK_STAGE}/usr" -f makefile_game
 "${COOKBOOK_MAKE}" install DESTDIR="${COOKBOOK_STAGE}/usr" -f makefile_game_term
 """

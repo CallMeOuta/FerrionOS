@@ -43,6 +43,11 @@ cookbook_meson \
     -Dgstreamer:check=disabled \
     -Dgstreamer:coretracers=disabled \
     -Dgst-plugins-bad:shm=disabled \
+    -Dgst-plugins-bad:x11=disabled \
+    -Dgst-plugins-base:x11=disabled \
+    -Dgst-plugins-base:xi=disabled \
     -Dgst-plugins-base:xshm=disabled \
+    -Dgst-plugins-base:xvideo=disabled \
+    -Dgst-plugins-good:ximagesrc=disabled \
     -Dgst-plugins-good:ximagesrc-xshm=disabled
 """

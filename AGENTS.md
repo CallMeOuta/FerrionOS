@@ -57,6 +57,10 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
 
 `ARCH` is exactly one of `x86_64`, `i586`, `aarch64`, `riscv64gc`, and the directories under `config/` carry the same names. `i686` on the make command line is rejected. The derived names differ and are computed, never typed: the Rust target is `<arch>-unknown-redox`, the GNU triple for RISC-V is `riscv64-unknown-redox`, and QEMU's own names are in `mk/qemu.mk`.
 
+# Display
+
+FerrionOS has no X11: no X server, no Xwayland, no X11 client library or protocol headers in any image. Ports build with X11 disabled (meson `-Dx11=disabled`, cmake `-DWITH_X11=OFF`, configure `--without-x`, cargo features without `x11`) and use Wayland or Orbital, and a recipe never depends on an X11 library: `python3 scripts/no-x11-check.py` fails when one does. The display stack today is in [`docs/platform-state.md`](docs/platform-state.md).
+
 # Running builds
 
 - A cook or an image build is long and large. Start one when the task needs its result, and reach first for the cheapest check that can fail for your change: [`docs/testing.md`](docs/testing.md).

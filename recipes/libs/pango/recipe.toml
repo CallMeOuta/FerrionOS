@@ -14,9 +14,6 @@ dependencies = [
     "fribidi",
     "glib",
     "harfbuzz",
-    # "libx11",
-    # "libxft",
-    # "libxrender",
 ]
 template = "custom"
 script = """

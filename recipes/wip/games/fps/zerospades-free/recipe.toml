@@ -22,8 +22,6 @@ dependencies = [
     "libjpeg",
     "openal",
     "curl",
-    "libxinerama",
-    "libxft",
 ]
 dev-dependencies = [
     "libstdcxx",

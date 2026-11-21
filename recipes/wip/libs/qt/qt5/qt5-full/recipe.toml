@@ -9,19 +9,13 @@ template = "configure"
 configureflags = [
     "-no-opengl",
     "-no-feature-accessibility",
+    "-no-xcb",
 ]
 dependencies = [
     "fontconfig",
     "freetype2",
     #"mesa",
     "libxkbcommon",
-    "libxcb",
-    "libx11",
-    "libxrender",
-    "libxext",
-    "libxfixes",
-    "libsm",
-    "libice",
     "glib",
     "gstreamer",
 ]

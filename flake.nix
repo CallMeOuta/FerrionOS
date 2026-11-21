@@ -161,8 +161,6 @@
             libpng # netsurf
             fontconfig # orbutils
             SDL # prboom
-            utilmacros # libX11
-            xtrans # libX11
           ];
 
           hardeningDisable = [ "format" ];

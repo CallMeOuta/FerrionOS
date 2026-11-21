@@ -18,12 +18,7 @@ autotools = {}
 dev-essential = {}
 dev-redox = {}
 llvm21-common = {}
-mate-common = {}
 redox-tests = {}
-x11-minimal = {}
-x11-full = {}
-xfce4-common = {}
-xfce4-full = {}
 
 # Normal packages below
 
@@ -161,7 +156,6 @@ libuv = {}
 libvorbis = {}
 libwebp = {}
 libxkbcommon = {}
-libxcursor = {}
 libxml2 = {}
 llvm21 = {}
 lsd = {}
@@ -176,7 +170,6 @@ mednafen = {}
 mesa = {}
 mesa-glu = {}
 mesa-demos = {}
-mesa-demos-x11 = {}
 meson = {}
 mgba = {}
 miniserve = {}

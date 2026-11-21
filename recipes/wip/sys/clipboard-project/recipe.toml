@@ -5,6 +5,10 @@ rev = "0.10.0"
 shallow_clone = true
 [build]
 template = "cmake"
+cmakeflags = [
+    "-DNO_X11=ON",
+]
 dependencies = [
-    "libx11",
+    "libwayland",
+    "wayland-protocols",
 ]

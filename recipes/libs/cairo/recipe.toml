@@ -12,14 +12,7 @@ dependencies = [
     "freetype2",
     "glib",
     "libpng",
-    "libx11",
-    "libxcb",
-    "libxext",
-    "libxrender",
     "pixman",
-]
-dev-dependencies = [
-    # xext and xrender is required by pkg-config, don't move them here
 ]
 template = "custom"
 script = """
@@ -27,6 +20,7 @@ DYNAMIC_INIT
 #TODO: why are math defines missing?
 CFLAGS="${CFLAGS} -DM_SQRT2=1.41421356237309504880 -DM_LN2=0.69314718055994530942"
 cookbook_meson \
-    -Dxlib-xcb=enabled \
+    -Dxcb=disabled \
+    -Dxlib=disabled \
     -Dtests=disabled
 """

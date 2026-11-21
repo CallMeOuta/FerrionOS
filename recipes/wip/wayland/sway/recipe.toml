@@ -11,6 +11,7 @@ mesonflags = [
     "-Dtray=disabled",
     "-Dswaynag=false",
     "-Dgdk-pixbuf=disabled",
+    "-Dxwayland=disabled",
 ]
 dependencies = [
     "cairo",
@@ -28,19 +29,12 @@ dependencies = [
     "libpng",
     "libpthread-stubs",
     "libwayland",
-    "libx11",
-    "libxau",
-    "libxcb",
-    "libxext",
-    "libxft",
     "libxkbcommon",
-    "libxrender",
     "pango",
     "pcre2",
     "pixman",
     "shared-mime-info",
     "wayland-protocols",
     "wlroots",
-    "x11proto",
     "zlib",
 ]

@@ -4,10 +4,8 @@ tar = "https://github.com/nigels-com/glew/releases/download/glew-2.3.1/glew-2.3.
 [build]
 template = "custom"
 dependencies = [
-    "libxi",
-    "libxmu",
-    "mesa-x11",
-    "mesa-glu-x11",
+    "mesa",
+    "mesa-glu",
 ]
 script = """
 DYNAMIC_INIT
@@ -15,6 +13,8 @@ COOKBOOK_CMAKE_FLAGS+=(
     -DOPENGL_opengl_LIBRARY="/dev/null"
     -DOPENGL_glx_LIBRARY="/dev/null"
     -DBUILD_UTILS=OFF
+    -DGLEW_EGL=ON
+    -DGLEW_X11=OFF
 )
 cookbook_cmake "${COOKBOOK_SOURCE}"/build/cmake
 # # Build system is a standalone Makefile

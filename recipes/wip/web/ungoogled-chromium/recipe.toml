@@ -44,8 +44,6 @@ template = "custom"
 #     "pango",
 #     "java21",
 #     "libpulse",
-#     "libx11",
-#     "libxtst",
 #     "libxkbcommon",
 # ]
 script = """

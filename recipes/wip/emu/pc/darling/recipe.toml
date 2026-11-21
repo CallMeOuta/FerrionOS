@@ -21,5 +21,4 @@ dependencies = [
     "libgif",
     "ffmpeg6",
     "openssl3",
-    "libxkbfile",
 ]

@@ -25,6 +25,5 @@ cmakeflags = [
 #     "shaderc",
 #     "libxml2",
 #     "libharu",
-#     "mesa-x11",
 #     "libxkbcommon",
 # ]

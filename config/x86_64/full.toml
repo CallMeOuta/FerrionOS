@@ -6,4 +6,13 @@ filesystem_size = 8192
 
 # Package settings
 [packages]
-# example = {}
+# From source, with X11 disabled: upstream's prebuilt packages of these link
+# X11 libraries.
+cairo = "source"
+firefox = "source"
+gstreamer = "source"
+gtk3 = "source"
+mesa-demos = "source"
+qemu = "source"
+webkitgtk3 = "source"
+zenity = "source"

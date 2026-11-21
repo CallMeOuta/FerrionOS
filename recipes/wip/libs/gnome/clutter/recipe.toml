@@ -1,4 +1,4 @@
-#TODO compiled but not tested
+#TODO not compiled or tested
 # build instructions: https://gitlab.gnome.org/Archive/clutter#building-and-installation
 [source]
 tar = "https://download.gnome.org/sources/clutter/1.26/clutter-1.26.4.tar.xz"
@@ -15,13 +15,12 @@ dependencies = [
     "gdk-pixbuf",
     "pango",
     "cogl",
-    "libxcb",
-    "libxcomposite",
-    "libxdamage",
-    "libxext",
+    "libwayland",
     "libxkbcommon",
 ]
 configureflags = [
+    "--disable-x11-backend",
+    "--enable-wayland-backend",
     "--disable-wayland-compositor",
     "--disable-egl-backend",
     "--disable-examples"

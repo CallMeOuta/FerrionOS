@@ -17,7 +17,5 @@ dependencies = [
     "zlib",
     "libbotan",
     "libargon2",
-    "libxi",
-    "libxtst",
     "readline",
 ]

@@ -11,8 +11,6 @@ dependencies = [
     "fontconfig",
     "openssl3",
     "libxkbcommon",
-    "libx11",
-    "libxcb",
 ]
 script = """
 DYNAMIC_INIT

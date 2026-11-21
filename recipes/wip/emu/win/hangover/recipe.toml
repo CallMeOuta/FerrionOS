@@ -15,16 +15,9 @@ dependencies = [
     "gnutls3",
     "gstreamer",
     "sdl2",
-    "mesa-x11",
+    "mesa",
     "libstdcxx",
-    "libx11",
-    "libxcomposite",
-    "libxcursor",
-    "libxi",
-    "libxfixes",
-    "libxrandr",
-    "libxrender",
-    "libxext",
+    "libwayland",
     "libxkbcommon",
     #"libxkbregistry",
 ]
@@ -86,6 +79,8 @@ COOKBOOK_CONFIGURE_FLAGS+=(
 	--without-pulse
 	--without-sane
 	--with-sdl
+	--with-wayland
+	--without-x
 	--without-udev
 	--without-unwind
 	--without-usb

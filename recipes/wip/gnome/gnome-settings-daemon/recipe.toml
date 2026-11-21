@@ -15,7 +15,7 @@ mesonflags = [
     "-Dwwan=false",
     "-Dcolord=false",
     "-Dxwayland=false",
-    "-Dx11=true",
+    "-Dx11=false",
 ]
 #dependencies = [
  #   "library1",

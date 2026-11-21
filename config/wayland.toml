@@ -11,13 +11,15 @@ filesystem_size = 2048
 
 # Package settings
 [packages]
+# From source, with X11 disabled: upstream's prebuilt packages of these link
+# X11 libraries.
+cairo = "source"
 adwaita-icon-theme = {}
 bash = {}
 cosmic-app-library = {}
 cosmic-comp = {}
-gtk3 = {}
+gtk3 = "source"
 libcosmic-wayland = {}
-libxcursor = {}
 iced-wayland = {}
 mesa = {}
 "pop-icon-theme.cursors" = {}

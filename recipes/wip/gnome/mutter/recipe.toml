@@ -1,4 +1,4 @@
-# the 49.x version is the latest with x11 support and logind/udev feature flags
+# the 49.x version is the latest with logind/udev feature flags
 #TODO discover minimum dependencies from meson log
 # build instructions: https://gitlab.gnome.org/GNOME/mutter/-/blob/gnome-49/doc/building-and-running.md
 # build options: https://gitlab.gnome.org/GNOME/mutter/-/blob/gnome-49/meson.options?ref_type=heads
@@ -13,8 +13,9 @@ mesonflags = [
     "-Dopengl=false",
     "-Dgles2=false",
     "-Degl=false",
-    "-Dwayland=false",
-    "-Dx11=true",
+    "-Dwayland=true",
+    "-Dx11=false",
+    "-Dxwayland=false",
     "-Dlogind=false",
     "-Dudev=false",
     "-Dremote_desktop=false",
@@ -30,6 +31,5 @@ mesonflags = [
     "-Ddevkit=disabled",
 ]
 #dependencies = [
-#    #"xwayland",
 #    "pango",
 #]

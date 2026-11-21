@@ -1,4 +1,4 @@
-#TODO waiting openjdk x11 feature creation
+#TODO waiting for OpenJDK's AWT on Wayland (Project Wakefield), the headless JDK opens no window
 [build]
 template = "custom"
 script = """
@@ -8,4 +8,4 @@ echo "#!/usr/bin/env sh \n java -jar /usr/bin/Mindustry.jar" > "${COOKBOOK_STAGE
 chmod +x "${COOKBOOK_STAGE}"/usr/bin/mindustry
 """
 [package]
-dependencies = ["openjdk17.x11"]
+dependencies = ["openjdk17"]

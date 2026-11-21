@@ -5,6 +5,5 @@ git = "https://github.com/woelper/oculante"
 template = "cargo"
 dependencies = [
     "gtk3",
-    "libxcb",
     "libalsa",
 ]
