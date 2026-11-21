@@ -1,16 +1,38 @@
-# x86_64 desktop: the shared desktop image, with Nushell as the user's shell.
+# x86_64 desktop: the shared desktop image with five shells to choose from:
+# bash, fish, zsh, Ion and Nushell. Nushell is the user's default; root and
+# system scripts stay on Ion.
 #
-# Nushell builds only for x86_64 today (the other config/<arch>/ci.toml files
-# comment it out), so other architectures keep Ion. System scripts and root
-# stay on Ion. To run root and system scripts on Nushell too, put the same
-# include in a config/my_<name>.toml (ignored by git), add a [users.root] table
-# with the password, uid and gid from config/base.toml and shell = "/usr/bin/nu",
-# and start scripts with #!/usr/bin/nu.
+# Change a user's shell on a running system with
+#   sudo usermod -s /usr/bin/fish user
+# using any path listed in /etc/shells. To change it in the image instead, set
+# shell in a [users.<name>] table of a config/my_<name>.toml (ignored by git)
+# that includes this file; that is also how root and system scripts move to
+# Nushell or another shell (scripts then start with #!/usr/bin/nu or similar).
+#
+# fish, zsh and Nushell build only for x86_64 today (the other
+# config/<arch>/ci.toml files leave them out), so the other architectures offer
+# bash and Ion. zsh's recipe is still work in progress: it prints getrusage()
+# warnings until relibc gains times() support.
 
 include = ["../desktop.toml"]
 
 [packages]
+bash = {}
+fish-shell = {}
+ion = {}
 nushell = {}
+zsh = {}
+
+# The login shells a user may pick.
+[[files]]
+path = "/etc/shells"
+data = """
+/usr/bin/bash
+/usr/bin/fish
+/usr/bin/ion
+/usr/bin/nu
+/usr/bin/zsh
+"""
 
 # Replaces the table from config/base.toml whole, so the password is repeated.
 [users.user]
