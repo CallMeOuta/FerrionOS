@@ -29,7 +29,12 @@ int sdl_lifecycle(void)
                         width, pixel[0], pixel[1], pixel[2], pixel[3]);
                 return 1;
             }
+            SDL_ClearError();
             SDL_GL_SwapWindow(window);
+            if (*SDL_GetError()) {
+                fprintf(stderr, "GPU_ERROR SDL swap: %s\n", SDL_GetError());
+                return 1;
+            }
         }
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);

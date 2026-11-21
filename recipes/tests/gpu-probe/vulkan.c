@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "exact-spv.h"
+#include "version.h"
 
 #define WIDTH 256
 #define HEIGHT 256
@@ -68,6 +69,7 @@ int vulkan_cpu(void)
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver,
     };
     for (uint32_t i = 0; i < count; ++i) {
+        driver = (VkPhysicalDeviceDriverProperties){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         vkGetPhysicalDeviceProperties2(devices[i], &properties);
         if (properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU &&
             driver.driverID == VK_DRIVER_ID_MESA_LLVMPIPE) {
@@ -83,7 +85,7 @@ int vulkan_cpu(void)
     printf("GPU_VK device=\"%s\" api=%u.%u.%u driver=\"%s\" version=\"%s\"\n",
            properties.properties.deviceName, VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
            VK_API_VERSION_PATCH(api), driver.driverName, driver.driverInfo);
-    int version_ok = api >= VK_API_VERSION_1_4 && strstr(driver.driverInfo, "Mesa 26.3.1") != NULL;
+    int version_ok = api >= VK_API_VERSION_1_4 && mesa_version_matches(driver.driverInfo);
     if (!version_ok)
         fputs("GPU_VERSION expected Mesa 26.3.1 and Vulkan 1.4 or newer\n", stderr);
 

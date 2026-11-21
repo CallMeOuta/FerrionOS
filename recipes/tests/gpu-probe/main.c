@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "version.h"
 
 /* Platform value supplied by Mesa's Orbital port. */
 #define EGL_PLATFORM_REDOX_EXT 0x31D9
@@ -84,12 +85,17 @@ static int egl_dispatch(int require_current)
         return 1;
     }
     const char *renderer = (const char *)glGetString(GL_RENDERER);
-    printf("GPU_GL version=\"%s\" renderer=\"%s\"\n", glGetString(GL_VERSION), renderer);
+    const char *version = (const char *)glGetString(GL_VERSION);
+    if (!version) {
+        fputs("GPU_ERROR missing OpenGL version\n", stderr);
+        return 1;
+    }
+    printf("GPU_GL version=\"%s\" renderer=\"%s\"\n", version, renderer ? renderer : "");
     if (!renderer || !strstr(renderer, "llvmpipe")) {
         fputs("GPU_ERROR expected llvmpipe\n", stderr);
         return 1;
     }
-    int version_ok = !require_current || strstr((const char *)glGetString(GL_VERSION), "Mesa 26.3.1") != NULL;
+    int version_ok = !require_current || mesa_version_matches(version);
     if (!version_ok)
         fputs("GPU_VERSION expected Mesa 26.3.1\n", stderr);
     GLuint texture, framebuffer;

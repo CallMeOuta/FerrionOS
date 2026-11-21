@@ -3989,7 +3989,7 @@ def test_audio_apps(args, out):
 
 
 def test_mesa_cpu(vm, args):
-    """Mesa 26.3.1 CPU GL and Vulkan reproduce the exact triangle."""
+    """Mesa 26.3.1 CPU GL and Vulkan reproduce the exact triangle (use --config mesa-cpu on x86_64)."""
     if not root_shell(vm, args.timeout):
         return False, "no root shell"
     since = vm.mark()
@@ -4003,7 +4003,9 @@ def test_mesa_cpu(vm, args):
         expected = f"GPU_PIXELS api={api} triangle=17540 mismatches=0 hash=47972063c7a47bfb"
         if expected not in output:
             return False, f"missing exact {api} pixels; see mesa-cpu.txt"
-    return "GPU_MESA_CPU_OK" in output, "Mesa CPU versions and both exact frames checked"
+    if "GPU_MESA_CPU_OK" not in output:
+        return False, "missing GPU_MESA_CPU_OK; see mesa-cpu.txt"
+    return True, "Mesa CPU versions and both exact frames checked"
 
 
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,

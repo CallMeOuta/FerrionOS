@@ -1,0 +1,7 @@
+include = ["desktop.toml"]
+
+[general]
+filesystem_size = 2048
+
+[packages]
+gpu-probe = "source"
