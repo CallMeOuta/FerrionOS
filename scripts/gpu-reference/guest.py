@@ -95,7 +95,7 @@ def main():
         capsets.append(dict(zip(("id", "max_version", "max_size"), map(int, match.groups()))))
     venus = next((c for c in capsets if c["id"] == 4), None)
     caps = required(["/tmp/probe", "caps", *([str(venus["max_size"])] if venus else [])])
-    result = {"status": "FAIL", "kernel": os.uname().release,
+    result = {"status": "FAIL", "kernel": os.uname().release, "glibc": os.confstr("CS_GNU_LIBC_VERSION"),
               "kernel_gpu_log": [line for line in log.splitlines() if "[drm]" in line or "virtio_gpu" in line],
               "capsets": capsets, "params": {}, "gl": [], "vulkan": []}
     for line in caps["stdout"].splitlines():
@@ -113,15 +113,26 @@ def main():
         result["gl"].append(gl_test("zink-venus", {"MESA_LOADER_DRIVER_OVERRIDE": "zink", "GALLIUM_DRIVER": "zink",
                                                   "VK_DRIVER_FILES": str(ICDS / "virtio_icd.json")}))
     if "gpu_reference=native" in Path("/proc/cmdline").read_text():
-        result["native_context"] = {"status": "UNSUPPORTED",
-            "reason": "The pinned kernel 6.12 is below 6.14; Intel native contexts also need Mesa 26.1, versus pinned 25.0.7."}
-        result["vulkan"].append(vulkan_test("intel-native", "intel_icd.json"))
+        native = vulkan_test("intel-native", "intel_icd.json")
+        result["vulkan"].append(native)
+        if native["devices"]:
+            result["native_context"] = {"status": "AVAILABLE"}
+            result["gl"].append(gl_test("intel-native", {"MESA_LOADER_DRIVER_OVERRIDE": "iris", "GALLIUM_DRIVER": "iris"}))
+            result["gl"].append(gl_test("zink-native", {"MESA_LOADER_DRIVER_OVERRIDE": "zink", "GALLIUM_DRIVER": "zink",
+                                                       "VK_DRIVER_FILES": str(ICDS / "intel_icd.json")}))
+        else:
+            result["native_context"] = {"status": "UNSUPPORTED",
+                "reason": "No Intel native Vulkan device. The pinned kernel is below QEMU's 6.14 guest floor; Intel also needs Mesa 26.1 or newer."}
     good = all(g["status"] == "PASS" for g in result["gl"])
     devices = result["vulkan"][0]["devices"]
     mode = re.search(r"gpu_reference=(\w+)", Path("/proc/cmdline").read_text())[1]
     expected = {1, 2} if mode == "virgl" else {1, 2, 4}
     good = good and expected.issubset({c["id"] for c in capsets})
-    good = good and (bool(devices) and all(d["driver_name"] == "venus" for d in devices) if mode != "virgl" else not devices)
+    if mode != "virgl":
+        good = good and result["vulkan"][0]["run"]["exit_code"] == 0 and bool(devices)
+        good = good and all(d["driver_name"] == "venus" and len(d["extensions"]) == d["extension_count"] for d in devices)
+    else:
+        good = good and not devices
     result["status"] = "PASS" if good else "FAIL"
     return result
 

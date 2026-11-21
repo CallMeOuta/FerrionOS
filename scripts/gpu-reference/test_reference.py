@@ -2,12 +2,14 @@
 # Host-only checks for the reference harness; no download, GPU, or guest needed.
 
 import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("reference", Path(__file__).resolve().parents[1] / "gpu-reference-guest.py")
 reference = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reference)
@@ -58,6 +60,26 @@ class ReferenceTests(unittest.TestCase):
         two = copy.deepcopy(one)
         two["guest"]["gl"][0]["scene"]["differing_pixels"] = 1
         self.assertEqual(reference.repeatability([one, two])["venus"]["status"], "FAIL")
+
+    def test_missing_results_do_not_count_as_repeatable(self):
+        result = {"device": "venus", "error": "no complete guest record"}
+        self.assertEqual(reference.repeatability([result, result])["venus"]["status"], "FAIL")
+
+    def test_blocked_host_writes_record_and_exits_two_without_downloads(self):
+        import contextlib
+        import io
+        import json
+        with tempfile.TemporaryDirectory(prefix="ferrion-gpu-reference-") as folder:
+            args = ["gpu-reference-guest.py", "--vk-driver", "fixture.json", "--out", folder, "--cache", folder]
+            with patch.object(sys, "argv", args), patch.object(reference, "host_info", return_value={"kernel": "6.12.0"}), \
+                 patch.object(reference, "fetch") as download, contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(reference.main(), 2)
+                download.assert_not_called()
+            record = json.loads(next(Path(folder).glob("run-*/result.json")).read_text())
+            self.assertEqual(record["status"], "BLOCKED")
+            self.assertEqual(len(record["variants"]), 2)
+            self.assertTrue(all(v["status"] == "BLOCKED" for v in record["variants"]))
 
 
 if __name__ == "__main__":

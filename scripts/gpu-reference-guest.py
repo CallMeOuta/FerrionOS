@@ -30,6 +30,33 @@ INDEX_SHA256 = "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498
 RELEASE_SHA256 = "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675"
 KERNEL = "6.12.107+deb13-amd64"
 MESA = "25.0.7-2+deb13u1"
+CURRENT_SNAPSHOT = "20261121T000000Z"
+CURRENT_INDEX_SHA256 = "5fbf6c2463072d01ea1f26b346aca503bfc0e4a5ec8ff7c6bfd6d6000d9d7b15"
+CURRENT_RELEASE_SHA256 = "6e8a85389997ac42de32f929b69157a53bb230f183ff0ddbf645ec70010374e4"
+CURRENT_MESA = "26.2.6-1"
+CURRENT_GLIBC = "2.43-7"
+CURRENT_LLVM = "1:22.1.8-4"
+# Minimal runtime upgrades required by the six Mesa packages, from the signed
+# unstable index above. The kernel and compiler remain from the Debian 13 pin.
+CURRENT_PINS = """
+8abae40b5e2bfca58fbc838329b48f525c98463e930b8d3ed075d0c9e960a57a pool/main/g/glibc/libc-gconv-modules-extra_2.43-7_amd64.deb
+5c71715c51103beb4fbba9fe9f8dff604af6610dfa71c70bff342f54a7860803 pool/main/g/glibc/libc6_2.43-7_amd64.deb
+dfc160ad29f280ec15fea4d3d61536d2b477b37288b53276bbd121a185d801d6 pool/main/libd/libdisplay-info/libdisplay-info3_0.3.0-1+b1_amd64.deb
+b7282a3422545c6cb488c3f4f5740844ad06c31030e7b9600700342a807ff519 pool/main/libd/libdrm/libdrm-amdgpu1_2.4.134-3_amd64.deb
+89127ee70fd643f0f1c1fe294bfda51315ea4e92234500211f9956351706363f pool/main/libd/libdrm/libdrm-common_2.4.134-3_all.deb
+f9ebd503a2e98d26a2936a4c875370260531a702e2c44aa5d6348a4c2b212b4b pool/main/libd/libdrm/libdrm-intel1_2.4.134-3_amd64.deb
+e1a841ed70c7b7bbd9a03f41c781101d668db0d35b4eee58d7705a6c32b88aaa pool/main/libd/libdrm/libdrm2_2.4.134-3_amd64.deb
+5ae16aef5adc19aad87dcd4e0b19010a5802d4cc6e5f826e8990ad3dbca0105d pool/main/m/mesa/libegl-mesa0_26.2.6-1_amd64.deb
+fdd7d975841d9d73380649f4bb5840073e38435701af9a97d5cc57c871d93daa pool/main/m/mesa/libgbm1_26.2.6-1_amd64.deb
+5ccd9e530adb132ad91cf768ea186c523e6dcef4f7245bac935091469912fa60 pool/main/m/mesa/libgl1-mesa-dri_26.2.6-1_amd64.deb
+85a66b48749c68b8d28ac2dc1282a71d35bfcc510c0ee42bb2c9e9ffe197df80 pool/main/m/mesa/libglx-mesa0_26.2.6-1_amd64.deb
+3bf498e61dbbef0cfd6bbdb97f4530f96f59806739d5964733d8a55e93d68f89 pool/main/l/llvm-toolchain-22/libllvm22_22.1.8-4_amd64.deb
+fe67acf1d02f21062c0b75cfe3299191b38967d89cfd5cab3a831e2e4b695d05 pool/main/libp/libpng1.6/libpng16-16t64_1.6.59-1_amd64.deb
+b432b1d30319f371efe776209e36143a23289285dd26d41751e89ad4a88b2c33 pool/main/w/wayland/libwayland-client0_1.26.0-1_amd64.deb
+f2b4d9acff743ff71f5409ae301452ebbb37d0d8709cf46fc9ec755d7df803ff pool/main/libx/libxml2/libxml2-16_2.15.4+dfsg-1+b1_amd64.deb
+d7819525795c50645f4dd08fa53c75258a6ae433bb7ddaa13059af9bb609abfe pool/main/m/mesa/mesa-libgallium_26.2.6-1_amd64.deb
+fe78bf25497ad1a7afae87cc59838fe86344d811e2e87d6f8047612fae521711 pool/main/m/mesa/mesa-vulkan-drivers_26.2.6-1_amd64.deb
+"""
 SCENE_HASH = "47972063c7a47bfb"
 # From the signed trixie main/binary-amd64 index above, including the compiler
 # used inside the guest. No package maintainer scripts execute on the host.
@@ -262,7 +289,7 @@ def preflight(args, host):
         raise Blocked("The selected host Vulkan ICD cannot create an instance; see host.runtime.vulkan.")
 
 
-def fetch(cache, digest, pool_path):
+def fetch(cache, digest, pool_path, snapshot=SNAPSHOT):
     target = cache / Path(pool_path).name
     if target.exists():
         if sha256(target) != digest:
@@ -270,7 +297,7 @@ def fetch(cache, digest, pool_path):
         return target
     partial = target.with_name(target.name + f".{os.getpid()}.partial")
     urls = [f"https://deb.debian.org/debian/{pool_path}",
-            f"https://snapshot.debian.org/archive/debian/{SNAPSHOT}/{pool_path}"]
+            f"https://snapshot.debian.org/archive/debian/{snapshot}/{pool_path}"]
     failures = []
     for url in urls:
         for attempt in range(3):
@@ -321,7 +348,9 @@ def cpio_entry(out, inode, name, mode, data=b"", rdev=(0, 0)):
 
 def assemble(cache, packages):
     """Create a root filesystem as newc initramfs, without host mounts or root."""
-    identity = hashlib.sha256(PACKAGE_PINS.encode())
+    identity = hashlib.sha256()
+    for package in packages:
+        identity.update(sha256(package).encode())
     for source in sorted(SOURCES.iterdir()):
         if source.is_file():
             identity.update(source.name.encode() + source.read_bytes())
@@ -329,7 +358,11 @@ def assemble(cache, packages):
     build = cache / identity.hexdigest()[:20]
     build.mkdir(exist_ok=True)
     kernel, initrd = build / "vmlinuz", build / "rootfs.cpio.gz"
-    if kernel.exists() and initrd.exists():
+    manifest = build / "artifacts.json"
+    if kernel.exists() and initrd.exists() and manifest.exists():
+        expected = json.loads(manifest.read_text())
+        if any(sha256(build / name) != digest for name, digest in expected.items()):
+            raise RuntimeError(f"Assembled guest cache fails SHA-256: {build}")
         return kernel, initrd
     files = {}
     modules = {}
@@ -342,7 +375,9 @@ def assemble(cache, packages):
                 if name.startswith("/") or ".." in PurePosixPath(name).parts:
                     raise ValueError(f"Unsafe archive path: {name}")
                 if name.startswith("boot/vmlinuz-"):
-                    kernel.write_bytes(archive.extractfile(member).read())
+                    partial_kernel = kernel.with_suffix(f".{os.getpid()}.partial")
+                    partial_kernel.write_bytes(archive.extractfile(member).read())
+                    partial_kernel.replace(kernel)
                     continue
                 if "/modules/" in name:
                     if re.search(r"\.ko(?:\.xz)?$", name):
@@ -402,7 +437,7 @@ def assemble(cache, packages):
             if str(parent) != ".":
                 files.setdefault(str(parent), (stat.S_IFDIR | 0o755, b""))
     partial = initrd.with_suffix(f".{os.getpid()}.partial")
-    with partial.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, compresslevel=1) as out:
+    with partial.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0, compresslevel=1) as out:
         for number, name in enumerate(sorted(files, key=lambda p: (p.count("/"), p)), 2):
             mode, data = files[name]
             cpio_entry(out, number, name, mode, data)
@@ -411,6 +446,9 @@ def assemble(cache, packages):
     partial.replace(initrd)
     if not kernel.exists():
         raise RuntimeError("Pinned kernel archive has no vmlinuz")
+    partial_manifest = manifest.with_suffix(f".{os.getpid()}.partial")
+    partial_manifest.write_text(json.dumps({kernel.name: sha256(kernel), initrd.name: sha256(initrd)}) + "\n")
+    partial_manifest.replace(manifest)
     return kernel, initrd
 
 
@@ -482,12 +520,17 @@ def run_guest(args, kernel, initrd, name, directory):
 def repeatability(runs):
     """Compare scene hashes and complete capset bytes, not timing-dependent logs."""
     groups = {}
+    blocked = set()
     for run in runs:
+        if run.get("status") == "BLOCKED":
+            blocked.add(run["device"])
         guest = run.get("guest", {})
         fingerprint = {"capset": guest.get("venus_capset"),
                        "scenes": {g["name"]: g.get("scene") for g in guest.get("gl", [])}}
         groups.setdefault(run["device"], []).append(fingerprint)
-    return {device: {"runs": len(values), "status": "PASS" if len(values) > 1 and all(v == values[0] for v in values) else
+    return {device: {"runs": len(values), "status": "BLOCKED" if device in blocked else
+                     "FAIL" if not all(v["scenes"] for v in values) else
+                     "PASS" if len(values) > 1 and all(v == values[0] for v in values) else
                      "NOT_RUN" if len(values) == 1 else "FAIL"}
             for device, values in groups.items()}
 
@@ -502,7 +545,11 @@ def main():
     parser.add_argument("--repeat", type=int, default=2, help="Boots per device line; default 2 checks repeatability")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--fetch-only", action="store_true", help="Verify/download pinned inputs without booting")
+    parser.add_argument("--variant", choices=("all", "debian13", "mesa26"), default="all",
+                        help="Debian 13 baseline, newer Mesa runtime overlay, or both (default)")
     args = parser.parse_args()
+    if not args.fetch_only and not args.vk_driver:
+        parser.error("choose --vk-driver or set VK_DRIVER_FILES; use --fetch-only to prepare the cache")
     if args.repeat < 1 or args.timeout < 1:
         parser.error("--repeat and --timeout must be positive")
     args.out = args.out.resolve()
@@ -512,10 +559,17 @@ def main():
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_dir = args.out / f"run-{stamp}-{os.getpid()}"
     run_dir.mkdir()
-    record = {"schema_version": 1, "status": "FAIL", "started_utc": stamp,
-              "guest_pin": {"snapshot": SNAPSHOT, "index_sha256": INDEX_SHA256,
-                            "inrelease_sha256": RELEASE_SHA256, "kernel": KERNEL, "mesa": MESA},
-              "expected_scene_hash": SCENE_HASH, "runs": []}
+    variants = [("debian13", {"mesa": MESA, "glibc": "2.41-12+deb13u4", "llvm": "1:19.1.7-3+b1",
+                              "snapshot": SNAPSHOT, "kind": "Debian 13 baseline"}),
+                ("mesa26", {"mesa": CURRENT_MESA, "glibc": CURRENT_GLIBC, "llvm": CURRENT_LLVM,
+                            "snapshot": CURRENT_SNAPSHOT, "kind": "Debian 13 with minimal runtime overlay",
+                            "index_sha256": CURRENT_INDEX_SHA256, "inrelease_sha256": CURRENT_RELEASE_SHA256})]
+    record = {"schema_version": 2, "status": "FAIL", "started_utc": stamp,
+              "base_pin": {"snapshot": SNAPSHOT, "index_sha256": INDEX_SHA256,
+                           "inrelease_sha256": RELEASE_SHA256, "kernel": KERNEL},
+              "expected_scene_hash": SCENE_HASH,
+              "variants": [{"name": name, "pin": pin, "runs": [], "status": "NOT_RUN"}
+                           for name, pin in variants if args.variant in ("all", name)]}
     try:
         record["host"] = host_info(args)
         if not args.fetch_only:
@@ -524,24 +578,42 @@ def main():
         print(f"Checking {len(pins)} pinned Debian packages", flush=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             packages = list(pool.map(lambda pair: fetch(args.cache, *pair), pins))
-        record["inputs"] = [{"filename": p.name, "sha256": digest} for p, (digest, _) in zip(packages, pins)]
-        if args.fetch_only:
-            record["status"] = "FETCHED"
-        else:
-            print("Assembling the offline guest", flush=True)
-            kernel, initrd = assemble(args.cache, packages)
-            record["artifacts"] = {"kernel_sha256": sha256(kernel), "rootfs_sha256": sha256(initrd)}
+        record["base_inputs"] = [{"filename": p.name, "sha256": digest} for p, (digest, _) in zip(packages, pins)]
+        for variant in record["variants"]:
+            variant_name = variant["name"]
+            variant["status"] = "FAIL"
+            variant_packages = packages
+            if variant_name == "mesa26":
+                overlay_pins = [line.split() for line in CURRENT_PINS.splitlines() if line.strip()]
+                overlay_cache = args.cache / CURRENT_SNAPSHOT
+                overlay_cache.mkdir(exist_ok=True)
+                print(f"Checking {len(overlay_pins)} pinned Mesa runtime overlay packages", flush=True)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    overlay = list(pool.map(lambda pair: fetch(overlay_cache, *pair, snapshot=CURRENT_SNAPSHOT), overlay_pins))
+                variant["overlay_inputs"] = [{"filename": p.name, "sha256": digest} for p, (digest, _) in zip(overlay, overlay_pins)]
+                variant_packages = packages + overlay
+            if args.fetch_only:
+                variant["status"] = "FETCHED"
+                continue
+            print(f"Assembling the offline {variant_name} guest", flush=True)
+            kernel, initrd = assemble(args.cache, variant_packages)
+            variant["artifacts"] = {"kernel_sha256": sha256(kernel), "rootfs_sha256": sha256(initrd)}
             for name in DEVICES:
                 for repeat in range(args.repeat):
-                    print(f"Booting {name}, run {repeat + 1}/{args.repeat}", flush=True)
-                    result = run_guest(args, kernel, initrd, name, run_dir / f"{name}-{repeat + 1}")
-                    record["runs"].append(result)
-                    print(f"{result['status']} {name}", flush=True)
-            record["repeatability"] = repeatability(record["runs"])
-            statuses = [r["status"] for r in record["runs"]] + [r["status"] for r in record["repeatability"].values()]
-            record["status"] = "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "PASS"
+                    print(f"Booting {variant_name}/{name}, run {repeat + 1}/{args.repeat}", flush=True)
+                    result = run_guest(args, kernel, initrd, name, run_dir / f"{variant_name}-{name}-{repeat + 1}")
+                    variant["runs"].append(result)
+                    print(f"{result['status']} {variant_name}/{name}", flush=True)
+            variant["repeatability"] = repeatability(variant["runs"])
+            statuses = [r["status"] for r in variant["runs"]] + [r["status"] for r in variant["repeatability"].values()]
+            variant["status"] = "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "PASS"
+        statuses = [variant["status"] for variant in record["variants"]]
+        record["status"] = "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "FETCHED" if args.fetch_only else "PASS"
     except Blocked as error:
         record.update(status="BLOCKED", error=str(error))
+        for variant in record["variants"]:
+            if variant["status"] == "NOT_RUN":
+                variant.update(status="BLOCKED", error=str(error))
     except (OSError, ValueError, RuntimeError, tarfile.TarError) as error:
         record["error"] = str(error)
     except KeyboardInterrupt:
