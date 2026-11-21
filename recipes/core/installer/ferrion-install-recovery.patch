@@ -1,0 +1,620 @@
+FerrionOS change to the upstream installer (MIT license, kept), made against upstream commit 16d39fe1f20f15fc97fa3aaa216ac7e449637d41 after ferrion-live-disk.patch:
+- the text and graphical installers encrypt the disk unless the user says no; general.install_unencrypted = true skips the question for unattended test installations.
+- creating an encrypted filesystem refuses unless /scheme/rand/status reports seeded: yes.
+- after the target volume is closed, redoxfs-key adds a recovery key in its own slot, which the installer shows once and asks the user to confirm they saved.
+- the passphrase is no longer trimmed, and the installed filesystem.toml never holds general.encrypt_disk: it is written from the parsed configuration without it, and fast cloning falls back to copying files when the live image's configuration holds one. --output-config still writes the whole configuration.
+
+diff --git a/gui/src/main.rs b/gui/src/main.rs
+index 7a3afd9..b4d818c 100644
+--- a/gui/src/main.rs
++++ b/gui/src/main.rs
+@@ -30,11 +30,33 @@ pub enum TargetKind {
+     Image,
+ }
+ 
+-#[derive(Default, Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct InstallConfig {
+     kind: InstallConfigKind,
+     live_disk: bool,
+     password_opt: Option<String>,
++    password_confirm: String,
++}
++
++impl Default for InstallConfig {
++    // FerrionOS: disk encryption is on unless the user turns it off.
++    fn default() -> Self {
++        Self {
++            kind: InstallConfigKind::default(),
++            live_disk: false,
++            password_opt: Some(String::new()),
++            password_confirm: String::new(),
++        }
++    }
++}
++
++impl InstallConfig {
++    fn ready(&self) -> bool {
++        match &self.password_opt {
++            Some(password) => !password.is_empty() && *password == self.password_confirm,
++            None => true,
++        }
++    }
+ }
+ 
+ #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+@@ -68,6 +90,11 @@ enum Page {
+     Sudo(String),
+     Install(usize, String),
+     Success(String),
++    Recovery {
++        key: String,
++        description: String,
++        saved: bool,
++    },
+     Error(String),
+ }
+ 
+@@ -104,12 +131,15 @@ enum Message {
+     ProfileChooseLive(bool),
+     ProfileChoosePassword(bool),
+     ProfileEnterPassword(String),
++    ProfileConfirmPassword(String),
+     ProfileConfirm,
+     GoBack,
+     WindowDrag,
+ 
+     Install(usize, String),
+     Success(String),
++    Recovery(String, String),
++    RecoverySaved(bool),
+     Exit,
+     Error(String),
+ }
+@@ -433,6 +463,7 @@ impl Application for Window {
+             Message::ProfileChoosePassword(password) => {
+                 if let Page::Profile { selected, .. } = &mut self.page {
+                     selected.password_opt = if password { Some("".to_string()) } else { None };
++                    selected.password_confirm.clear();
+                 }
+             }
+             Message::ProfileEnterPassword(password) => {
+@@ -440,6 +471,11 @@ impl Application for Window {
+                     selected.password_opt = Some(password);
+                 }
+             }
++            Message::ProfileConfirmPassword(password) => {
++                if let Page::Profile { selected, .. } = &mut self.page {
++                    selected.password_confirm = password;
++                }
++            }
+             Message::ProfileConfirm => {
+                 if let Page::Profile {
+                     target,
+@@ -447,6 +483,15 @@ impl Application for Window {
+                     selected: profile,
+                 } = &self.page
+                 {
++                    if !profile.ready() {
++                        return Task::none();
++                    }
++                    if profile.password_opt.is_some() {
++                        if let Err(err) = redox_installer::require_seeded_random() {
++                            self.page = Page::Error(format!("{err:#}"));
++                            return Task::none();
++                        }
++                    }
+                     if let Some(worker) = &self.worker_opt {
+                         match worker.command_sender.send((
+                             target.clone(),
+@@ -535,6 +580,21 @@ impl Application for Window {
+             Message::Success(description) => {
+                 self.page = Page::Success(description);
+             }
++            Message::Recovery(key, description) => {
++                self.page = Page::Recovery {
++                    key,
++                    description,
++                    saved: false,
++                };
++            }
++            Message::RecoverySaved(saved) => {
++                if let Page::Recovery {
++                    saved: page_saved, ..
++                } = &mut self.page
++                {
++                    *page_saved = saved;
++                }
++            }
+             Message::Error(err) => {
+                 self.page = Page::Error(err);
+             }
+@@ -834,24 +894,33 @@ impl Application for Window {
+ 
+                 widgets.push(
+                     checkbox(selected.password_opt.is_some())
+-                        .label("Enable disk encryption password")
++                        .label("Encrypt the disk")
+                         .on_toggle(Message::ProfileChoosePassword)
+                         .into(),
+                 );
+                 match selected.password_opt.as_ref() {
+-                    Some(pass) => widgets.push(
+-                        text_input("", pass)
+-                            .on_input(Message::ProfileEnterPassword)
+-                            .secure(true)
+-                            .into(),
+-                    ),
+-                    None => {}
++                    Some(pass) => {
++                        widgets.push(
++                            text_input("Passphrase", pass)
++                                .on_input(Message::ProfileEnterPassword)
++                                .secure(true)
++                                .into(),
++                        );
++                        widgets.push(
++                            text_input("Confirm passphrase", &selected.password_confirm)
++                                .on_input(Message::ProfileConfirmPassword)
++                                .secure(true)
++                                .into(),
++                        );
++                    }
++                    None => widgets
++                        .push(text("Anyone with this disk will be able to read its files.").into()),
+                 }
+ 
+                 widgets.push(space::vertical().into());
+                 widgets.push(
+                     button::destructive("Start Installation")
+-                        .on_press(Message::ProfileConfirm)
++                        .on_press_maybe(selected.ready().then_some(Message::ProfileConfirm))
+                         .into(),
+                 );
+             }
+@@ -882,6 +951,32 @@ impl Application for Window {
+                     .into(),
+                 );
+             }
++            Page::Recovery {
++                key,
++                description,
++                saved,
++            } => {
++                widgets.push(text("Save your recovery key").size(24).into());
++                widgets.push(text(description).into());
++                widgets.push(
++                    text("It opens this disk if you forget the passphrase. It is shown only now: write it down or store it somewhere other than this disk. At startup, type all 48 digits without spaces.").into(),
++                );
++                widgets.push(text(key).size(24).font(cosmic::font::mono()).into());
++                widgets.push(
++                    checkbox(*saved)
++                        .label("I have saved the recovery key")
++                        .on_toggle(Message::RecoverySaved)
++                        .into(),
++                );
++                widgets.push(space::vertical().into());
++                widgets.push(
++                    row![
++                        space::horizontal(),
++                        button::standard("Exit").on_press_maybe(saved.then_some(Message::Exit)),
++                    ]
++                    .into(),
++                );
++            }
+             Page::Error(err) => {
+                 widgets.push(text(format!("{}", err)).into());
+             }
+diff --git a/gui/src/worker.rs b/gui/src/worker.rs
+index af110a9..a6fa845 100644
+--- a/gui/src/worker.rs
++++ b/gui/src/worker.rs
+@@ -217,6 +217,7 @@ pub(crate) fn install<F: FnMut(Message)>(
+     #[cfg(target_os = "linux")]
+     let mut should_install_systemd_boot = false;
+     let password_opt = profile.password_opt.filter(|s| !s.is_empty());
++    let recovery_password = password_opt.clone();
+     let mut config: Config = match profile.kind {
+         InstallConfigKind::Desktop => toml::from_str(include_str!("../../config/desktop.toml"))
+             .expect("Cannot parse compiled desktop.toml"),
+@@ -274,14 +275,58 @@ pub(crate) fn install<F: FnMut(Message)>(
+         message!("Installation is completed.");
+         Ok(())
+     }) {
+-        Ok(_) => f(Message::Success(format!(
+-            "Finished installing in {:.2} seconds",
+-            start.elapsed().as_secs_f32()
+-        ))),
++        Ok(_) => finish(
++            &mut f,
++            target.install_path(),
++            recovery_password.as_deref(),
++            format!(
++                "Finished installing in {:.2} seconds",
++                start.elapsed().as_secs_f32()
++            ),
++        ),
+         Err(e) => f(Message::Error(format!("Failed installing: {:?}", e))),
+     }
+ }
+ 
++/// FerrionOS: add a recovery key in its own slot once the target is closed, and show it once.
++fn finish<F: FnMut(Message)>(
++    f: &mut F,
++    disk_path: &str,
++    password_opt: Option<&str>,
++    description: String,
++) {
++    let Some(password) = password_opt else {
++        f(Message::Success(description));
++        return;
++    };
++    match add_recovery_key(disk_path, password) {
++        Ok(key) => f(Message::Recovery(key, description)),
++        Err(err) => f(Message::Error(format!(
++            "Recovery key creation failed; installation is not complete: {err:#}"
++        ))),
++    }
++}
++
++fn add_recovery_key(disk_path: &str, password: &str) -> anyhow::Result<String> {
++    let mut child = std::process::Command::new("redoxfs-key")
++        .args(["add", "--recovery", "--key-file", "-", disk_path])
++        .stdin(std::process::Stdio::piped())
++        .stdout(std::process::Stdio::piped())
++        .spawn()
++        .map_err(|err| format_err!("could not start redoxfs-key: {err}"))?;
++    // Taking and dropping the pipe closes stdin even if writing fails.
++    let sent = child.stdin.take().unwrap().write_all(password.as_bytes());
++    let output = child.wait_with_output()?;
++    sent?;
++    if !output.status.success() {
++        return Err(format_err!("redoxfs-key exited with {}", output.status));
++    }
++    String::from_utf8(output.stdout)?
++        .lines()
++        .find_map(|line| line.split_once("): ").map(|(_, key)| key.to_string()))
++        .ok_or_else(|| format_err!("redoxfs-key printed no recovery key"))
++}
++
+ #[allow(unused)]
+ pub(crate) fn install_clone_disk<F: FnMut(Message)>(
+     target: TargetConfig,
+@@ -412,14 +457,17 @@ pub(crate) fn install_clone_disk<F: FnMut(Message)>(
+                 }
+             };
+ 
+-            // Copy filesystem.toml, which is not packaged
+-            let mut files = vec!["filesystem.toml".to_string()];
++            // Re-serialize instead of copying a live image's saved secret.
++            let installed_config = config.filesystem_toml()?;
++            fs::write(mount_path.join("filesystem.toml"), installed_config)?;
++            let mut files = Vec::new();
+ 
+             // Copy files from locally installed packages
+             message!("Loading package files");
+             if let Err(err) = package_files(&root_path, &mut config, &mut files) {
+                 return Err(format_err!("failed to read package files: {}", err));
+             }
++            files.retain(|name| name != "filesystem.toml");
+ 
+             // Sort and remove duplicates
+             files.sort();
+@@ -449,19 +497,17 @@ pub(crate) fn install_clone_disk<F: FnMut(Message)>(
+     });
+ 
+     match res {
+-        Ok(()) => {
+-            f(Message::Success(format!(
++        Ok(()) => finish(
++            &mut f,
++            disk_path,
++            password_opt.as_deref(),
++            format!(
+                 "Finished installing in {:?}, ready to reboot",
+                 start.elapsed()
+-            )));
+-        }
++            ),
++        ),
+         Err(err) => {
+             f(Message::Error(format!("Failed to install: {}", err)));
+         }
+     }
+-
+-    f(Message::Success(format!(
+-        "Finished installing in {:?}",
+-        start.elapsed()
+-    )));
+ }
+diff --git a/src/bin/installer.rs b/src/bin/installer.rs
+index ebc26f6..73d38c3 100644
+--- a/src/bin/installer.rs
++++ b/src/bin/installer.rs
+@@ -135,16 +135,14 @@ fn main() {
+         redox_installer::Config::default()
+     };
+ 
+-    // Get toml of merged config
+-    let merged_toml = toml::to_string_pretty(&config).unwrap();
+-
+     // Just output merged config and exit
+     if let Some(path) = parser.get_opt("output-config") {
+-        fs::write(path, merged_toml).unwrap();
++        fs::write(path, toml::to_string_pretty(&config).unwrap()).unwrap();
+         return;
+     }
+ 
+     // Add filesystem.toml to config
++    let merged_toml = config.filesystem_toml().unwrap();
+     config.files.push(redox_installer::FileConfig {
+         path: "filesystem.toml".to_string(),
+         data: merged_toml,
+diff --git a/src/bin/installer_tui.rs b/src/bin/installer_tui.rs
+index 76458ee..db33184 100644
+--- a/src/bin/installer_tui.rs
++++ b/src/bin/installer_tui.rs
+@@ -1,4 +1,4 @@
+-use anyhow::{anyhow, bail, Result};
++use anyhow::{anyhow, bail, Context, Result};
+ use pkgar::{ext::EntryExt, PackageHead};
+ use pkgar_core::PackageSrc;
+ use pkgar_keys::PublicKeyFile;
+@@ -242,16 +242,84 @@ fn choose_disk() -> PathBuf {
+     }
+ }
+ 
++fn encryption_password(config: &Config) -> Result<Option<String>> {
++    if config.general.install_unencrypted == Some(true) {
++        eprintln!("Disk encryption is disabled by the installation configuration.");
++        return Ok(None);
++    }
++
++    loop {
++        eprint!("Encrypt this disk? [Y/n]: ");
++        io::stderr().flush()?;
++        let mut answer = String::new();
++        if io::stdin().read_line(&mut answer)? == 0 {
++            bail!("Installation cancelled: end of input");
++        }
++        match answer.trim().to_ascii_lowercase().as_str() {
++            "" | "y" | "yes" => break,
++            "n" | "no" => {
++                eprintln!("Anyone with this disk will be able to read its files.");
++                return Ok(None);
++            }
++            _ => eprintln!("Enter yes or no."),
++        }
++    }
++
++    redox_installer::require_seeded_random()?;
++    let password = redox_installer::prompt_password("Disk passphrase: ", "Confirm passphrase: ")?
++        .context("A nonempty passphrase is required for disk encryption")?;
++    eprintln!();
++    Ok(Some(password))
++}
++
++fn add_recovery_key(disk_path: &Path, password: &[u8]) -> Result<()> {
++    eprintln!("Save the recovery key below somewhere other than this disk.");
++    eprintln!("It will be shown once. To unlock at startup, type all 48 digits without spaces.");
++    io::stderr().flush()?;
++    let mut child = process::Command::new("redoxfs-key")
++        .args(["add", "--recovery", "--key-file", "-"])
++        .arg(disk_path)
++        .stdin(process::Stdio::piped())
++        .spawn()
++        .context("Could not start redoxfs-key to create the recovery key")?;
++    // Taking and dropping the pipe closes stdin even if writing fails.
++    let sent = child.stdin.take().unwrap().write_all(password);
++    let status = child.wait().context("Could not wait for redoxfs-key")?;
++    sent.context("Could not send the disk passphrase to redoxfs-key")?;
++    if !status.success() {
++        bail!("Recovery key creation failed; installation is not complete");
++    }
++    loop {
++        eprint!("Type SAVED after saving your recovery key: ");
++        io::stderr().flush()?;
++        let mut answer = String::new();
++        if io::stdin().read_line(&mut answer)? == 0 {
++            bail!("Recovery key was not acknowledged; do not reboot until you have saved it");
++        }
++        if answer.trim() == "SAVED" {
++            return Ok(());
++        }
++    }
++}
++
+ fn main() {
+     let root_path = Path::new("/");
+ 
+     let disk_path = choose_disk();
+ 
+-    let Ok(password_opt) = redox_installer::prompt_password(
+-        "redox_installer_tui: redoxfs password (empty for none)",
+-        "redox_installer_tui: confirm password",
+-    ) else {
+-        process::exit(1);
++    let mut config = match Config::from_file(&root_path.join("filesystem.toml")) {
++        Ok(config) => config,
++        Err(err) => {
++            eprintln!("redox_installer_tui: failed to read installation configuration: {err}");
++            process::exit(1);
++        }
++    };
++    let password_opt = match encryption_password(&config) {
++        Ok(password) => password,
++        Err(err) => {
++            eprintln!("redox_installer_tui: {err}");
++            process::exit(1);
++        }
+     };
+ 
+     let instant = std::time::Instant::now();
+@@ -323,15 +391,16 @@ fn main() {
+ 
+         // Slow install method via file copy
+         with_redoxfs_mount(fs, None, |mount_path| {
+-            let mut config: Config = Config::from_file(&root_path.join("filesystem.toml"))?;
+-
+-            // Copy filesystem.toml, which is not packaged
+-            let mut files = vec!["filesystem.toml".to_string()];
++            // Re-serialize instead of copying a live image's saved secret.
++            let installed_config = config.filesystem_toml()?;
++            fs::write(mount_path.join("filesystem.toml"), installed_config)?;
++            let mut files = Vec::new();
+ 
+             // Copy files from locally installed packages
+             package_files(&root_path, &mut config, &mut files)
+                 // TODO: implement Error trait
+                 .map_err(|err| anyhow!("failed to read package files: {err}"))?;
++            files.retain(|name| name != "filesystem.toml");
+ 
+             // Perform config install (after packages have been converted to files)
+             eprintln!("configuring system");
+@@ -357,6 +426,13 @@ fn main() {
+ 
+             Ok(())
+         })
++    })
++    .and_then(|()| {
++        // The installer mount and disk handle must be closed before key-slot updates.
++        if let Some(password) = password_opt.as_ref() {
++            add_recovery_key(&disk_path, password.as_bytes())?;
++        }
++        Ok(())
+     });
+ 
+     match res {
+diff --git a/src/config/general.rs b/src/config/general.rs
+index 417ff2d..3858d7f 100644
+--- a/src/config/general.rs
++++ b/src/config/general.rs
+@@ -12,6 +12,8 @@ pub struct GeneralConfig {
+     pub skip_partitions: Option<bool>,
+     /// Set a plain text password to encrypt the disk
+     pub encrypt_disk: Option<String>,
++    /// Skip encryption in the text installer, for unattended test installations
++    pub install_unencrypted: Option<bool>,
+     /// Use live disk for bootloader config, default is false
+     pub live_disk: Option<bool>,
+     /// If set, write bootloader disk into this path
+@@ -33,6 +35,7 @@ impl GeneralConfig {
+         if let Some(encrypt_disk) = other.encrypt_disk {
+             self.encrypt_disk = Some(encrypt_disk);
+         }
++        self.install_unencrypted = other.install_unencrypted.or(self.install_unencrypted);
+         self.live_disk = other.live_disk.or(self.live_disk);
+         if let Some(write_bootloader) = other.write_bootloader {
+             self.write_bootloader = Some(write_bootloader);
+diff --git a/src/config/mod.rs b/src/config/mod.rs
+index b0c4b13..2f76a41 100644
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -34,6 +34,15 @@ pub struct Config {
+ }
+ 
+ impl Config {
++    /// Serialize the installed configuration without the disk-unlock secret.
++    /// Explicit host configuration exports use the ordinary serializer instead.
++    pub fn filesystem_toml(&mut self) -> Result<String> {
++        let password = self.general.encrypt_disk.take();
++        let result = toml::to_string_pretty(self);
++        self.general.encrypt_disk = password;
++        Ok(result?)
++    }
++
+     /// Load installer config from a TOML path
+     pub fn from_file(path: &Path) -> Result<Self> {
+         let mut config: Config = match fs::read_to_string(&path) {
+diff --git a/src/installer.rs b/src/installer.rs
+index 93de28b..a1212f9 100644
+--- a/src/installer.rs
++++ b/src/installer.rs
+@@ -73,10 +73,8 @@ pub fn prompt_password(prompt: &str, confirm_prompt: &str) -> Result<Option<Stri
+ 
+     for i in 0..3 {
+         print!("{}", prompt);
++        io::Write::flush(&mut stdout)?;
+         let mut password = stdin.read_passwd(&mut stdout)?;
+-        if let Some(password) = password.as_mut() {
+-            *password = password.trim().to_string();
+-        }
+         password.take_if(|s| s.is_empty());
+ 
+         if password.is_none() {
+@@ -84,6 +82,7 @@ pub fn prompt_password(prompt: &str, confirm_prompt: &str) -> Result<Option<Stri
+         }
+ 
+         print!("\n{}", confirm_prompt);
++        io::Write::flush(&mut stdout)?;
+         let confirm_password = stdin.read_passwd(&mut stdout)?;
+ 
+         // Note: Actually comparing two Option<String> values
+@@ -96,6 +95,19 @@ pub fn prompt_password(prompt: &str, confirm_prompt: &str) -> Result<Option<Stri
+     bail!("passwords do not match, giving up");
+ }
+ 
++/// Require a seeded random source before generating disk keys on FerrionOS.
++pub fn require_seeded_random() -> Result<()> {
++    #[cfg(target_os = "redox")]
++    {
++        let status = fs::read_to_string("/scheme/rand/status")
++            .context("Disk encryption requires /scheme/rand/status to report seeded: yes")?;
++        if status.lines().next() != Some("seeded: yes") {
++            bail!("Disk encryption requires a seeded random source; /scheme/rand/status is not seeded");
++        }
++    }
++    Ok(())
++}
++
+ fn install_packages(config: &Config, dest: &Path, cookbook: Option<&str>) -> anyhow::Result<()> {
+     let target = &get_target();
+ 
+@@ -363,6 +375,9 @@ where
+     D: Disk + Send + 'static,
+     F: FnOnce(FileSystem<D>) -> Result<T>,
+ {
++    if password_opt.is_some() {
++        require_seeded_random()?;
++    }
+     let ctime = SystemTime::now().duration_since(UNIX_EPOCH)?;
+     let fs = FileSystem::create(disk, password_opt, ctime.as_secs(), ctime.subsec_nanos())
+         .map_err(syscall_error)?;
+@@ -549,6 +564,9 @@ where
+     P: AsRef<Path>,
+     F: FnOnce(FileSystem<DiskIo<fscommon::StreamSlice<DiskWrapper>>>) -> Result<T>,
+ {
++    if disk_option.password_opt.is_some() {
++        require_seeded_random()?;
++    }
+     let bootloader_efi_name = bootloader_efi_name()?;
+     // Open disk and read metadata
+     eprintln!(
+@@ -815,7 +833,26 @@ pub fn try_fast_install<D: redoxfs::Disk, F: FnMut(u64, u64)>(
+         }
+     }
+ 
+-    let mut fs_old = redoxfs::FileSystem::open(DiskLive { file, size }, None, None, false)?;
++    // An encrypted live image cannot be cloned without its key: install file by file instead.
++    let mut fs_old = match redoxfs::FileSystem::open(DiskLive { file, size }, None, None, false) {
++        Ok(fs) => fs,
++        Err(err) if err.errno == syscall::ENOKEY => return Ok(false),
++        Err(err) => return Err(err.into()),
++    };
++    // Inspect the original live image, not the writable live-session overlay.
++    // Older images can contain an unlock secret in their saved configuration.
++    // Fall back to file installation so it is removed before any target write.
++    let config_data = fs_old.tx(|tx| {
++        let node = tx.find_node(redoxfs::TreePtr::root(), "filesystem.toml")?;
++        let mut data = vec![0; node.data().size() as usize];
++        let count = tx.read_node_inner(&node, 0, &mut data)?;
++        data.truncate(count);
++        Ok(data)
++    })?;
++    let config: Config = toml::from_str(std::str::from_utf8(&config_data)?)?;
++    if config.general.encrypt_disk.is_some() {
++        return Ok(false);
++    }
+     let size_old = fs_old.header.size();
+     let free_old = fs_old.allocator().free() * redoxfs::BLOCK_SIZE;
+     let used_old = size_old - free_old;

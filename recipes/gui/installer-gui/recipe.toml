@@ -1,5 +1,6 @@
 [package]
 description = "Graphical FerrionOS installer"
+dependencies = ["redoxfs"]
 
 [source]
 same_as = "../../core/installer"

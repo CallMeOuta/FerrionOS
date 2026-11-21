@@ -1,0 +1,188 @@
+FerrionOS change to the upstream installer (MIT license, kept), made against upstream commit 16d39fe1f20f15fc97fa3aaa216ac7e449637d41 after ferrion-live-disk.patch, ferrion-install-recovery.patch and ferrion-install-clear-ring.patch (issue 7). The file-copy install works on a FerrionOS live system:
+- the text and graphical installers list the files to copy from the package heads in var/lib/packages and the repository key in etc/pkg/id_ed25519.pub.toml, where the package manager keeps them, instead of a pkg directory that a FerrionOS root does not have.
+- when a file the configuration wrote is also a package file (/etc/hosts, say), the live system's copy replaces it, as the image build left it; before, the copy stopped with "File exists".
+- with_redoxfs_mount ends its mount by stopping the mount loop and removing the scheme from the process's namespace through the namespace manager. redoxfs::unmount_path removes /scheme/<name> through the mounted scheme itself, which the installer's redoxfs answers with EOPNOTSUPP, and that error used to hide the install's own error.
+
+diff --git a/gui/src/worker.rs b/gui/src/worker.rs
+index a6fa845..684f0fc 100644
+--- a/gui/src/worker.rs
++++ b/gui/src/worker.rs
+@@ -76,9 +76,23 @@ pub fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> anyhow::Result<()>
+             }
+         };
+ 
++        // A file the configuration writes that a package also ships (/etc/hosts, say) is
++        // already in the target. The live system's copy is the one the image build kept, so it
++        // replaces that one. A link in its place is an error: unlink fails on this mount.
++        let existing = fs::symlink_metadata(&dest).ok();
++        if existing
++            .as_ref()
++            .is_some_and(|m| m.file_type().is_symlink())
++        {
++            return Err(format_err!(
++                "failed to create file {}: a link is in its place",
++                dest.display()
++            ));
++        }
+         let mut dest_file = match fs::OpenOptions::new()
+             .write(true)
+-            .create_new(true)
++            .create(true)
++            .truncate(true)
+             .mode(metadata.mode())
+             .open(&dest)
+         {
+@@ -91,6 +105,15 @@ pub fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> anyhow::Result<()>
+                 ));
+             }
+         };
++        if existing.is_some() {
++            if let Err(err) = dest_file.set_permissions(metadata.permissions()) {
++                return Err(format_err!(
++                    "failed to set the mode of {}: {}",
++                    dest.display(),
++                    err
++                ));
++            }
++        }
+ 
+         loop {
+             let count = match src_file.read(buf) {
+@@ -132,11 +155,13 @@ pub fn package_files(
+     //TODO: Remove packages from config where all files are located (and have valid shasum?)
+     config.packages.clear();
+ 
+-    let pkey_path = "pkg/id_ed25519.pub.toml";
++    // The package manager keeps the repository key in etc/pkg and the package heads in
++    // var/lib/packages (redox-pkg's PACKAGES_HEAD_DIR); a FerrionOS root has no pkg directory.
++    let pkey_path = "etc/pkg/id_ed25519.pub.toml";
+     let pkey = PublicKeyFile::open(&root_path.join(pkey_path))?.pkey;
+     files.push(pkey_path.to_string());
+ 
+-    for item_res in fs::read_dir(&root_path.join("pkg"))? {
++    for item_res in fs::read_dir(&root_path.join("var/lib/packages"))? {
+         let item = item_res?;
+         let pkg_path = item.path();
+         if pkg_path.extension() == Some(OsStr::new("pkgar_head")) {
+diff --git a/src/bin/installer_tui.rs b/src/bin/installer_tui.rs
+index db33184..2b56091 100644
+--- a/src/bin/installer_tui.rs
++++ b/src/bin/installer_tui.rs
+@@ -123,9 +123,23 @@ fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> Result<()> {
+             }
+         };
+ 
++        // A file the configuration writes that a package also ships (/etc/hosts, say) is
++        // already in the target. The live system's copy is the one the image build kept, so it
++        // replaces that one. A link in its place is an error: unlink fails on this mount.
++        let existing = fs::symlink_metadata(&dest).ok();
++        if existing
++            .as_ref()
++            .is_some_and(|m| m.file_type().is_symlink())
++        {
++            bail!(
++                "failed to create file {}: a link is in its place",
++                dest.display()
++            );
++        }
+         let mut dest_file = match fs::OpenOptions::new()
+             .write(true)
+-            .create_new(true)
++            .create(true)
++            .truncate(true)
+             .mode(metadata.mode())
+             .open(&dest)
+         {
+@@ -134,6 +148,11 @@ fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> Result<()> {
+                 bail!("failed to create file {}: {}", dest.display(), err);
+             }
+         };
++        if existing.is_some() {
++            if let Err(err) = dest_file.set_permissions(metadata.permissions()) {
++                bail!("failed to set the mode of {}: {}", dest.display(), err);
++            }
++        }
+ 
+         loop {
+             let count = match src_file.read(buf) {
+@@ -167,11 +186,13 @@ fn package_files(
+     //TODO: Remove packages from config where all files are located (and have valid shasum?)
+     config.packages.clear();
+ 
+-    let pkey_path = "pkg/id_ed25519.pub.toml";
++    // The package manager keeps the repository key in etc/pkg and the package heads in
++    // var/lib/packages (redox-pkg's PACKAGES_HEAD_DIR); a FerrionOS root has no pkg directory.
++    let pkey_path = "etc/pkg/id_ed25519.pub.toml";
+     let pkey = PublicKeyFile::open(&root_path.join(pkey_path))?.pkey;
+     files.push(pkey_path.to_string());
+ 
+-    for item_res in fs::read_dir(&root_path.join("pkg"))? {
++    for item_res in fs::read_dir(&root_path.join("var/lib/packages"))? {
+         let item = item_res?;
+         let pkg_path = item.path();
+         if pkg_path.extension() == Some(OsStr::new("pkgar_head")) {
+diff --git a/src/installer.rs b/src/installer.rs
+index dd0cf49..aa71890 100644
+--- a/src/installer.rs
++++ b/src/installer.rs
+@@ -1,7 +1,7 @@
+ use anyhow::Context;
+ use anyhow::{bail, Result};
+ use pkg::Library;
+-use redoxfs::{unmount_path, Disk, DiskIo, FileSystem, BLOCK_SIZE, HEADER_RING};
++use redoxfs::{Disk, DiskIo, FileSystem, BLOCK_SIZE, HEADER_RING};
+ use termion::input::TermRead;
+ 
+ use crate::config::file::FileConfig;
+@@ -449,9 +449,12 @@ where
+         }
+     };
+ 
+-    unmount_path(&mount_path.as_os_str().to_str().unwrap())?;
++    unmount_redoxfs(mount_path.as_os_str().to_str().unwrap())?;
+ 
+     join_handle.join().unwrap();
++    // A later mount in this process must not stop at once.
++    #[cfg(target_os = "redox")]
++    redoxfs::IS_UMT.store(0, std::sync::atomic::Ordering::SeqCst);
+ 
+     if cfg!(not(target_os = "redox")) {
+         fs::remove_dir_all(&mount_path)?;
+@@ -460,6 +463,37 @@ where
+     res
+ }
+ 
++/// Ends the mount `with_redoxfs_mount` made in this process. `redoxfs::unmount_path` removes
++/// `/scheme/<name>` through the mounted scheme itself, which this redoxfs answers with
++/// EOPNOTSUPP on FerrionOS. Instead the mount loop is told to stop, and the scheme leaves this
++/// process's namespace through the namespace manager: closing the namespace's handle on the
++/// scheme wakes the loop, which then flushes the filesystem and returns.
++#[cfg(target_os = "redox")]
++fn unmount_redoxfs(mount_path: &str) -> Result<()> {
++    use std::sync::atomic::Ordering;
++    use syscall::CallFlags;
++    // StdFsCallKind::Unlinkat. redox_syscall 0.9.5 names it; the 0.9.4 that the graphical
++    // installer's Cargo.lock pins keeps the number without a name.
++    const UNLINKAT: u64 = 10;
++
++    redoxfs::IS_UMT.store(1, Ordering::SeqCst);
++    let namespace = libredox::call::getns()?;
++    let path = format!("/scheme/{mount_path}");
++    libredox::call::call_wo(
++        namespace,
++        path.as_bytes(),
++        CallFlags::STD_FS | CallFlags::WRITE,
++        &[UNLINKAT, 0, 0],
++    )?;
++    Ok(())
++}
++
++#[cfg(not(target_os = "redox"))]
++fn unmount_redoxfs(mount_path: &str) -> Result<()> {
++    redoxfs::unmount_path(mount_path)?;
++    Ok(())
++}
++
+ pub fn with_redoxfs_ar<D, T, F>(
+     mut fs: FileSystem<D>,
+     mount_path: Option<&Path>,

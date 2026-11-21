@@ -1,0 +1,41 @@
+FerrionOS change to the upstream installer (MIT license, kept), made against upstream commit 16d39fe1f20f15fc97fa3aaa216ac7e449637d41 after ferrion-live-disk.patch and ferrion-install-recovery.patch:
+- zero the header ring when creating a volume: with_redoxfs writes zeros over the first HEADER_RING blocks of the target partition before FileSystem::create, so a header left by an older volume on the same partition can no longer be picked when the new volume is opened.
+
+diff --git a/src/installer.rs b/src/installer.rs
+index fda7d22..831df77 100644
+--- a/src/installer.rs
++++ b/src/installer.rs
+@@ -1,7 +1,7 @@
+ use anyhow::Context;
+ use anyhow::{bail, Result};
+ use pkg::Library;
+-use redoxfs::{unmount_path, Disk, DiskIo, FileSystem, BLOCK_SIZE};
++use redoxfs::{unmount_path, Disk, DiskIo, FileSystem, BLOCK_SIZE, HEADER_RING};
+ use termion::input::TermRead;
+ 
+ use crate::config::file::FileConfig;
+@@ -368,7 +368,7 @@ fn copy_dir_all(
+     Ok(())
+ }
+ 
+-pub fn with_redoxfs<D, T, F>(disk: D, password_opt: Option<&[u8]>, callback: F) -> Result<T>
++pub fn with_redoxfs<D, T, F>(mut disk: D, password_opt: Option<&[u8]>, callback: F) -> Result<T>
+ where
+     D: Disk + Send + 'static,
+     F: FnOnce(FileSystem<D>) -> Result<T>,
+@@ -376,6 +376,15 @@ where
+     if password_opt.is_some() {
+         require_seeded_random()?;
+     }
++    // Zero the whole header ring first, so no header left by an older
++    // volume on this partition can carry a higher generation than the new one
++    let zero = [0; BLOCK_SIZE as usize];
++    for block in 0..HEADER_RING {
++        let count = unsafe { disk.write_at(block, &zero) }.map_err(syscall_error)?;
++        if count != zero.len() {
++            bail!("short write while clearing the header ring");
++        }
++    }
+     let ctime = SystemTime::now().duration_since(UNIX_EPOCH)?;
+     let fs = FileSystem::create(disk, password_opt, ctime.as_secs(), ctime.subsec_nanos())
+         .map_err(syscall_error)?;
