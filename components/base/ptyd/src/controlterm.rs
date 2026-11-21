@@ -66,6 +66,8 @@ impl Resource for PtyControlTerm {
             }
 
             Ok(i)
+        } else if pty.hung_up() {
+            Ok(0)
         } else if self.flags & O_NONBLOCK == O_NONBLOCK || Rc::weak_count(&self.pty) == 0 {
             Err(Error::new(EAGAIN))
         } else {
@@ -115,7 +117,7 @@ impl Resource for PtyControlTerm {
         if pty.stopped {
             return EventFlags::empty();
         }
-        if pty.miso.front().is_some() {
+        if pty.miso.front().is_some() || pty.hung_up() {
             if !self.notified_read {
                 self.notified_read = true;
                 events |= syscall::EVENT_READ;

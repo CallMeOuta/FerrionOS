@@ -19,6 +19,10 @@ pub struct Pty {
     pub timeout_count: u64,
     pub timeout_character: Option<u64>,
     pub pgrp_handle: Option<libredox::Fd>,
+    /// Open subterminal handles.
+    pub subterms: usize,
+    /// Whether a subterminal was ever opened, so a new PTY is not hung up.
+    pub subterm_opened: bool,
 }
 
 impl Pty {
@@ -36,7 +40,14 @@ impl Pty {
             timeout_count: 0,
             timeout_character: None,
             pgrp_handle: None,
+            subterms: 0,
+            subterm_opened: false,
         }
+    }
+
+    /// The last subterminal handle was closed: the master reads end of file.
+    pub fn hung_up(&self) -> bool {
+        self.subterm_opened && self.subterms == 0
     }
 
     pub fn path(&self, buf: &mut [u8]) -> Result<usize> {

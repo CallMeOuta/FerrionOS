@@ -17,11 +17,24 @@ pub struct PtySubTerm {
 
 impl PtySubTerm {
     pub fn new(pty: Weak<RefCell<Pty>>, flags: usize) -> Self {
+        if let Some(pty_lock) = pty.upgrade() {
+            let mut pty = pty_lock.borrow_mut();
+            pty.subterms += 1;
+            pty.subterm_opened = true;
+        }
         PtySubTerm {
             pty,
             flags,
             notified_read: false,
             notified_write: false,
+        }
+    }
+}
+
+impl Drop for PtySubTerm {
+    fn drop(&mut self) {
+        if let Some(pty_lock) = self.pty.upgrade() {
+            pty_lock.borrow_mut().subterms -= 1;
         }
     }
 }

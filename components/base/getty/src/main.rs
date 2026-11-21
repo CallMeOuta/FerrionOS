@@ -60,12 +60,14 @@ pub fn handle(event_queue: &mut mio::Poll, tty: &mut File, master: &mut File, pr
     // tty_fd => Display
     // master_fd => PTY
 
-    let mut handle_event = |event_id: mio::Token| {
+    // Returns true once the master reads end of file: every holder of the
+    // subterminal, login and what it started, has closed it.
+    let mut handle_event = |event_id: mio::Token| -> bool {
         if event_id == TTY {
             let mut packet = [0; 4096];
             loop {
                 let count = match tty.read(&mut packet) {
-                    Ok(0) => return,
+                    Ok(0) => return false,
                     Ok(count) => count,
                     Err(ref err) if err.raw_os_error() == Some(EAGAIN) => break,
                     Err(_) => panic!("getty: failed to read from TTY"),
@@ -77,7 +79,7 @@ pub fn handle(event_queue: &mut mio::Poll, tty: &mut File, master: &mut File, pr
             let mut packet = [0; 4096];
             loop {
                 let count = match master.read(&mut packet) {
-                    Ok(0) => return,
+                    Ok(0) => return true,
                     Ok(count) => count,
                     Err(ref err) if err.raw_os_error() == Some(EAGAIN) => break,
                     Err(_) => panic!("getty: failed to read from master TTY"),
@@ -89,18 +91,20 @@ pub fn handle(event_queue: &mut mio::Poll, tty: &mut File, master: &mut File, pr
                 }
             }
         }
+        false
     };
 
     handle_event(TTY);
-    handle_event(MASTER);
+    let mut hung_up = handle_event(MASTER);
 
-    'events: loop {
+    // A hangup means login has closed the subterminal and is exiting.
+    'events: while !hung_up {
         let mut events = mio::Events::with_capacity(2);
         event_queue
             .poll(&mut events, None)
             .expect("getty: failed to read event file");
         for event in events.iter() {
-            handle_event(event.token());
+            hung_up |= handle_event(event.token());
         }
 
         match process.try_wait() {
@@ -279,7 +283,7 @@ fn daemon(tty: &mut File, clear: bool, contain: bool, stderr: &mut Stderr) {
             Command::new("login")
         };
         command
-            .stdin(slave_stdin.try_clone().unwrap())
+            .stdin(slave_stdin)
             .stdout(slave_stdout)
             .stderr(slave_stderr)
             .env("TERM", "xterm-256color")
@@ -292,7 +296,7 @@ fn daemon(tty: &mut File, clear: bool, contain: bool, stderr: &mut Stderr) {
 
                 // FIXME enable this once redox supports controlling ttys
                 #[cfg(not(target_os = "redox"))]
-                if libc::ioctl(slave_stdin.as_raw_fd(), libc::TIOCSCTTY, 1) != 0 {
+                if libc::ioctl(0, libc::TIOCSCTTY, 1) != 0 {
                     return Err(io::Error::last_os_error());
                 }
 
@@ -300,7 +304,11 @@ fn daemon(tty: &mut File, clear: bool, contain: bool, stderr: &mut Stderr) {
             });
         }
 
-        match command.spawn() {
+        let spawned = command.spawn();
+        // The command holds getty's copies of the subterminal; drop them so the
+        // master hangs up once login and everything it started have closed theirs.
+        drop(command);
+        match spawned {
             Ok(mut process) => {
                 handle(&mut event_queue, tty, &mut master, &mut process);
             }
