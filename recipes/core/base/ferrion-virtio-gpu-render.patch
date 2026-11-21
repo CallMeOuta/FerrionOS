@@ -1,0 +1,851 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with the FerrionOS patches before it in recipe.toml applied, ferrion-redox-ioctl-path.patch last among them, so that it builds against relibc's redox-ioctl. It gives the virtio-gpu driver the render side of slice GP3 of FerrionOS's GPU plan, in new files with hooks in upstream's:
+- virtio-gpud acknowledges the virgl, blob and context-init features when the device offers them, reads the capsets at start (bounded: 64 capsets, ids up to 63, 64 KiB, 8 versions), and creates and destroys contexts (render.rs). The commands follow Linux's drivers/gpu/drm/virtio/virtgpu_vq.c (MIT). It leaves the device's shared memory region unmapped: blobs and the host-visible window come later.
+- driver-graphics registers a second name, gpu.<driver>, beside display.<driver> on the same scheme when the adapter has a render device (GraphicsAdapter::render_device). Its root opens render handles, which serve the version (virtio_gpu 0.1.0), get-parameter, get-capset, context-init and GEM close requests with Linux v7.3's checks and errors (render.rs, ioctl/virtgpu.rs), refuse DRM's own and mode-setting requests with EACCES and everything else with EINVAL, and destroy their context when closed. A context's name is cut at its first zero and kept to printable ASCII before the device sees it.
+
+diff --git a/drivers/graphics/driver-graphics/src/ioctl/mod.rs b/drivers/graphics/driver-graphics/src/ioctl/mod.rs
+index c0ea0907..ca340105 100644
+--- a/drivers/graphics/driver-graphics/src/ioctl/mod.rs
++++ b/drivers/graphics/driver-graphics/src/ioctl/mod.rs
+@@ -15,6 +15,7 @@ mod driver_info;
+ mod framebuffer;
+ mod plane;
+ mod property;
++pub(crate) mod virtgpu;
+ 
+ pub(crate) fn call_ioctl<T: GraphicsAdapter>(
+     adapter: &mut T,
+diff --git a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+new file mode 100644
+index 00000000..f20563f5
+--- /dev/null
++++ b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+@@ -0,0 +1,165 @@
++//! The requests a render handle serves (FerrionOS): those of Linux's virtio-gpu driver that
++//! Mesa's Venus driver makes, with the checks and errors of Linux v7.3's
++//! `drivers/gpu/drm/virtio/virtgpu_ioctl.c`. Every count, number and name a client sends is
++//! checked here before the device sees it; the wire formats are `redox_ioctl::virtgpu`'s.
++
++use std::ffi::c_char;
++use std::{cmp, slice};
++
++use redox_ioctl::{drm, virtgpu};
++use syscall::{EACCES, EEXIST, EINVAL, ENOENT, ENOSYS, Error, Result};
++
++use crate::render::{RenderDevice, RenderHandle};
++
++/// Linux's `MAX_CAPSET_ID` and `MAX_RINGS` (`virtgpu_drv.h`).
++const MAX_CAPSET_ID: u64 = 63;
++const MAX_RINGS: u64 = 64;
++
++pub(crate) fn call_render_ioctl<T>(
++    device: &mut dyn RenderDevice,
++    handle: &mut RenderHandle<T>,
++    cmd: u64,
++    payload: &mut [u8],
++) -> Result<usize> {
++    match cmd {
++        drm::VERSION => drm::DrmVersion::with(payload, |data| version(device, data)),
++        // A render handle holds no buffer before blobs exist, so every number is unknown, as
++        // Linux answers an unknown number.
++        virtgpu::GEM_CLOSE => virtgpu::GemClose::with(payload, |_| Err(Error::new(EINVAL))),
++        virtgpu::GETPARAM => virtgpu::VirtgpuGetparam::with(payload, |mut data| {
++            data.set_value(getparam(device, data.param())?);
++            Ok(0)
++        }),
++        virtgpu::GET_CAPS => virtgpu::VirtgpuGetCaps::with(payload, |data| get_caps(device, data)),
++        virtgpu::CONTEXT_INIT => {
++            virtgpu::VirtgpuContextInit::with(payload, |data| context_init(device, handle, data))
++        }
++        // DRM's own requests and mode-setting: a render handle shows nothing on a display, and
++        // Linux answers these on a render node with EACCES.
++        0x00..=0x3F | 0xA0..=0xFF => Err(Error::new(EACCES)),
++        _ => Err(Error::new(EINVAL)),
++    }
++}
++
++fn c_chars(bytes: &'static [u8]) -> &'static [c_char] {
++    // c_char is one byte on every target, signed or not.
++    unsafe { slice::from_raw_parts(bytes.as_ptr().cast::<c_char>(), bytes.len()) }
++}
++
++fn version(device: &dyn RenderDevice, mut data: drm::DrmVersion<'_>) -> Result<usize> {
++    let (name, desc, [major, minor, patchlevel]) = device.driver_info();
++    data.set_version_major(major);
++    data.set_version_minor(minor);
++    data.set_version_patchlevel(patchlevel);
++    data.set_name(c_chars(name));
++    data.set_date(c_chars(b"0"));
++    data.set_desc(c_chars(desc));
++    Ok(0)
++}
++
++fn getparam(device: &dyn RenderDevice, param: u64) -> Result<i32> {
++    let features = device.features();
++    Ok(match param {
++        virtgpu::VIRTGPU_PARAM_3D_FEATURES => features.three_d.into(),
++        virtgpu::VIRTGPU_PARAM_CAPSET_QUERY_FIX => 1,
++        virtgpu::VIRTGPU_PARAM_RESOURCE_BLOB => features.resource_blob.into(),
++        virtgpu::VIRTGPU_PARAM_HOST_VISIBLE => features.host_visible.into(),
++        // Resource identifiers (the UUID feature) are not acknowledged.
++        virtgpu::VIRTGPU_PARAM_CROSS_DEVICE => 0,
++        virtgpu::VIRTGPU_PARAM_CONTEXT_INIT => features.context_init.into(),
++        // Linux answers its 64-bit mask in an int, so capsets above 31 do not show.
++        virtgpu::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs => device.capset_ids() as i32,
++        // A context can be named whenever it can be created.
++        virtgpu::VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME => features.context_init.into(),
++        // The device's blob alignment feature is not acknowledged, and Linux answers ENOENT then.
++        virtgpu::VIRTGPU_PARAM_BLOB_ALIGNMENT => return Err(Error::new(ENOENT)),
++        _ => return Err(Error::new(EINVAL)),
++    })
++}
++
++fn get_caps(device: &dyn RenderDevice, mut data: virtgpu::VirtgpuGetCaps<'_>) -> Result<usize> {
++    // Linux's order: no capsets at all, a size of 0, then a capset or version the device lacks.
++    if device.capset_ids() == 0 {
++        return Err(Error::new(ENOSYS));
++    }
++    let size = data.size();
++    if size == 0 {
++        return Err(Error::new(EINVAL));
++    }
++    let capset = device
++        .capset(data.cap_set_id(), data.cap_set_ver())
++        .ok_or(Error::new(EINVAL))?;
++    // The smaller of the two sizes; addr_mut() leaves the caller's size as it asked, as on Linux.
++    let len = cmp::min(size as usize, capset.len());
++    data.addr_mut()[..len].copy_from_slice(&capset[..len]);
++    Ok(0)
++}
++
++fn context_init<T>(
++    device: &mut dyn RenderDevice,
++    handle: &mut RenderHandle<T>,
++    data: virtgpu::VirtgpuContextInit<'_>,
++) -> Result<usize> {
++    let invalid = || Error::new(EINVAL);
++    let features = device.features();
++    if !(features.three_d && features.context_init)
++        || data.num_params() > virtgpu::CONTEXT_INIT_MAX_PARAMS
++    {
++        return Err(invalid());
++    }
++    if handle.context.is_some() {
++        return Err(Error::new(EEXIST));
++    }
++    // Every parameter is checked before anything changes, and each may come once.
++    let (mut capset_id, mut num_rings, mut ring_mask, mut named) = (None, None, None, false);
++    for param in data.params() {
++        match param.param {
++            virtgpu::VIRTGPU_CONTEXT_PARAM_CAPSET_ID => {
++                if capset_id.is_some()
++                    || param.value > MAX_CAPSET_ID
++                    || device.capset_ids() & (1 << param.value) == 0
++                {
++                    return Err(invalid());
++                }
++                capset_id = Some(param.value as u32);
++            }
++            virtgpu::VIRTGPU_CONTEXT_PARAM_NUM_RINGS => {
++                if num_rings.is_some() || param.value > MAX_RINGS {
++                    return Err(invalid());
++                }
++                num_rings = Some(param.value);
++            }
++            // No reader of ring events exists yet, so the handle sends none: only an empty mask.
++            virtgpu::VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK => {
++                if ring_mask.is_some() || param.value != 0 {
++                    return Err(invalid());
++                }
++                ring_mask = Some(param.value);
++            }
++            // Its value is the caller's address; relibc sent the name itself after the
++            // parameters.
++            virtgpu::VIRTGPU_CONTEXT_PARAM_DEBUG_NAME => {
++                if named {
++                    return Err(invalid());
++                }
++                named = true;
++            }
++            _ => return Err(invalid()),
++        }
++    }
++    // The label reaches the host's logs and traces: up to its first zero, printable ASCII only.
++    let name: Vec<u8> = data
++        .name()
++        .iter()
++        .take_while(|&&byte| byte != 0)
++        .map(|&byte| {
++            if byte.is_ascii_graphic() || byte == b' ' {
++                byte
++            } else {
++                b'?'
++            }
++        })
++        .collect();
++    handle.context = Some(device.create_context(capset_id.unwrap_or(0), &name)?);
++    Ok(0)
++}
+diff --git a/drivers/graphics/driver-graphics/src/lib.rs b/drivers/graphics/driver-graphics/src/lib.rs
+index fe2a0362..fcc54702 100644
+--- a/drivers/graphics/driver-graphics/src/lib.rs
++++ b/drivers/graphics/driver-graphics/src/lib.rs
+@@ -34,6 +34,9 @@ mod buffer;
+ mod handle;
+ mod ioctl;
+ pub mod kms;
++mod render;
++
++pub use render::{RenderDevice, RenderFeatures};
+ 
+ #[derive(Debug, Copy, Clone)]
+ pub struct Damage {
+@@ -159,6 +162,13 @@ pub trait GraphicsAdapter: Sized + Debug {
+     }
+ 
+     fn poll_pending(&mut self, _cx: &mut Context<'_>) {}
++
++    /// The GPU's render side, or None for an adapter without one. When the adapter has one at
++    /// start, the scheme registers the render name `gpu.<driver>` beside `display.<driver>`
++    /// (FerrionOS, render.rs).
++    fn render_device(&mut self) -> Option<&mut dyn RenderDevice> {
++        None
++    }
+ }
+ 
+ pub trait Buffer: Debug {
+@@ -235,6 +245,9 @@ impl<T: GraphicsAdapter> GraphicsScheme<T> {
+         let cap_id = inner.scheme_root().expect("failed to get this scheme root");
+         register_scheme_inner(&socket, &scheme_name, cap_id)
+             .expect("failed to register graphics scheme root");
++        if inner.scheme_data_mut().adapter.render_device().is_some() {
++            render::register_render_root(&mut inner, &socket, &scheme_name);
++        }
+ 
+         let control_cap = inner
+             .new_handle_fd(
+@@ -367,6 +380,8 @@ resource_scheme! {
+         Control(Control<T>),
+         DrmHandle(DrmHandle<T>),
+         DrmBuffer(DrmBuffer<T>),
++        RenderRoot(render::RenderRoot<T>),
++        RenderHandle(render::RenderHandle<T>),
+     }
+ }
+ 
+diff --git a/drivers/graphics/driver-graphics/src/render.rs b/drivers/graphics/driver-graphics/src/render.rs
+new file mode 100644
+index 00000000..2aafea34
+--- /dev/null
++++ b/drivers/graphics/driver-graphics/src/render.rs
+@@ -0,0 +1,181 @@
++//! The render side of a GPU (FerrionOS).
++//!
++//! A GPU's scheme has two names: `display.<driver>`, whose root opens display handles for a
++//! virtual terminal, and `gpu.<driver>`, whose root opens render handles. A render handle is a
++//! client of the GPU: it holds one context on the device and, in later steps, buffers and
++//! fences. It can neither set a mode, show a buffer, move the cursor nor read a display. The
++//! render name is the grant to use the GPU, so it is registered beside the display name, and
++//! a namespace holds it only when given it.
++//!
++//! The requests a render handle serves are those of Linux's virtio-gpu driver that Mesa's Venus
++//! driver makes, in `ioctl::virtgpu`; everything a client sends is checked there before the
++//! device sees it.
++
++use std::fmt::Debug;
++use std::marker::PhantomData;
++
++use redox_scheme::CallerCtx;
++use scheme_utils::{ResourceOpenResult, ResourceSync};
++use syscall::schemev2::NewFdFlags;
++use syscall::{ENODEV, ENOENT, Error, MODE_CHR, Result};
++
++use crate::{GraphicsAdapter, GraphicsResource, GraphicsSchemeData, ioctl};
++
++/// The device features render handles report, as Linux's virtio-gpu driver reports them.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct RenderFeatures {
++    /// 3D: virtio-gpu's virgl feature, which every 3D capset needs.
++    pub three_d: bool,
++    pub resource_blob: bool,
++    pub context_init: bool,
++    /// The host-visible memory region is mapped, so host blobs can be.
++    pub host_visible: bool,
++}
++
++/// What a GPU's driver gives render handles. Every value it receives has been checked against
++/// Linux's rules by the request code; it still trusts nothing it reads from the device.
++pub trait RenderDevice: Debug {
++    /// The name, description and version (major, minor, patch level) a render handle's version
++    /// request answers. Mesa picks its driver by the name and the major version.
++    fn driver_info(&self) -> (&'static [u8], &'static [u8], [i32; 3]);
++
++    fn features(&self) -> RenderFeatures;
++
++    /// The capset numbers the device offers, one bit each.
++    fn capset_ids(&self) -> u64;
++
++    /// Capset `id` at `version`, as the device answered it at start.
++    fn capset(&self, id: u32, version: u32) -> Option<&[u8]>;
++
++    /// Creates a context on the device that speaks capset `capset_id` (0: none named), labelled
++    /// `name`, and returns its number.
++    fn create_context(&mut self, capset_id: u32, name: &[u8]) -> Result<u32>;
++
++    /// Destroys a context `create_context` made, which stops its work on the host.
++    fn destroy_context(&mut self, context_id: u32);
++}
++
++/// The root registered under the render name.
++pub(crate) struct RenderRoot<T>(pub(crate) PhantomData<T>);
++
++impl<T> Debug for RenderRoot<T> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_tuple("RenderRoot").finish()
++    }
++}
++
++impl<T: GraphicsAdapter> ResourceSync for RenderRoot<T> {
++    type SchemeData = GraphicsSchemeData<T>;
++    type ResourceEnum = GraphicsResource<T>;
++
++    fn openat(
++        &mut self,
++        scheme_data: &mut Self::SchemeData,
++        path: &str,
++        _flags: usize,
++        _fcntl_flags: u32,
++        _ctx: &CallerCtx,
++    ) -> Result<ResourceOpenResult<Self::ResourceEnum>> {
++        // The root is the device: each open of it is a new client, and nothing lies below it.
++        if !path.trim_matches('/').is_empty() {
++            return Err(Error::new(ENOENT));
++        }
++        if scheme_data.adapter.render_device().is_none() {
++            return Err(Error::new(ENODEV));
++        }
++        Ok(ResourceOpenResult::ThisScheme {
++            data: GraphicsResource::RenderHandle(RenderHandle::new()),
++            flags: NewFdFlags::empty(),
++        })
++    }
++}
++
++/// One client of the GPU, opened from the render root. Its context, the device's number for
++/// it, is set once by context-init and destroyed with the handle; no request names it, so no
++/// other handle can reach it.
++pub(crate) struct RenderHandle<T> {
++    pub(crate) context: Option<u32>,
++    _adapter: PhantomData<T>,
++}
++
++impl<T> Debug for RenderHandle<T> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("RenderHandle")
++            .field("context", &self.context)
++            .finish()
++    }
++}
++
++impl<T> RenderHandle<T> {
++    fn new() -> Self {
++        Self {
++            context: None,
++            _adapter: PhantomData,
++        }
++    }
++}
++
++impl<T: GraphicsAdapter> ResourceSync for RenderHandle<T> {
++    type SchemeData = GraphicsSchemeData<T>;
++    type ResourceEnum = GraphicsResource<T>;
++
++    fn fstat(
++        &mut self,
++        _scheme_data: &mut Self::SchemeData,
++        stat: &mut syscall::Stat,
++    ) -> Result<()> {
++        // A DRM render node: major 226, minors from 128.
++        stat.st_mode = MODE_CHR;
++        stat.st_dev = (226 << 8) | 128;
++        Ok(())
++    }
++
++    fn call(
++        &mut self,
++        scheme_data: &mut Self::SchemeData,
++        payload: &mut [u8],
++        metadata: &[u64],
++        _ctx: &CallerCtx,
++    ) -> Result<usize> {
++        let device = scheme_data
++            .adapter
++            .render_device()
++            .ok_or(Error::new(ENODEV))?;
++        ioctl::virtgpu::call_render_ioctl(device, self, metadata[0], payload)
++    }
++
++    fn on_close(self, scheme_data: &mut Self::SchemeData) {
++        if let Some(context) = self.context {
++            if let Some(device) = scheme_data.adapter.render_device() {
++                device.destroy_context(context);
++            }
++        }
++    }
++}
++
++/// Registers `gpu.<driver>` for the scheme registered as `display.<driver>`: a second root on
++/// the same socket, which opens render handles.
++pub(crate) fn register_render_root<T: GraphicsAdapter>(
++    inner: &mut crate::GraphicsSchemeImpl<T>,
++    socket: &redox_scheme::Socket,
++    display_name: &str,
++) {
++    let render_name = format!(
++        "gpu.{}",
++        display_name
++            .strip_prefix("display.")
++            .unwrap_or(display_name)
++    );
++    let root = inner
++        .new_handle_fd(
++            socket,
++            GraphicsResource::RenderRoot(RenderRoot(PhantomData)),
++            0,
++        )
++        .expect("failed to create the graphics render root");
++    // As redox_scheme's register_scheme_inner does for a root number.
++    let namespace = libredox::call::getns().expect("failed to get the namespace");
++    libredox::call::register_scheme_to_ns(namespace, &render_name, root.into_raw())
++        .expect("failed to register the graphics render root");
++    log::info!("{render_name}: render handles for {display_name}");
++}
+diff --git a/drivers/graphics/virtio-gpud/src/main.rs b/drivers/graphics/virtio-gpud/src/main.rs
+index b4b394ed..cecbe6a4 100644
+--- a/drivers/graphics/virtio-gpud/src/main.rs
++++ b/drivers/graphics/virtio-gpud/src/main.rs
+@@ -32,6 +32,7 @@ use event::{user_data, EventQueue};
+ use pcid_interface::PciFunctionHandle;
+ use virtio_core::utils::VolatileCell;
+ 
++mod render;
+ mod scheme;
+ 
+ struct FrameWake(File);
+@@ -50,11 +51,11 @@ impl Wake for FrameWake {
+     }
+ }
+ 
+-//const VIRTIO_GPU_F_VIRGL: u32 = 0;
++const VIRTIO_GPU_F_VIRGL: u32 = 0;
+ const VIRTIO_GPU_F_EDID: u32 = 1;
+ //const VIRTIO_GPU_F_RESOURCE_UUID: u32 = 2;
+-//const VIRTIO_GPU_F_RESOURCE_BLOB: u32 = 3;
+-//const VIRTIO_GPU_F_CONTEXT_INIT: u32 = 4;
++const VIRTIO_GPU_F_RESOURCE_BLOB: u32 = 3;
++const VIRTIO_GPU_F_CONTEXT_INIT: u32 = 4;
+ 
+ const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
+ const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
+@@ -540,6 +541,20 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+     if has_edid {
+         device.transport.ack_driver_feature(VIRTIO_GPU_F_EDID);
+     }
++    // FerrionOS: the 3D features render handles need (render.rs), each when the device offers it.
++    let ack = |feature| {
++        let offered = device.transport.check_device_feature(feature);
++        if offered {
++            device.transport.ack_driver_feature(feature);
++        }
++        offered
++    };
++    let features = render::Features {
++        virgl: ack(VIRTIO_GPU_F_VIRGL),
++        resource_blob: ack(VIRTIO_GPU_F_RESOURCE_BLOB),
++        context_init: ack(VIRTIO_GPU_F_CONTEXT_INIT),
++    };
++    log::info!("virtio-gpu: {features:?}");
+     device.transport.finalize_features();
+ 
+     // Queue for sending control commands.
+@@ -573,6 +588,7 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+         cursor_queue.clone(),
+         device.transport.clone(),
+         has_edid,
++        features,
+         frame_waker,
+     )?;
+     daemon.ready();
+diff --git a/drivers/graphics/virtio-gpud/src/render.rs b/drivers/graphics/virtio-gpud/src/render.rs
+new file mode 100644
+index 00000000..540c0200
+--- /dev/null
++++ b/drivers/graphics/virtio-gpud/src/render.rs
+@@ -0,0 +1,311 @@
++//! The 3D side of virtio-gpu that render handles use (FerrionOS): the virgl, blob and
++//! context-init features, the capsets read from the device at start, and contexts. Linux's
++//! `drivers/gpu/drm/virtio/virtgpu_vq.c` (MIT) is the reference for the commands.
++//!
++//! The host-visible window, blobs and submissions come with slice GP4 of the GPU plan. Until
++//! then the device's shared memory region is not mapped: virtio-core skips that capability.
++
++use std::collections::BTreeSet;
++use std::fmt;
++use std::sync::Arc;
++
++use common::dma::Dma;
++use driver_graphics::{RenderDevice, RenderFeatures};
++use syscall::{EINVAL, EIO, ENOMEM};
++use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
++use virtio_core::transport::{Error, Queue};
++
++use crate::{CommandTy, ControlHeader};
++
++/// The features the driver acknowledged.
++#[derive(Clone, Copy, Debug)]
++pub struct Features {
++    pub virgl: bool,
++    pub resource_blob: bool,
++    pub context_init: bool,
++}
++
++/// Bounds on what the device reports, for robustness: Linux's `MAX_CAPSET_ID` gives 64
++/// capsets at most; no capset today is near 64 KiB (Venus's has 160 bytes, virgl's second
++/// 1408) or has more than three versions.
++const MAX_CAPSETS: u32 = 64;
++const MAX_CAPSET_ID: u32 = 63;
++const MAX_CAPSET_SIZE: u32 = 64 * 1024;
++const MAX_CAPSET_VERSIONS: u32 = 8;
++
++/// Contexts alive at once. Each Venus context is a worker on the host, so a bound keeps one
++/// client from making the host start them without end; slice GP12 sets quotas per handle.
++const MAX_CONTEXTS: usize = 256;
++
++/// The header of a response, read with its type as a number, so that a type the driver does
++/// not know is never taken for a `CommandTy`.
++#[derive(Default)]
++#[repr(C)]
++struct ResponseHeader {
++    ty: u32,
++    flags: u32,
++    fence_id: u64,
++    ctx_id: u32,
++    ring_index: u8,
++    padding: [u8; 3],
++}
++
++const _: () = assert!(size_of::<ResponseHeader>() == size_of::<ControlHeader>());
++
++#[repr(C)]
++struct GetCapsetInfo {
++    header: ControlHeader,
++    capset_index: u32,
++    padding: u32,
++}
++
++#[derive(Default)]
++#[repr(C)]
++struct CapsetInfo {
++    header: ResponseHeader,
++    capset_id: u32,
++    capset_max_version: u32,
++    capset_max_size: u32,
++    padding: u32,
++}
++
++#[repr(C)]
++struct GetCapset {
++    header: ControlHeader,
++    capset_id: u32,
++    capset_version: u32,
++}
++
++#[repr(C)]
++struct CtxCreate {
++    header: ControlHeader,
++    nlen: u32,
++    context_init: u32,
++    debug_name: [u8; 64],
++}
++
++struct Capset {
++    id: u32,
++    /// The capset's bytes at each version from 0 on.
++    versions: Vec<Vec<u8>>,
++}
++
++pub struct VirtGpuRender {
++    control_queue: Arc<Queue>,
++    features: Features,
++    capsets: Vec<Capset>,
++    contexts: BTreeSet<u32>,
++    next_context: u32,
++}
++
++impl fmt::Debug for VirtGpuRender {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("VirtGpuRender")
++            .field("features", &self.features)
++            .field("capset_ids", &self.capset_ids())
++            .field("contexts", &self.contexts)
++            .finish()
++    }
++}
++
++fn errno(error: Error) -> syscall::Error {
++    syscall::Error::new(match error {
++        Error::SyscallError(error) => error.errno(),
++        _ => EIO,
++    })
++}
++
++/// Sends one command whose answer is a bare header, and returns the answer's type.
++async fn send<T: Send + 'static>(queue: &Queue, request: T) -> Result<u32, Error> {
++    let request = Dma::new(request)?;
++    let header = Dma::new(ResponseHeader::default())?;
++    let command = ChainBuilder::new()
++        .chain(Buffer::new(request))
++        .chain(Buffer::new(header).flags(DescriptorFlags::WRITE_ONLY))
++        .build();
++    let (_, [_, header]) = queue.send(command).await.into_parts();
++    Ok(header.into_inner::<Dma<ResponseHeader>>().ty)
++}
++
++/// Capset `index` of the device: its number and its bytes at each version, or None when the
++/// device's answer is out of bounds.
++async fn read_capset(queue: &Queue, index: u32) -> Result<Option<Capset>, Error> {
++    let request = Dma::new(GetCapsetInfo {
++        header: ControlHeader::with_ty(CommandTy::GetCapsetInfo),
++        capset_index: index,
++        padding: 0,
++    })?;
++    let info = Dma::new(CapsetInfo::default())?;
++    let command = ChainBuilder::new()
++        .chain(Buffer::new(request))
++        .chain(Buffer::new(info).flags(DescriptorFlags::WRITE_ONLY))
++        .build();
++    let (written, [_, info]) = queue.send(command).await.into_parts();
++    let info: Dma<CapsetInfo> = info.into_inner();
++    if (written as usize) < size_of::<CapsetInfo>()
++        || info.header.ty != CommandTy::RespOkCapsetInfo as u32
++    {
++        log::warn!(
++            "virtio-gpu: capset {index}: the device answered type {:#x}",
++            info.header.ty
++        );
++        return Ok(None);
++    }
++    let (id, max_size) = (info.capset_id, info.capset_max_size);
++    if id > MAX_CAPSET_ID || max_size == 0 || max_size > MAX_CAPSET_SIZE {
++        log::warn!("virtio-gpu: capset {index}: id {id}, {max_size} bytes, out of bounds");
++        return Ok(None);
++    }
++    let mut versions = Vec::new();
++    for version in 0..=info.capset_max_version.min(MAX_CAPSET_VERSIONS - 1) {
++        let request = Dma::new(GetCapset {
++            header: ControlHeader::with_ty(CommandTy::GetCapset),
++            capset_id: id,
++            capset_version: version,
++        })?;
++        let header_len = size_of::<ResponseHeader>();
++        let response =
++            unsafe { Dma::<[u8]>::zeroed_slice(header_len + max_size as usize)?.assume_init() };
++        let command = ChainBuilder::new()
++            .chain(Buffer::new(request))
++            .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++        let (written, [_, response]) = queue.send(command).await.into_parts();
++        let response: Dma<[u8]> = response.into_inner();
++        let ty = u32::from_ne_bytes(response[..4].try_into().unwrap());
++        if ty != CommandTy::RespOkCapset as u32 || (written as usize) < header_len {
++            log::warn!(
++                "virtio-gpu: capset {id} version {version}: the device answered type {ty:#x}"
++            );
++            break;
++        }
++        let len = (written as usize - header_len).min(max_size as usize);
++        versions.push(response[header_len..header_len + len].to_vec());
++    }
++    if versions.is_empty() {
++        return Ok(None);
++    }
++    log::info!(
++        "virtio-gpu: capset {id}, versions 0 to {}, {max_size} bytes",
++        versions.len() - 1
++    );
++    Ok(Some(Capset { id, versions }))
++}
++
++impl VirtGpuRender {
++    /// The render side of a device that offers 3D, with the capsets it reports; None for a 2D
++    /// device.
++    pub fn new(control_queue: Arc<Queue>, features: Features, num_capsets: u32) -> Option<Self> {
++        if !features.virgl {
++            return None;
++        }
++        if num_capsets > MAX_CAPSETS {
++            log::warn!("virtio-gpu: {num_capsets} capsets reported, reading {MAX_CAPSETS}");
++        }
++        let mut capsets: Vec<Capset> = Vec::new();
++        futures::executor::block_on(async {
++            for index in 0..num_capsets.min(MAX_CAPSETS) {
++                match read_capset(&control_queue, index).await {
++                    Ok(Some(capset)) if capsets.iter().all(|known| known.id != capset.id) => {
++                        capsets.push(capset)
++                    }
++                    Ok(_) => {}
++                    Err(error) => log::warn!("virtio-gpu: capset {index}: {error:?}"),
++                }
++            }
++        });
++        Some(Self {
++            control_queue,
++            features,
++            capsets,
++            contexts: BTreeSet::new(),
++            next_context: 1,
++        })
++    }
++
++    /// A context number no live context has; 0 is never one.
++    fn allocate_context(&mut self) -> u32 {
++        loop {
++            let id = self.next_context;
++            self.next_context = self.next_context.checked_add(1).unwrap_or(1);
++            if id != 0 && !self.contexts.contains(&id) {
++                return id;
++            }
++        }
++    }
++}
++
++impl RenderDevice for VirtGpuRender {
++    fn driver_info(&self) -> (&'static [u8], &'static [u8], [i32; 3]) {
++        // Linux's virtio-gpu driver: Mesa's virtio drivers accept no other name, and version 0.
++        (b"virtio_gpu", b"virtio GPU", [0, 1, 0])
++    }
++
++    fn features(&self) -> RenderFeatures {
++        RenderFeatures {
++            three_d: self.features.virgl,
++            resource_blob: self.features.resource_blob,
++            context_init: self.features.context_init,
++            host_visible: false,
++        }
++    }
++
++    fn capset_ids(&self) -> u64 {
++        self.capsets
++            .iter()
++            .fold(0, |ids, capset| ids | (1 << capset.id))
++    }
++
++    fn capset(&self, id: u32, version: u32) -> Option<&[u8]> {
++        let capset = self.capsets.iter().find(|capset| capset.id == id)?;
++        capset.versions.get(version as usize).map(Vec::as_slice)
++    }
++
++    fn create_context(&mut self, capset_id: u32, name: &[u8]) -> syscall::Result<u32> {
++        if self.contexts.len() >= MAX_CONTEXTS {
++            return Err(syscall::Error::new(ENOMEM));
++        }
++        let id = self.allocate_context();
++        let mut command = CtxCreate {
++            header: ControlHeader {
++                ctx_id: id,
++                ..ControlHeader::with_ty(CommandTy::CtxCreate)
++            },
++            nlen: 0,
++            context_init: capset_id,
++            debug_name: [0; 64],
++        };
++        // The name field keeps a terminating zero, as Linux's strscpy leaves one.
++        let len = name.len().min(command.debug_name.len() - 1);
++        command.debug_name[..len].copy_from_slice(&name[..len]);
++        command.nlen = len as u32;
++        let ty = futures::executor::block_on(send(&self.control_queue, command)).map_err(errno)?;
++        if ty != CommandTy::RespOkNodata as u32 {
++            log::warn!("virtio-gpu: context {id}: the device answered type {ty:#x}");
++            return Err(syscall::Error::new(
++                if ty == CommandTy::RespErrOutOfMemory as u32 {
++                    ENOMEM
++                } else {
++                    EINVAL
++                },
++            ));
++        }
++        self.contexts.insert(id);
++        Ok(id)
++    }
++
++    fn destroy_context(&mut self, context_id: u32) {
++        if !self.contexts.remove(&context_id) {
++            return;
++        }
++        let command = ControlHeader {
++            ctx_id: context_id,
++            ..ControlHeader::with_ty(CommandTy::CtxDestroy)
++        };
++        match futures::executor::block_on(send(&self.control_queue, command)) {
++            Ok(ty) if ty == CommandTy::RespOkNodata as u32 => {}
++            Ok(ty) => log::warn!("virtio-gpu: context {context_id}: destroy answered {ty:#x}"),
++            Err(error) => log::warn!("virtio-gpu: context {context_id}: destroy failed: {error:?}"),
++        }
++    }
++}
+diff --git a/drivers/graphics/virtio-gpud/src/scheme.rs b/drivers/graphics/virtio-gpud/src/scheme.rs
+index 80a864ea..88acff33 100644
+--- a/drivers/graphics/virtio-gpud/src/scheme.rs
++++ b/drivers/graphics/virtio-gpud/src/scheme.rs
+@@ -16,6 +16,7 @@ use driver_graphics::kms::plane::{KmsPlane, KmsPlaneDriver, KmsPlaneState};
+ use driver_graphics::kms::rc_object::KmsRcObjectRef;
+ use driver_graphics::{
+     Buffer as DrmBuffer, Damage, DumbBufferConfig, GraphicsAdapter, GraphicsScheme, PendingFrame,
++    RenderDevice,
+ };
+ use syscall::{EINVAL, EIO, ENOMEM, PAGE_SIZE};
+ use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
+@@ -114,6 +115,7 @@ pub struct VirtGpuAdapter<'a> {
+     hidden_cursor: Option<Arc<VirtGpuFramebuffer>>,
+     pending_frames: VecDeque<Pin<Box<dyn Future<Output = ()>>>>,
+     frame_waker: Waker,
++    render: Option<crate::render::VirtGpuRender>,
+ }
+ 
+ impl<'a> fmt::Debug for VirtGpuAdapter<'a> {
+@@ -570,6 +572,12 @@ impl<'a> GraphicsAdapter for VirtGpuAdapter<'a> {
+         Ok(Some(pending))
+     }
+ 
++    fn render_device(&mut self) -> Option<&mut dyn RenderDevice> {
++        self.render
++            .as_mut()
++            .map(|render| render as &mut dyn RenderDevice)
++    }
++
+     fn poll_pending(&mut self, cx: &mut Context<'_>) {
+         while let Some(frame) = self.pending_frames.front_mut() {
+             if frame.as_mut().poll(cx) == Poll::Pending {
+@@ -710,9 +718,15 @@ impl<'a> GpuScheme {
+         cursor_queue: Arc<Queue>,
+         transport: Arc<dyn Transport>,
+         has_edid: bool,
++        features: crate::render::Features,
+         waker: Waker,
+     ) -> Result<GraphicsScheme<VirtGpuAdapter<'a>>, Error> {
+         let (unref_tx, unref_rx) = mpsc::channel();
++        let render = crate::render::VirtGpuRender::new(
++            control_queue.clone(),
++            features,
++            config.num_capsets.get(),
++        );
+         let adapter = VirtGpuAdapter {
+             unique,
+             config,
+@@ -726,6 +740,7 @@ impl<'a> GpuScheme {
+             hidden_cursor: None,
+             pending_frames: VecDeque::new(),
+             frame_waker: waker.clone(),
++            render,
+         };
+ 
+         Ok(GraphicsScheme::new_with_waker(
