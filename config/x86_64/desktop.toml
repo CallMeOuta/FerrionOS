@@ -1,0 +1,18 @@
+# x86_64 desktop: the shared desktop image, with Nushell as the user's shell.
+#
+# Nushell builds only for x86_64 today (the other config/<arch>/ci.toml files
+# comment it out), so other architectures keep Ion. System scripts and root
+# stay on Ion. To run root and system scripts on Nushell too, put the same
+# include in a config/my_<name>.toml (ignored by git), add a [users.root] table
+# with the password, uid and gid from config/base.toml and shell = "/usr/bin/nu",
+# and start scripts with #!/usr/bin/nu.
+
+include = ["../desktop.toml"]
+
+[packages]
+nushell = {}
+
+# Replaces the table from config/base.toml whole, so the password is repeated.
+[users.user]
+password = ""
+shell = "/usr/bin/nu"
