@@ -22,8 +22,6 @@ dev-dependencies = [
 script = """
 DYNAMIC_INIT
 
-# For some reason, cook_configure breaks spectacularly on this
-# We will just copy instead
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 COOKBOOK_CONFIGURE="./configure"
 COOKBOOK_CONFIGURE_FLAGS+=(

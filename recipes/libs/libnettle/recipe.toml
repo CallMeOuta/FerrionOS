@@ -18,7 +18,6 @@ dependencies = [
 ]
 script = """
 DYNAMIC_INIT
-# TODO: sccache regression
 export CC="$GNU_TARGET-gcc"
 cookbook_configure
 """

@@ -3,7 +3,6 @@ description = "Python interpreter written in Rust"
 
 [source]
 git = "https://github.com/RustPython/RustPython"
-# newer rev requires 'bits/libc-header-start.h' for bindgen
 rev = "2025-10-13-main-51"
 shallow_clone = true
 patches = [

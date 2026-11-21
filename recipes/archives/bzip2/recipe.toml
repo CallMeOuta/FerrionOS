@@ -10,8 +10,6 @@ template = "custom"
 script = """
 DYNAMIC_INIT
 
-# This installs the static library regardless of config options
-# The static lib is preferred according to the README because it's faster
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 "${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}" \
     AR="${AR}" \
@@ -21,11 +19,8 @@ rsync -av --delete "${COOKBOOK_SOURCE}/" ./
     install
 
 if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
-# However, distros distribute libbz2 as well so we'll support it too
-# Linking the lib fails if we don't rebuild the objects from earlier
 "${COOKBOOK_MAKE}" clean
 
-# This DOES NOT build/clobber the binaries already built above
 "${COOKBOOK_MAKE}" -f Makefile-libbz2_so \
     -j"${COOKBOOK_MAKE_JOBS}" \
     AR="${AR}" \
@@ -38,7 +33,6 @@ ln -s "libbz2.so.1.0" "${COOKBOOK_STAGE}/usr/lib/libbz2.so.1"
 ln -s "libbz2.so.1.0" "${COOKBOOK_STAGE}/usr/lib/libbz2.so"
 fi
 
-# Change symlinks in usr/bin as relative
 find "${COOKBOOK_STAGE}/usr/bin" -type l | while read -r link; do
     target=$(readlink "$link")
     if [[ "$target" = /* ]]; then

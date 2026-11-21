@@ -1,15 +1,3 @@
-//! tpmd: the TPM 2.0 driver.
-//!
-//! It finds the TPM through the ACPI TPM2 table, maps its Command Response Buffer (CRB)
-//! registers, checks it answers TPM2_GetRandom and mixes the bytes into /scheme/rand/hardware.
-//! It registers no scheme name: it makes one
-//! handle to itself, starts `attestd` with that handle and keeps none, so `attestd` is the only
-//! process that can send the TPM a command, and no process can open another. When `attestd`
-//! closes the handle, tpmd exits. Without a usable TPM it starts `attestd` with no handle.
-//!
-//! The register layout is the CRB interface of the TCG PC Client Platform TPM Profile (PTP)
-//! specification; QEMU's `tpm-crb` device implements it.
-
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::Command;
@@ -29,13 +17,10 @@ use tpmd::{TPM_FD_ENV, service, tpm2};
 const PAGE_SIZE: usize = 4096;
 const RANDOM_BYTES: u16 = 32;
 
-/// ACPI TPM2 table: start method 7 is the Command Response Buffer interface.
 const START_METHOD_CRB: u32 = 7;
 
-// CRB registers of locality 0, as offsets from the start of the register page.
 const LOC_STATE: usize = 0x00;
 const LOC_CTRL: usize = 0x08;
-/// The control area the TPM2 table points at sits at this offset of the register page.
 const CTRL_AREA: usize = 0x40;
 const CTRL_REQ: usize = 0x40;
 const CTRL_STS: usize = 0x44;
@@ -55,16 +40,10 @@ const CTRL_REQ_GO_IDLE: u32 = 1 << 1;
 const CTRL_STS_ERROR: u32 = 1 << 0;
 const CTRL_START_INVOKE: u32 = 1 << 0;
 
-/// How long locality and state changes may take (PTP TIMEOUT_C is 200 ms; Linux allows more).
 const STATE_TIMEOUT: Duration = Duration::from_millis(750);
-/// How long one command from attestd may take. Key creation is the slowest command allowed.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long each command of the probe may take; init waits for tpmd while it probes, so a TPM
-/// that hangs must not hold up the boot for long.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The commands `attestd` may send. Everything that changes the TPM's state for later boots or
-/// other users (PCR extends, NV storage, hierarchy control, clearing) is refused.
 const ALLOWED_COMMANDS: [u32; 5] = [
     tpm2::CC_GET_RANDOM,
     tpm2::CC_PCR_READ,
@@ -73,10 +52,8 @@ const ALLOWED_COMMANDS: [u32; 5] = [
     tpm2::CC_FLUSH_CONTEXT,
 ];
 
-/// The number of the one handle tpmd hands out.
 const HANDLE: usize = 1;
 
-/// Maps `len` bytes of physical memory at `phys`, uncached.
 fn physmap(phys: u64, len: usize) -> Result<*mut u8, String> {
     let page = phys & !(PAGE_SIZE as u64 - 1);
     let offset = (phys - page) as usize;
@@ -97,7 +74,6 @@ fn physmap(phys: u64, len: usize) -> Result<*mut u8, String> {
     Ok(unsafe { (base as *mut u8).add(offset) })
 }
 
-/// The TPM2 table from acpid, if the firmware has one.
 fn tpm2_table() -> Result<Option<Vec<u8>>, String> {
     let dir = "/scheme/acpi/tables";
     let entries = std::fs::read_dir(dir).map_err(|e| format!("cannot list {dir}: {e}"))?;
@@ -117,7 +93,6 @@ fn tpm2_table() -> Result<Option<Vec<u8>>, String> {
 
 struct Crb {
     regs: *mut u8,
-    /// The locality registers exist when the control area sits at its PTP offset.
     has_locality: bool,
     cmd: *mut u8,
     cmd_size: usize,
@@ -142,8 +117,6 @@ impl Crb {
         }
         let page = ctrl_area & !(PAGE_SIZE as u64 - 1);
         let has_locality = ctrl_area - page == CTRL_AREA as u64;
-        // Without locality registers, map the control area alone and address it as if it sat
-        // at its PTP offset.
         let regs = if has_locality {
             physmap(page, PAGE_SIZE)?
         } else {
@@ -183,7 +156,6 @@ impl Crb {
         unsafe { ptr::write_volatile(self.regs.add(reg) as *mut u32, value) }
     }
 
-    /// Waits until `reg & mask == want`.
     fn wait(&self, reg: usize, mask: u32, want: u32, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -193,8 +165,6 @@ impl Crb {
             if Instant::now() >= deadline {
                 return false;
             }
-            // Yield like base's common::Timeout: after setrens(0, 0) tpmd has no time
-            // scheme to sleep on, and a sleep never returns there.
             std::thread::yield_now();
         }
     }
@@ -244,7 +214,6 @@ impl Crb {
         Ok(response)
     }
 
-    /// Checks the TPM answers, sending TPM2_Startup first if the firmware did not.
     fn probe(&self) -> Result<Vec<u8>, String> {
         self.request_locality()?;
         let mut response = self.transact(&tpm2::get_random(RANDOM_BYTES), PROBE_TIMEOUT)?;
@@ -268,7 +237,6 @@ impl Crb {
 
 struct TpmScheme {
     crb: Crb,
-    /// The response to the last command, until `attestd` reads it.
     response: Option<Vec<u8>>,
 }
 
@@ -339,7 +307,6 @@ impl SchemeSync for TpmScheme {
     }
 }
 
-/// Starts attestd with init's notification pipe and, if there is a TPM, the handle `tpm_fd`.
 fn start_attestd(tpm_fd: Option<usize>) -> Result<(), String> {
     let mut command = Command::new("/usr/bin/attestd");
     match tpm_fd {
@@ -352,8 +319,6 @@ fn start_attestd(tpm_fd: Option<usize>) -> Result<(), String> {
         .map_err(|e| format!("cannot start attestd: {e}"))
 }
 
-/// Passes the probe's bytes to randd before entering the null namespace. A short TPM response
-/// still contributes bytes, but randd only marks a hardware write seeded at 32 bytes.
 fn feed_randd(random: &mut [u8]) {
     let result = OpenOptions::new()
         .write(true)
@@ -405,7 +370,6 @@ fn main() {
         eprintln!("tpmd: {e}");
         std::process::exit(1);
     }
-    // attestd holds the notification pipe and the handle now; tpmd keeps neither.
     let _ = libredox::call::close(tpm_fd);
     let _ = libredox::call::close(notify);
     libredox::call::setrens(0, 0).expect("tpmd: cannot enter the null namespace");

@@ -1,10 +1,3 @@
-//! Serves a scheme of its own whose reads answer with fewer bytes than asked, and forks a child
-//! that reads from it into buffers at offsets inside a page and across page boundaries. Passes when every
-//! byte past the reply count keeps the pattern the probe wrote there. A changed byte is reported
-//! as zero, as the daemon's fill byte, or as foreign (neither, so it came from somewhere else).
-//!
-//! The daemon answers a read at offset N with min(N, len) bytes of FILL, so the probe chooses the
-//! reply count through pread's offset.
 
 use std::process::exit;
 
@@ -70,7 +63,6 @@ fn serve(socket: Socket) -> ! {
     }
 }
 
-/// The byte the probe writes at `index` of its buffer: never zero and never FILL.
 fn pattern(index: usize) -> u8 {
     match (index.wrapping_mul(131).wrapping_add(17) % 251) as u8 {
         0 => 0x5A,
@@ -94,9 +86,6 @@ fn main() {
             exit(2);
         }
     };
-    // The reader must be another process: in the daemon's own address space the kernel maps
-    // nothing and short reads never reach the head and tail copies. The scheme belongs to the
-    // process that created it, so this process serves it and a forked child reads.
     let child = unsafe { libc::fork() };
     if child < 0 {
         println!("scheme-short-read-probe: FAIL setup fork");
@@ -124,19 +113,18 @@ fn reader(cap: usize) -> ! {
         }
     };
 
-    // (offset of the buffer in its first page, requested length, reply count)
     let cases: &[(usize, usize, usize)] = &[
-        (100, 64, 8),                       // inside one page
-        (100, 64, 0),                       // empty reply
-        (PAGE - 8, 16, 8),                  // u64 pair across a boundary, reply ends at it
-        (4000, 200, 50),                    // spans a boundary, reply ends in the head
-        (4000, 200, 150),                   // spans a boundary, reply ends in the tail
-        (4000, 2 * PAGE + 300, 60),         // head, a full page, tail; reply ends in the head
-        (4000, 2 * PAGE + 300, 5000),       // reply ends in the full page
-        (4000, 2 * PAGE + 300, 2 * PAGE + 150), // reply ends in the tail
-        (0, PAGE + 100, 20),                // page-aligned start, reply ends in the first page
-        (0, PAGE + 100, PAGE + 40),         // page-aligned start, reply ends in the tail
-        (4000, 200, 200),                   // full reply, for contrast
+        (100, 64, 8),
+        (100, 64, 0),
+        (PAGE - 8, 16, 8),
+        (4000, 200, 50),
+        (4000, 200, 150),
+        (4000, 2 * PAGE + 300, 60),
+        (4000, 2 * PAGE + 300, 5000),
+        (4000, 2 * PAGE + 300, 2 * PAGE + 150),
+        (0, PAGE + 100, 20),
+        (0, PAGE + 100, PAGE + 40),
+        (4000, 200, 200),
     ];
 
     let mut failures = 0;

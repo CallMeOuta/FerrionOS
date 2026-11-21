@@ -1,6 +1,3 @@
-//! ferrion-run's policy: options, profiles, the rule for standard descriptors and the
-//! descriptor bookkeeping. Nothing here calls the OS; `launch` (FerrionOS only) does.
-
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -9,13 +6,10 @@ use serde::Deserialize;
 #[cfg(target_os = "redox")]
 pub mod launch;
 
-/// The schemes that carry the network. A namespace without them cannot open a socket.
 pub const NETWORK_SCHEMES: [&str; 4] = ["ip", "icmp", "tcp", "udp"];
 
-/// Where profiles live: `<PROFILE_DIR>/<program file name>.toml`.
 pub const PROFILE_DIR: &str = "/etc/ferrion-run";
 
-/// Exit status when ferrion-run refuses or fails before the program starts.
 pub const EXIT_REFUSED: i32 = 125;
 
 pub const USAGE: &str = "\
@@ -61,8 +55,6 @@ pub enum Command {
     Run(Options),
 }
 
-/// Parses the arguments after the program name. Options stop at `--` or at the first
-/// argument that is not an option; everything after PROGRAM goes to it unchanged.
 pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut args = args.into_iter();
     let mut no_network = false;
@@ -101,12 +93,10 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
 pub struct Profile {
     pub version: u32,
     pub network: bool,
-    /// Gives the program the `sudo` scheme back; never the default.
     #[serde(default)]
     pub allow_sudo: bool,
 }
 
-/// The profile file for PROGRAM, by its file name; None when PROGRAM names no file.
 pub fn profile_path(program: &OsStr) -> Option<PathBuf> {
     let name = Path::new(program).file_name()?;
     let mut file = name.to_owned();
@@ -114,8 +104,6 @@ pub fn profile_path(program: &OsStr) -> Option<PathBuf> {
     Some(Path::new(PROFILE_DIR).join(file))
 }
 
-/// Parses a profile; an unknown key or version is an error, so a profile written for a
-/// later ferrion-run is refused instead of half applied.
 pub fn parse_profile(text: &str) -> Result<Profile, String> {
     let profile: Profile = toml::from_str(text).map_err(|e| e.message().to_owned())?;
     if profile.version != 1 {
@@ -127,8 +115,6 @@ pub fn parse_profile(text: &str) -> Result<Profile, String> {
     Ok(profile)
 }
 
-/// The schemes the program receives: the caller's own, less the network when it is
-/// withheld, and less `sudo` unless a profile grants it.
 pub fn child_schemes(caller: &[String], withhold_network: bool, allow_sudo: bool) -> Vec<String> {
     caller
         .iter()
@@ -138,7 +124,6 @@ pub fn child_schemes(caller: &[String], withhold_network: bool, allow_sudo: bool
         .collect()
 }
 
-/// The scheme a descriptor's path names: `/scheme/<name>/...` or `<name>:...`.
 pub fn scheme_of_path(path: &str) -> Option<&str> {
     let name = match path.strip_prefix("/scheme/") {
         Some(rest) => rest.split('/').next()?,
@@ -147,7 +132,6 @@ pub fn scheme_of_path(path: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Schemes whose descriptors are sockets or connections to another process.
 const SOCKET_SCHEMES: [&str; 7] = [
     "ip",
     "icmp",
@@ -157,12 +141,8 @@ const SOCKET_SCHEMES: [&str; 7] = [
     "uds_dgram",
     "chan",
 ];
-/// Schemes a standard descriptor may come from: terminals, pipes and the null devices.
 const STDIO_SCHEMES: [&str; 5] = ["pty", "pipe", "debug", "null", "zero"];
 
-/// Whether a standard descriptor whose path is `path` may pass to the program. A socket
-/// and a file on disk are refused, and so is any scheme not known to be a terminal, a
-/// pipe or a null device.
 pub fn check_stdio(fd: usize, path: &str) -> Result<(), String> {
     let Some(scheme) = scheme_of_path(path) else {
         return Err(format!("descriptor {fd} has an unreadable path {path:?}"));
@@ -181,7 +161,6 @@ pub fn check_stdio(fd: usize, path: &str) -> Result<(), String> {
     }
 }
 
-/// Parses a file-table snapshot: one little-endian u64 descriptor number after another.
 pub fn parse_snapshot(bytes: &[u8]) -> Result<Vec<usize>, String> {
     if !bytes.len().is_multiple_of(8) {
         return Err(format!(
@@ -198,7 +177,6 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<Vec<usize>, String> {
         .collect()
 }
 
-/// Descriptors in `after` that were not in `before`.
 pub fn new_handles(before: &[usize], after: &[usize]) -> Vec<usize> {
     after
         .iter()
@@ -207,7 +185,6 @@ pub fn new_handles(before: &[usize], after: &[usize]) -> Vec<usize> {
         .collect()
 }
 
-/// Descriptors of `table` to close: all but `keep` and the standard three.
 pub fn to_close(table: &[usize], keep: &[usize]) -> Vec<usize> {
     table
         .iter()

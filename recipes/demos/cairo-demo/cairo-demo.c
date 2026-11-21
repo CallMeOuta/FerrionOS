@@ -35,12 +35,12 @@ travel_path (cairo_t *cr)
   cairo_pattern_destroy (pat);
 
 
-  double x         = 305.6,        /* parameters like cairo_rectangle */
+  double x         = 305.6,
         y         = 25.6,
         width         = 204.8,
         height        = 204.8,
-        aspect        = 1.0,     /* aspect ratio */
-        corner_radius = height / 10.0;   /* and corner curvature radius */
+        aspect        = 1.0,
+        corner_radius = height / 10.0;
 
   double radius = corner_radius / aspect;
   double degrees = M_PI / 180.0;
@@ -62,14 +62,13 @@ travel_path (cairo_t *cr)
   double xc = 128.0;
   double yc = 128.0;
   radius = 100.0;
-  double angle1 = 45.0  * (M_PI/180.0);  /* angles are specified */
-  double angle2 = 180.0 * (M_PI/180.0);  /* in radians           */
+  double angle1 = 45.0  * (M_PI/180.0);
+  double angle2 = 180.0 * (M_PI/180.0);
 
   cairo_set_line_width (cr, 10.0);
   cairo_arc (cr, xc, yc, radius, angle1, angle2);
   cairo_stroke (cr);
 
-  /* draw helping lines */
   cairo_set_source_rgba (cr, 1, 0.2, 0.2, 0.6);
   cairo_set_line_width (cr, 6.0);
 
@@ -97,7 +96,6 @@ main(int argc, char *argv[])
 {
   void * window = orb_window_new(-1, -1, width, height, "CairoDemo");
   
-  //Cairo
   uint32_t * frame_data = orb_window_data(window);
   cairo_surface_t *surface = cairo_image_surface_create_for_data((uint8_t*) frame_data, CAIRO_FORMAT_ARGB32, width, height, cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, width));
   cairo_create(surface);
@@ -124,6 +122,6 @@ main(int argc, char *argv[])
    orb_events_destroy(event_iter);
   }
   orb_window_destroy(window);
-  return 0;             /* ANSI C requires main to return int. */
+  return 0;
 }
 

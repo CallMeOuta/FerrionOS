@@ -12,12 +12,7 @@ dependencies = ["gettext", "ncursesw", "pcre"]
 script = """
 DYNAMIC_INIT
 
-# Without PREFIX, fish compiles in ~/.local/share/fish/install as its data
-# directory, cannot find the scripts installed below and refuses to read its
-# configuration.
 export PREFIX=/usr SYSCONFDIR=/etc
-# The default feature embed-data builds the scripts into the binary; they are
-# installed as files below instead.
 cookbook_cargo --no-default-features
 mkdir -p "${COOKBOOK_STAGE}/usr/share/fish"
 rsync -a "${COOKBOOK_SOURCE}/share/" "${COOKBOOK_STAGE}/usr/share/fish/"

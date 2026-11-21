@@ -1,6 +1,5 @@
 #include <dlfcn.h>
 
-/* This value is observable only after the nested library's constructor ran. */
 static int initialized;
 
 __attribute__((constructor)) static void initialize(void)

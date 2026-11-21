@@ -1,7 +1,3 @@
-/* Exercises public descriptor APIs, not scheme paths or a libc-private fd map.
- * Run directly or through scripts/vm-test.py fd-primitives. Each pass marker
- * names a completed contract; signalfd is deliberately outside this probe.
- * An alarm bounds blocking reads, readiness waits, fork and exec failures. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -112,12 +108,10 @@ static void eventfd_counter(void) {
     ERROR(write(fd, &value, sizeof value), EAGAIN);
     CHECK(read_count(fd) == UINT64_MAX - 1);
     empty(fd);
-    /* Reads may have extra capacity but still transfer exactly one u64. */
     uint64_t buffer[2] = {0, UINT64_MAX};
     write_count(fd, 11);
     CHECK(read(fd, buffer, sizeof buffer) == (ssize_t)sizeof buffer[0]);
     CHECK(buffer[0] == 11);
-    /* Writes require exactly one u64; rejection must not change the counter. */
     ERROR(write(fd, buffer, sizeof buffer), EINVAL);
     empty(fd);
     CHECK(close(fd) == 0);
@@ -151,7 +145,6 @@ static void eventfd_readiness(void) {
     poll_events(fd, POLLIN, 0);
     CHECK(read_count(fd) == UINT64_MAX - 1);
     poll_events(fd, POLLOUT, 0);
-    /* Keep poll's registration snapshots out of the persistent epoll queue. */
     int ep = watch(fd, EPOLLIN);
     epoll_events(ep, fd, 0, 0);
     write_count(fd, 5);
@@ -236,9 +229,6 @@ static void timerfd_errors(void) {
     value = timer_value(0, 0, 0);
     CHECK(clock_gettime(CLOCK_REALTIME, &value.it_value) == 0);
     value.it_value.tv_sec += 60;
-    /* FerrionOS explicitly refuses this unsupported clock-change contract.
-     * The Linux host comparison accepts the same request; neither path claims
-     * to test clock-change delivery or changes the machine's realtime clock. */
 #ifdef __redox__
     ERROR(timerfd_settime(fd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &value, NULL), EINVAL);
     CHECK(timerfd_gettime(fd, &current) == 0);
@@ -271,8 +261,6 @@ static void timerfd_clock(clockid_t clock, const char *marker) {
                 }
             }
             CHECK(timerfd_settime(fd, absolute ? TFD_TIMER_ABSTIME : 0, &value, NULL) == 0);
-            /* Both APIs wait for a future expiration, without poll registration
-             * adding snapshots to an existing epoll queue. */
             if (use_epoll) {
                 epoll_events(ep, fd, EPOLLIN, 2000);
                 CHECK(close(ep) == 0);
@@ -308,7 +296,6 @@ static void timerfd_rearm(void) {
     CHECK(timerfd_settime(fd, 0, &value, &old) == 0);
     CHECK(!is_zero(old.it_value) && old.it_value.tv_sec <= 60);
     CHECK(old.it_interval.tv_sec == 0 && old.it_interval.tv_nsec == 20000000L);
-    /* Let multiple periods elapse using the clock API independently of timerfd. */
     struct timespec delay = { .tv_sec = 0, .tv_nsec = 120000000L };
     while (nanosleep(&delay, &delay) < 0)
         CHECK(errno == EINTR);
@@ -326,7 +313,6 @@ static void timerfd_rearm(void) {
     value = timer_value(0, 20000000L, 0);
     CHECK(timerfd_settime(fd, 0, &value, NULL) == 0);
     poll_events(fd, POLLIN, 2000);
-    /* Rearming discards an unread expiration, rather than preserving readiness. */
     value = timer_value(60, 0, 0);
     CHECK(timerfd_settime(fd, 0, &value, &old) == 0);
     CHECK(is_zero(old.it_value));

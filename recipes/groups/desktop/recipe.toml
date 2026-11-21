@@ -1,4 +1,3 @@
-# desktop variant meta-package
 [package]
 dependencies = [
     "server",

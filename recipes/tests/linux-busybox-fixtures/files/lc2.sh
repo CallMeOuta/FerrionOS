@@ -1,7 +1,3 @@
-# The LC2 script of plans/linux-compat.md for `busybox sh`: a loop, pipelines, a subshell, a
-# here-document, file commands, a trap and background jobs. Its output is the same on every run
-# and machine: it prints no dates, sizes of directories, user names or host names. EXPECT_UID is
-# the caller's user id, so that `id -u` is checked without being printed.
 set -e
 d=$(mktemp -d); cd "$d"
 i=0; while [ $i -lt 5 ]; do echo "line$i" >> f; i=$((i+1)); done

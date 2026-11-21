@@ -1,4 +1,3 @@
-# Dynamic TLS regression: scripts/vm-test.py dlopen-tls --config firefox.
 [package]
 description = "Checks independent TLS from two dlopened libraries in a later thread"
 

@@ -31,7 +31,6 @@ fn monotonic_ns() -> io::Result<u64> {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: timestamp is writable storage for one timespec.
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timestamp) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -63,7 +62,6 @@ impl Mode {
     }
 
     fn pixel(self) -> [u8; 4] {
-        // wl_shm ARGB8888 is little-endian, with opaque premultiplied alpha.
         match self {
             Self::Normal => 0xffe68e0d_u32.to_le_bytes(),
             Self::Slow => 0xff3a9fd8_u32.to_le_bytes(),
@@ -104,7 +102,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut state = State::new(mode);
     connection.display().get_registry(&qh, ());
     queue.roundtrip(&mut state)?;
-    // Receive the capabilities and formats of the globals we just bound.
     queue.roundtrip(&mut state)?;
     state.create_window(&qh)?;
     connection.flush()?;
@@ -119,8 +116,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         Ok(())
     })();
 
-    // Destruction requests precede the final flush. On transport failure,
-    // disconnecting also releases the server's objects and shared mappings.
     drop(state);
     let cleanup = connection.flush();
     result?;
@@ -138,8 +133,6 @@ struct Window {
     xdg_surface: xdg_surface::XdgSurface,
     toplevel: xdg_toplevel::XdgToplevel,
     buffers: [Buffer; BUFFER_COUNT],
-    // Keep the anonymous backing file alive until all buffer destroy requests.
-    // Its contents never change while a compositor can be reading them.
     _shm_file: File,
 }
 
@@ -209,7 +202,6 @@ impl State {
             ),
             busy: false,
         });
-        // wl_buffer retains the pool's storage after wl_shm_pool.destroy.
         pool.destroy();
 
         let surface = compositor.create_surface(qh, ());
@@ -223,7 +215,6 @@ impl State {
         toplevel.set_min_size(WIDTH, HEIGHT);
         toplevel.set_max_size(WIDTH, HEIGHT);
         xdg_surface.set_window_geometry(0, 0, WIDTH, HEIGHT);
-        // The first xdg commit must have no buffer; configure permits mapping.
         surface.commit();
         self.window = Some(Window {
             surface,
@@ -247,11 +238,9 @@ impl State {
             return Ok(());
         };
         let Some(buffer) = window.buffers.iter_mut().find(|buffer| !buffer.busy) else {
-            // A frame callback is not a buffer release. Wait for both gates.
             return Ok(());
         };
         if self.mode == Mode::Slow {
-            // This delay belongs only to this independent client process.
             thread::sleep(Duration::from_millis(100));
         }
         window.surface.attach(Some(&buffer.proxy), 0, 0);
@@ -271,8 +260,6 @@ impl State {
                 Mode::Slow => "DD1_SLOW_CLIENT_READY",
             })?;
         }
-        // The VM joins this CLOCK_MONOTONIC sample to the compositor's present
-        // sample by client/frame. The client cannot claim that a frame displayed.
         writeln!(
             output,
             "DD1_CLIENT_COMMIT client={} frame={} monotonic_ns={}",
@@ -480,8 +467,6 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 state.running = false;
             }
         }
-        // Keymap's OwnedFd is dropped with the event; physical key reporting
-        // needs no mapping, modifiers, synthetic repeats, or XKB keycode offset.
     }
 }
 

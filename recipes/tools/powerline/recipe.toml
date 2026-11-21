@@ -9,7 +9,6 @@ template = "custom"
 script = """
 export CARGOFLAGS="--no-default-features --features chrono"
 
-# --locked uses a reallyyyy old redox_syscall and libc which fails
 ${COOKBOOK_CARGO} install \
     --path "${COOKBOOK_SOURCE}/${COOKBOOK_CARGO_PATH}" \
     --root "${COOKBOOK_STAGE}/usr" \

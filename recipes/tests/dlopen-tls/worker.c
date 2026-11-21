@@ -6,7 +6,6 @@ void *dlopen_tls_worker(void *argument)
 {
     (void)argument;
     if (dlopen_tls_pointer) {
-        /* A corrupted Rust Arc pointer reaches the same refcount write. */
         __sync_fetch_and_add(dlopen_tls_pointer, 1);
         printf("dlopen-tls: FAIL thread-tls-initial (%p)\n", (void *)dlopen_tls_pointer);
         return (void *)1;

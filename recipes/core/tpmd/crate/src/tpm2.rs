@@ -1,8 +1,3 @@
-//! The few TPM 2.0 commands FerrionOS sends, built and parsed by hand.
-//!
-//! Names and numbers follow the TCG TPM 2.0 Library specification, Part 2 (structures) and
-//! Part 3 (commands). Every integer on the wire is big-endian.
-
 use std::fmt;
 
 pub const ST_NO_SESSIONS: u16 = 0x8001;
@@ -18,11 +13,8 @@ pub const CC_GET_RANDOM: u32 = 0x017B;
 pub const CC_PCR_READ: u32 = 0x017E;
 
 pub const RC_SUCCESS: u32 = 0x000;
-/// TPM_RC_INITIALIZE: the firmware never sent TPM2_Startup.
 pub const RC_INITIALIZE: u32 = 0x100;
 
-/// The null hierarchy: its seed changes at every TPM reset, so a key made under it is new on
-/// every boot and links nothing across boots.
 const RH_NULL: u32 = 0x4000_0007;
 const RS_PW: u32 = 0x4000_0009;
 const SU_CLEAR: u16 = 0x0000;
@@ -33,20 +25,15 @@ const ALG_ECDSA: u16 = 0x0018;
 const ALG_ECC: u16 = 0x0023;
 const ECC_NIST_P256: u16 = 0x0003;
 
-/// fixedTPM, fixedParent, sensitiveDataOrigin, userWithAuth, noDA, restricted, sign.
 const AK_ATTRIBUTES: u32 = 0x0005_0472;
 
-/// Size of a command or response header: tag, size, command or response code.
 pub const HEADER_LEN: usize = 10;
 pub const SHA256_LEN: usize = 32;
-/// Largest qualifying data (nonce) a quote takes here: one SHA-256 digest.
 pub const MAX_NONCE_LEN: usize = SHA256_LEN;
 
 #[derive(Debug)]
 pub enum Error {
-    /// The TPM answered with this response code.
     Tpm(u32),
-    /// The response is shorter than its fields or does not match the request.
     Malformed(&'static str),
 }
 
@@ -61,17 +48,14 @@ impl fmt::Display for Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// The command code in a command's header, if the buffer holds a whole header.
 pub fn command_code(command: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(command.get(6..10)?.try_into().ok()?))
 }
 
-/// The size a command or response header declares.
 pub fn declared_size(buf: &[u8]) -> Option<usize> {
     Some(u32::from_be_bytes(buf.get(2..6)?.try_into().ok()?) as usize)
 }
 
-/// The response code in a response's header.
 pub fn response_code(response: &[u8]) -> Option<u32> {
     command_code(response)
 }
@@ -98,18 +82,14 @@ impl Command {
         self.0.extend_from_slice(&v.to_be_bytes());
         self
     }
-    /// A TPM2B: a 16-bit size, then the bytes.
     fn sized(self, bytes: &[u8]) -> Self {
         let mut this = self.u16(bytes.len() as u16);
         this.0.extend_from_slice(bytes);
         this
     }
-    /// The authorization area for one empty password: TPM_RS_PW, no nonce, no attributes and
-    /// an empty password.
     fn password_auth(self) -> Self {
         self.u32(9).u32(RS_PW).u16(0).u8(0).u16(0)
     }
-    /// TPML_PCR_SELECTION with one SHA-256 bank.
     fn pcr_selection(self, pcrs: &[u8]) -> Self {
         let select = pcr_bitmap(pcrs);
         self.u32(1)
@@ -126,7 +106,6 @@ impl Command {
     }
 }
 
-/// The 3-byte selection bitmap of PCRs 0 to 23.
 fn pcr_bitmap(pcrs: &[u8]) -> [u8; 3] {
     let mut select = [0u8; 3];
     for &pcr in pcrs {
@@ -147,48 +126,42 @@ pub fn get_random(count: u16) -> Vec<u8> {
         .finish()
 }
 
-/// TPM2_PCR_Read of the given PCRs (each below 24) in the SHA-256 bank.
 pub fn pcr_read(pcrs: &[u8]) -> Vec<u8> {
     Command::new(ST_NO_SESSIONS, CC_PCR_READ)
         .pcr_selection(pcrs)
         .finish()
 }
 
-/// TPM2_CreatePrimary of a restricted ECDSA P-256 signing key in the null hierarchy: an
-/// attestation key that exists for one boot.
 pub fn create_attestation_key() -> Vec<u8> {
     Command::new(ST_SESSIONS, CC_CREATE_PRIMARY)
         .u32(RH_NULL)
         .password_auth()
-        // inSensitive: size 4, empty userAuth, empty data.
         .u16(4)
         .u16(0)
         .u16(0)
-        // inPublic: TPMT_PUBLIC of 24 bytes.
         .u16(24)
         .u16(ALG_ECC)
         .u16(ALG_SHA256)
         .u32(AK_ATTRIBUTES)
-        .u16(0) // authPolicy
-        .u16(ALG_NULL) // symmetric
+        .u16(0)
+        .u16(ALG_NULL)
         .u16(ALG_ECDSA)
         .u16(ALG_SHA256)
         .u16(ECC_NIST_P256)
-        .u16(ALG_NULL) // kdf
-        .u16(0) // unique.x
-        .u16(0) // unique.y
-        .u16(0) // outsideInfo
-        .u32(0) // creationPCR: no PCRs
+        .u16(ALG_NULL)
+        .u16(0)
+        .u16(0)
+        .u16(0)
+        .u32(0)
         .finish()
 }
 
-/// TPM2_Quote of the given SHA-256 PCRs, signed by `key` over `nonce`.
 pub fn quote(key: u32, nonce: &[u8], pcrs: &[u8]) -> Vec<u8> {
     Command::new(ST_SESSIONS, CC_QUOTE)
         .u32(key)
         .password_auth()
         .sized(nonce)
-        .u16(ALG_NULL) // inScheme: the key's own scheme
+        .u16(ALG_NULL)
         .pcr_selection(pcrs)
         .finish()
 }
@@ -228,7 +201,6 @@ impl<'a> Reader<'a> {
         let len = self.u16()?;
         self.bytes(usize::from(len))
     }
-    /// A TPML_PCR_SELECTION that must select exactly `pcrs` in the SHA-256 bank.
     fn expect_selection(&mut self, pcrs: &[u8]) -> Result<()> {
         if self.u32()? != 1 || self.u16()? != ALG_SHA256 {
             return Err(Error::Malformed("unexpected PCR bank"));
@@ -251,7 +223,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Checks the header of a response to a command sent with `tag` and returns a reader past it.
 fn response(buf: &[u8], tag: u16) -> Result<Reader<'_>> {
     let mut r = Reader { buf, pos: 0 };
     let got_tag = r.u16()?;
@@ -269,7 +240,6 @@ fn response(buf: &[u8], tag: u16) -> Result<Reader<'_>> {
     Ok(r)
 }
 
-/// Checks a response that carries no parameters, such as that of TPM2_Startup.
 pub fn parse_empty(buf: &[u8]) -> Result<()> {
     response(buf, ST_NO_SESSIONS).map(|_| ())
 }
@@ -278,10 +248,9 @@ pub fn parse_get_random(buf: &[u8]) -> Result<Vec<u8>> {
     Ok(response(buf, ST_NO_SESSIONS)?.sized()?.to_vec())
 }
 
-/// The SHA-256 values of `pcrs`, in the order asked.
 pub fn parse_pcr_read(buf: &[u8], pcrs: &[u8]) -> Result<Vec<[u8; SHA256_LEN]>> {
     let mut r = response(buf, ST_NO_SESSIONS)?;
-    r.u32()?; // pcrUpdateCounter
+    r.u32()?;
     r.expect_selection(pcrs)?;
     let count = r.u32()? as usize;
     if count != pcrs.len() {
@@ -303,12 +272,10 @@ pub fn parse_pcr_read(buf: &[u8], pcrs: &[u8]) -> Result<Vec<[u8; SHA256_LEN]>> 
         .collect())
 }
 
-/// The handle of the key TPM2_CreatePrimary made.
 pub fn parse_create_primary(buf: &[u8]) -> Result<u32> {
     response(buf, ST_SESSIONS)?.u32()
 }
 
-/// What a quote attests, from its TPMS_ATTEST; the signature is not checked here.
 pub struct Quote {
     pub nonce: Vec<u8>,
     pub pcr_digest: Vec<u8>,
@@ -316,7 +283,7 @@ pub struct Quote {
 
 pub fn parse_quote(buf: &[u8], pcrs: &[u8]) -> Result<Quote> {
     let mut r = response(buf, ST_SESSIONS)?;
-    r.u32()?; // parameterSize
+    r.u32()?;
     let attest = r.sized()?;
     let mut a = Reader {
         buf: attest,
@@ -328,10 +295,10 @@ pub fn parse_quote(buf: &[u8], pcrs: &[u8]) -> Result<Quote> {
     if a.u16()? != ST_ATTEST_QUOTE {
         return Err(Error::Malformed("not a quote"));
     }
-    a.sized()?; // qualifiedSigner
+    a.sized()?;
     let nonce = a.sized()?.to_vec();
-    a.bytes(17)?; // clockInfo
-    a.bytes(8)?; // firmwareVersion
+    a.bytes(17)?;
+    a.bytes(8)?;
     a.expect_selection(pcrs)?;
     let pcr_digest = a.sized()?.to_vec();
     Ok(Quote { nonce, pcr_digest })
@@ -347,7 +314,6 @@ mod tests {
 
     #[test]
     fn get_random_matches_the_specification_example() {
-        // TPM2_GetRandom(8): tag 8001, size 12, code 017B, bytesRequested 8.
         assert_eq!(
             get_random(8),
             [0x80, 0x01, 0, 0, 0, 12, 0, 0, 1, 0x7B, 0, 8]
@@ -363,7 +329,6 @@ mod tests {
     fn create_primary_sizes_add_up() {
         let cmd = create_attestation_key();
         assert_eq!(declared_size(&cmd), Some(cmd.len()));
-        // header 10, handle 4, auth 13, inSensitive 6, inPublic 2 + 24, outsideInfo 2, creationPCR 4
         assert_eq!(cmd.len(), 10 + 4 + 13 + 6 + 26 + 2 + 4);
     }
 

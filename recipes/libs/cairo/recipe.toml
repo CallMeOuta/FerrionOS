@@ -17,7 +17,6 @@ dependencies = [
 template = "custom"
 script = """
 DYNAMIC_INIT
-#TODO: why are math defines missing?
 CFLAGS="${CFLAGS} -DM_SQRT2=1.41421356237309504880 -DM_LN2=0.69314718055994530942"
 cookbook_meson \
     -Dxcb=disabled \

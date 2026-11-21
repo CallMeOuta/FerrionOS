@@ -1,6 +1,3 @@
-//! tpm-pcrs: prints PCRs 7, 8 and 9 of the SHA-256 bank, as attestd reads them from the TPM.
-//! Root only: attestd serves no other user.
-
 const PATH: &str = "/scheme/attest/pcrs";
 
 fn main() {

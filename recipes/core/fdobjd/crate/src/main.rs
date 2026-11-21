@@ -73,7 +73,6 @@ struct Alarm {
     object: usize,
     generation: u64,
     uid: u32,
-    // Retain obsolete generations until they fire: closing cannot cancel a kernel timeout.
     _fd: Fd,
 }
 
@@ -378,8 +377,6 @@ impl SchemeSync for Objects<'_> {
                 } else {
                     now + value
                 };
-                // Reserve a representable next period before publishing an armed timer.
-                // A hostile interval must not make the asynchronous rearm terminate the daemon.
                 if deadline / NANO > i64::MAX as u128
                     || (deadline != 0 && (deadline + interval) / NANO > i64::MAX as u128)
                 {
@@ -408,7 +405,6 @@ impl SchemeSync for Objects<'_> {
                 }
                 Ok(0)
             }
-            // CANCEL_ON_SET needs a kernel clock-change notification, which does not exist yet.
             _ => Err(Error::new(EINVAL)),
         }
     }
@@ -582,7 +578,6 @@ impl Requests {
     }
 
     fn retry(&mut self, scheme: &mut Objects<'_>) -> Result<()> {
-        // Retrying may unblock an earlier writer after a later pending reader drains the counter.
         loop {
             let before = self.pending.len();
             for _ in 0..before {
@@ -603,8 +598,6 @@ fn run() -> Result<()> {
         .ok_or(Error::new(EINVAL))?;
     let notify = Fd::new(notify);
     let events = Fd::open("/scheme/event", (O_RDWR | O_CLOEXEC) as i32, 0)?;
-    // Opening the scheme pathname itself would open an empty clock name. Obtain
-    // its root capability from the namespace before dropping namespace access.
     let time_root = Fd::new(libredox::call::openat(
         libredox::call::getns()?,
         "/scheme/time",

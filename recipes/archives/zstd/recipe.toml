@@ -10,8 +10,6 @@ template = "custom"
 compiler = "no-lto"
 script = """
 DYNAMIC_STATIC_INIT
-# TODO: fPIC is the default on Linux but not on FerrionOS and
-#       required by llvm21 as zstd statically linked there
 export CPPFLAGS="$CPPFLAGS -fPIC"
 COOKBOOK_SOURCE="$COOKBOOK_SOURCE/build/cmake"
 if [ "${COOKBOOK_DYNAMIC}" != "1" ]; then

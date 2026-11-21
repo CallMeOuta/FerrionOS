@@ -1,12 +1,3 @@
-//! Sends the namespace manager, through the caller's own namespace handle, fork requests whose
-//! name length runs past the end of the request, then checks that it still answers. Run it as
-//! `user` in a login shell.
-//!
-//! Each line reads `nsmgr-bounds-probe: pass <check>: ...` or `nsmgr-bounds-probe: FAIL <check>:
-//! ...`. A refused request must fail with EINVAL; a well-formed fork and a listing of `/scheme`
-//! must still work afterwards. The exit status is 0 only when every line passes.
-//! `scripts/vm-test.py nsmgr-bounds` runs it on a booted image.
-
 use std::fs;
 use std::io;
 use std::process::ExitCode;
@@ -14,8 +5,6 @@ use std::process::ExitCode;
 use libredox::protocol::NsDup;
 use libredox::{call, errno};
 
-/// A fork request: its kind, then one name as a length and the bytes `file`. `len` is the
-/// length the request claims for that name.
 fn fork_request(len: usize) -> Vec<u8> {
     let mut request = (NsDup::ForkNs as usize).to_le_bytes().to_vec();
     request.extend_from_slice(&len.to_le_bytes());

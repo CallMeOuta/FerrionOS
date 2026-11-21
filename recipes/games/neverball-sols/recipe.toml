@@ -17,7 +17,6 @@ rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 
 "${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}" ENABLE_FS=stdio PKG_CONFIG="pkg-config" CC="cc" mapc sols
 
-# Copy assets
 mkdir -p "${COOKBOOK_STAGE}/usr/games/neverball"
 cp -rv data "${COOKBOOK_STAGE}/usr/games/neverball"
 """

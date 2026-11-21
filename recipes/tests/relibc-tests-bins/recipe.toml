@@ -12,7 +12,6 @@ if [ -n "$TESTBIN" ]; then
 "${COOKBOOK_REDOXER}" write-exec sh -c "cd /usr/share/relibc-tests; make run-once TESTBIN=bins_dynamic/$TESTBIN"
 fi
 
-# Create runner script
 mkdir -p "${COOKBOOK_STAGE}/usr/bin"
 cat > "${COOKBOOK_STAGE}/usr/bin/relibc-tests-runner" <<EOF
 #!/usr/bin/env bash

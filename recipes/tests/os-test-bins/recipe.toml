@@ -11,12 +11,10 @@ template = "custom"
 script = """
 DYNAMIC_INIT
 
-# Copy source to /home/user/os-test
 mkdir -p "${COOKBOOK_STAGE}/home/user/os-test"
 cd "${COOKBOOK_STAGE}/home/user/os-test"
 rsync -a "${COOKBOOK_SOURCE}/" "./"
 
-# Pre-compile tests for FerrionOS (OS= is os-test's name for this OS)
 make OS=Redox \
     CC="${CC_WRAPPER} ${GNU_TARGET}-gcc" \
     CFLAGS="-I${COOKBOOK_SYSROOT}/include" \
@@ -39,7 +37,6 @@ make OS=Redox \
     misc/html
 
 skips=(
-    # These tests hang
     basic/sys_wait/waitpid
     signal/ppoll-block-sleep-raise-write
     signal/ppoll-block-sleep-write-raise
@@ -56,7 +53,6 @@ done
 
 cp -t out -R out.known/redox
 
-# Create runner script
 mkdir -p "${COOKBOOK_STAGE}/usr/bin"
 cat > "${COOKBOOK_STAGE}/usr/bin/os-test-runner" <<EOF
 #!/usr/bin/env bash
@@ -77,8 +73,6 @@ dependencies = [
     "uutils-sed",
 ]
 
-# The installation order must be exact in order to satisfy Makefile requirement
-# Cookbook/installer install order is based on package name, while pkg is based on dependencies
 [[optional-packages]]
 name = "a-sources"
 files = [

@@ -16,8 +16,6 @@ fn framebuffer(backend: &mut Backend) -> Result<pixman::Image<'static, 'static>,
     let (width, height) = backend.dimensions();
     let stride = backend.stride() as usize;
     let pixels = backend.framebuffer_mut();
-    // The backend owns this allocation. The image is dropped before reconfigure/drop;
-    // no CPU writes or present call occurs while a renderer frame borrows the image.
     let image = unsafe { pixman::Image::from_raw_mut(pixman::FormatCode::A8R8G8B8, width as usize, height as usize, pixels.as_mut_ptr().cast(), stride, false) }?;
     Ok(image)
 }

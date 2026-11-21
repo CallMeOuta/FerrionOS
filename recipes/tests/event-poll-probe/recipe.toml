@@ -1,7 +1,3 @@
-# Run as `user`, event-poll-probe polls 200 empty pipes once each with a zero timeout and passes
-# when the kernel's count of event subscribers (/scheme/sys/stat) has not grown by them while the
-# pipes are still open (kernel ferrion-event-call-unsubscribe.patch). The crate lives in crate/
-# beside this file. config/x86_64/desktop.toml installs it; `scripts/vm-test.py event-poll` runs it.
 [package]
 description = "Checks that a zero-timeout poll that finds nothing leaves no event subscription behind"
 

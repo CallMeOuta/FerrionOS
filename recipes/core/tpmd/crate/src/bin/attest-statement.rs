@@ -1,7 +1,3 @@
-//! attest-statement: asks attestd for a statement about a nonce and prints it.
-//! The nonce is 1 to 32 bytes given in hexadecimal; without one, 32 random bytes are used.
-//! Root only: attestd serves no other user.
-
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -53,7 +49,6 @@ fn main() {
         .unwrap_or_else(|e| fail(&format!("cannot open {PATH}"), e));
     file.write_all(&nonce)
         .unwrap_or_else(|e| fail("cannot send the nonce", e));
-    // The write moved the file position past the nonce; the statement starts at 0.
     file.seek(SeekFrom::Start(0))
         .unwrap_or_else(|e| fail("cannot read the statement", e));
     let mut statement = String::new();

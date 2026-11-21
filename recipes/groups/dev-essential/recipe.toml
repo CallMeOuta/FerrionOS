@@ -1,9 +1,7 @@
 [package]
 dependencies = [
     "autotools",
-    #"bison", #TODO: fix compilation error
     "cmake",
-    #"debugedit", #TODO: compile and test
     "gcc13",
     "gcc13.cxx",
     "groff",

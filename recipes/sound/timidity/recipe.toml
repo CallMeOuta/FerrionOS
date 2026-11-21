@@ -15,7 +15,6 @@ COOKBOOK_CONFIGURE_FLAGS+=(
 )
 cookbook_configure
 
-# Create configuration files
 mkdir -pv "${COOKBOOK_STAGE}/etc/timidity"
 echo "soundfont /usr/share/generaluser-gs/generaluser-gs.sf2" >> "${COOKBOOK_STAGE}/etc/timidity/timidity.cfg"
 

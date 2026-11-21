@@ -10,7 +10,7 @@ dependencies = [
 script = """
 DYNAMIC_INIT
 export RUSTONIG_DYNAMIC_LIBONIG=1
-COOKBOOK_CARGO_FLAGS=() # remove --locked
+COOKBOOK_CARGO_FLAGS=()
 COOKBOOK_CARGO_PATH=examples/editor cookbook_cargo_build
 """
 

@@ -1,4 +1,3 @@
-# Native GTK display regression: scripts/vm-test.py gtk-window --config firefox-window.
 [package]
 description = "Checks a GTK window's pixels and normal exit on Orbital"
 

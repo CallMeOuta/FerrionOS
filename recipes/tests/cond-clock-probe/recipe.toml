@@ -1,4 +1,3 @@
-# Condition-clock regression: scripts/vm-test.py cond-clock --config firefox.
 [package]
 description = "Checks realtime and monotonic pthread condition deadlines"
 

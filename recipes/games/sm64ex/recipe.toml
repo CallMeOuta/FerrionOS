@@ -1,4 +1,3 @@
-# XXX: Do not distribute https://github.com/sm64pc/sm64ex/issues/89
 [source]
 git = "https://github.com/jackpot51/sm64ex.git"
 
@@ -14,10 +13,8 @@ script = """
 DYNAMIC_INIT
 
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
-# You must find your own ROM
 cp -v "${COOKBOOK_RECIPE}/baserom.us.z64" baserom.us.z64
 
-#TODO: do this in cook instead
 unset AR AS CC CXX LD NM OBJCOPY OBJDUMP RANLIB READELF STRIP
 
 export REDOX_CFLAGS="${CFLAGS} -I${COOKBOOK_SYSROOT}/include"

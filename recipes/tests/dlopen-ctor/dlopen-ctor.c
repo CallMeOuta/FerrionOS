@@ -3,7 +3,6 @@
 
 int dlopen_ctor_leaf_finalized;
 
-/* Resolved and called by the constructor through the real loader API. */
 int dlopen_ctor_host_value(void)
 {
     return 41;

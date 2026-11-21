@@ -1,6 +1,5 @@
 [source]
 git = "https://github.com/pop-os/cosmic-files.git"
-#TODO: compio and fork don't compile on FerrionOS anymore
 rev = "a9bc7c11e5e09a8b4d4463662ed597b95dde7f56"
 
 [build]
@@ -15,7 +14,6 @@ cookbook_cargo --no-default-features
 
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/ui/apps/"
 cp -v "${COOKBOOK_RECIPE}/manifest" "${COOKBOOK_STAGE}/usr/share/ui/apps/20_cosmic-files"
-#TODO: install with just?
 APPID="com.system76.CosmicFiles"
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/applications/"
 cp -v "${COOKBOOK_SOURCE}/res/${APPID}.desktop" "${COOKBOOK_STAGE}/usr/share/applications/"

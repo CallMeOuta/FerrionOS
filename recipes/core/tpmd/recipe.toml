@@ -1,11 +1,3 @@
-# FerrionOS's TPM 2.0 stack (security roadmap S20, first step). The crate lives in crate/
-# beside this file:
-#   tpmd              driver for a TPM on the CRB interface the ACPI TPM2 table names
-#   attestd           attestation service, the only holder of a handle to tpmd; serves
-#                     /scheme/attest to root
-#   tpm-pcrs          prints PCRs 7, 8 and 9 through attestd
-#   attest-statement  prints attestd's statement for a nonce
-# config/tpm.toml installs the package and starts tpmd at boot.
 [package]
 description = "TPM 2.0 driver and attestation service"
 

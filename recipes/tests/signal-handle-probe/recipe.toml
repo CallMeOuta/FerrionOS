@@ -1,7 +1,3 @@
-# A probe for the security roadmap's S12: run as `user`, signal-handle-probe has a child become
-# root through sudo and signals it with kill() and through a process handle; it passes when the
-# process manager applies kill()'s permission rule to both. The C source lives beside this file.
-# config/x86_64/desktop.toml installs it; `scripts/vm-test.py signal-handle` runs it.
 [package]
 description = "Checks that signals sent through process handles follow kill()'s permission rule"
 

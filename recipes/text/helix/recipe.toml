@@ -1,9 +1,6 @@
 [package]
 description = "\"Post-modern\" modal text editor for terminals"
 
-#TODO signal handling is disabled, it should be re-enabled when FerrionOS is ready
-#TODO language files are not built for fennel and crstalline langauges
-#TODO configuration - https://docs.helix-editor.com/install.html#configuring-helixs-runtime-files
 [source]
 git = "https://github.com/greyshaman/helix.git"
 branch = "port-to-redoxos"

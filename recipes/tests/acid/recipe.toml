@@ -7,7 +7,6 @@ script = """
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/acid"
 cp -rv "${COOKBOOK_SOURCE}"/* "${COOKBOOK_STAGE}/usr/share/acid"
 
-# Create runner script
 mkdir -p "${COOKBOOK_STAGE}/usr/bin"
 cat > "${COOKBOOK_STAGE}/usr/bin/acid-runner" <<EOF
 #!/usr/bin/ion

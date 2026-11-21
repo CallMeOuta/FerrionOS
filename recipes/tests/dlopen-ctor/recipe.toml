@@ -1,4 +1,3 @@
-# External loader regression: scripts/vm-test.py dlopen-ctor --config firefox.
 [package]
 description = "Checks dynamic loader reentry from shared library constructors"
 

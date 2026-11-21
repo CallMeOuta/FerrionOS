@@ -17,6 +17,5 @@ export CFLAGS="${CFLAGS} -I${COOKBOOK_SYSROOT}/include/ncursesw"
 
 "${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}"
 
-# Install
 "${COOKBOOK_MAKE}" DESTDIR="${COOKBOOK_STAGE}" PREFIX="" install
 """

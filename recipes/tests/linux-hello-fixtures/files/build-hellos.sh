@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Build and execute LC1's four Linux reference fixtures with the locked Debian tools.
 set -euo pipefail
 if [[ $# != 2 ]]; then
     echo "usage: $0 SOURCE_DIRECTORY EMPTY_OUTPUT_DIRECTORY" >&2

@@ -13,7 +13,6 @@ dependencies = [
     "openssl3",
     "xxhash",
 ]
-# TODO: libidn failing on libunistring (requires gnulib fseterr)
 configureflags = [
     "--disable-idn"
 ]

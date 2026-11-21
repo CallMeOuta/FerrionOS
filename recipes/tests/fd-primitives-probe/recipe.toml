@@ -1,6 +1,3 @@
-# Public eventfd/timerfd regression; static linkage exercises the image's relibc.
-# Run with scripts/vm-test.py fd-primitives on an image containing this package
-# and fdobjd. Signalfd is deferred and is not reported as passing by this probe.
 [package]
 description = "Checks eventfd and timerfd I/O, readiness and descriptor sharing"
 

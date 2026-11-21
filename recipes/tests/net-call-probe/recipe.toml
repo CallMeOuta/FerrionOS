@@ -1,9 +1,3 @@
-# Run as `user`, net-call-probe makes calls on tcp and udp sockets whose buffers are shorter than
-# the reply or whose sizes run past them, and reads datagrams into buffers shorter than they are,
-# then checks that the network stack still carries UDP and TCP over loopback (base
-# ferrion-net-bounds.patch). Run as root with the argument `mac`, it reads each network driver's
-# `mac` past its end. The crate lives in crate/ beside this file. config/x86_64/desktop.toml
-# installs it; `scripts/vm-test.py net-calls` and `net-hardening` run it.
 [package]
 description = "Checks that the network stack and drivers refuse calls whose buffers or offsets do not fit"
 

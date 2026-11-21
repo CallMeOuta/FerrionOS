@@ -7,12 +7,6 @@ rev = "58d1140176430f222ac0749c8b83349f2c4da916"
 
 [build]
 template = "custom"
-# FerrionOS's login background, wallpaper and launcher button (branding/orbdata/,
-# made by branding/generate.py) replace upstream's files of the same paths, and
-# Orbital's background behind every window becomes the same ground color
-# (branding/orbital-background.toml). They are images and generated text, which
-# a patch file cannot carry or would copy. After regenerating them, cook again
-# with `make cr.orbdata`: the cookbook only watches recipe.toml and source/.
 script = """
 cp -rv "${COOKBOOK_SOURCE}/"* "${COOKBOOK_STAGE}/"
 cp -rv "${COOKBOOK_ROOT}/branding/orbdata/"* "${COOKBOOK_STAGE}/"

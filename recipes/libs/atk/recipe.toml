@@ -12,7 +12,6 @@ GNU_CONFIG_GET config.sub
 dependencies = [
     "gettext",
     "glib",
-    #TODO "gobject-introspection",
     "libffi",
     "libiconv",
     "pcre2",

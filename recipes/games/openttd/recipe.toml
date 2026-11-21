@@ -3,7 +3,6 @@ description = "Open-source Transport Tycoon Deluxe engine reimplementation (requ
 
 [source]
 git = "https://github.com/OpenTTD/OpenTTD.git"
-#TODO: fix issues with this: branch = "release/1.8"
 rev = "231402fb4bea0a0d6a16cef90764d9e7aa699c53"
 shallow_clone = true
 patches = ["redox.patch"]
@@ -23,9 +22,6 @@ DYNAMIC_INIT
 
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 
-# Unsure if the bundle dir is necessary
-# Or why the installation differs
-# Could be unnecessary
 ./configure \\
     --build="$(gcc -dumpmachine)" \\
     --host="${TARGET}" \\

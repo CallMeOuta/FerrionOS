@@ -1,14 +1,3 @@
-//! Test helper for the ferrion-run check in scripts/vm-test.py; not meant for users.
-//!   ferrion-run-probe hold-socket HOST:PORT [--stdin] -- PROGRAM [ARGUMENT ...]
-//!       connects to HOST:PORT, keeps the socket open across exec as a posix descriptor and
-//!       as an upper (tagged) one, names both in FERRION_RUN_PROBE_FDS, and executes
-//!       PROGRAM; with --stdin the socket also becomes standard input
-//!   ferrion-run-probe use-fd PATH
-//!       sends an HTTP request for PATH on each descriptor in FERRION_RUN_PROBE_FDS and
-//!       exits 0 when one of them answered
-//!   ferrion-run-probe connect HOST:PORT PATH
-//!       opens a new connection and requests PATH; exits 0 when it answered
-
 #[cfg(target_os = "redox")]
 fn main() {
     std::process::exit(probe::main(std::env::args().skip(1).collect()));
@@ -74,7 +63,6 @@ mod probe {
                 return 2;
             }
         };
-        // Rust opens descriptors close-on-exec; clear it so the socket would pass.
         let upper =
             call::fcntl(fd, F_SETFD, 0).and_then(|_| call::fcntl(fd, F_DUPFD, UPPER_FDTBL_TAG));
         let upper = match upper {

@@ -1,20 +1,3 @@
-/*
- * linux-probe: a static Linux program with no C library, built with -nostdlib so that every
- * system call is a raw Linux x86-64 call. Run under `linux-run`, it checks the crossings LC1 of
- * plans/linux-compat.md requires beyond the four hello programs: registers, XMM state and the
- * FS base survive a call; a Linux signal handler gets a Linux frame (siginfo, ucontext with the
- * interrupted registers) on the right stack, sigreturn resumes the interrupted code, a blocked
- * signal waits for its unblock; a thread made by clone with CLONE_SETTLS sees its own FS base
- * and its exit clears the child-tid word; and it prints the cost of a cached call (getpid) and
- * of one that leaves the runtime (getppid). Lines read `linux-probe: pass NAME` or
- * `linux-probe: FAIL NAME`; the exit status is the number of failures.
- *
- * `linux-probe lc2` runs LC2's cases instead: a signal from another process reaches a thread
- * spinning in Linux code and one blocked in a call (EINTR without SA_RESTART, restarted with
- * it); tgkill reaches a spinning sibling thread; a fault becomes SIGSEGV with si_addr and
- * si_code and the handler can resume elsewhere; fork, vfork, wait4 statuses (exit and signal),
- * execve of /proc/self/exe, pipe2 and dup2.
- */
 typedef unsigned long u64;
 typedef long i64;
 
@@ -72,7 +55,6 @@ static void report(int ok, const char *name) {
     failures += !ok;
 }
 
-/* Linux's kernel sigaction for x86-64. */
 struct ksigaction { void *handler; u64 flags; void *restorer; u64 mask; };
 #define SA_SIGINFO 4
 #define SA_ONSTACK 0x08000000
@@ -98,7 +80,6 @@ static void handler(int sig, void *info, void *ucv) {
     got_code = si[2];
     got_rsp = sp;
     got_fs = rdfs();
-    /* uc_mcontext starts at offset 40; rip is its 17th word. */
     got_uc_rip = uc[5 + 16];
 }
 
@@ -108,7 +89,6 @@ static volatile int child_tid_word = 1;
 static volatile u64 child_fs, child_ran;
 static char child_stack[16384] __attribute__((aligned(16)));
 
-/* The child starts on child_stack with RAX 0 and the parent's registers otherwise. */
 static void child_main(void) {
     child_fs = rdfs();
     child_ran = 1;
@@ -141,13 +121,11 @@ static u64 now_ns(void) {
 void probe_main(void) {
     puts1("hello from linux-probe\n");
 
-    /* FS base: set, read back, survives a call. */
-    sc(SYS_arch_prctl, 0x1002 /* ARCH_SET_FS */, tls_main, 0);
+    sc(SYS_arch_prctl, 0x1002  , tls_main, 0);
     u64 fs = 0;
-    sc(SYS_arch_prctl, 0x1003 /* ARCH_GET_FS */, &fs, 0);
+    sc(SYS_arch_prctl, 0x1003  , &fs, 0);
     report(fs == (u64)tls_main && rdfs() == (u64)tls_main, "fs-base");
 
-    /* Callee-saved registers and XMM state across a call. */
     {
         u64 out[8];
         __asm__ volatile(
@@ -167,25 +145,22 @@ void probe_main(void) {
         report(ok, "registers-and-xmm");
     }
 
-    /* A handler gets a Linux frame. */
     struct ksigaction sa = {handler, SA_SIGINFO | SA_RESTORER, restore_rt, 0};
     report(sc6(SYS_rt_sigaction, SIGUSR1, (i64)&sa, 0, 8, 0, 0) == 0, "sigaction");
     i64 pid = sc(SYS_getpid, 0, 0, 0);
     sc(SYS_kill, pid, SIGUSR1, 0);
-    report(got_sig == SIGUSR1 && got_info_signo == SIGUSR1 && got_code == 0 /* SI_USER */, "signal-frame");
+    report(got_sig == SIGUSR1 && got_info_signo == SIGUSR1 && got_code == 0  , "signal-frame");
     report(got_fs == (u64)tls_main, "handler-fs");
     report(got_uc_rip != 0, "ucontext-rip");
 
-    /* Blocked until unblocked. */
     got_sig = 0;
     u64 set = 1ul << (SIGUSR1 - 1), old = 0;
-    sc6(SYS_rt_sigprocmask, 0 /* SIG_BLOCK */, (i64)&set, (i64)&old, 8, 0, 0);
+    sc6(SYS_rt_sigprocmask, 0  , (i64)&set, (i64)&old, 8, 0, 0);
     sc(SYS_tgkill, pid, sc(SYS_gettid, 0, 0, 0), SIGUSR1);
     int waited = got_sig == 0;
-    sc6(SYS_rt_sigprocmask, 1 /* SIG_UNBLOCK */, (i64)&set, 0, 8, 0, 0);
-    report(waited && got_sig == SIGUSR1 && got_code == -6 /* SI_TKILL */, "blocked-then-delivered");
+    sc6(SYS_rt_sigprocmask, 1  , (i64)&set, 0, 8, 0, 0);
+    report(waited && got_sig == SIGUSR1 && got_code == -6  , "blocked-then-delivered");
 
-    /* The alternate stack. */
     struct { void *sp; int flags; int pad; u64 size; } ss = {altstack, 0, 0, sizeof altstack};
     sc(SYS_sigaltstack, &ss, 0, 0);
     struct ksigaction sa2 = {handler, SA_SIGINFO | SA_RESTORER | SA_ONSTACK, restore_rt, 0};
@@ -195,20 +170,18 @@ void probe_main(void) {
     report(got_sig == SIGUSR2 && got_rsp > (u64)altstack && got_rsp <= (u64)altstack + sizeof altstack,
            "altstack");
 
-    /* A thread with its own FS base; its exit clears and wakes the child-tid word. */
-    u64 flags = 0x100 | 0x200 | 0x400 | 0x800 | 0x10000 /* VM FS FILES SIGHAND THREAD */
-                | 0x80000 /* SETTLS */ | 0x200000 /* CHILD_CLEARTID */ | 0x100000 /* PARENT_SETTID */;
+    u64 flags = 0x100 | 0x200 | 0x400 | 0x800 | 0x10000
+                | 0x80000   | 0x200000   | 0x100000  ;
     volatile int ptid = 0;
     i64 tid = do_clone(flags, child_stack + sizeof child_stack, &ptid, &child_tid_word, tls_child);
     for (int i = 0; i < 1000 && child_tid_word != 0; i++) {
         i64 ts[2] = {0, 10000000};
-        sc6(SYS_futex, (i64)&child_tid_word, 0 /* WAIT */, child_tid_word, (i64)ts, 0, 0);
+        sc6(SYS_futex, (i64)&child_tid_word, 0  , child_tid_word, (i64)ts, 0, 0);
     }
     report(tid > 0 && ptid == tid && child_ran && child_fs == (u64)tls_child && child_tid_word == 0,
            "clone-thread");
     report(rdfs() == (u64)tls_main, "fs-after-clone");
 
-    /* Costs. */
     enum { N = 100000 };
     u64 t0 = now_ns();
     for (int i = 0; i < N; i++) sc(SYS_getpid, 0, 0, 0);
@@ -225,7 +198,6 @@ void probe_main(void) {
     sc(SYS_exit_group, failures, 0, 0);
 }
 
-/* LC2 cases. */
 #define SA_RESTART 0x10000000
 #define SIGSEGV 11
 #define SIGTERM 15
@@ -245,7 +217,7 @@ static void segv_handler(int sig, void *info, void *ucv) {
     u64 *uc = ucv;
     segv_addr = *(u64 *)((char *)info + 16);
     segv_code = ((int *)info)[2];
-    uc[5 + 16] = (u64)fault_resume; /* resume after the faulting load */
+    uc[5 + 16] = (u64)fault_resume;
 }
 
 static volatile int spin_flag, spin_ready;
@@ -276,7 +248,6 @@ static void lc2(char *self) {
     i64 me = sc(SYS_getpid, 0, 0, 0);
     int st;
 
-    /* A signal from another process reaches this thread while it spins without calls. */
     struct ksigaction a1 = {set_flag1, SA_RESTORER, restore_rt, 0};
     sc6(SYS_rt_sigaction, SIGUSR1, (i64)&a1, 0, 8, 0, 0);
     flag1 = 0;
@@ -286,7 +257,6 @@ static void lc2(char *self) {
     report(flag1 == 1, "async-spinning");
     waitchild(c, &st);
 
-    /* ... and one blocked in read: EINTR without SA_RESTART. */
     int p[2];
     report(sc(SYS_pipe2, p, 0, 0) == 0, "pipe2");
     struct ksigaction a2 = {set_flag2, SA_RESTORER, restore_rt, 0};
@@ -299,7 +269,6 @@ static void lc2(char *self) {
     report(r == -4 && flag2 == 1, "async-blocked-eintr");
     waitchild(c, &st);
 
-    /* With SA_RESTART the read goes on and gets the byte written later. */
     struct ksigaction a3 = {set_flag2, SA_RESTORER | SA_RESTART, restore_rt, 0};
     sc6(SYS_rt_sigaction, SIGUSR2, (i64)&a3, 0, 8, 0, 0);
     flag2 = 0;
@@ -312,7 +281,6 @@ static void lc2(char *self) {
     report(r == 1 && b == 'x' && flag2 == 1, "async-blocked-restart");
     waitchild(c, &st);
 
-    /* tgkill reaches a sibling thread spinning in Linux code. */
     flag1 = 0;
     i64 tid = clone_spin();
     while (!spin_ready) __asm__ volatile("" ::: "memory");
@@ -324,13 +292,11 @@ static void lc2(char *self) {
     }
     report(tid > 0 && spin_flag == 1 && spin_tid_word == 0, "tgkill-spinning-thread");
 
-    /* A fault in Linux code becomes SIGSEGV with a frame. */
     struct ksigaction a4 = {segv_handler, SA_SIGINFO | SA_RESTORER, restore_rt, 0};
     sc6(SYS_rt_sigaction, SIGSEGV, (i64)&a4, 0, 8, 0, 0);
     fault_try();
-    report(segv_addr == 0x1000 && segv_code == 1 /* SEGV_MAPERR */, "fault-sigsegv");
+    report(segv_addr == 0x1000 && segv_code == 1  , "fault-sigsegv");
 
-    /* Without a handler the fault ends the process by SIGSEGV. */
     c = sc(SYS_fork, 0, 0, 0);
     if (c == 0) {
         struct ksigaction dfl = {0, SA_RESTORER, restore_rt, 0};
@@ -342,7 +308,6 @@ static void lc2(char *self) {
     r = waitchild(c, &st);
     report(r == c && (st & 0x7f) == SIGSEGV, "fault-default-kills");
 
-    /* wait4 statuses: an exit code, and a default SIGTERM. */
     c = sc(SYS_fork, 0, 0, 0);
     if (c == 0) sc(SYS_exit_group, 42, 0, 0);
     st = 0;
@@ -354,14 +319,12 @@ static void lc2(char *self) {
     r = waitchild(c, &st);
     report(r == c && (st & 0x7f) == SIGTERM, "kill-default-sigterm");
 
-    /* vfork: the parent resumes once the child has exited. */
     c = sc(SYS_vfork, 0, 0, 0);
     if (c == 0) sc(SYS_exit_group, 7, 0, 0);
     st = 0;
     r = waitchild(c, &st);
     report(c > 0 && r == c && ((st >> 8) & 0xff) == 7, "vfork");
 
-    /* execve of /proc/self/exe with an argument the new image answers with its status. */
     c = sc(SYS_fork, 0, 0, 0);
     if (c == 0) {
         char *argv[] = {self, "exec-child", 0};
@@ -373,7 +336,6 @@ static void lc2(char *self) {
     r = waitchild(c, &st);
     report(r == c && ((st >> 8) & 0xff) == 33, "execve-self");
 
-    /* dup2 onto a pipe end. */
     sc(SYS_dup2, p[1], 100, 0);
     sc(SYS_write, 100, "y", 1);
     b = 0;

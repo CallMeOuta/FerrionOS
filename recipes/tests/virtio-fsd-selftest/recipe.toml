@@ -1,5 +1,4 @@
 [source]
-# The selftest is a member of the base workspace (base/selftests/virtio-fsd)
 same_as = "../../core/base"
 
 [build]

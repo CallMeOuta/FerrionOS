@@ -24,7 +24,6 @@ if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
 else
     COOKBOOK_CONFIGURE_FLAGS+=(no-shared)
 fi
-# TODO: Sccache regression between 0.11-0.15 preventing us to use ${CC_WRAPPER}
 export CC="${GNU_TARGET}-gcc"
 "${COOKBOOK_CONFIGURE}" "${COOKBOOK_CONFIGURE_FLAGS[@]}"
 "${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}"

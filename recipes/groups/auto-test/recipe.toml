@@ -1,5 +1,3 @@
-# Meta-package for automated testing of essential test suites
-# Smaller test suites are executed first to catch possible bugs or regressions faster
 [build]
 template = "custom"
 script = """

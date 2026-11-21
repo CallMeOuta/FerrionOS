@@ -1,10 +1,3 @@
-# ferrion-run, FerrionOS's program launcher (security roadmap S12, first step). The crate
-# lives in crate/ beside this file:
-#   ferrion-run        starts a program in a namespace without the network schemes and with
-#                      no inherited descriptor but its standard input, output and error
-#   ferrion-run-probe  test helper for scripts/vm-test.py: holds a socket across a launch
-#                      and tries to use it from the launched program
-# config/x86_64/desktop.toml installs the package and the profiles in /etc/ferrion-run.
 [package]
 description = "FerrionOS program launcher that withholds the network"
 

@@ -21,7 +21,6 @@ COOKBOOK_CONFIGURE_FLAGS+=(
 COOKBOOK_MAKE_FLAGS=(
     infodir="$COOKBOOK_STAGE/usr/share/info"
 )
-# termcap only emit static object
 export CC+=" -fPIC"
 mkdir -p "${COOKBOOK_STAGE}/etc"
 cookbook_configure

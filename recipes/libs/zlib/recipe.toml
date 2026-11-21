@@ -1,7 +1,6 @@
 [package]
 description = "Library for data compression and decompression"
 
-# zlib-rs is compatible with zlib
 [source]
 tar = "https://github.com/trifectatechfoundation/zlib-rs/archive/refs/tags/v0.6.8.tar.gz"
 blake3 = "933487029f0a79a923545d60e3828da151194fcbff521acccecfb128ca738ee9"
@@ -10,14 +9,11 @@ blake3 = "933487029f0a79a923545d60e3828da151194fcbff521acccecfb128ca738ee9"
 template = "custom"
 compiler = "no-lto"
 script = """
-# the dynamic and static lib must exist
 COOKBOOK_SOURCE+="/libz-rs-sys-cdylib"
 COOKBOOK_CARGO_FLAGS+=(
         --no-default-features --features "c-allocator,std,gz,gzprintf"
 )
 
-# NOTE: relocation-model=pic is the default on Linux and FerrionOS,
-# it is required by libz-sys as zlib statically linked there
 "${COOKBOOK_CARGO}" build \
         --manifest-path "${COOKBOOK_SOURCE}/Cargo.toml" \
         ${build_flags} -j "${COOKBOOK_MAKE_JOBS}" \

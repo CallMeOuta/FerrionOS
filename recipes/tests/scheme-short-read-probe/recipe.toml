@@ -1,9 +1,3 @@
-# Run as root (a `user` login may not open the scheme-creation capability), scheme-short-read-probe
-# serves a scheme of its own that answers reads with fewer bytes than asked to a child it forks, and passes when
-# every byte of the caller's buffer past the reply is left as it was, at buffer offsets inside a
-# page and across page boundaries (kernel ferrion-scheme-short-read.patch). The crate lives in
-# crate/ beside this file. config/x86_64/desktop.toml installs it; `scripts/vm-test.py
-# scheme-short-read` runs it.
 [package]
 description = "Checks that a short read from a user-space scheme leaves the rest of the caller's buffer untouched"
 

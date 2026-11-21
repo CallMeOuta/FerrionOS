@@ -31,7 +31,6 @@ COOKBOOK_CMAKE_FLAGS+=(
     -DCROSS_TOOLCHAIN_FLAGS_NATIVE="-DCMAKE_TOOLCHAIN_FILE=$(realpath native.cmake)"
     -DLLVM_USE_STATIC_ZSTD=On
 
-# the shared options from llvm
     -DCMAKE_CXX_FLAGS="--std=gnu++11"
     -DBUILD_SHARED_LIBS=False
     -DLLVM_BUILD_EXAMPLES=Off

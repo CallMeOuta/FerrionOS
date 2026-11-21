@@ -1,6 +1,3 @@
-//! ferrion-run: starts a program without the network and without inherited descriptors.
-//! The usage text in src/lib.rs describes it.
-
 use std::process;
 
 use ferrion_run::{Command, EXIT_REFUSED, USAGE, parse_args, parse_profile, profile_path};

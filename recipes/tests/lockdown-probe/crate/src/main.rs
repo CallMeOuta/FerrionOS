@@ -1,14 +1,3 @@
-//! Probes every route from a process to raw hardware that the security roadmap's S13 closes, as
-//! the calling process: physical memory, DMA memory, address translation, port I/O through the
-//! memory scheme and through the thread handle, and the schemes that reach devices (`irq`,
-//! `serio`, `kernel.acpi`, `pci`, `acpi`), opened directly and through a namespace made with
-//! mkns. Run it as root in a login shell.
-//!
-//! Each line reads `lockdown-probe: pass <check>: ...` when the route is closed to the caller,
-//! and `lockdown-probe: FAIL <check>: ...` when it is open; an open route is used once, so the
-//! line shows what it reached. Ordinary memory must keep working. The exit status is 0 only when
-//! every line passes. `scripts/vm-test.py lockdown` runs it on a booted image.
-
 use std::io;
 use std::process::ExitCode;
 use std::ptr;
@@ -18,9 +7,7 @@ use libredox::{call, errno, flag, Fd};
 use syscall::{CallFlags, ProcSchemeVerb};
 
 const PAGE: usize = 4096;
-/// A physical address inside the first megabyte, present on every PC.
 const PHYS_ADDR: u64 = 0x1000;
-/// Device schemes a process without the hardware right must not find, with a resource each.
 const HIDDEN: &[(&str, &str, i32)] = &[
     ("irq", "/scheme/irq", flag::O_DIRECTORY),
     ("serio", "/scheme/serio/0", flag::O_RDONLY),
@@ -49,7 +36,6 @@ impl Report {
         println!("lockdown-probe: {verdict} {name}: {detail}");
     }
 
-    /// An open that must fail: `closed` when it does.
     fn refused(
         &mut self,
         name: &str,
@@ -74,7 +60,6 @@ fn open(path: &str, flags: i32) -> libredox::error::Result<Fd> {
     Fd::open(path, flags | flag::O_CLOEXEC, 0)
 }
 
-/// Maps one page of physical memory through `fd` and shows its first bytes.
 fn read_physical(fd: &Fd) -> String {
     let mapped = unsafe {
         call::mmap(call::MmapArgs {
@@ -97,7 +82,6 @@ fn read_physical(fd: &Fd) -> String {
     }
 }
 
-/// Reads I/O port 0x80, the POST diagnostic port, which only works once I/O privilege is raised.
 #[cfg(target_arch = "x86_64")]
 fn read_port() -> String {
     let value: u8;
@@ -112,7 +96,6 @@ fn read_port() -> String {
     "no I/O ports on this architecture".to_owned()
 }
 
-/// Raises the calling thread's I/O privilege through a `port-io` handle, then uses it.
 fn use_port_io(fd: &Fd) -> String {
     match fd.call_wo(&[], CallFlags::empty(), &[]) {
         Err(err) => format!("but raising I/O privilege failed: {}", text(err)),
@@ -120,7 +103,6 @@ fn use_port_io(fd: &Fd) -> String {
     }
 }
 
-/// The route every driver used before S13: the Iopl verb on the caller's own thread handle.
 fn iopl_verb(report: &mut Report) {
     let thread = match call::dup(unsafe { redox_cur_thrfd_v0() }, b"open_via_dup") {
         Err(err) => {
@@ -142,7 +124,6 @@ fn iopl_verb(report: &mut Report) {
     }
 }
 
-/// Opens each hidden scheme's resource; only "no such device", the namespace's answer, passes.
 fn hidden_schemes(report: &mut Report) {
     for &(name, path, flags) in HIDDEN {
         let check = format!("scheme-{name}");
@@ -160,7 +141,6 @@ fn hidden_schemes(report: &mut Report) {
     }
 }
 
-/// Builds a namespace naming the hidden schemes and `memory`, then tries them through it.
 fn mkns_escape(report: &mut Report) {
     let mut names: Vec<&str> = HIDDEN.iter().map(|&(name, _, _)| name).collect();
     names.push("memory");
@@ -216,7 +196,6 @@ fn mkns_escape(report: &mut Report) {
     }
 }
 
-/// The control: ordinary memory from the same `memory` scheme still works.
 fn ordinary_memory(report: &mut Report) {
     let result = open("/scheme/memory/zeroed", flag::O_RDWR).and_then(|fd| unsafe {
         call::mmap(call::MmapArgs {

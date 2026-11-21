@@ -19,7 +19,6 @@ template = "custom"
 script = """
 DYNAMIC_INIT
 
-# Copy source to build directory
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 
 export CFLAGS="${CFLAGS} -I${COOKBOOK_SYSROOT}/include -I${COOKBOOK_SYSROOT}/include/SDL"

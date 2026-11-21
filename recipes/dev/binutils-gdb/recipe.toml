@@ -12,14 +12,11 @@ dependencies = [
   "libgmp",
   "libmpfr",
   "target:readline",
-# TODO: this zlib get linked when boostrapping binutils
-#    "zlib"
 ]
 script = """
 DYNAMIC_INIT
 
 if [ "${COOKBOOK_HOST_SYSROOT}" = "/usr" ]; then
-# not specifying --enable-shared as it will link shared deps
 COOKBOOK_CONFIGURE_FLAGS=( --prefix=/usr --host="${GNU_TARGET}" --program-prefix="${COOKBOOK_CROSS_GNU_TARGET:-$GNU_TARGET}-" )
 else 
 COOKBOOK_CONFIGURE_FLAGS+=( --with-system-readline )
@@ -30,7 +27,6 @@ COOKBOOK_CONFIGURE_FLAGS+=(
     --enable-default-hash-style=gnu
     --enable-deterministic-archives
     --disable-werror
-#   --with-system-zlib
 )
 
 cookbook_configure

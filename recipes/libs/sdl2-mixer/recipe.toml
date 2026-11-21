@@ -19,5 +19,5 @@ dev-dependencies = [
   "libstdcxx"
 ]
 cmakeflags = [
-  "-DSDL2MIXER_MIDI=OFF", # fluidsynth
+  "-DSDL2MIXER_MIDI=OFF",
 ]

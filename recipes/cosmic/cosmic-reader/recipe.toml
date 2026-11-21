@@ -13,7 +13,6 @@ dependencies = [
 script = """
 DYNAMIC_INIT
 export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=${COOKBOOK_HOST_SYSROOT}/${GNU_TARGET} -I${COOKBOOK_HOST_SYSROOT}/${GNU_TARGET}/include"
-# Define endianness for mupdf
 export CFLAGS="${CFLAGS} -D__LITTLE_ENDIAN__"
 "${COOKBOOK_CARGO}" rustc \
     --manifest-path "${COOKBOOK_SOURCE}/Cargo.toml" \
@@ -27,7 +26,6 @@ mkdir -pv "${COOKBOOK_STAGE}/usr/bin/"
 cp -v "target/${TARGET}/release/cosmic-reader" "${COOKBOOK_STAGE}/usr/bin/"
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/ui/apps"
 cp -v "${COOKBOOK_RECIPE}/manifest" "${COOKBOOK_STAGE}/usr/share/ui/apps/40_cosmic-reader"
-#TODO: install with just?
 APPID="com.system76.CosmicReader"
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/applications/"
 cp -v "${COOKBOOK_SOURCE}/res/${APPID}.desktop" "${COOKBOOK_STAGE}/usr/share/applications/"

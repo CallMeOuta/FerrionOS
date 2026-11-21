@@ -50,7 +50,7 @@ COOKBOOK_CONFIGURE_FLAGS+=(
     --disable-opcache
     --enable-bcmath
     --enable-calendar
-    --enable-fpm  # need times function
+    --enable-fpm
     --enable-gd
     --enable-intl
     --enable-mbstring
@@ -77,7 +77,6 @@ mv ${COOKBOOK_STAGE}/usr/sbin/* ${COOKBOOK_STAGE}/usr/bin/
 for bin in "php-cgi" "php-config" "php" "phpdbg" "phpize" "php-fpm"; do
   ln -s "$bin$SUFFIX" ${COOKBOOK_STAGE}/usr/bin/$bin
 done
-# will not exist on bash but exist on other shell
 rm -f ${COOKBOOK_STAGE}/usr/bin/phar$SUFFIX
 cp ${COOKBOOK_SOURCE}/php.ini* ${COOKBOOK_STAGE}/etc/php/$SUFFIX/
 """

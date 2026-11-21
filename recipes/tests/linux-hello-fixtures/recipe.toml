@@ -1,10 +1,3 @@
-# The four static Linux hello programs of the Linux layer's LC0 (plans/linux-compat.md): raw
-# system calls, musl, glibc and Go, each printing `hello from linux` and exiting 0 on Linux.
-# They were built on the build host from the sources in files/ with the pinned Debian tools
-# listed in files/toolchain.tsv (files/build-hellos.sh), and are kept here as binaries because
-# no FerrionOS recipe can build Linux programs yet. The script refuses any file whose SHA-256
-# differs from files/SHA256SUMS. They are Linux files, so they go under usr/share/linux-hello,
-# which the cookbook does not strip. `scripts/vm-test.py linux-hello` runs them under linux-run.
 [package]
 description = "Static Linux hello programs for the Linux layer's checks"
 

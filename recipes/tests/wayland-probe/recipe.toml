@@ -1,5 +1,3 @@
-# DD1 uses the Rust Wayland backend, not the C libwayland package.
-# Run wayland-probe and wayland-probe --slow as separate client processes.
 [package]
 description = "FerrionOS Wayland display, frame pacing and keyboard probe"
 

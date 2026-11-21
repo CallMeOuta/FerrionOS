@@ -1,18 +1,3 @@
-/*
- * foreign-call-probe: checks the kernel's foreign-call hook (plans/linux-compat.md, LC1) from a
- * native FerrionOS program. The probe registers its own text as the native range and an entry
- * stub inside it, then runs a `syscall` instruction from an anonymous code page outside that
- * range. Each check prints `foreign-call-probe: pass NAME` or `foreign-call-probe: FAIL NAME:
- * why`; the exit status is the number of failures (0 when all pass). Run as any user.
- *
- * Checks: a bad registration is refused (empty range, past user memory, entry outside, another
- * thread's handle); a registered thread's outside call reaches the entry with every general
- * register, the flags, XMM0 and the FS and GS bases intact and RCX at the return address; a call
- * from inside the range is still dispatched; an unregistered thread in the same process is not
- * redirected; three zeros unregister; exec clears the registration; a native signal handler
- * interrupting at least 200 of the foreign calls corrupts nothing. Last it prints the cost of a native call
- * loop and of a foreign round trip in nanoseconds.
- */
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -26,7 +11,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* relibc's libredox exports (src/platform/redox/libredox.rs). Results above -4096 are errors. */
 extern uintptr_t redox_cur_thrfd_v0(void);
 extern uintptr_t redox_dup_v1(uintptr_t fd, const char *buf, uintptr_t len);
 extern uintptr_t redox_read_v1(uintptr_t fd, void *buf, uintptr_t len);
@@ -52,7 +36,6 @@ static void report(int ok, const char *name, const char *why) {
 
 static long raw_err(uintptr_t r) { return r > (uintptr_t)-4096 ? -(long)r : 0; }
 
-/* Opens the calling thread's (or `thread_fd`'s) foreign-call handle. */
 static long open_hook(uintptr_t thread_fd) {
     uintptr_t r = redox_dup_v1(thread_fd, "foreign-call", 12);
     return raw_err(r) ? -raw_err(r) : (long)r;
@@ -69,11 +52,6 @@ static int get_hook(long fd, uintptr_t out[3]) {
     return raw_err(r) ? -1 : (int)r;
 }
 
-/*
- * The entry stub and a caller that loads known values into every register. `seen` receives the
- * registers as the stub found them: rax rbx rcx rdx rsi rdi rbp rsp r8..r15 rflags xmm0(lo,hi)
- * fsbase gsbase, then the count of entries.
- */
 struct seen {
     uint64_t gpr[16];
     uint64_t rflags;
@@ -118,8 +96,6 @@ __asm__(
     "    inc qword ptr [rip + seen + 168]\n"
     "    mov rax, 0x5ec0de\n"
     "    jmp rcx\n"
-    /* fc_call(target): loads the pattern 0x1100+n into register n and two patterns into XMM0, calls target, which runs
-     * `syscall; ret`, and returns RAX. Callee-saved registers are restored. */
     ".globl fc_call\n"
     "fc_call:\n"
     "    push rbx\n push rbp\n push r12\n push r13\n push r14\n push r15\n"
@@ -139,7 +115,6 @@ extern char __executable_start[], etext[];
 typedef uint64_t (*page_fn)(void);
 static unsigned char *page;
 
-/* A code page outside the native range holding `syscall; ret`. */
 static void make_page(void) {
     page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (page == MAP_FAILED) {
@@ -160,7 +135,6 @@ static uint64_t call_page(void) { return ((uint64_t(*)(void *))fc_call)(page); }
 static uint64_t rdfs(void) { uint64_t v; __asm__ volatile("rdfsbase %0" : "=r"(v)); return v; }
 static uint64_t rdgs(void) { uint64_t v; __asm__ volatile("rdgsbase %0" : "=r"(v)); return v; }
 
-/* Runs one foreign call and checks what the stub saw; returns NULL or the reason. */
 static const char *one_foreign(char *why, size_t len) {
     uint64_t before = seen.entries;
     uint64_t fs = rdfs(), gs = rdgs();
@@ -182,7 +156,6 @@ static const char *one_foreign(char *why, size_t len) {
     return NULL;
 }
 
-/* A native call through the page: with the hook it must not reach the stub. */
 static uint64_t native_yield_from_page(void) {
     uint64_t r;
     __asm__ volatile("call %1" : "=a"(r) : "r"(page), "0"((uint64_t)SYS_YIELD) : "rcx", "r11", "memory");
@@ -320,7 +293,6 @@ int main(int argc, char **argv) {
     pthread_t self = pthread_self(), sig_thread;
     pthread_create(&sig_thread, NULL, signaller, &self);
     const char *sig_bad = NULL;
-    /* At least 20000 calls, and on until 200 signals have arrived or 5 s have passed. */
     double until = now_ns() + 5e9;
     unsigned long calls = 0;
     while (!sig_bad && (calls < 20000 || (sig_count < 200 && now_ns() < until))) {
@@ -346,7 +318,6 @@ int main(int argc, char **argv) {
     char *args[] = {argv[0], "--after-exec", NULL};
     pid_t child = fork();
     if (child == 0) {
-        /* The child is a new context: register again so exec has something to clear. */
         long cfd = open_hook(redox_cur_thrfd_v0());
         if (cfd < 0 || set_hook(cfd, entry, start, end) != 24) _exit(90);
         execv("/usr/bin/foreign-call-probe", args);

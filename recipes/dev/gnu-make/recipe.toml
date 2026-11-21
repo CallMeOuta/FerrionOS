@@ -1,7 +1,6 @@
 [package]
 description = "GNU version of Make tool"
 
-#TODO slower jobserver due to lack of named pipes
 [source]
 tar = "http://ftp.gnu.org/gnu/make/make-4.4.tar.gz"
 blake3 = "1a0e5353205e106bd9b3c0f4a5f37ee1156a1e1c8feb771d1b4842c216612cba"
@@ -17,7 +16,6 @@ template = "custom"
 script = """
 DYNAMIC_INIT
 COOKBOOK_CONFIGURE_FLAGS+=(
-# TODO: workaround for an open upstream bug
     'ac_cv_func_mkfifo=no'
 )
 cookbook_configure

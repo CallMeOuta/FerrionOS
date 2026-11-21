@@ -1,4 +1,3 @@
-# TODO: When more CPAL examples are added, description should be changed
 [package]
 description = "Command line beep tool (demo from CPAL sound library)"
 

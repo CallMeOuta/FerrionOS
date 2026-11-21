@@ -1,7 +1,3 @@
-//! Polls PIPES empty pipes once each with a zero timeout, keeping them open, and compares the
-//! kernel's event subscriber count (`event_subcribers` in /scheme/sys/stat) before and after.
-//! A poll's subscriptions last for that call only, so the count should not grow by the pipes;
-//! a growth of at least half of them fails.
 
 use std::process::exit;
 
@@ -31,7 +27,6 @@ fn main() {
         }
         pipes.push(ends);
     }
-    // One poll first, so the thread's cached event queue exists before the baseline.
     let mut warm = libc::pollfd { fd: pipes[0][0], events: libc::POLLIN, revents: 0 };
     unsafe { libc::poll(&mut warm, 1, 0) };
 

@@ -1,14 +1,3 @@
-/* signal-handle-probe: checks that signals sent through process handles follow kill()'s
- * permission rule (security roadmap S12).
- *
- * Run it as a non-root member of group sudo whose password is empty (`user` on dev images). It
- * starts a session, has a child become root through sudo inside it, then sends that child SIGTERM
- * twice: with kill(), and through a process handle (`child/<pid>/proc-obj`, which a session
- * leader may open for any process of its session). It prints REFUSED and exits 0 when both are
- * refused with EPERM, and ACCEPTED and exits 1 when the handle delivers the signal. Other
- * outcomes print INCONCLUSIVE and exit 2.
- *
- * Checked by `scripts/vm-test.py signal-handle`. */
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
@@ -18,13 +7,11 @@
 #include <time.h>
 #include <unistd.h>
 
-/* relibc's C interface to the process manager. */
 size_t redox_cur_procfd_v0(void);
 size_t redox_openat_v1(size_t fd, const char *path, size_t len, unsigned flags, unsigned fcntl_flags);
 size_t redox_sys_call_v0(size_t fd, unsigned char *payload, size_t len, size_t flags, const uint64_t *meta,
                          size_t meta_len);
 
-/* PidfdCall::SendSignal of the process manager's protocol. */
 #define PIDFD_SEND_SIGNAL 0
 
 static const char *result(long r) {
@@ -57,8 +44,6 @@ static int probe(void) {
         _exit(127);
     }
     close(pipe_fds[0]);
-    /* `user`'s password is empty, so sudo runs without reading this newline; it
-       stays for images built before sudo stopped reading its standard input. */
     if (write(pipe_fds[1], "\n", 1) != 1)
         return 2;
     int root = 0;
@@ -102,8 +87,6 @@ static int probe(void) {
 }
 
 int main(void) {
-    /* A process group leader cannot start a session, and a shell makes each command one, so the
-     * probe runs in a child. */
     pid_t worker = fork();
     if (worker == 0) {
         int r = probe();

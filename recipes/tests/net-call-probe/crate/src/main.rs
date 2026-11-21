@@ -1,13 +1,3 @@
-//! Makes calls on `tcp` and `udp` sockets with buffers shorter than the reply, sizes that run
-//! past the buffer or past `usize::MAX`, and datagrams longer than the buffer, then checks that
-//! the network stack still carries a UDP datagram and a TCP connection over loopback. Run it as
-//! `user` in a login shell. With the argument `mac`, run as root, it reads each network driver's
-//! `mac` at and past its end instead, then reads it again whole.
-//!
-//! Each line reads `net-call-probe: pass <check>: ...` or `net-call-probe: FAIL <check>: ...`.
-//! The exit status is 0 only when every line passes. `scripts/vm-test.py net-calls` and
-//! `scripts/vm-test.py net-hardening` run it on a booted image.
-
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -18,8 +8,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 extern "C" {
-    // relibc's entry points for the `call` and `fpath` system calls; errors come back as the
-    // negated error number.
     fn redox_sys_call_v0(
         fd: usize,
         payload: *mut u8,
@@ -31,12 +19,11 @@ extern "C" {
     fn redox_fpath_v1(fd: usize, dst_base: *mut u8, dst_len: usize) -> usize;
 }
 
-const CALL_READ_WRITE: usize = (1 << 9) | (1 << 10); // CallFlags::WRITE | CallFlags::READ
+const CALL_READ_WRITE: usize = (1 << 9) | (1 << 10);
 const SOCKET_CALL_RECVMSG: u64 = 5;
 const WORD: usize = mem::size_of::<usize>();
 const DATA: u8 = 7;
 const TIMEOUT: Duration = Duration::from_secs(3);
-// Ports above 1024, so `user` may bind them, and outside the stack's ephemeral range.
 const UDP_PORT: u16 = 47_001;
 const TCP_PORT: u16 = 47_011;
 const LIVE_PORT: u16 = 47_021;
@@ -49,7 +36,6 @@ fn errno_result(raw: usize) -> Result<usize, i32> {
     }
 }
 
-/// A RecvMsg call on `fd` with `buf` as both request and reply.
 fn recvmsg_call(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
     let metadata = [SOCKET_CALL_RECVMSG, 0];
     errno_result(unsafe {
@@ -64,8 +50,6 @@ fn recvmsg_call(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
     })
 }
 
-/// A RecvMsg buffer of `len` bytes that starts with the room for the name, the payload and
-/// ancillary data.
 fn request(sizes: [usize; 3], len: usize) -> Vec<u8> {
     let mut buf = vec![0; len.max(3 * WORD)];
     for (index, size) in sizes.iter().enumerate() {
@@ -112,7 +96,6 @@ fn localhost(port: u16) -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)
 }
 
-/// Waits until `fd` has data to read.
 fn wait_readable(fd: i32) -> io::Result<()> {
     let mut poll = libc::pollfd {
         fd,
@@ -126,7 +109,6 @@ fn wait_readable(fd: i32) -> io::Result<()> {
     }
 }
 
-/// A UDP socket on UDP_PORT holding one 100-byte datagram from `sender`.
 fn udp_with_datagram(sender: &UdpSocket) -> io::Result<UdpSocket> {
     let receiver = UdpSocket::bind(localhost(UDP_PORT))?;
     sender.send_to(&[DATA; 100], localhost(UDP_PORT))?;
@@ -152,7 +134,6 @@ fn udp_checks(report: &mut Report) {
         recvmsg_call(fd, &mut request([1, 100, 0], 3 * WORD + 101)),
     );
 
-    // The datagram is still there: a 1-byte read with the sender's address takes 1 byte of it.
     let mut byte = [0; 1];
     let result = receiver.recv_from(&mut byte);
     report.line(
@@ -160,7 +141,6 @@ fn udp_checks(report: &mut Report) {
         matches!(result, Ok((1, _))) && byte == [DATA],
         format!("{result:?}, byte {}", byte[0]),
     );
-    // A plain recv, with no address and no flags, is a read of the socket.
     byte = [0];
     let result = sender
         .send_to(&[DATA; 100], localhost(UDP_PORT))
@@ -172,7 +152,6 @@ fn udp_checks(report: &mut Report) {
         format!("{result:?}"),
     );
 
-    // Larger than the socket's whole send buffer (128 packets of 1,500 bytes).
     let result = sender.send_to(&vec![DATA; 200_000], localhost(UDP_PORT));
     report.line(
         "udp datagram of 200,000 bytes",
@@ -243,7 +222,6 @@ fn fpath_check(report: &mut Report) {
     );
 }
 
-/// A UDP datagram and a TCP connection over loopback, on sockets opened afterwards.
 fn stack_answers(report: &mut Report) {
     let udp = || -> io::Result<usize> {
         let a = UdpSocket::bind(localhost(LIVE_PORT))?;

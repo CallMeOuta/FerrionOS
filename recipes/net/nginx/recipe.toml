@@ -1,7 +1,6 @@
 [package]
 description = "Web server with cache and proxy abilities"
 
-#TODO FastCGI not working
 [source]
 tar = "https://nginx.org/download/nginx-1.28.0.tar.gz"
 patches = [
@@ -62,7 +61,6 @@ cookbook_configure
 
 mkdir -p "$COOKBOOK_STAGE"/var/lib/nginx/{body,proxy,fastcgi,uwsgi,scgi} \
  "$COOKBOOK_STAGE"/var/log/nginx/
-#TODO: pkgar don't track empty directories
 touch "$COOKBOOK_STAGE"/var/lib/nginx/{body,proxy,fastcgi,uwsgi,scgi}/.tmp \
  "$COOKBOOK_STAGE"/var/log/nginx/.tmp
 """

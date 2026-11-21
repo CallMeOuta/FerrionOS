@@ -1,14 +1,3 @@
-//! attestd: the attestation service, and the only holder of a handle to `tpmd`.
-//!
-//! It serves the `attest` scheme to root alone:
-//!   /scheme/attest/pcrs       read: PCRs 7, 8 and 9 of the SHA-256 bank, one per line, for
-//!                             diagnosis on this machine
-//!   /scheme/attest/statement  write a nonce of 1 to 32 bytes, then read a statement about it
-//! A statement is a verdict: it says what the evidence shows and never carries the evidence
-//! (PCR values, the quote, keys or the event log). The quote that backs it is signed by a key
-//! made in the TPM's null hierarchy, new on every boot, so the key links nothing across boots.
-//! No Verifier judges the evidence yet, so a statement is checked on this machine only.
-
 use std::collections::BTreeMap;
 
 use redox_scheme::scheme::SchemeSync;
@@ -20,7 +9,6 @@ use syscall::flag::MODE_FILE;
 use syscall::schemev2::NewFdFlags;
 use tpmd::{BOOT_PCRS, TPM_FD_ENV, service, tpm2};
 
-/// The largest TPM response the CRB interface carries.
 const RESPONSE_MAX: usize = 4096;
 
 struct Tpm {
@@ -63,7 +51,6 @@ fn is_zero(digest: &[u8]) -> bool {
     digest.iter().all(|&b| b == 0)
 }
 
-/// The statement for `nonce`, from what the TPM shows now.
 fn statement(tpm: Option<&Tpm>, nonce: &[u8]) -> String {
     let mut out = format!(
         "FerrionOS attestation statement, format 1\nnonce: {}\n",
@@ -87,8 +74,6 @@ fn statement(tpm: Option<&Tpm>, nonce: &[u8]) -> String {
         hasher.update(pcr);
     }
     let consistent = quote.nonce == nonce && quote.pcr_digest == hasher.finalize().as_slice();
-    // PCR 7 is measured by every firmware with a TPM; PCRs 8 and 9 only by a bootloader that
-    // measures what it loads.
     let bootloader_measured = !is_zero(&pcrs[1]) && !is_zero(&pcrs[2]);
     out += "tpm: present\n";
     out += if consistent {

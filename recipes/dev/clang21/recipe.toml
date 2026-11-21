@@ -10,11 +10,11 @@ dependencies = [
     "llvm21",
 ]
 dev-dependencies = [
-    "libstdcxx", # no idea
+    "libstdcxx",
     "llvm21.dev",
     "llvm21.runtime",
     "host:xz",
-    "host:libarchive",  # workaround for cmake error
+    "host:libarchive",
 ]
 script = """
 DYNAMIC_INIT
@@ -29,7 +29,6 @@ COOKBOOK_CMAKE_FLAGS+=(
     -DLLVM_BUILD_UTILS=On
     -DLLVM_LINK_LLVM_DYLIB=On
 
-# the shared options from llvm
     -DCMAKE_CXX_FLAGS="--std=gnu++11"
     -DBUILD_SHARED_LIBS=False
     -DLLVM_BUILD_EXAMPLES=Off
@@ -67,7 +66,6 @@ if [ "$TARGET" = "$COOKBOOK_HOST_TARGET" ]; then
         "${COOKBOOK_CMAKE_FLAGS[@]}" \
         "$@"
 
-    # All distros use clever tricks to this problem. I have no idea how I came up with this
     export PATH="$PATH:$COOKBOOK_STAGE/usr/bin"
     DESTDIR="${COOKBOOK_STAGE}" "${COOKBOOK_NINJA}" install-clang-tblgen
     "${COOKBOOK_NINJA}" -j"${COOKBOOK_MAKE_JOBS}"

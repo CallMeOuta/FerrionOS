@@ -32,11 +32,8 @@ sed -i "s|TARGET|${TARGET}|g" config.toml
 else
 
 DYNAMIC_INIT
-# Hack for Rust errorneusly running `llvm-config --version` on cross compiled llvm-config
 cat "${COOKBOOK_ROOT}/bin/${TARGET}-llvm-config" > "${COOKBOOK_SYSROOT}/bin/llvm-config"
-# Hack for Rust stage1 being dynamically linked with LLVM in prefix toolchain
 export LD_LIBRARY_PATH="${COOKBOOK_HOST_SYSROOT}/lib:${LD_LIBRARY_PATH}"
-# Linker flags for stage1 compiler (host -> host)
 export RUSTFLAGS_BOOTSTRAP="\
 -Clink-args=-L${COOKBOOK_HOST_SYSROOT}/lib \
 -Clink-args=-Wl,-rpath-link,${COOKBOOK_HOST_SYSROOT}/lib"
@@ -52,8 +49,6 @@ sed -i "s|\"CXX\"|\"${CXX##* }\"|g" config.toml
 sed -i "s|\"AR\"|\"${AR##* }\"|g" config.toml
 fi
 
-# the cookbook LTO config need to be moved to rust LTO config
-# see https://github.com/rust-lang/rust/issues/147902
 if [[ "$REDOXER_USE_LTO" = "1" || "$REDOXER_USE_LTO" = "true" ]]; then
     LTO_MODE="thin"
     export CPPFLAGS="${CPPFLAGS//-flto=auto/}"
@@ -67,15 +62,12 @@ else
 fi
 sed -i "s|COOKBOOK_LTO_MODE|${LTO_MODE}|g" config.toml
 
-# to force libz-sys build.rs to do dylib link
 export LIBZ_SYS_STATIC=0
 export CFLAGS="-L${COOKBOOK_SYSROOT}/usr/lib"
 reexport_flags
 
-# Don't poison the stage1 compiler (host -> host)
 unset AR AS CC CXX LD LDFLAGS NM OBJCOPY OBJDUMP RANLIB READELF RUSTFLAGS CARGO_ENCODED_RUSTFLAGS STRIP
 
-# Curl fix for some platform
 for cert in "/etc/ssl/certs/ca-certificates.crt" \
     "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
 do if [ -f "$cert" ]; then export SSL_CERT_FILE="$cert"; break; fi; done
@@ -88,8 +80,6 @@ mkdir -p "${COOKBOOK_STAGE}"/usr
 rsync -av --delete "${COOKBOOK_BUILD}"/install/* "${COOKBOOK_STAGE}"/usr/
 rm -rf "${COOKBOOK_STAGE}"/usr/lib/rustlib/*.log
 
-# workaround for rust.lld, needed by e.g. compiling bootloader
-# https://github.com/rust-lang/rust/issues/143076#issuecomment-3011710678
 LLD_DIR="${COOKBOOK_STAGE}/usr/lib/rustlib/$TARGET/bin"
 mkdir -p $LLD_DIR/gcc-ld
 cp ${COOKBOOK_SYSROOT}/usr/bin/lld $LLD_DIR/rust-lld

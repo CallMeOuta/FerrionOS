@@ -22,7 +22,6 @@ dependencies = [
     "libwebp",
     "mesa",
     "libfdk-aac",
-    #TODO: "openal",
     "pango",
 ]
 script = """
