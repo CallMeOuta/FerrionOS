@@ -32,6 +32,7 @@ static mut STATIC_TCB_MASTER: Master = Master {
     image_size: 0,
     segment_size: 0,
     offset: 0,
+    is_static: true,
 };
 
 #[inline(never)]

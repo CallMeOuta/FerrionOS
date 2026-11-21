@@ -28,6 +28,8 @@ pub struct Master {
     pub segment_size: usize,
     /// Offset in TLS to copy initial data to
     pub offset: usize,
+    /// Whether this segment belongs to the initial static TLS block.
+    pub is_static: bool,
 }
 
 impl Master {
@@ -154,7 +156,7 @@ impl Tcb {
             && let Some(masters) = self.masters()
         {
             for (i, master) in masters.iter().skip(self.num_copied_masters).enumerate() {
-                if master.image_size == 0 {
+                if !master.is_static || master.image_size == 0 {
                     continue;
                 }
 
@@ -230,6 +232,9 @@ impl Tcb {
 
             if let Some(masters) = self.masters() {
                 for (i, master) in masters.iter().enumerate() {
+                    if !master.is_static {
+                        continue;
+                    }
                     let tls = unsafe { self.tls().unwrap() };
                     let offset = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
                         // x86{_64} TLS layout is backwards

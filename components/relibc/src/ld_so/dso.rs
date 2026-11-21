@@ -429,6 +429,7 @@ impl DSO {
                         .expect("always within bounds"),
                     segment_size: memsz,
                     offset: (tls_offset + memsz).next_multiple_of(align),
+                    is_static: true,
                 }
             })
             .unwrap();
@@ -472,8 +473,11 @@ impl DSO {
 
         let path_c = CString::new(path).map_err(|err| err.to_string())?;
         let path_cc = CStr::borrow(&path_c);
-        let (mmap, link_guard, tcb_master, dynamic) =
+        let (mmap, link_guard, mut tcb_master, dynamic) =
             DSO::mmap_and_copy(path, &path_cc, &elf, data, base_addr, tls_offset)?;
+        if let Some(master) = tcb_master.as_mut() {
+            master.is_static = !dlopened;
+        }
 
         let name = match dynamic.soname {
             Some(soname) => soname,
@@ -858,6 +862,7 @@ impl DSO {
                             .expect("always within bounds"),
                         segment_size: memsz,
                         offset: (tls_offset + memsz).next_multiple_of(align),
+                        is_static: true,
                     });
                     log::trace!("  tcb master {:x?}", tcb_master);
                 }
