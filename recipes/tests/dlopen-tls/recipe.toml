@@ -1,0 +1,13 @@
+# Dynamic TLS regression: scripts/vm-test.py dlopen-tls --config firefox.
+[package]
+description = "Checks independent TLS from two dlopened libraries in a later thread"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin" "${COOKBOOK_STAGE}/usr/lib"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -fPIC -ftls-model=global-dynamic -shared -o "${COOKBOOK_STAGE}/usr/lib/libdlopen-tls-worker.so" "${COOKBOOK_RECIPE}/worker.c" ${LDFLAGS}
+${CC} ${CFLAGS} -O2 -Wall -Wextra -fPIC -ftls-model=global-dynamic -shared -o "${COOKBOOK_STAGE}/usr/lib/libdlopen-tls-occupant.so" "${COOKBOOK_RECIPE}/occupant.c" ${LDFLAGS}
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/dlopen-tls" "${COOKBOOK_RECIPE}/dlopen-tls.c" ${LDFLAGS} -ldl -lpthread
+"""
