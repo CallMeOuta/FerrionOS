@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-# The virtgpu layout check. Compiles Linux's `virtgpu_drm.h` in C and the `virtgpu` module of
-# relibc's crate `redox-ioctl` in Rust, then compares every structure's size, every field's
-# offset, size and type, and every number the header defines, the request numbers among them.
-# Then it checks each payload the module defines for a request: its fixed part must be the
-# header's structure without the array pointers, packed in the header's order, and each array's
-# pointer, count and element must match the header.
+# The virtgpu layout check. Compiles Linux's `virtgpu_drm.h`, with DRM's own close request from
+# the `drm.h` beside it, in C and the `virtgpu` module of relibc's crate `redox-ioctl` in Rust,
+# then compares every structure's size and alignment, every field's offset, size and type, and
+# every number the headers define, the request numbers among them. Then it checks each payload the
+# module defines for a request: one payload per request at most, and at least one; its function
+# number and the module's request number against the structure; its fixed part must be the
+# header's structure without the array pointers, packed in the header's order; each array's
+# pointer, count and element must match the header, and its direction what Linux's driver does
+# with it; and the arrays must stay aligned whatever their counts. Last, it runs the crate's own
+# tests, which send payloads both ways.
 #
 # Prints each mismatch and a summary. Exits 0 when everything matches, 1 on a mismatch, 2 when
 # the check cannot run: no C compiler or cargo, relibc's source not fetched (`make f.relibc`),
@@ -42,6 +46,22 @@ HEADER_SHA256 = {
     "drm_mode.h": "cfa0f3dff969178ec1f30abcb2072feb1a0b9f3aabb55580f3b08a77fd13e1e8",
 }
 
+# The items of drm.h that Venus uses and relibc does not carry yet, compared like the rest.
+DRM_H_STRUCTS = ("drm_gem_close",)
+DRM_H_CONSTANTS = ("DRM_IOCTL_GEM_CLOSE",)
+
+# Which way each array travels, by what Linux v7.3's driver does with it: `In` when it only
+# copies the array in, `Out` when it only copies it out, `Both` when it does both.
+ARRAY_DIRECTIONS = {
+    ("drm_virtgpu_execbuffer", "command"): "In",  # virtgpu_submit.c:421, vmemdup_user
+    ("drm_virtgpu_execbuffer", "bo_handles"): "In",  # virtgpu_submit.c:308-316, copy_from_user
+    ("drm_virtgpu_execbuffer", "in_syncobjs"): "In",  # virtgpu_submit.c:113-121, copy_from_user
+    ("drm_virtgpu_execbuffer", "out_syncobjs"): "In",  # virtgpu_submit.c:204-211, copy_from_user
+    ("drm_virtgpu_get_caps", "addr"): "Out",  # virtgpu_ioctl.c:481, copy_to_user
+    ("drm_virtgpu_resource_create_blob", "cmd"): "In",  # virtgpu_ioctl.c:574, memdup_user
+    ("drm_virtgpu_context_init", "ctx_set_params"): "In",  # virtgpu_ioctl.c:650, memdup_user
+}
+
 C_TYPES = {
     "__u8": "u8", "__u16": "u16", "__u32": "u32", "__u64": "u64",
     "__s8": "i8", "__s16": "i16", "__s32": "i32", "__s64": "i64",
@@ -60,8 +80,9 @@ class CannotRun(Exception):
     pass
 
 
-def parse_header(text):
-    """The structures, object-like macros and request numbers that a virtgpu_drm.h defines."""
+def parse_header(text, only_structs=None, only_constants=None):
+    """The structures, object-like macros and request numbers that a header defines, or only
+    the ones named."""
     text = re.sub(r"\\\n", " ", text)
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
     text = re.sub(r"//[^\n]*", " ", text)
@@ -72,6 +93,8 @@ def parse_header(text):
         name, function_like, value = m.groups()
         if function_like or not value.strip():
             continue
+        if only_constants is not None and name not in only_constants:
+            continue
         constants.append(name)
         target = re.search(r"\bstruct\s+(\w+)", value)
         if name.startswith("DRM_IOCTL_") and target:
@@ -80,6 +103,8 @@ def parse_header(text):
     structs = {}
     code = re.sub(r"^[ \t]*#.*$", "", text, flags=re.M)
     for m in re.finditer(r"\bstruct\s+(\w+)\s*\{(.*?)\}\s*;", code, flags=re.S):
+        if only_structs is not None and m.group(1) not in only_structs:
+            continue
         fields = []
         for decl in m.group(2).split(";"):
             decl = " ".join(decl.split())
@@ -96,6 +121,10 @@ def parse_header(text):
         structs[m.group(1)] = fields
     if not structs or not constants:
         raise CannotRun("the header defines no structure or no number")
+    for wanted, found in ((only_structs, structs), (only_constants, constants)):
+        missing = [name for name in wanted or () if name not in found]
+        if missing:
+            raise CannotRun(f"the header does not define {', '.join(missing)}")
     return structs, constants, requests
 
 
@@ -111,7 +140,7 @@ def c_program(header, structs, constants):
         "int main(void) {",
     ]
     for s, fields in structs.items():
-        lines.append(f'    printf("struct {s} %zu\\n", sizeof(struct {s}));')
+        lines.append(f'    printf("struct {s} %zu %zu\\n", sizeof(struct {s}), _Alignof(struct {s}));')
         for name, _, rtype in fields:
             lines.append(
                 f'    printf("field {s} {name} %zu %zu {rtype}\\n",'
@@ -135,7 +164,7 @@ def rust_program(structs, constants):
         "fn main() {",
     ]
     for s, fields in structs.items():
-        lines.append(f'    println!("struct {s} {{}}", size_of::<v::{s}>());')
+        lines.append(f'    println!("struct {s} {{}} {{}}", size_of::<v::{s}>(), align_of::<v::{s}>());')
         lines.append(f"    let x: v::{s} = unsafe {{ core::mem::zeroed() }};")
         for name, _, _ in fields:
             r = rust_ident(name)
@@ -148,11 +177,11 @@ def rust_program(structs, constants):
     lines += [
         "    for (nr, name, layout) in v::PAYLOADS {",
         '        println!("payload {name} {nr} {}", layout.fixed_size);',
-        "        for (field, offset, size) in layout.fixed {",
-        '            println!("fixed {name} {field} {offset} {size}");',
+        "        for f in layout.fixed {",
+        '            println!("fixed {name} {} {} {}", f.name, f.offset, f.size);',
         "        }",
-        "        for (field, count, element, size) in layout.arrays {",
-        '            println!("array {name} {field} {count} {element} {size}");',
+        "        for a in layout.arrays {",
+        '            println!("array {name} {} {} {} {} {} {:?}", a.pointer, a.count, a.element, a.size, a.align, a.direction);',
         "        }",
         "    }",
         "}",
@@ -162,23 +191,23 @@ def rust_program(structs, constants):
 
 
 def read_records(output):
-    records = {"struct": {}, "field": {}, "const": {}, "payload": {}, "fixed": {}, "array": {}}
+    records = {"struct": {}, "field": {}, "const": {}, "payload": [], "fixed": {}, "array": {}}
     for line in output.splitlines():
         kind, *rest = line.split(" ")
         if kind == "struct":
-            records["struct"][rest[0]] = int(rest[1])
+            records["struct"][rest[0]] = (int(rest[1]), int(rest[2]))
         elif kind == "field":
             s, f, offset, size, *rtype = rest
             records["field"][(s, f)] = (int(offset), int(size), " ".join(rtype))
         elif kind == "const":
             records["const"][rest[0]] = int(rest[1])
         elif kind == "payload":
-            records["payload"][rest[0]] = (int(rest[1]), int(rest[2]))
+            records["payload"].append((rest[0], int(rest[1]), int(rest[2])))
         elif kind == "fixed":
             records["fixed"].setdefault(rest[0], []).append((rest[1], int(rest[2]), int(rest[3])))
         elif kind == "array":
             records["array"].setdefault(rest[0], []).append(
-                (rest[1], rest[2], " ".join(rest[3:-1]), int(rest[-1]))
+                (rest[1], rest[2], " ".join(rest[3:-3]), int(rest[-3]), int(rest[-2]), rest[-1])
             )
     return records
 
@@ -234,14 +263,37 @@ def build_rust(crate, structs, constants, work):
     return built.stdout, None
 
 
+def run_tests(crate, work):
+    """Runs the crate's own tests in its workspace. Returns the failing tests' names."""
+    env = dict(os.environ, CARGO_TARGET_DIR=str(work / "crate-target"))
+    pin = crate.parent / "rust-toolchain.toml"
+    if pin.is_file():
+        env["RUSTUP_TOOLCHAIN"] = tomllib.loads(pin.read_text())["toolchain"]["channel"]
+    tested = run(["cargo", "test", "--quiet", "--locked", "--manifest-path", str(crate / "Cargo.toml")], env=env)
+    if tested.returncode == 0:
+        return []
+    failed = re.findall(r"^    (\S+)$", tested.stdout, flags=re.M)
+    if failed:
+        return failed
+    # A test that crashes ends the whole test process before it lists the failures.
+    crashed = re.search(r"process didn't exit successfully: .*\((signal: [^)]*)\)", tested.stderr)
+    if crashed:
+        return [f"the test process ended on {crashed.group(1)}"]
+    raise CannotRun(f"the crate's tests do not run:\n{tested.stderr}{tested.stdout}")
+
+
 def compare(structs, constants, requests, c, r):
     """Yields (item, mismatch or None) for every item compared."""
     for s, fields in structs.items():
         if s not in r["struct"]:
             yield f"struct {s}", "missing from the module"
             continue
-        yield f"struct {s}: size", None if c["struct"][s] == r["struct"][s] else (
-            f"{c['struct'][s]} in the header, {r['struct'][s]} in the module"
+        (c_size, c_align), (r_size, r_align) = c["struct"][s], r["struct"][s]
+        yield f"struct {s}: size", None if c_size == r_size else (
+            f"{c_size} in the header, {r_size} in the module"
+        )
+        yield f"struct {s}: alignment", None if c_align == r_align else (
+            f"{c_align} in the header, {r_align} in the module"
         )
         for name, _, _ in fields:
             want = c["field"][(s, name)]
@@ -254,37 +306,65 @@ def compare(structs, constants, requests, c, r):
         want, have = c["const"][name], r["const"].get(name)
         yield f"{name}", None if want == have else f"{want:#x} in the header, {have} in the module"
 
-    request_of = {target: c["const"][name] for name, target in requests.items()}
-    for s, (nr, fixed_size) in r["payload"].items():
+    payload_structs = [s for s, _, _ in r["payload"]]
+    payload_numbers = [nr for _, nr, _ in r["payload"]]
+    yield "payloads: at least one", None if r["payload"] else "PAYLOADS is empty"
+    for kind, values in (("structure", payload_structs), ("function number", payload_numbers)):
+        twice = sorted({v for v in values if values.count(v) > 1}, key=str)
+        yield f"payloads: each {kind} once", None if not twice else f"listed more than once: {twice}"
+
+    request_of = {target: name for name, target in requests.items()}
+    for s, nr, fixed_size in r["payload"]:
         prefix = f"payload {s}"
         if s not in structs:
             yield prefix, "names no structure of the header"
             continue
-        request = request_of.get(s)
-        if request is None:
+        name = request_of.get(s)
+        if name is None:
             yield prefix, "no request of the header takes this structure"
             continue
+        request = c["const"][name]
         yield f"{prefix}: function number", None if nr == request & 0xFF else (
-            f"{nr:#x}, the request's low byte is {request & 0xFF:#x}"
+            f"{nr:#x}, the header's {name} has {request & 0xFF:#x}"
         )
-        size_in_request = (request >> 16) & 0x3FFF
-        yield f"{prefix}: size in the request", None if size_in_request == c["struct"][s] else (
-            f"the request encodes {size_in_request}, the structure is {c['struct'][s]}"
-        )
+        # The module's own request number against the module's own structure: its type, its
+        # number and its size field, the size relibc checks a caller's buffer against.
+        rust_request = r["const"].get(name)
+        if rust_request is not None:
+            fields = (rust_request >> 8 & 0xFF, rust_request & 0xFF, rust_request >> 16 & 0x3FFF)
+            want = (ord("d"), nr, r["struct"][s][0])
+            yield f"{prefix}: the module's {name}", None if fields == want else (
+                f"type, number and size {fields}, the payload and the structure give {want}"
+            )
 
         header_fields = {name: c["field"][(s, name)] for name, _, _ in structs[s]}
         ctype_of = {name: ctype for name, ctype, _ in structs[s]}
         arrays = r["array"].get(s, [])
         pointers = {a[0] for a in arrays}
-        for pointer, count, element, size in arrays:
+        for pointer, count, element, size, align, direction in arrays:
             item = f"{prefix}: array {pointer}"
+            expected_direction = ARRAY_DIRECTIONS.get((s, pointer))
+            yield f"{item}: direction", None if direction == expected_direction else (
+                f"{direction} in the module, Linux's driver gives {expected_direction}"
+                if expected_direction
+                else f"{direction} in the module, and the check records no direction for it"
+            )
             if ctype_of.get(pointer) != "__u64":
                 yield item, f"{pointer} is not a __u64 field of the header"
             elif ctype_of.get(count) not in C_TYPES:
                 yield item, f"its count {count} is not an integer field of the header"
             else:
-                want = c["struct"].get(element, PRIMITIVE_SIZES.get(element))
-                yield item, None if want == size else f"element {element} is {size} bytes, the header's is {want}"
+                primitive = PRIMITIVE_SIZES.get(element)
+                want = c["struct"].get(element, (primitive, primitive))
+                yield item, None if want == (size, align) else (
+                    f"element {element} has size and alignment {(size, align)}, the header's {want}"
+                )
+        aligns = [a[4] for a in arrays]
+        stays_aligned = not aligns or (fixed_size % aligns[0] == 0 and aligns == sorted(aligns, reverse=True))
+        yield f"{prefix}: arrays stay aligned", None if stays_aligned else (
+            f"the fixed part has {fixed_size} bytes and the arrays' alignments are {aligns}: "
+            "list them from the most strictly aligned down"
+        )
 
         expected, offset = [], 0
         for name, _, _ in structs[s]:
@@ -315,6 +395,13 @@ def main():
         if not (crate / "src/virtgpu.rs").is_file():
             raise CannotRun(f"no virtgpu module in {crate}: fetch relibc's source with `make f.relibc`")
         structs, constants, requests = parse_header(header.read_text())
+        drm_h = header.parent / "drm.h"
+        if not drm_h.is_file():
+            raise CannotRun(f"no drm.h beside {header}")
+        more = parse_header(drm_h.read_text(), DRM_H_STRUCTS, DRM_H_CONSTANTS)
+        structs.update(more[0])
+        constants += [name for name in more[1] if name not in constants]
+        requests.update(more[2])
         work.mkdir(parents=True, exist_ok=True)
         c = read_records(build_c(header, structs, constants, work))
         output, errors = build_rust(crate, structs, constants, work)
@@ -338,10 +425,16 @@ def main():
 
     r = read_records(output)
     results = list(compare(structs, constants, requests, c, r))
+    try:
+        failed = run_tests(crate, work)
+    except CannotRun as e:
+        print(f"virtgpu layout: cannot run: {e}", file=sys.stderr)
+        return 2
+    results.append(("redox-ioctl's tests", f"failed: {', '.join(failed)}" if failed else None))
     mismatches = [(item, why) for item, why in results if why]
     for item, why in mismatches:
         print(f"MISMATCH {item}: {why}")
-    served = set(r["payload"])
+    served = {s for s, _, _ in r["payload"]}
     unserved = sorted(n for n, s in requests.items() if s not in served)
     print(f"structures {len(structs)}, numbers {len(constants)}, requests {len(requests)}, payloads {len(served)}")
     if unserved:
