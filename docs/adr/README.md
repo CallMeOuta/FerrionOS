@@ -1,0 +1,29 @@
+# Architecture decision records
+
+Each record explains a decision a reader would otherwise reverse by mistake: its context, the decision, its consequences, and where in the code it lives. Read the records of an area before changing it. A record is changed when its decision changes, and a new decision gets the next number. [0001](0001-no-code-comments.md) says why these records replaced the code's comments.
+
+| Record | Decision |
+|---|---|
+| [0001](0001-no-code-comments.md) | Code carries no comments; decisions live in ADRs and debts in issues |
+| [0002](0002-pinned-versions.md) | A pin is a hash; its version is read from upstream, and a held-back pin says why here |
+| [0003](0003-cookbook-sources-and-revisions.md) | The cookbook reads git state itself and defaults its mirrors |
+| [0004](0004-cookbook-build-terminal.md) | Build scripts run on a pseudo-terminal the cookbook owns |
+| [0005](0005-recipe-schema.md) | What the recipe keys mean beyond their names |
+| [0006](0006-cookbook-staging-and-publishing.md) | A cooked package is staged, then renamed into place |
+| [0007](0007-repo-command-behavior.md) | How the repo command selects recipes, logs and reports |
+| [0008](0008-make-target-guards.md) | Make targets keep the container and the cookbook from rebuilding needlessly |
+| [0009](0009-emulators-and-host-networking.md) | How QEMU, Cloud Hypervisor and their host helpers are set up |
+| [0010](0010-boot-signing.md) | How images are signed for verified boot and Secure Boot, and how that is tested |
+| [0011](0011-host-setup.md) | How the bootstrap scripts, the containers and the Nix shell set up a host |
+| [0012](0012-repository-checks-and-conventions.md) | What the repository's own checks enforce, and how files are kept |
+| [0013](0013-tpm-attestation.md) | The TPM is driven by tpmd and reached only through attestd |
+| [0014](0014-ferrion-run.md) | How ferrion-run starts a program in a narrower namespace |
+| [0015](0015-fdobjd.md) | fdobjd serves eventfd and timerfd objects, and its probe checks the public calls |
+| [0016](0016-wayland-smoke-session.md) | The Wayland smoke session and its probe client |
+| [0017](0017-linux-layer-probes.md) | How the Linux layer's probes and fixtures are built and packaged |
+| [0018](0018-in-os-probes.md) | What the in-OS probes rely on, and how the test suites are packaged |
+| [0019](0019-filesystem-configs.md) | Why the filesystem configs override, build from source and order what they do |
+| [0020](0020-identity-and-desktop-fixtures.md) | FerrionOS's identity files and desktop mockups are generated from a few sources |
+| [0021](0021-gpu-reference-guest.md) | The GPU reference guest runs pinned Linux packages only inside QEMU |
+| [0022](0022-toolchain-recipes.md) | How the toolchain and language recipes cross-compile |
+| [0023](0023-porting-recipes.md) | Choices the port recipes make about building and packaging |
