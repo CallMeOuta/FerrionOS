@@ -5,6 +5,16 @@
 #           appear on screen, and the login arrives within the timeout
 #   shells  logs in as `user` on the serial console and runs each shell the
 #           x86_64 desktop offers
+#   tpm     boots with a software TPM (swtpm) on QEMU's tpm-crb device, logs
+#           in as root on the serial console, and checks that tpm-pcrs prints
+#           the PCRs 7, 8 and 9 the host then reads from swtpm, and that
+#           attest-statement answers with a verdict that carries none of them
+#   lockdown  checks that every driver still works (the graphical login, a
+#           keypress on it, a DHCP address, a file written to disk, the
+#           drivers' processes), then logs in as root on the serial console
+#           and checks that root reaches no raw hardware: no device scheme in
+#           /scheme, no physical memory, and lockdown-probe passes (needs an
+#           image whose config includes config/lockdown.toml)
 # Every run boots with -snapshot, so the image is never changed, and `make` is
 # told the image is up to date, so a run never starts a build. Screenshots
 # (PNG) and the serial log of each run go under --out. Run from the
@@ -13,6 +23,7 @@
 import argparse
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -122,10 +133,58 @@ class Frame:
                                + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
+class Swtpm:
+    """A software TPM 2.0 that QEMU reaches as a tpm-crb device, for one boot."""
+
+    def __init__(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-tpm-"))
+        self.ctrl = self.dir / "ctrl.sock"
+        self.proc = self._start("--ctrl", f"type=unixio,path={self.ctrl}")
+        self.qemu_flags = (f"-chardev socket,id=chrtpm,path={self.ctrl} -tpmdev emulator,id=tpm0,chardev=chrtpm "
+                           "-device tpm-crb,tpmdev=tpm0")
+
+    def _start(self, *channels):
+        proc = subprocess.Popen(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={self.dir}", *channels],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        socket_path = Path(channels[-1].split("path=")[1])
+        deadline = time.monotonic() + 10
+        while not socket_path.exists():
+            if time.monotonic() > deadline or proc.poll() is not None:
+                raise RuntimeError("swtpm did not start")
+            time.sleep(0.05)
+        return proc
+
+    def read_pcrs(self, pcrs):
+        """The SHA-256 PCRs as lowercase hex, read on the host once QEMU was killed.
+
+        A QEMU that quits cleanly shuts swtpm down and its PCRs are lost; after a kill,
+        swtpm stores its volatile state and a second swtpm resumes from it on a data
+        socket that tpm2_pcrread can reach."""
+        subprocess.run(["swtpm_ioctl", "--unix", str(self.ctrl), "-v"], check=True, capture_output=True)
+        subprocess.run(["swtpm_ioctl", "--unix", str(self.ctrl), "-s"], check=True, capture_output=True)
+        self.proc.wait(timeout=20)
+        data = self.dir / "data.sock"
+        self.proc = self._start("--flags", "not-need-init", "--server", f"type=unixio,path={data}",
+                                "--ctrl", f"type=unixio,path={data}.ctrl")
+        try:
+            text = subprocess.run(["tpm2_pcrread", "-T", f"swtpm:path={data}",
+                                   "sha256:" + ",".join(map(str, pcrs))],
+                                  check=True, capture_output=True, text=True).stdout
+        finally:
+            subprocess.run(["swtpm_ioctl", "--unix", f"{data}.ctrl", "-s"], capture_output=True)
+        return {int(i): v.lower() for i, v in re.findall(r"(\d+)\s*:\s*0x([0-9A-Fa-f]{64})", text)}
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait(timeout=20)
+        shutil.rmtree(self.dir)
+
+
 class VM:
     """One QEMU run started by `make qemu`: serial on stdio, monitor on a socket."""
 
-    def __init__(self, args, out):
+    def __init__(self, args, out, tpm=False):
         image = ROOT / "build" / args.arch / args.config / "harddrive.img"
         if not image.exists():
             sys.exit(f"vm-test: {image.relative_to(ROOT)} is missing; build it first: "
@@ -139,7 +198,11 @@ class VM:
         self.out = out
         self.scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-"))
         self.monitor_path = self.scratch / "monitor.sock"
-        env = dict(os.environ, QEMUFLAGS=f"-display none -snapshot -monitor unix:{self.monitor_path},server=on,wait=off")
+        self.tpm = Swtpm() if tpm else None
+        flags = f"-display none -snapshot -monitor unix:{self.monitor_path},server=on,wait=off"
+        if self.tpm:
+            flags += " " + self.tpm.qemu_flags
+        env = dict(os.environ, QEMUFLAGS=flags)
         # `-o` takes each target exactly as make spells it, relative to the
         # repository root (an absolute path would not match): neither the image
         # nor the package repository behind it is ever rebuilt by a test.
@@ -154,7 +217,12 @@ class VM:
         self.typing = threading.Lock()
         self.log = open(out / "serial.log", "wb")
         threading.Thread(target=self._read_serial, daemon=True).start()
-        self.monitor = self._connect_monitor()
+        try:
+            self.monitor = self._connect_monitor()
+        except RuntimeError:
+            if self.tpm:
+                self.tpm.close()
+            raise
 
     def elapsed(self):
         return time.monotonic() - self.start
@@ -233,15 +301,23 @@ class VM:
         with self.lock:
             return len(self.serial)
 
+    def kill(self):
+        """Stops QEMU at once, as pulling the plug would."""
+        os.killpg(self.proc.pid, signal.SIGKILL)
+        self.proc.wait(timeout=20)
+
     def close(self):
-        try:
-            self.monitor.sendall(b"quit\n")
-            self.proc.wait(timeout=20)
-        except (OSError, subprocess.TimeoutExpired):
-            os.killpg(self.proc.pid, signal.SIGTERM)
-            self.proc.wait(timeout=20)
+        if self.proc.poll() is None:
+            try:
+                self.monitor.sendall(b"quit\n")
+                self.proc.wait(timeout=20)
+            except (OSError, subprocess.TimeoutExpired):
+                os.killpg(self.proc.pid, signal.SIGTERM)
+                self.proc.wait(timeout=20)
         self.monitor.close()
         self.log.close()
+        if self.tpm:
+            self.tpm.close()
         for path in self.scratch.iterdir():
             path.unlink()
         self.scratch.rmdir()
@@ -297,6 +373,72 @@ def test_shells(vm, args):
     if failed:
         return False, f"no expected output from: {failed}; see {vm.out / 'serial.log'}"
     return True, f"{len(SHELL_CHECKS)} shell checks passed"
+
+
+# The nonce the tpm test asks attestd about, in hexadecimal, and the PCRs it compares.
+TPM_NONCE = "f3" * 32
+TPM_PCRS = (7, 8, 9)
+
+
+def test_tpm(vm, args):
+    """Root reads PCRs 7, 8 and 9 through attestd and they equal swtpm's; a statement carries none of them."""
+    # OVMF can lose swtpm during the firmware phase when QEMU's monitor sits idle, and then
+    # measures nothing more (PCR 4 stays zero); a monitor command every 0.3 s avoids it.
+    deadline = time.monotonic() + args.timeout
+    while not vm.wait_serial(r"login: ", 0.3):
+        if time.monotonic() > deadline:
+            return False, f"no serial login prompt within {args.timeout}s"
+        vm.command("info status")
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no password prompt for root"
+    vm.type("password\n")
+    time.sleep(3)
+
+    since = vm.mark()
+    vm.type("tpm-pcrs\n")
+    if not vm.wait_serial(r"PCR 9 sha256 [0-9a-f]{64}", 30, since):
+        return False, f"tpm-pcrs printed no PCRs; see {vm.out / 'serial.log'}"
+    guest = {int(i): v for i, v in re.findall(r"PCR (\d+) sha256 ([0-9a-f]{64})", vm.text(since))}
+
+    since = vm.mark()
+    vm.type(f"attest-statement {TPM_NONCE}\n")
+    found = vm.wait_serial(r"FerrionOS attestation statement.*\n(?:[a-z-]+: .*\n)*?verdict: .*\n", 60, since)
+    if not found:
+        return False, f"attest-statement printed no statement; see {vm.out / 'serial.log'}"
+    statement = found.group(0)
+
+    # tpmd registers no scheme name, so nothing but attestd's handle reaches it.
+    since = vm.mark()
+    vm.type("ls /scheme; echo scheme-list-$((40+2))\n")
+    listing = vm.wait_serial(r"(?s)(.*)scheme-list-42", 20, since)
+    schemes = set(re.findall(r"[\w.-]+", listing.group(1))) if listing else set()
+
+    vm.kill()
+    # PCR 4 holds the firmware's measurement of the boot application: zero means the firmware
+    # lost the TPM during boot, and the run proves nothing.
+    host = vm.tpm.read_pcrs((4, *TPM_PCRS))
+    healthy = host.get(4, "0" * 64) != "0" * 64
+    host = {i: host.get(i) for i in TPM_PCRS}
+    (vm.out / "statement.txt").write_text(statement)
+    (vm.out / "pcrs.txt").write_text("".join(f"PCR {i} guest {guest.get(i)} host {host.get(i)}\n" for i in TPM_PCRS))
+
+    problems = [] if healthy else ["PCR 4 is zero: the firmware lost the TPM during boot; run again"]
+    if sorted(guest) != list(TPM_PCRS) or guest != host:
+        problems.append(f"the PCRs read inside differ from swtpm's (see {vm.out / 'pcrs.txt'})")
+    for line in (f"nonce: {TPM_NONCE}", "tpm: present", "quote: matches the PCRs read"):
+        if line not in statement:
+            problems.append(f"the statement lacks {line!r}")
+    if any(value in statement for value in guest.values()):
+        problems.append("the statement carries a PCR value")
+    if not listing:
+        problems.append("`ls /scheme` printed nothing")
+    elif "attest" not in schemes or "tpm" in schemes:
+        problems.append("`ls /scheme` should list attest and no scheme named tpm")
+    if problems:
+        return False, "; ".join(problems)
+    verdict = re.search(r"verdict: (.*)", statement).group(1)
+    return True, f"PCRs 7, 8 and 9 equal swtpm's; verdict: {verdict}; see {vm.out}"
 
 
 def settle(vm, timeout, still=1.0):
@@ -383,7 +525,93 @@ def test_screenshots(vm, args):
     return True, f"saved {len(saved)} screenshots in {vm.out}: {saved}"
 
 
-TESTS = {"boot": test_boot, "shells": test_shells, "screenshots": test_screenshots}
+# Drivers the x86_64 desktop runs under `make qemu`'s defaults (q35, NVMe, e1000,
+# xHCI, the firmware's framebuffer); each must keep running once the hardware
+# right is limited to drivers.
+LOCKDOWN_DRIVERS = ["pcid", "acpid", "nvmed", "e1000d", "xhcid", "vesad"]
+# Schemes only a process holding the hardware right may name (security roadmap S13).
+HARDWARE_SCHEMES = ["irq", "serio", "kernel.acpi", "pci", "acpi"]
+
+
+def test_lockdown(vm, args):
+    """Every driver works (login screen, keypress, DHCP, disk, driver processes) while root reaches no raw hardware."""
+    kind = None
+    while vm.elapsed() < args.timeout and kind != "login":
+        kind = vm.screenshot().kind()
+        time.sleep(0.2)
+    if kind != "login":
+        return False, f"no graphical login within {args.timeout}s"
+    login = settle(vm, 10)
+    login.save_png(vm.out / "login.png")
+    # The login screen has `user` filled in and an empty password: Enter logs in.
+    vm.command("sendkey ret")
+    desktop = settle(vm, 30, still=2.0)
+    desktop.save_png(vm.out / "desktop.png")
+    problems = []
+    if desktop.rgb == login.rgb:
+        problems.append("Enter on the login screen changed nothing, so keyboard input is broken")
+
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no password prompt for root"
+    vm.type("password\n")
+    time.sleep(3)
+
+    def run(line, end, timeout=30):
+        """Types `line` followed by an echo of `end`; returns the output before it, or None."""
+        since = vm.mark()
+        vm.type(f"{line}; echo {end}-$((40+2))\n")
+        found = vm.wait_serial(rf"(?s)\n(.*){end}-42", timeout, since)
+        return found.group(1) if found else None
+
+    address = None
+    for _ in range(10):
+        output = run("cat /scheme/netcfg/ifaces/eth0/addr/list", "net") or ""
+        address = re.search(r"\b10\.0\.2\.\d+", output)
+        if address:
+            break
+        time.sleep(3)
+    if not address:
+        problems.append("eth0 has no address from QEMU's DHCP server")
+    if "disk-42" not in (run("echo disk-$((40+2)) > /tmp/lockdown-disk; cat /tmp/lockdown-disk", "disk-done") or ""):
+        problems.append("writing and reading back /tmp/lockdown-disk on the root file system failed")
+    processes = run("ps", "ps") or ""
+    (vm.out / "ps.txt").write_text(processes)
+    missing = [driver for driver in LOCKDOWN_DRIVERS if driver not in processes]
+    if missing:
+        problems.append(f"drivers not running: {missing} (see {vm.out / 'ps.txt'})")
+
+    listing = run("ls /scheme", "scheme-list")
+    schemes = set(re.findall(r"[\w.-]+", listing or ""))
+    if not listing or "memory" not in schemes:
+        problems.append("`ls /scheme` printed no memory scheme")
+    visible = [name for name in HARDWARE_SCHEMES if name in schemes]
+    if visible:
+        problems.append(f"root sees the device schemes {visible}")
+    # bash opens the file for its redirection and prints the marker only if the open succeeded.
+    opened = run("bash -c 'exec 3</scheme/memory/physical && echo physmem-opened-$((40+2))'", "physmem")
+    if opened is None or "physmem-opened-42" in opened:
+        problems.append("root opened /scheme/memory/physical")
+    since = vm.mark()
+    vm.type("lockdown-probe; echo probe-exit-$?\n")
+    probe = vm.wait_serial(r"(?s)\n(lockdown-probe: .*)probe-exit-(\d+)", 60, since)
+    if not probe:
+        problems.append("lockdown-probe printed nothing; is config/lockdown.toml included?")
+    else:
+        (vm.out / "probe.txt").write_text(probe.group(1))
+        if probe.group(2) != "0":
+            failed = re.findall(r"lockdown-probe: FAIL (\S+):", probe.group(1))
+            problems.append(f"lockdown-probe exited {probe.group(2)}; open routes: {failed}")
+
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, f"drivers work ({address.group(0)} from DHCP) and root reaches no raw hardware; see {vm.out}"
+
+
+TESTS = {"boot": test_boot, "shells": test_shells, "screenshots": test_screenshots, "tpm": test_tpm,
+         "lockdown": test_lockdown}
 
 
 def main():
@@ -408,7 +636,7 @@ def main():
         for run in range(1, args.repeat + 1):
             out = out_root / f"{name}-{run}"
             out.mkdir(parents=True, exist_ok=True)
-            vm = VM(args, out)
+            vm = VM(args, out, tpm=name == "tpm")
             try:
                 ok, note = TESTS[name](vm, args)
             finally:

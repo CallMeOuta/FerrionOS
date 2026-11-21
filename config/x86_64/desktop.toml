@@ -14,7 +14,9 @@
 # bash and Ion. zsh's recipe is still work in progress: it prints getrusage()
 # warnings until relibc gains times() support.
 
-include = ["../desktop.toml"]
+# tpm.toml: the TPM driver and attestation service, built and tested for x86_64 only.
+# lockdown.toml: lockdown-probe, which checks that root reaches no raw hardware.
+include = ["../desktop.toml", "../tpm.toml", "../lockdown.toml"]
 
 [packages]
 bash = {}

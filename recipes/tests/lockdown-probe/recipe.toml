@@ -1,0 +1,13 @@
+# The S13 probe of the security roadmap: run as root, lockdown-probe tries every route from a
+# process to raw hardware (physical memory, port I/O, the device schemes) and passes only when
+# each is closed to a process without the hardware right. The crate lives in crate/ beside this
+# file. config/lockdown.toml installs it; `scripts/vm-test.py lockdown` runs it.
+[package]
+description = "Checks that root without the hardware right reaches no raw hardware"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

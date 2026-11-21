@@ -1,0 +1,12 @@
+[package]
+name = "lockdown-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Checks that a process without the hardware right reaches no raw hardware (security roadmap S13)"
+publish = false
+
+[dependencies]
+ioslice = "0.6"
+libredox = { version = "0.2.0", features = ["mkns"] }
+redox_syscall = "0.9.5"

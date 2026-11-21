@@ -1,0 +1,13 @@
+# Lockdown probe (recipes/tests/lockdown-probe; security roadmap S13).
+#
+# init grants the hardware right only to the services whose unit sets
+# `hardware = true`: the drivers and the driver managers. Every other process,
+# root's login shell included, sees no irq, serio, kernel.acpi, pci or acpi
+# scheme, and its memory scheme maps no physical memory and grants no port I/O.
+# Run `lockdown-probe` as root to check it: it prints one line per route and
+# exits 0 when every route is closed.
+#
+# Checked by `scripts/vm-test.py lockdown`.
+
+[packages]
+lockdown-probe = {}
