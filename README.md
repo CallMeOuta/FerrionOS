@@ -1,4 +1,9 @@
-# FerrionOS
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="branding/github/readme-dark.svg">
+    <img alt="FerrionOS" src="branding/github/readme-light.svg" width="160">
+  </picture>
+</h1>
 
 This repository is the build system for FerrionOS. FerrionOS began as a fork of Redox OS and is developed independently; it is not affiliated with or endorsed by the Redox OS project.
 
