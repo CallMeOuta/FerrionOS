@@ -237,7 +237,7 @@ pub fn fetch(recipe: &CookRecipe, check_source: bool, logger: &PtyOut) -> Result
                     }
                     // TODO: RedoxFS has a race condition problem with `--recursive` and running in multi CPU.
                     //       It is appear that running the submodule update separately fixes it. Remove this when
-                    //       `git clone https://gitlab.redox-os.org/redox-os/relibc --recursive` proven to work in FerrionOS.
+                    //       a recursive clone of relibc (`git clone --recursive`) is proven to work in FerrionOS.
                     let mut cmds = vec!["update", "--init"];
                     if shallow_clone {
                         cmds.push("--filter=tree:0");

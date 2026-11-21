@@ -1,4 +1,4 @@
-#TODO can't recognize Redox target
+#TODO can't recognize the target
 [source]
 tar = "http://caca.zoy.org/files/libcaca/libcaca-0.99.beta19.tar.gz"
 [build]

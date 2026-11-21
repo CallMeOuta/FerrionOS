@@ -1,6 +1,6 @@
 # FerrionOS
 
-FerrionOS is a fork of the Redox OS build system: makefiles (`Makefile`, `mk/`), a Rust build tool called the cookbook (`src/`), package recipes (`recipes/`) and filesystem configs (`config/`). Together they fetch, cross-compile and package the operating system's components and assemble a bootable image. The components' own code (kernel, relibc, drivers) is fetched at build time and lives in other repositories.
+This repository is FerrionOS's build system, forked from an upstream project's: makefiles (`Makefile`, `mk/`), a Rust build tool called the cookbook (`src/`), package recipes (`recipes/`) and filesystem configs (`config/`). Together they fetch, cross-compile and package the operating system's components and assemble a bootable image. The components' own code (kernel, relibc, drivers) is fetched at build time and lives in other repositories.
 
 # Task Guides
 
@@ -15,19 +15,19 @@ Read the matching guide before starting:
 
 # Reference
 
-- Relying on something you remember about Redox, or a port, test or boot failing in hardware, networking, terminals and PTYs, the filesystem or POSIX and relibc: [`docs/redox-state.md`](docs/redox-state.md)
+- Relying on something you remember about the system's components, or a port, test or boot failing in hardware, networking, terminals and PTYs, the filesystem or POSIX and relibc: [`docs/platform-state.md`](docs/platform-state.md)
 - Choosing a check, or about to start a build: [`docs/testing.md`](docs/testing.md)
 - How a `make` run becomes an image, where a setting comes from, what a target name means: [`docs/build-system.md`](docs/build-system.md)
-- What still comes from Redox's servers and repositories: [`docs/upstream.md`](docs/upstream.md)
+- What still comes from upstream's servers and repositories: [`docs/upstream.md`](docs/upstream.md)
 - Roadmaps, when `plans/` exists on this machine (it is kept out of git, so a clone has none): `plans/kernel-roadmap.md` before setting up hosting or forks or starting kernel, relibc or RedoxFS work; `plans/product-roadmap.md` before deciding what to build next for users; `plans/linux-driver-compat.md` before porting a Linux driver; `plans/performance-roadmap.md` before changing a build flag, a hot path or a hardening default; `plans/security-roadmap.md` before any change listed under Security. Never commit them.
 
-Documentation is split by genre. `agents/skills/` holds task procedure and `docs/` holds reference on how the build system is shaped; both are for anyone working on the codebase. The roadmaps in `plans/` stay local to the maintainer's machine. User documentation is upstream's [Redox Book](https://doc.redox-os.org/book/).
+Documentation is split by genre. `agents/skills/` holds task procedure and `docs/` holds reference on how the build system is shaped; both are for anyone working on the codebase. The roadmaps in `plans/` stay local to the maintainer's machine. User documentation is the FerrionOS Book in `book/` (mdBook, published at https://callmeouta.github.io/FerrionOS/), and it follows the same naming rule.
 
 # Rules
 
-- The code in this repository is the source of truth. The Redox Book and FAQ describe Redox and lag behind it: where they disagree with the code, follow the code.
+- The code in this repository is the source of truth. The book in `book/` lags behind it: where they disagree, follow the code.
 - A failure that also happens without your change is pre-existing. Report it with its log and move on.
-- Code brought in from another project keeps its licence notice and names its source. Upstream relibc has an open issue over code copied without one ([`docs/redox-state.md`](docs/redox-state.md)).
+- Code brought in from another project keeps its licence notice and names its source.
 - A single source of truth stays in code, and documents point at it instead of copying it: make targets in the comments of `Makefile` and `mk/*.mk`, build variables in `mk/config.mk`, emulator options in `mk/qemu.mk`, cookbook commands and `COOKBOOK_*` variables in `REPO_HELP_STR` (`src/bin/repo/main.rs`), recipe keys in `src/recipe.rs`. Update those when behaviour changes.
 
 # Security
@@ -46,9 +46,11 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
 # Naming
 
 - Write `FerrionOS` wherever text names the OS or project this repository builds: prose, comments, messages, package descriptions, labels a user sees.
-- `Redox` stays for what upstream owns (the Redox OS project, its team, nonprofit, trademark, website, Book, GitLab and chat, published titles, statements about upstream) and inside identifiers and compound names: RedoxFS, Redoxer, relibc, libredox, `redox_syscall`, target triples such as `x86_64-unknown-redox`, recipe, file and directory names, URLs, any lowercase `redox`.
-- `Redox` also stays in a string that something outside this repository matches: the kernel answers `uname -s` with `Redox`, and third-party build scripts list it as an OS name. Before renaming such a string, `rg` it across the repository, then rename every use together or keep it.
-- `*.patch` files, `LICENSE` and `TRADEMARK.md` keep their text.
+- The name of the upstream project is never written in FerrionOS's text: prose, comments, messages, package descriptions, docs and links. Where the fact matters, write "upstream" ("the upstream project", "upstream's packages"). There are three exceptions:
+  1. Legal notices: the copyright line in `LICENSE`, copyright and licence headers in code and in `*.patch` files, and `authors` in `Cargo.toml` files.
+  2. Identifiers and strings that other software matches, which would break if renamed: target triples such as `x86_64-unknown-redox`, crate, package, recipe, file and directory names (RedoxFS, relibc, `redox_syscall`, `redox.patch`), make and environment variables (`HOSTED_REDOX`), the `uname -s` value the kernel reports and code compares, `ID_LIKE` in os-release, and URLs that code or a recipe fetches. Prose may name a component by its identifier. Before renaming such a string, `rg` it across the repository, then rename every use together or keep it.
+  3. Files applied byte-exact from upstream: `*.patch` files and anything under a recipe's `source/`, which are never edited.
+- `README.md` has one sentence saying FerrionOS began as a fork and is not affiliated with the upstream project; it is the only other place the name appears.
 
 # Architectures
 
@@ -61,7 +63,7 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
 - Cook through `make`: it enters the container and puts the cross toolchain on `PATH`. Call `target/release/repo` directly only for its listing commands (`find`, `cook-list`).
 - `source/` and `target/` under a recipe, and `build/`, `prefix/`, `repo/` and `target/` at the root, are fetched or generated. The cookbook resets and deletes `source/` trees: before editing one, read [`agents/skills/component-sources.md`](agents/skills/component-sources.md).
 - `make install` and the `i.` targets extract packages into `DESTDIR`, which defaults to `/`. Pass `DESTDIR=<directory>` on any host that is not running FerrionOS.
-- The bootstrap scripts clone upstream Redox and delete themselves unless called with `-d`.
+- The bootstrap scripts clone upstream's build system and delete themselves unless called with `-d`.
 
 # Style
 

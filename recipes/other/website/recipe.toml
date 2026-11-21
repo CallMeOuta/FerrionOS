@@ -1,5 +1,5 @@
 [package]
-description = "Redox website data"
+description = "Upstream's website data"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/website"

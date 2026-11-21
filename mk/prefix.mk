@@ -140,7 +140,7 @@ else
 	mv "$@.partial" "$@"
 endif
 
-# PREFIX_BINARY FOR REDOX -----------------------------------------
+# PREFIX_BINARY ON A FERRIONOS HOST -----------------------------------------
 else
 
 $(PREFIX)/id_ed25519.pub.toml: | $(CONTAINER_TAG)

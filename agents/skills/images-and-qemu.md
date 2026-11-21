@@ -15,7 +15,7 @@ Read this before building an image or booting one in QEMU.
 
 Each of these can start a cook, and `make qemu` starts the whole build when the image is missing. Run them the way [`docs/testing.md`](../../docs/testing.md) says: `CI=1 COOKBOOK_LOGS=true` in the environment, output to a log file. [`docs/build-system.md`](../../docs/build-system.md) explains the stages, and why `make all` can find nothing to do after an edit.
 
-`REPO_BINARY=1` fills the image with Redox's prebuilt packages instead of cooking. That proves a config or the image assembly quickly, and says nothing about a changed recipe.
+`REPO_BINARY=1` fills the image with upstream's prebuilt packages instead of cooking. That proves a config or the image assembly quickly, and says nothing about a changed recipe.
 
 The image is `build/<arch>/<config>/harddrive.img`. `make mount` mounts it at `build/<arch>/<config>/filesystem/` through FUSE, and `make unmount` releases it. A mount, a push (`make p.<recipe>`) and a running QEMU exclude each other: the image takes one writer at a time.
 
@@ -53,4 +53,4 @@ On the serial console Ctrl-C goes to the guest, and `Ctrl-a h` lists the keys of
 3. `make mount CONFIG_NAME=my_<name>`, read the result under `build/<arch>/my_<name>/filesystem/`, then `make unmount CONFIG_NAME=my_<name>`. `make ci-os-test` in `mk/ci.mk` does the same for the os-test suite.
 4. After the unmount, delete the config and `build/<arch>/my_<name>/`.
 
-Done when you have read the result file, or the serial log shows where the boot stopped. A failure here may be one of Redox's known limits: [`docs/redox-state.md`](../../docs/redox-state.md).
+Done when you have read the result file, or the serial log shows where the boot stopped. A failure here may be one of the platform's known limits: [`docs/platform-state.md`](../../docs/platform-state.md).

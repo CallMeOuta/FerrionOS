@@ -6,7 +6,7 @@ Read this before changing the Rust code under `src/`.
 
 - `repo` is the command every recipe target in `mk/repo.mk` calls (`src/bin/repo/`).
 - `repo_builder` publishes cooked packages into `repo/<target>/`. `repo cook` runs it at the end.
-- `cookbook_redoxer` wraps Redox's `redoxer` and provides the cross-compilation environment every build script runs in.
+- `cookbook_redoxer` wraps upstream's `redoxer` crate and provides the cross-compilation environment every build script runs in.
 - `repo_editor` is an interactive terminal front end, started by `make repo_editor`.
 
 `repo` looks for `repo_builder` and `cookbook_redoxer` beside its own executable, so build them together.
@@ -23,7 +23,7 @@ Read this before changing the Rust code under `src/`.
 - The callers of `repo`. `mk/*.mk` and `scripts/` call it with fixed commands and flags and parse its output (`find`, `--display=csv`). `rg 'REPO_BIN|target/release/repo' Makefile mk scripts` lists them. `REPO_HELP_STR` in `src/bin/repo/main.rs` is the list users see: keep it in step.
 - The container. An environment variable the cookbook reads reaches a Podman build only when `PODMAN_CONFIG` in `mk/podman.mk` forwards it.
 - Every host. The cookbook, and the bash in `src/cook/script.rs`, run on Linux, macOS, FreeBSD and on FerrionOS itself (`is_redox()` in `src/lib.rs`). Give an external command only options all of them accept; `fetch_extract_tar` in `src/cook/fetch.rs` shows the pattern.
-- Redox's crates. `PackageName`, `Package` and the filesystem-config types come from `redox-pkg`, `pkgar` and `redox_installer`, git dependencies in `Cargo.toml`. Their code is not in this repository.
+- Upstream's crates. `PackageName`, `Package` and the filesystem-config types come from `redox-pkg`, `pkgar` and `redox_installer`, git dependencies in `Cargo.toml`. Their code is not in this repository.
 
 ## Conventions in the code
 

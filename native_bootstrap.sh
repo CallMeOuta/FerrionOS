@@ -916,7 +916,7 @@ usage()
 cargoInstall()
 {
     if is_os_redox ; then
-        # in redox OS, cargo is not based on rustup. Packages are managed by pkg
+        # On FerrionOS, cargo is not based on rustup. Packages are managed by pkg
         return 0
     fi
     if [[ "`cargo +stable install --list`" != *"$1 v$2"* ]]; then
@@ -935,7 +935,7 @@ cargoInstall()
 rustInstall()
 {
     if is_os_redox ; then
-        # in redox OS, rustup is not available. Packages are managed by pkg
+        # On FerrionOS, rustup is not available. Packages are managed by pkg
         return 0
     fi
     noninteractive=$1

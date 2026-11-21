@@ -14,7 +14,7 @@ else
 PODMAN_VOLUME_FLAG=
 endif
 
-# Cache layers to redox-os docker hub
+# Cache layers to upstream's Docker Hub repository
 PODMAN_CACHE=
 PODMAN_CACHE_PATH?=docker.io/redoxos/$(IMAGE_TAG)-$(HOST_ARCH)
 

@@ -10,7 +10,7 @@ usage()
     echo "Print the backtrace contained in the backtracefile."
     echo "Symbols are taken from the executable for the given recipe."
     echo "If no backtracefile is given, decode the given addresses instead."
-    echo "This command must be run in the 'redox' directory."
+    echo "This command must be run in the build system's root directory."
     echo
     echo "-X for x86_64, -6 for i686, -A for aarch64 (x86_64 is the default)."
     echo "To read from stdin, use '-b -'"

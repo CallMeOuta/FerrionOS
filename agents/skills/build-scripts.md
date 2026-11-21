@@ -36,4 +36,4 @@ A tool the build needs on the host is declared once per package manager. Adding 
 
 ## Bootstrap scripts in this checkout
 
-Without `-d`, both bootstrap scripts clone upstream Redox into a new `redox/` directory and then delete themselves. Run them here as `./native_bootstrap.sh -d` or `./podman_bootstrap.sh -d`, which installs the dependencies and stops.
+Without `-d`, both bootstrap scripts clone the upstream build system into a new `redox/` directory and then delete themselves. Run them here as `./native_bootstrap.sh -d` or `./podman_bootstrap.sh -d`, which installs the dependencies and stops.

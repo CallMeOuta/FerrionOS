@@ -2,7 +2,7 @@
   "files": [
     {
       "path": "AGENTS.md",
-      "description": "Contributor contract: FerrionOS/Redox naming, architecture names, how to run builds, sources of truth kept in code. CLAUDE.md only imports this file."
+      "description": "Contributor contract: naming rule and its exceptions, architecture names, how to run builds, sources of truth kept in code. CLAUDE.md only imports this file."
     },
     {
       "path": "agents/skills/recipes.md",
@@ -58,7 +58,7 @@
     },
     {
       "path": "docs/upstream.md",
-      "description": "What is still fetched from Redox's repositories and servers",
+      "description": "What is still fetched from upstream's repositories and servers",
       "scope": [
         "recipes/core/**",
         "Cargo.toml",
@@ -68,8 +68,8 @@
       ]
     },
     {
-      "path": "docs/redox-state.md",
-      "description": "Redox's current limits and outdated beliefs, dated 2026-11-20",
+      "path": "docs/platform-state.md",
+      "description": "What the platform can and cannot do today and outdated beliefs, dated 2026-11-20",
       "scope": [
         "recipes/**",
         "config/**"

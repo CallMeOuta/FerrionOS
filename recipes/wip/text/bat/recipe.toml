@@ -1,4 +1,4 @@
-#TODO sys-info crate build.rs does not recognize Redox
+#TODO sys-info crate build.rs does not recognize the target OS
 [source]
 git = "https://github.com/sharkdp/bat"
 [build]

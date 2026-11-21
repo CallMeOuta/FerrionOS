@@ -148,7 +148,7 @@ KPROF_PROCESSED_OUTPUT?=$(BUILD)/flamegraph/processed.txt
 KPROF_COLLAPSED_OUTPUT?=$(BUILD)/flamegraph/collapsed.txt
 # XXX: This assumes the TSC is invariant, that the value for cpu0 is the same as for all other CPUs, and that the value from ACPI actually reflects the TSC rate. It also only works on Linux.
 KPROF_CPU_GHZ?=$(shell (cat /sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq || echo 3400) | xargs echo "0.001 *" | bc)
-# See https://gitlab.redox-os.org/redox-os/kprofiling/-/blob/master/src/main.rs?ref_type=heads#L16-L18
+# The option letters are listed in src/main.rs of the kprofiling component (recipes/wip/dev/perf/redox-kprofiling)
 # Set e.g. to "xo" to show individual instruction offsets
 KPROF_OPTIONS?=u
 # for example, set --reverse to get a reverse flamegraph

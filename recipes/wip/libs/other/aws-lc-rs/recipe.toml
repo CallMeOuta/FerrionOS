@@ -6,7 +6,7 @@ template = "custom"
 
 script = """
     # we need HOST != TARGET, because otherwise we get this error: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189
-    # by this line https://gitlab.redox-os.org/njskalski/aws-lc-rs/-/blob/main/aws-lc-sys/builder/cc_builder.rs#L493
+    # by aws-lc-sys/builder/cc_builder.rs
     export HOST=x86_64-linux-gnu
 
     rsync -a --delete "${COOKBOOK_SOURCE}/" ./

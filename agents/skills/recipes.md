@@ -12,7 +12,7 @@ Search the whole tree before creating anything: `rg --files recipes -g recipe.to
 
 - A new or unfinished port lives in `recipes/wip/<category>/<name>/`. Its `recipe.toml` opens with a `#TODO` line that says what is missing, in the tree's vocabulary: `not compiled or tested`, `compiled but not tested`, a named error (`#TODO openssl-sys crate error`), or `promote` once it works. Update the line whenever the state changes.
 - A recipe that works inside the OS lives in `recipes/<category>/<name>/`. Promoting it means moving the directory, removing the `#TODO` and giving a `tar` source its `blake3`.
-- Prove a recipe on x86_64 first. It is the architecture with by far the most working packages ([`docs/redox-state.md`](../../docs/redox-state.md)).
+- Prove a recipe on x86_64 first. It is the architecture with by far the most working packages ([`docs/platform-state.md`](../../docs/platform-state.md)).
 
 ## The format
 

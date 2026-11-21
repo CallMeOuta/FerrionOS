@@ -2,7 +2,7 @@
 
 Read this before changing code inside a recipe's `source/` directory: the kernel, relibc, the drivers in `base`, or any other fetched package.
 
-The components' code is not in this repository. A recipe's `[source]` says where it comes from, and the cookbook clones or unpacks it into `recipes/<category>/<name>/source/`; `make find.<name>` prints the recipe directory. Almost every system component comes from Redox's GitLab ([`docs/upstream.md`](../../docs/upstream.md)).
+The components' code is not in this repository. A recipe's `[source]` says where it comes from, and the cookbook clones or unpacks it into `recipes/<category>/<name>/source/`; `make find.<name>` prints the recipe directory. Almost every system component comes from upstream's GitLab ([`docs/upstream.md`](../../docs/upstream.md)).
 
 ## Keep your edits
 
@@ -19,7 +19,7 @@ So set the recipe's rule to `local` before the first edit: `make f.<name>` fetch
 2. `make p.<name>` pushes the package into the existing image, with QEMU stopped. `make rp.<name>` does steps 1 and 2. Without an image yet, `make image` builds one from every cooked package.
 3. Boot and check: [`images-and-qemu.md`](images-and-qemu.md).
 
-RedoxFS is also built into the initfs inside the `base` package (`recipes/core/base/recipe.toml` lists it as a build dependency). After changing RedoxFS cook `base` as well: `make rp.redoxfs,base`, per the Redox Book's [How to update RedoxFS](https://doc.redox-os.org/book/coding-and-building.html#how-to-update-redoxfs).
+RedoxFS is also built into the initfs inside the `base` package (`recipes/core/base/recipe.toml` lists it as a build dependency). After changing RedoxFS cook `base` as well: `make rp.redoxfs,base`, per the book's [How to update RedoxFS](../../book/src/coding-and-building.md#how-to-update-redoxfs).
 
 ## Make it last
 

@@ -14,7 +14,7 @@ dependencies = [
 ]
 script = """
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
-#TODO: support Redox in UNAME
+#TODO: support this OS's uname -s value in UNAME
 DYNAMIC_INIT
 "${COOKBOOK_MAKE}" \
     CROSS_COMPILE="${TARGET}-" \

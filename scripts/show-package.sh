@@ -6,7 +6,7 @@ if [ -z "$*" ]
 then
     echo "Show the contents of the "stage" and 'sysroot' directories in recipe(s)"
     echo "Usage: $0 recipe1 ..."
-    echo "Must be run from the 'redox' directory"
+    echo "Must be run from the build system's root directory"
     echo "e.g. $0 kernel"
     exit 1
 fi

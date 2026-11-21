@@ -78,7 +78,7 @@ COOKBOOK_CONFIGURE_FLAGS+=(
     --enable-host-shared
     --enable-threads=posix
     --enable-libstdcxx-threads
-    --with-bugurl="https://gitlab.redox-os.org/redox-os/gcc/-/issues"
+    --with-bugurl="https://github.com/CallMeOuta/FerrionOS/issues"
 )
 
 "${COOKBOOK_CONFIGURE}" "${COOKBOOK_CONFIGURE_FLAGS[@]}"

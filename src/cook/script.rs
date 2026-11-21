@@ -292,7 +292,7 @@ set(CMAKE_C_COMPILER_TARGET ${target})
 set(CMAKE_CXX_COMPILER_TARGET ${target})
 set(CMAKE_ASM_COMPILER_TARGET ${target})
 EOF
-# redox clang workaround (see redoxer env)
+# clang workaround for the target (see redoxer env)
 CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-stdlib=libstdc++"
 fi
 

@@ -6,7 +6,7 @@ A filesystem config names the packages, files, users and size of one image. `mak
 
 ## The format
 
-The schema is `redox_installer::Config`, in Redox's installer crate and not in this repository: `src/config/` of `gitlab.redox-os.org/redox-os/installer` at the revision `Cargo.lock` pins, and after a first build also `recipes/core/installer/source/src/config/`. How it merges:
+The schema is `redox_installer::Config`, in upstream's installer crate and not in this repository: `src/config/` of `gitlab.redox-os.org/redox-os/installer` at the revision `Cargo.lock` pins, and after a first build also `recipes/core/installer/source/src/config/`. How it merges:
 
 - `include = ["base.toml"]` takes paths relative to the including file. Included configs merge in list order, and the including file merges last.
 - `[general]` merges key by key, the later file winning: `filesystem_size` in MiB, `efi_partition_size`, `prompt` and others.
