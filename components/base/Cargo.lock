@@ -2738,6 +2738,7 @@ dependencies = [
  "daemon",
  "driver-graphics",
  "futures",
+ "libc",
  "libredox 0.2.0",
  "log",
  "pcid",

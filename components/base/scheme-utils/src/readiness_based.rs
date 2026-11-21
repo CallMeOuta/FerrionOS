@@ -37,6 +37,15 @@ impl<S: Deref<Target = Socket>> ReadinessBased<S> {
     }
 
     pub fn read_and_process_requests(&mut self, scheme: &mut impl SchemeSync) -> Result<()> {
+        self.read_and_process_requests_with_cancel(scheme, |_, _| {})
+            .map(|_| ())
+    }
+
+    pub fn read_and_process_requests_with_cancel<T: SchemeSync>(
+        &mut self,
+        scheme: &mut T,
+        mut cancel: impl FnMut(Id, &mut T),
+    ) -> Result<usize> {
         assert!(self.requests_read.is_empty());
 
         match self
@@ -52,12 +61,14 @@ impl<S: Deref<Target = Socket>> ReadinessBased<S> {
             }) => {}
             Err(err) => return Err(err),
         }
+        let count = self.requests_read.len();
 
         for request in self.requests_read.drain(..) {
             let req = match request.kind() {
                 RequestKind::Call(c) => c,
                 RequestKind::Cancellation(req) => {
                     if let Some((_caller, op)) = self.states.remove(&req.id) {
+                        cancel(req.id, scheme);
                         self.responses_to_write
                             .push_back(Response::err(ECANCELED, op));
                     }
@@ -122,7 +133,7 @@ impl<S: Deref<Target = Socket>> ReadinessBased<S> {
             self.responses_to_write.push_back(resp);
         }
 
-        Ok(())
+        Ok(count)
     }
 
     // TODO: Doesn't scale. Instead, provide an API for some form of queue.
