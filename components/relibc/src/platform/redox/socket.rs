@@ -299,7 +299,13 @@ unsafe fn serialize_ancillary_data_to_stream(
                             fd_count * mem::size_of::<usize>(),
                         )
                     };
-                    redox_rt::sys::sys_call_wo(socket as usize, fds_slice, CallFlags::FD, &[])?;
+                    // SCM_RIGHTS passes copies: the sender keeps its descriptors.
+                    redox_rt::sys::sys_call_wo(
+                        socket as usize,
+                        fds_slice,
+                        CallFlags::FD | CallFlags::FD_CLONE,
+                        &[],
+                    )?;
                 }
 
                 // Serialize to ancillary_data_stream.
