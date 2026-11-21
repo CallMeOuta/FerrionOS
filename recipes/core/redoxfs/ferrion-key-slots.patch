@@ -1,0 +1,947 @@
+FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc after ferrion-passphrase-wipe.patch:
+- redoxfs-key lists, adds (a passphrase, or a generated recovery key printed once), changes and removes key slots of a version 8 volume, on an image file or, as root, on the mounted root volume through a call on the mounted filesystem, and every change rewrites all headers of the ring.
+- the daemon and the tools skip all-zero key slots, and the master keys a slot yields are checked against the header before use.
+- redoxfs, redoxfs-mkfs, redoxfs-clone, redoxfs-resize and redoxfs-ar take --key-file PATH, or - for standard input, holding the exact passphrase bytes.
+- creating a key refuses unless /scheme/rand/status reports seeded: yes.
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 3c8471e..7818de9 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -42,6 +42,12 @@ path = "src/bin/resize.rs"
+ doc = false
+ required-features = ["std"]
+ 
++[[bin]]
++name = "redoxfs-key"
++path = "src/bin/key.rs"
++doc = false
++required-features = ["std"]
++
+ [dependencies]
+ aes = { version = "0.8", default-features = false }
+ argon2 = { version = "0.4", default-features = false, features = ["alloc"] }
+diff --git a/src/bin/ar.rs b/src/bin/ar.rs
+index 45ed5ce..30d9718 100644
+--- a/src/bin/ar.rs
++++ b/src/bin/ar.rs
+@@ -12,13 +12,21 @@ use uuid::Uuid;
+ fn main() {
+     env_logger::init();
+ 
+-    let mut args = env::args().skip(1);
++    let (key, args) = match redoxfs::key_tool::take_key_file(env::args().skip(1)) {
++        Ok(ok) => ok,
++        Err(err) => {
++            eprintln!("redoxfs-ar: {}", err);
++            process::exit(1);
++        }
++    };
++    let password_opt = key.as_ref().map(|key| key.0.as_slice());
++    let mut args = args.into_iter();
+ 
+     let disk_path = if let Some(path) = args.next() {
+         path
+     } else {
+         println!("redoxfs-ar: no disk image provided");
+-        println!("redoxfs-ar DISK FOLDER [BOOTLOADER]");
++        println!("redoxfs-ar [--key-file PATH|-] DISK FOLDER [BOOTLOADER]");
+         process::exit(1);
+     };
+ 
+@@ -26,7 +34,7 @@ fn main() {
+         path
+     } else {
+         println!("redoxfs-ar: no folder provided");
+-        println!("redoxfs-ar DISK FOLDER [BOOTLOADER]");
++        println!("redoxfs-ar [--key-file PATH|-] DISK FOLDER [BOOTLOADER]");
+         process::exit(1);
+     };
+ 
+@@ -66,7 +74,7 @@ fn main() {
+     let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+     match FileSystem::create_reserved(
+         disk,
+-        None,
++        password_opt,
+         &bootloader,
+         ctime.as_secs(),
+         ctime.subsec_nanos(),
+diff --git a/src/bin/clone.rs b/src/bin/clone.rs
+index d0d48a5..15c29b3 100644
+--- a/src/bin/clone.rs
++++ b/src/bin/clone.rs
+@@ -12,13 +12,21 @@ use uuid::Uuid;
+ fn main() {
+     env_logger::init();
+ 
+-    let mut args = env::args().skip(1);
++    let (key, args) = match redoxfs::key_tool::take_key_file(env::args().skip(1)) {
++        Ok(ok) => ok,
++        Err(err) => {
++            eprintln!("redoxfs-clone: {}", err);
++            process::exit(1);
++        }
++    };
++    let password_opt = key.as_ref().map(|key| key.0.as_slice());
++    let mut args = args.into_iter();
+ 
+     let disk_path_old = if let Some(path) = args.next() {
+         path
+     } else {
+         println!("redoxfs-clone: no old disk image provided");
+-        println!("redoxfs-clone NEW-DISK OLD-DISK [BOOTLOADER]");
++        println!("redoxfs-clone [--key-file PATH|-] OLD-DISK NEW-DISK [BOOTLOADER]");
+         process::exit(1);
+     };
+ 
+@@ -26,7 +34,7 @@ fn main() {
+         path
+     } else {
+         println!("redoxfs-clone: no new disk image provided");
+-        println!("redoxfs-clone NEW-DISK OLD-DISK [BOOTLOADER]");
++        println!("redoxfs-clone [--key-file PATH|-] OLD-DISK NEW-DISK [BOOTLOADER]");
+         process::exit(1);
+     };
+ 
+@@ -49,7 +57,19 @@ fn main() {
+         }
+     };
+ 
+-    let mut fs_old = match FileSystem::open(disk_old, None, None, false) {
++    // The key opens an encrypted old volume and always encrypts the new one.
++    let fs_old = match FileSystem::open(disk_old, password_opt, None, false) {
++        Err(err) if password_opt.is_some() && err.errno == syscall::EKEYREJECTED => {
++            match fs::File::open(&disk_path_old).map(DiskFile::from) {
++                Ok(disk_old) => FileSystem::open(disk_old, None, None, false),
++                Err(err) => Err(syscall::Error::new(
++                    err.raw_os_error().unwrap_or(syscall::EIO),
++                )),
++            }
++        }
++        other => other,
++    };
++    let mut fs_old = match fs_old {
+         Ok(fs) => fs,
+         Err(err) => {
+             println!(
+@@ -97,7 +117,7 @@ fn main() {
+     let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+     let mut fs = match FileSystem::create_reserved(
+         disk,
+-        None,
++        password_opt,
+         &bootloader,
+         ctime.as_secs(),
+         ctime.subsec_nanos(),
+diff --git a/src/bin/key.rs b/src/bin/key.rs
+new file mode 100644
+index 0000000..01f3e99
+--- /dev/null
++++ b/src/bin/key.rs
+@@ -0,0 +1,192 @@
++#[cfg(target_os = "redox")]
++use redoxfs::key_tool::Secret;
++use redoxfs::key_tool::{read_secret, recovery_key, require_seeded_random};
++use redoxfs::{DiskFile, FileSystem, Header, KeySlot, Salt};
++use std::{env, io};
++
++type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
++
++enum Volume {
++    Disk(FileSystem<DiskFile>),
++    #[cfg(target_os = "redox")]
++    Mounted(libredox::Fd),
++}
++
++impl Volume {
++    fn open(path: &str, password: &[u8]) -> Result<Self> {
++        #[cfg(target_os = "redox")]
++        if path == "/" {
++            return Ok(Self::Mounted(libredox::Fd::open(
++                path,
++                libredox::flag::O_RDONLY | libredox::flag::O_DIRECTORY | libredox::flag::O_CLOEXEC,
++                0,
++            )?));
++        }
++        Ok(Self::Disk(FileSystem::open(
++            DiskFile::open(path)?,
++            Some(password),
++            None,
++            false,
++        )?))
++    }
++
++    fn header(&mut self) -> Result<Header> {
++        match self {
++            Self::Disk(fs) => Ok(fs.header),
++            #[cfg(target_os = "redox")]
++            Self::Mounted(fd) => {
++                use redoxfs::key_tool::{KEY_CALL, KEY_HEADER};
++                let mut header = Header::default();
++                let count = fd.call_rw(
++                    &mut header,
++                    syscall::CallFlags::empty(),
++                    &[KEY_CALL, KEY_HEADER, 0],
++                )?;
++                if count != header.len() || !header.valid() {
++                    return Err("invalid header reply".into());
++                }
++                Ok(header)
++            }
++        }
++    }
++
++    fn set(&mut self, index: usize, old: KeySlot, slot: KeySlot, password: &[u8]) -> Result<()> {
++        match self {
++            Self::Disk(fs) => {
++                fs.set_key_slot(index, slot)?;
++                fs.disk.file.sync_all()?;
++            }
++            #[cfg(target_os = "redox")]
++            Self::Mounted(fd) => {
++                use redoxfs::key_tool::{KEY_CALL, KEY_SET};
++                let mut payload = Secret(Vec::with_capacity(96 + password.len()));
++                payload.0.extend_from_slice(&old.to_bytes());
++                payload.0.extend_from_slice(&slot.to_bytes());
++                payload.0.extend_from_slice(password);
++                fd.call_rw(
++                    &mut payload.0,
++                    syscall::CallFlags::empty(),
++                    &[KEY_CALL, KEY_SET, index as u64],
++                )?;
++            }
++        }
++        #[cfg(not(target_os = "redox"))]
++        let _ = (old, password);
++        Ok(())
++    }
++}
++
++fn run() -> Result<()> {
++    let mut args = env::args().skip(1);
++    let operation = args.next().ok_or("usage: redoxfs-key list|add|change|remove [--key-file PATH|-] [--new-key-file PATH] [--slot N] [--recovery] VOLUME")?;
++    let mut key_file = None;
++    let mut new_key_file = None;
++    let mut index = None;
++    let mut recovery = false;
++    let mut path = None;
++    while let Some(arg) = args.next() {
++        match arg.as_str() {
++            "--key-file" => key_file = Some(args.next().ok_or("missing key file")?),
++            "--new-key-file" => new_key_file = Some(args.next().ok_or("missing new key file")?),
++            "--slot" => index = Some(args.next().ok_or("missing slot")?.parse::<usize>()?),
++            "--recovery" => recovery = true,
++            _ if !arg.starts_with('-') && path.is_none() => path = Some(arg),
++            _ => return Err("unknown or duplicate argument".into()),
++        }
++    }
++    let path = path.ok_or("missing volume (use / for mounted root)")?;
++    if !matches!(operation.as_str(), "list" | "add" | "change" | "remove")
++        || (recovery && (operation != "add" || new_key_file.is_some()))
++        || (new_key_file.is_some() && !matches!(operation.as_str(), "add" | "change"))
++    {
++        return Err("invalid operation or options".into());
++    }
++    let password = read_secret(key_file.as_deref(), "Current passphrase")?;
++    let mut volume = Volume::open(&path, &password.0)?;
++    let header = volume.header()?;
++    let (unlocked, keys) = header.unlock(&password.0).ok_or("incorrect passphrase")?;
++    if operation == "list" {
++        for (index, slot) in header.key_slots.iter().enumerate() {
++            if !slot.is_empty() {
++                println!("slot {index}: in use");
++            }
++        }
++        return Ok(());
++    }
++    let index = match (operation.as_str(), index) {
++        ("add", None) => header
++            .key_slots
++            .iter()
++            .position(KeySlot::is_empty)
++            .ok_or("no empty slots")?,
++        ("change", None) => unlocked,
++        ("remove", None) => return Err("remove requires --slot".into()),
++        (_, Some(index)) if index < 64 => index,
++        _ => return Err("slot out of range".into()),
++    };
++    let old = header.key_slots[index];
++    if (operation == "add") != old.is_empty() {
++        return Err("slot is not available for this operation".into());
++    }
++    let new_secret;
++    let slot = if operation == "remove" {
++        if header
++            .key_slots
++            .iter()
++            .filter(|slot| !slot.is_empty())
++            .count()
++            < 2
++        {
++            return Err("cannot remove the last slot".into());
++        }
++        KeySlot::default()
++    } else {
++        require_seeded_random()?;
++        new_secret = if recovery {
++            recovery_key()?
++        } else {
++            let value = read_secret(new_key_file.as_deref(), "New passphrase")?;
++            if new_key_file.is_none() {
++                let confirmation = read_secret(None, "Confirm new passphrase")?;
++                if value.0 != confirmation.0 {
++                    return Err("passphrases differ".into());
++                }
++            }
++            value
++        };
++        let slot = KeySlot::new(&new_secret.0, Salt::new().map_err(io::Error::other)?, keys)
++            .map_err(|err| io::Error::other(err.to_string()))?;
++        let mut check = header;
++        check.key_slots = [KeySlot::default(); 64];
++        check.key_slots[index] = slot;
++        if check.unlock(&new_secret.0).is_none() {
++            return Err("new slot verification failed".into());
++        }
++        volume.set(index, old, slot, &password.0)?;
++        if recovery {
++            use std::io::Write;
++            let mut out = io::stdout().lock();
++            out.write_all(b"Recovery key (type all digits without spaces): ")?;
++            for (i, group) in new_secret.0.chunks_exact(6).enumerate() {
++                if i != 0 {
++                    out.write_all(b" ")?;
++                }
++                out.write_all(group)?;
++            }
++            out.write_all(b"\n")?;
++            out.flush()?;
++        }
++        println!("slot {index}: updated; header ring rolled");
++        return Ok(());
++    };
++    volume.set(index, old, slot, &password.0)?;
++    println!("slot {index}: removed; header ring rolled");
++    Ok(())
++}
++
++fn main() {
++    if let Err(error) = run() {
++        eprintln!("redoxfs-key: {error}");
++        std::process::exit(1);
++    }
++}
+diff --git a/src/bin/mkfs.rs b/src/bin/mkfs.rs
+index b868940..2854933 100644
+--- a/src/bin/mkfs.rs
++++ b/src/bin/mkfs.rs
+@@ -2,14 +2,13 @@ extern crate redoxfs;
+ extern crate uuid;
+ 
+ use std::io::Read;
+-use std::{env, fs, io, process, time};
++use std::{env, fs, process, time};
+ 
+ use redoxfs::{DiskFile, FileSystem};
+-use termion::input::TermRead;
+ use uuid::Uuid;
+ 
+ fn usage() -> ! {
+-    eprintln!("redoxfs-mkfs [--encrypt] DISK [BOOTLOADER]");
++    eprintln!("redoxfs-mkfs [--encrypt] [--key-file PATH] DISK [BOOTLOADER]");
+     process::exit(1);
+ }
+ 
+@@ -19,9 +18,14 @@ fn main() {
+     let mut encrypt = false;
+     let mut disk_path_opt = None;
+     let mut bootloader_path_opt = None;
+-    for arg in env::args().skip(1) {
++    let mut key_file = None;
++    let mut args = env::args().skip(1);
++    while let Some(arg) = args.next() {
+         if arg == "--encrypt" {
+             encrypt = true;
++        } else if arg == "--key-file" {
++            key_file = Some(args.next().unwrap_or_else(|| usage()));
++            encrypt = true;
+         } else if disk_path_opt.is_none() {
+             disk_path_opt = Some(arg);
+         } else if bootloader_path_opt.is_none() {
+@@ -71,21 +75,17 @@ fn main() {
+     };
+ 
+     let password_opt = if encrypt {
+-        eprint!("redoxfs-mkfs: password: ");
+-
+-        let password = io::stdin()
+-            .read_passwd(&mut io::stderr())
+-            .unwrap()
+-            .unwrap_or_default();
+-
+-        eprintln!();
+-
+-        if password.is_empty() {
+-            eprintln!("redoxfs-mkfs: empty password, giving up");
++        if let Err(err) = redoxfs::require_seeded_random() {
++            eprintln!("redoxfs-mkfs: cannot generate keys: {err}");
+             process::exit(1);
+         }
+-
+-        Some(password)
++        match redoxfs::key_tool::read_secret(key_file.as_deref(), "redoxfs-mkfs: password") {
++            Ok(password) => Some(password),
++            Err(err) => {
++                eprintln!("redoxfs-mkfs: {err}");
++                process::exit(1);
++            }
++        }
+     } else {
+         None
+     };
+@@ -95,7 +95,7 @@ fn main() {
+         .unwrap();
+     match FileSystem::create_reserved(
+         disk,
+-        password_opt.as_ref().map(|x| x.as_bytes()),
++        password_opt.as_ref().map(|x| x.0.as_slice()),
+         &bootloader,
+         ctime.as_secs(),
+         ctime.subsec_nanos(),
+diff --git a/src/bin/mount.rs b/src/bin/mount.rs
+index b1100f7..c24701e 100644
+--- a/src/bin/mount.rs
++++ b/src/bin/mount.rs
+@@ -161,7 +161,9 @@ fn print_usage_exit() -> ! {
+ }
+ 
+ fn usage() {
+-    eprintln!("redoxfs [--no-daemon|-d] [--uuid] [disk or uuid] [mountpoint] [block in hex]");
++    eprintln!(
++        "redoxfs [--no-daemon|-d] [--key-file PATH] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
++    );
+ }
+ 
+ enum DiskId {
+@@ -176,7 +178,7 @@ fn filesystem_by_path(
+     boot_password: Option<&[u8]>,
+ ) -> Option<(String, FileSystem<DiskCache<Box<dyn Disk>>>)> {
+     log::debug!("opening {}", path);
+-    let attempts = 10;
++    let attempts = if boot_password.is_some() { 0 } else { 10 };
+     for attempt in 0..=attempts {
+         let typed;
+         let password_opt = if attempt > 0 {
+@@ -352,11 +354,18 @@ fn daemon(
+     mountpoint: &str,
+     block_opt: Option<u64>,
+     mut write: Option<File>,
++    key_file: Option<&str>,
+ ) -> ! {
+     setsig();
+ 
+     // Read once: reading wipes the bootloader's copy, and the search below may try several disks
+-    let boot_password = bootloader_password();
++    let boot_password = match key_file {
++        Some(path) => match redoxfs::key_tool::read_secret(Some(path), "") {
++            Ok(mut secret) => Some(Passphrase(std::mem::take(&mut secret.0))),
++            Err(err) => print_err_exit(format!("cannot read key file: {err}")),
++        },
++        None => bootloader_password(),
++    };
+     let boot_password_opt = boot_password.as_ref().map(|password| password.0.as_slice());
+     let filesystem_opt = match *disk_id {
+         DiskId::Path(ref path) => filesystem_by_path(path, block_opt, true, boot_password_opt),
+@@ -419,10 +428,17 @@ fn main() {
+     let mut disk_id: Option<DiskId> = None;
+     let mut mountpoint: Option<String> = None;
+     let mut block_opt: Option<u64> = None;
++    let mut key_file = None;
+ 
+     while let Some(arg) = args.next() {
+         match arg.as_str() {
+             "--no-daemon" | "-d" => daemonise = false,
++            "--key-file" => {
++                key_file = Some(
++                    args.next()
++                        .unwrap_or_else(|| print_err_exit("missing key file")),
++                )
++            }
+ 
+             "--uuid" if disk_id.is_none() => {
+                 disk_id = Some(DiskId::Uuid(
+@@ -467,7 +483,13 @@ fn main() {
+             if pid == 0 {
+                 drop(read);
+ 
+-                daemon(&disk_id, &mountpoint, block_opt, Some(write));
++                daemon(
++                    &disk_id,
++                    &mountpoint,
++                    block_opt,
++                    Some(write),
++                    key_file.as_deref(),
++                );
+             } else if pid > 0 {
+                 drop(write);
+ 
+@@ -486,6 +508,6 @@ fn main() {
+         }
+     } else {
+         log::info!("running in foreground");
+-        daemon(&disk_id, &mountpoint, block_opt, None);
++        daemon(&disk_id, &mountpoint, block_opt, None, key_file.as_deref());
+     }
+ }
+diff --git a/src/bin/resize.rs b/src/bin/resize.rs
+index b7f9525..70c954c 100644
+--- a/src/bin/resize.rs
++++ b/src/bin/resize.rs
+@@ -137,13 +137,21 @@ fn resize<D: Disk>(fs: &mut FileSystem<D>, size_arg: String) -> Result<(), Strin
+ fn main() {
+     env_logger::init();
+ 
+-    let mut args = env::args().skip(1);
++    let (key, args) = match redoxfs::key_tool::take_key_file(env::args().skip(1)) {
++        Ok(ok) => ok,
++        Err(err) => {
++            eprintln!("redoxfs-resize: {}", err);
++            process::exit(1);
++        }
++    };
++    let password_opt = key.as_ref().map(|key| key.0.as_slice());
++    let mut args = args.into_iter();
+ 
+     let disk_path = if let Some(path) = args.next() {
+         path
+     } else {
+         eprintln!("redoxfs-resize: no new disk image provided");
+-        eprintln!("redoxfs-resize NEW-DISK [SIZE]");
++        eprintln!("redoxfs-resize [--key-file PATH|-] NEW-DISK [SIZE]");
+         process::exit(1);
+     };
+ 
+@@ -160,7 +168,7 @@ fn main() {
+         }
+     };
+ 
+-    let mut fs = match FileSystem::open(disk, None, None, true) {
++    let mut fs = match FileSystem::open(disk, password_opt, None, true) {
+         Ok(fs) => fs,
+         Err(err) => {
+             eprintln!(
+diff --git a/src/filesystem.rs b/src/filesystem.rs
+index 01ddb11..ce01c43 100644
+--- a/src/filesystem.rs
++++ b/src/filesystem.rs
+@@ -32,6 +32,36 @@ pub struct FileSystem<D: Disk> {
+ }
+ 
+ impl<D: Disk> FileSystem<D> {
++    /// Change one slot and overwrite every header in the ring before returning.
++    /// An interrupted roll must be retried before claiming the old slot is gone.
++    pub fn set_key_slot(&mut self, index: usize, slot: crate::KeySlot) -> Result<()> {
++        if self.cipher_opt.is_none() || index >= self.header.key_slots.len() {
++            return Err(Error::new(syscall::error::EINVAL));
++        }
++        if slot.is_empty()
++            && !self
++                .header
++                .key_slots
++                .iter()
++                .enumerate()
++                .any(|(i, entry)| i != index && !entry.is_empty())
++        {
++            return Err(Error::new(syscall::error::EINVAL));
++        }
++        self.tx(|tx| {
++            tx.header.key_slots[index] = slot;
++            tx.header_changed = true;
++            Ok(())
++        })?;
++        for _ in 1..HEADER_RING {
++            self.tx(|tx| {
++                tx.header_changed = true;
++                Ok(())
++            })?;
++        }
++        Ok(())
++    }
++
+     /// Open a file system on a disk
+     pub fn open(
+         mut disk: D,
+@@ -158,6 +188,7 @@ impl<D: Disk> FileSystem<D> {
+ 
+         let cipher_opt = match password_opt {
+             Some(password) => {
++                crate::require_seeded_random().map_err(|_| Error::new(syscall::error::EIO))?;
+                 //TODO: handle errors
+                 header.key_slots[0] = KeySlot::new(
+                     password,
+diff --git a/src/header.rs b/src/header.rs
+index df9f283..308f542 100644
+--- a/src/header.rs
++++ b/src/header.rs
+@@ -117,10 +117,19 @@ impl Header {
+     }
+ 
+     pub fn cipher(&self, password: &[u8]) -> Option<Xts128<Aes128>> {
++        self.unlock(password)
++            .map(|(_, keys)| Xts128::new(keys.0.into_aes(), keys.1.into_aes()))
++    }
++
++    /// Return master keys only after checking them against this header.
++    pub fn unlock(&self, password: &[u8]) -> Option<(usize, (crate::Key, crate::Key))> {
+         let hash = self.create_encrypted_hash(None);
+-        for slot in self.key_slots.iter() {
+-            //TODO: handle errors
+-            let cipher = slot.cipher(password).unwrap();
++        for (index, slot) in self.key_slots.iter().enumerate() {
++            if slot.is_empty() {
++                continue;
++            }
++            let keys = slot.unwrap(password).ok()?;
++            let cipher = Xts128::new(keys.0.aes(), keys.1.aes());
+             let mut block = aes::Block::from(self.encrypted_hash);
+             cipher.decrypt_area(
+                 &mut block,
+@@ -129,7 +138,7 @@ impl Header {
+                 get_tweak_default,
+             );
+             if block == aes::Block::from(hash) {
+-                return Some(cipher);
++                return Some((index, keys));
+             }
+         }
+         None
+diff --git a/src/key.rs b/src/key.rs
+index 084c5b9..303c269 100644
+--- a/src/key.rs
++++ b/src/key.rs
+@@ -24,10 +24,23 @@ impl Key {
+     }
+ 
+     pub fn into_aes(self) -> Aes128 {
++        self.aes()
++    }
++
++    pub(crate) fn aes(&self) -> Aes128 {
+         Aes128::new(&aes::Block::from(self.0))
+     }
+ }
+ 
++impl Drop for Key {
++    fn drop(&mut self) {
++        for byte in &mut self.0 {
++            unsafe { core::ptr::write_volatile(byte, 0) };
++        }
++        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
++    }
++}
++
+ /// The encrypted key, encrypted with AES using the salt and password
+ #[derive(Clone, Copy, Default)]
+ #[repr(transparent)]
+@@ -66,6 +79,38 @@ pub struct KeySlot {
+ }
+ 
+ impl KeySlot {
++    pub fn is_empty(&self) -> bool {
++        self.salt.0 == [0; 16]
++            && self.encrypted_keys.0.0 == [0; 16]
++            && self.encrypted_keys.1.0 == [0; 16]
++    }
++
++    pub fn to_bytes(&self) -> [u8; 48] {
++        let mut bytes = [0; 48];
++        bytes[..16].copy_from_slice(&self.salt.0);
++        bytes[16..32].copy_from_slice(&self.encrypted_keys.0.0);
++        bytes[32..].copy_from_slice(&self.encrypted_keys.1.0);
++        bytes
++    }
++
++    pub fn from_bytes(bytes: &[u8; 48]) -> Self {
++        Self {
++            salt: Salt(bytes[..16].try_into().unwrap()),
++            encrypted_keys: (
++                EncryptedKey(bytes[16..32].try_into().unwrap()),
++                EncryptedKey(bytes[32..].try_into().unwrap()),
++            ),
++        }
++    }
++
++    pub fn unwrap(&self, password: &[u8]) -> Result<(Key, Key), argon2::Error> {
++        let aes = Self::password_aes(password, &self.salt)?;
++        Ok((
++            self.encrypted_keys.0.decrypt(&aes),
++            self.encrypted_keys.1.decrypt(&aes),
++        ))
++    }
++
+     /// Get the password AES key (generated from the password and salt, encrypts the real key)
+     pub fn password_aes(password: &[u8], salt: &Salt) -> Result<Aes128, argon2::Error> {
+         let mut key = Key([0; 16]);
+diff --git a/src/key_tool.rs b/src/key_tool.rs
+new file mode 100644
+index 0000000..2aba1b9
+--- /dev/null
++++ b/src/key_tool.rs
+@@ -0,0 +1,112 @@
++use std::io::{self, Read, Write};
++use termion::input::TermRead;
++
++pub const KEY_CALL: u64 = 0x46534b455931;
++pub const KEY_HEADER: u64 = 0;
++pub const KEY_SET: u64 = 1;
++pub const MAX_PASSPHRASE: usize = 4096;
++
++/// Secret buffers are wiped on every return path.
++pub struct Secret(pub Vec<u8>);
++
++impl Drop for Secret {
++    fn drop(&mut self) {
++        for byte in &mut self.0 {
++            unsafe { core::ptr::write_volatile(byte, 0) };
++        }
++        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
++    }
++}
++
++pub fn require_seeded_random() -> io::Result<()> {
++    #[cfg(target_os = "redox")]
++    {
++        let status = std::fs::read_to_string("/scheme/rand/status")?;
++        if status.lines().next() != Some("seeded: yes") {
++            return Err(io::Error::other(
++                "/scheme/rand/status must report seeded: yes before generating keys",
++            ));
++        }
++    }
++    Ok(())
++}
++
++pub fn read_secret(path: Option<&str>, prompt: &str) -> io::Result<Secret> {
++    let mut secret = Secret(Vec::new());
++    match path {
++        Some(path) => {
++            let mut input: Box<dyn Read> = if path == "-" {
++                Box::new(io::stdin())
++            } else {
++                Box::new(std::fs::File::open(path)?)
++            };
++            input
++                .by_ref()
++                .take(MAX_PASSPHRASE as u64 + 1)
++                .read_to_end(&mut secret.0)?;
++        }
++        None => {
++            eprint!("{prompt}: ");
++            io::stderr().flush()?;
++            secret.0 = io::stdin()
++                .read_passwd(&mut io::stderr())?
++                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no passphrase"))?
++                .into_bytes();
++            eprintln!();
++        }
++    }
++    if secret.0.is_empty() || secret.0.len() > MAX_PASSPHRASE {
++        return Err(io::Error::other("passphrase must contain 1 to 4096 bytes"));
++    }
++    Ok(secret)
++}
++
++/// Removes `--key-file PATH|-` from `args` and reads the secret it names.
++pub fn take_key_file(
++    mut args: impl Iterator<Item = String>,
++) -> io::Result<(Option<Secret>, Vec<String>)> {
++    let mut path = None;
++    let mut rest = Vec::new();
++    while let Some(arg) = args.next() {
++        if arg == "--key-file" {
++            if path.is_some() {
++                return Err(io::Error::other("--key-file given twice"));
++            }
++            path = Some(
++                args.next()
++                    .ok_or_else(|| io::Error::other("--key-file needs a path"))?,
++            );
++        } else {
++            rest.push(arg);
++        }
++    }
++    let secret = match path {
++        Some(path) => Some(read_secret(Some(&path), "")?),
++        None => None,
++    };
++    Ok((secret, rest))
++}
++
++/// Eight checked six-digit groups encode 128 random bits; the password has no spaces.
++pub fn recovery_key() -> io::Result<Secret> {
++    require_seeded_random()?;
++    let mut random = [0u8; 16];
++    getrandom::fill(&mut random).map_err(io::Error::other)?;
++    let mut secret = Secret(Vec::with_capacity(48));
++    for bytes in random.chunks_exact(2) {
++        let mut value = u16::from_le_bytes([bytes[0], bytes[1]]) as u32 * 11;
++        let mut digits = [b'0'; 6];
++        for digit in digits.iter_mut().rev() {
++            *digit += (value % 10) as u8;
++            value /= 10;
++        }
++        secret.0.extend_from_slice(&digits);
++        for byte in &mut digits {
++            unsafe { core::ptr::write_volatile(byte, 0) };
++        }
++    }
++    for byte in &mut random {
++        unsafe { core::ptr::write_volatile(byte, 0) };
++    }
++    Ok(secret)
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index cc5522c..9961e7e 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -35,6 +35,10 @@ pub use self::filesystem::FileSystem;
+ pub use self::header::{HEADER_RING, Header};
+ pub use self::key::{Key, KeySlot, Salt};
+ #[cfg(feature = "std")]
++pub use self::key_tool::require_seeded_random;
++#[cfg(feature = "std")]
++pub mod key_tool;
++#[cfg(feature = "std")]
+ pub use self::mount::mount;
+ pub use self::node::{Node, NodeFlags, NodeLevel, NodeLevelData};
+ pub use self::record::RecordRaw;
+diff --git a/src/mount/redox/scheme.rs b/src/mount/redox/scheme.rs
+index f23cd82..c36d541 100644
+--- a/src/mount/redox/scheme.rs
++++ b/src/mount/redox/scheme.rs
+@@ -1247,6 +1247,50 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
+         Ok(0)
+     }
+ 
++    fn call(
++        &mut self,
++        id: usize,
++        payload: &mut [u8],
++        metadata: &[u64],
++        ctx: &CallerCtx,
++    ) -> Result<usize> {
++        use crate::key_tool::{KEY_CALL, KEY_HEADER, KEY_SET, MAX_PASSPHRASE};
++        if metadata.first() != Some(&KEY_CALL) {
++            return Err(Error::new(EOPNOTSUPP));
++        }
++        Handle::get_resource(self.handles.get(&id))?;
++        let (_, uid, _) = get_uid_gid_from_pid(&self.proc_creds_capability, ctx.pid)?;
++        if uid != 0 {
++            return Err(Error::new(EPERM));
++        }
++        // The scheme receives three metadata words; unused ones are zero.
++        match metadata {
++            [KEY_CALL, KEY_HEADER, 0] if payload.len() == BLOCK_SIZE as usize => {
++                payload.copy_from_slice(&self.fs.header);
++                Ok(payload.len())
++            }
++            [KEY_CALL, KEY_SET, index]
++                if *index < 64 && (97..=96 + MAX_PASSPHRASE).contains(&payload.len()) =>
++            {
++                let index = *index as usize;
++                if self.fs.header.key_slots[index].to_bytes() != payload[..48] {
++                    return Err(Error::new(EBUSY));
++                }
++                let authenticated = self.fs.header.unlock(&payload[96..]).is_some();
++                for byte in &mut payload[96..] {
++                    unsafe { core::ptr::write_volatile(byte, 0) };
++                }
++                if !authenticated {
++                    return Err(Error::new(syscall::ENOKEY));
++                }
++                let slot = crate::KeySlot::from_bytes(payload[48..96].try_into().unwrap());
++                self.fs.set_key_slot(index, slot)?;
++                Ok(0)
++            }
++            _ => Err(Error::new(EINVAL)),
++        }
++    }
++
+     fn std_fs_call(
+         &mut self,
+         id: usize,
+diff --git a/src/tests.rs b/src/tests.rs
+index 2f327fe..acb05f8 100644
+--- a/src/tests.rs
++++ b/src/tests.rs
+@@ -31,6 +31,69 @@ where
+     res
+ }
+ 
++#[test]
++fn key_slots_recovery_change_and_removal_persist() {
++    use crate::{Disk, DiskFile, HEADER_RING, Header, KeySlot, Salt};
++    let path = format!("key-slots-{}.bin", IMAGE_SEQ.fetch_add(1, Relaxed));
++    let disk = DiskSparse::create(&path, 16 * 1024 * 1024).unwrap();
++    let mut volume = FileSystem::create(disk, Some(b"old passphrase"), 0, 0).unwrap();
++    let original_slot = volume.header.key_slots[0].to_bytes();
++    let recovery = crate::key_tool::recovery_key().unwrap();
++    assert_eq!(recovery.0.len(), 48);
++    assert!(recovery.0.iter().all(u8::is_ascii_digit));
++    let (_, keys) = volume.header.unlock(b"old passphrase").unwrap();
++    let slot = KeySlot::new(&recovery.0, Salt::new().unwrap(), keys).unwrap();
++    volume.set_key_slot(1, slot).unwrap();
++    drop(volume);
++    let mut volume = FileSystem::open(
++        DiskFile::open(&path).unwrap(),
++        Some(&recovery.0),
++        None,
++        false,
++    )
++    .unwrap();
++    let (_, keys) = volume.header.unlock(&recovery.0).unwrap();
++    volume
++        .set_key_slot(
++            0,
++            KeySlot::new(b"new passphrase", Salt::new().unwrap(), keys).unwrap(),
++        )
++        .unwrap();
++    drop(volume);
++    let error = FileSystem::open(
++        DiskFile::open(&path).unwrap(),
++        Some(b"old passphrase"),
++        None,
++        false,
++    )
++    .err()
++    .expect("old passphrase must be refused");
++    assert_eq!(error.errno, syscall::ENOKEY);
++    let mut volume = FileSystem::open(
++        DiskFile::open(&path).unwrap(),
++        Some(b"new passphrase"),
++        None,
++        false,
++    )
++    .unwrap();
++    volume.set_key_slot(1, KeySlot::default()).unwrap();
++    assert!(volume.set_key_slot(0, KeySlot::default()).is_err());
++    for block in 0..HEADER_RING {
++        let mut header = Header::default();
++        unsafe {
++            volume
++                .disk
++                .read_at(volume.block + block, &mut header)
++                .unwrap();
++        }
++        assert!(header.valid());
++        assert_eq!(header.key_slots[1].to_bytes(), [0; 48]);
++        assert_ne!(header.key_slots[0].to_bytes(), original_slot);
++    }
++    drop(volume);
++    fs::remove_file(path).unwrap();
++}
++
+ #[test]
+ fn many_create_remove_should_not_increase_size() {
+     with_redoxfs(|mut fs| {
