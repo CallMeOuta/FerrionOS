@@ -75,8 +75,8 @@ members = [
     "selftests/virtio-fsd",
 ]
 
-# Bootstrap needs it's own profile configuration
-exclude = ["bootstrap"]
+# Bootstrap needs it's own profile configuration; vendor/ holds patched crates.
+exclude = ["bootstrap", "vendor"]
 
 # Low-level Redox OS crates should be kept in sync using workspace dependencies
 # Remember to also update bootstrap dependencies, those are not in the workspace
@@ -133,3 +133,8 @@ unused_io_amount = "warn" #TODO: have an abstraction to irq file read/write, the
 
 [patch."https://gitlab.redox-os.org/redox-os/relibc.git"]
 #redox-ioctl = { path = "../../relibc/source/redox-ioctl" }
+
+# smoltcp 0.14.0 with a hook for TCP initial sequence numbers, unpacked and patched into
+# vendor/smoltcp by the FerrionOS recipe.
+[patch.crates-io]
+smoltcp = { path = "vendor/smoltcp" }

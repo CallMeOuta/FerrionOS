@@ -12,6 +12,7 @@ use smoltcp::wire::EthernetAddress;
 use crate::scheme::Smolnetd;
 
 mod error;
+mod isn;
 mod link;
 mod logger;
 mod port_set;
@@ -86,6 +87,7 @@ fn run(daemon: daemon::Daemon) -> Result<()> {
     let time_fd = Fd::open(&time_path, O_RDWR, 0).context("failed to open /scheme/time")?;
 
     random::init().context("failed to open /scheme/rand")?;
+    isn::init().context("failed to read the sequence number key from /scheme/rand")?;
 
     event::user_data! {
         enum EventSource {

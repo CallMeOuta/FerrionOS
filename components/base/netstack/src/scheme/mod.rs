@@ -103,10 +103,13 @@ impl Smolnetd {
         );
 
         let mut config = Config::new(HardwareAddress::Ip);
-        // The engine draws TCP initial sequence numbers from this seed; its default is 0.
+        // The engine's own random numbers start from this seed; its default is 0.
         config.random_seed = crate::random::u64()
             .map_err(|err| Error::from_io_error(err, "failed to read /scheme/rand"))?;
         let mut iface = SmoltcpInterface::new(config, &mut network_device, Instant::now());
+        // TCP initial sequence numbers follow RFC 6528 (isn.rs) rather than the engine's
+        // random number generator.
+        iface.set_tcp_isn_generator(Some(crate::isn::initial_seq_no));
         iface.update_ip_addrs(|ip_addrs| ip_addrs.extend(protocol_addrs));
         iface
             .routes_mut()
