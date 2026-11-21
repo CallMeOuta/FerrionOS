@@ -6,7 +6,7 @@ What can be checked in this repository, cheapest first: what each check proves a
 
 | Rung | Command | Proves | Needs |
 |---|---|---|---|
-| 1. Syntax | `bash -n <script>` for shell, `python3 -c 'import sys,tomllib; [tomllib.load(open(f,"rb")) for f in sys.argv[1:]]' <file.toml>` for TOML, `make -n <target>` for makefiles | The file parses; for make, which commands a target would run. | Nothing. |
+| 1. Syntax | `bash -n <script>` for shell, `python3 -c 'import sys,tomllib; [tomllib.load(open(f,"rb")) for f in sys.argv[1:]]' <file.toml>` for TOML, `make -n <target>` for makefiles, `python3 scripts/security-audit.py` after a change to accounts, a recipe's `[source]` or a download | The file parses; for make, which commands a target would run; for the audit, that the change adds no security finding beyond `scripts/security-audit.baseline.jsonl` (exit code 1 when it does, the script's header lists the checks). | Nothing. |
 | 2. Cookbook | `cargo fmt -- --check`, `cargo test --locked` | Formatting and the unit tests in `src/`. | The Rust toolchain pinned in `rust-toolchain.toml`, and network on the first run: `Cargo.toml` takes four git repositories from gitlab.redox-os.org. |
 | 3. Graph | `make rt.<recipe>`, `make repo-tree`, `make image-tree` | The recipe matches the schema, and every dependency and every package of the config names an existing recipe. | The cookbook built (`build/fstools.tag`). |
 | 4. Fetch | `make f.<recipe>` | The source URL answers, the `blake3` matches and the patches apply. | Network. |
