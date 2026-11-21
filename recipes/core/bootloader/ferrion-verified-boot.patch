@@ -1,0 +1,298 @@
+FerrionOS change to the upstream bootloader (MIT licence, kept), applied after ferrion-quiet-boot.patch, made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8:
+- verified boot on UEFI: the binary carries an empty 32-byte Ed25519 key slot after the marker FerrionBootKey/1, which scripts/verified-boot-sign.sh fills at image build time (VERIFIED_BOOT=1). With a key the bootloader loads usr/lib/boot/manifest and manifest.sig, checks the signature before reading the manifest, and refuses to start a kernel or initfs whose SHA-512 differs from it, with a message a quiet boot shows too; the boot environment editor (e) is not offered. With the slot empty it boots as before. The BIOS bootloader never verifies;
+- uses ed25519-compact 2.6.1 (MIT) without default features, with opt_size.
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 765a0a7..4f72e9a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -132,6 +132,12 @@ dependencies = [
+  "bitflags 1.3.2",
+ ]
+ 
++[[package]]
++name = "ed25519-compact"
++version = "2.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9547879431a90e352a35863a54416d92898a787b9af09e6ae2e09a96bd78be80"
++
+ [[package]]
+ name = "endian-num"
+ version = "0.1.2"
+@@ -221,6 +227,7 @@ dependencies = [
+  "bitflags 1.3.2",
+  "byteorder",
+  "dmidecode",
++ "ed25519-compact",
+  "fdt",
+  "linked_list_allocator",
+  "log",
+diff --git a/Cargo.toml b/Cargo.toml
+index a23d52f..537e94d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -16,6 +16,7 @@ crate-type = ["staticlib"]
+ 
+ [dependencies]
+ bitflags = "1.3.2"
++ed25519-compact = { version = "2.6.1", default-features = false, features = ["opt_size"] }
+ linked_list_allocator = "0.10.5"
+ log = "0.4.17"
+ redox_syscall = "0.5"
+diff --git a/src/main.rs b/src/main.rs
+index c6a6cf9..1088472 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -26,6 +26,23 @@ mod arch;
+ mod editor;
+ mod logger;
+ mod serial_16550;
++// Verified boot runs on UEFI only; the BIOS bootloader gets a stub that never verifies.
++#[cfg(any(target_arch = "riscv64", target_os = "uefi"))]
++mod verify;
++#[cfg(not(any(target_arch = "riscv64", target_os = "uefi")))]
++mod verify {
++    pub struct Manifest;
++    impl Manifest {
++        pub fn load<O: crate::os::Os>(_: &O, _: &mut redoxfs::FileSystem<O::D>) -> Option<Self> {
++            None
++        }
++        pub fn check_kernel(&self, _: &[u8]) {}
++        pub fn check_initfs(&self, _: &[u8]) {}
++    }
++    pub fn enabled() -> bool {
++        false
++    }
++}
+ 
+ const KIBI: usize = 1024;
+ const MIBI: usize = KIBI * KIBI;
+@@ -192,7 +209,11 @@ fn select_mode(
+     } else {
+         println!("Press l to  enable live mode");
+     }
+-    println!("Press e to edit boot environment");
++    // A verified boot hands the kernel only the environment the bootloader writes itself: an
++    // edited one would reach the kernel and init unchecked, so the editor is not offered.
++    if !verify::enabled() {
++        println!("Press e to edit boot environment");
++    }
+     println!();
+     print!(" ");
+ 
+@@ -287,7 +308,7 @@ fn select_mode(
+                     println!("Press l to  enable live mode");
+                 }
+             }
+-            OsKey::Char('e') => {
++            OsKey::Char('e') if !verify::enabled() => {
+                 if let Some(mode_i) = modes.iter().position(|x| x.0.id == selected) {
+                     if let Some((mode, _text)) = modes.get(mode_i) {
+                         *edit_env = true;
+@@ -380,6 +401,9 @@ fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>)
+ enum Filetype {
+     Elf,
+     Initfs,
++    // Only verified boot, on UEFI, loads files it does not check for a magic number
++    #[allow(dead_code)]
++    Raw,
+ }
+ fn load_to_memory<O: Os>(
+     os: &O,
+@@ -591,8 +615,13 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+         None
+     };
+ 
++    let manifest = verify::Manifest::load(os, &mut fs);
++
+     let (kernel, kernel_entry) = {
+         let kernel = load_to_memory(os, &mut fs, "usr/lib/boot/kernel", Filetype::Elf);
++        if let Some(manifest) = &manifest {
++            manifest.check_kernel(kernel);
++        }
+         let (kernel_entry, kernel_64bit) = elf_entry(kernel);
+         unsafe {
+             KERNEL_64BIT = kernel_64bit;
+@@ -602,6 +631,9 @@ fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
+ 
+     let (bootstrap_size, bootstrap_base) = {
+         let initfs_slice = load_to_memory(os, &mut fs, "usr/lib/boot/initfs", Filetype::Initfs);
++        if let Some(manifest) = &manifest {
++            manifest.check_initfs(initfs_slice);
++        }
+ 
+         let memory = unsafe {
+             let total_size = initfs_slice.len().next_multiple_of(4096);
+diff --git a/src/verify.rs b/src/verify.rs
+new file mode 100644
+index 0000000..a0ddbda
+--- /dev/null
++++ b/src/verify.rs
+@@ -0,0 +1,167 @@
++//! Verified boot (FerrionOS). A bootloader whose key slot holds an Ed25519 public key starts only
++//! a kernel and an initfs listed in `usr/lib/boot/manifest` and signed with that key in
++//! `usr/lib/boot/manifest.sig`. UEFI Secure Boot covers this binary and so the key; this module
++//! extends the chain to the two files the bootloader reads from RedoxFS itself.
++//!
++//! The key is not compiled in: one cooked bootloader serves every image of an architecture. The
++//! image build (`scripts/verified-boot-sign.sh`) writes the key into `KEY_SLOT` after its marker,
++//! in the copy it installs, before that copy is signed for Secure Boot. An all-zero key, as cooked,
++//! leaves verification off and the bootloader boots as it always did.
++//!
++//! The manifest is text: the line `ferrion-boot-manifest 1`, then `kernel <hex>` and
++//! `initfs <hex>`, each the SHA-512 of the file. The signature is 64 raw bytes over the manifest.
++
++use ed25519_compact::{PublicKey, Signature, sha512};
++use redoxfs::TreePtr;
++
++use crate::os::Os;
++use crate::{Filetype, load_to_memory};
++
++/// A 16-byte marker that occurs once in the binary, then the 32-byte public key.
++#[used]
++static KEY_SLOT: [u8; 48] = *b"FerrionBootKey/1\
++\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
++
++/// The key written into `KEY_SLOT`, read through a volatile load so that the compiler cannot
++/// fold the all-zero value it sees at build time.
++fn key() -> [u8; 32] {
++    let slot = unsafe { core::ptr::read_volatile(&KEY_SLOT) };
++    let mut key = [0; 32];
++    key.copy_from_slice(&slot[16..]);
++    key
++}
++
++/// Whether this copy of the bootloader verifies: its key slot holds a key.
++pub fn enabled() -> bool {
++    key() != [0; 32]
++}
++
++const MANIFEST: &str = "usr/lib/boot/manifest";
++const SIGNATURE: &str = "usr/lib/boot/manifest.sig";
++const VERSION_LINE: &str = "ferrion-boot-manifest 1";
++/// A manifest holds a version line and two hashes; anything far larger is not one.
++const MANIFEST_MAX: u64 = 4096;
++
++/// Stops the boot with a message on screen and serial, shown by a quiet boot too.
++fn refuse(reason: core::fmt::Arguments) -> ! {
++    loud_println!();
++    loud_println!("FerrionOS verified boot refused to start: {}", reason);
++    loud_println!("This bootloader starts only a kernel and initfs signed with its built-in key.");
++    loop {
++        core::hint::spin_loop();
++    }
++}
++
++/// The size of a file, or None when it is missing.
++fn file_size<D: redoxfs::Disk>(fs: &mut redoxfs::FileSystem<D>, path: &str) -> Option<u64> {
++    fs.tx(|tx| {
++        let mut ptr = TreePtr::root();
++        let mut size = None;
++        for component in path.split('/') {
++            match tx.find_node(ptr, component) {
++                Ok(node) => {
++                    ptr = node.ptr();
++                    size = Some(node.data().size());
++                }
++                Err(_) => return Ok(None),
++            }
++        }
++        Ok(size)
++    })
++    .unwrap_or(None)
++}
++
++fn parse_hex(hex: &str) -> Option<[u8; 64]> {
++    let bytes = hex.as_bytes();
++    if bytes.len() != 128 {
++        return None;
++    }
++    let mut out = [0; 64];
++    for (i, pair) in bytes.chunks(2).enumerate() {
++        let digit = |c: u8| (c as char).to_digit(16);
++        out[i] = (digit(pair[0])? * 16 + digit(pair[1])?) as u8;
++    }
++    Some(out)
++}
++
++pub struct Manifest {
++    kernel: [u8; 64],
++    initfs: [u8; 64],
++}
++
++impl Manifest {
++    /// With verification on, loads the manifest and its signature and checks the signature
++    /// before reading anything else in the manifest; refuses to go on when either fails.
++    pub fn load<O: Os>(os: &O, fs: &mut redoxfs::FileSystem<O::D>) -> Option<Manifest> {
++        let key = key();
++        if key == [0; 32] {
++            return None;
++        }
++        // Sizes first: a missing or empty file must refuse, not reach an allocation that panics.
++        match file_size(fs, MANIFEST) {
++            None => refuse(format_args!("{} is missing", MANIFEST)),
++            Some(1..=MANIFEST_MAX) => (),
++            Some(_) => refuse(format_args!("{} is empty or too large", MANIFEST)),
++        }
++        match file_size(fs, SIGNATURE) {
++            None => refuse(format_args!("{} is missing", SIGNATURE)),
++            Some(64) => (),
++            Some(_) => refuse(format_args!("{} is not a 64-byte signature", SIGNATURE)),
++        }
++        let text = load_to_memory(os, fs, MANIFEST, Filetype::Raw);
++        let signature = load_to_memory(os, fs, SIGNATURE, Filetype::Raw);
++        let signature = Signature::from_slice(signature)
++            .unwrap_or_else(|_| refuse(format_args!("{} is not a 64-byte signature", SIGNATURE)));
++        if PublicKey::new(key).verify(&*text, &signature).is_err() {
++            refuse(format_args!(
++                "{} does not match the manifest and the built-in key",
++                SIGNATURE
++            ));
++        }
++
++        let text = core::str::from_utf8(text)
++            .unwrap_or_else(|_| refuse(format_args!("the manifest is not text")));
++        let mut lines = text.lines();
++        if lines.next() != Some(VERSION_LINE) {
++            refuse(format_args!(
++                "the manifest does not start with `{}`",
++                VERSION_LINE
++            ));
++        }
++        let (mut kernel, mut initfs) = (None, None);
++        for line in lines {
++            let (name, hex) = line
++                .split_once(' ')
++                .unwrap_or_else(|| refuse(format_args!("bad manifest line `{}`", line)));
++            let hash =
++                parse_hex(hex).unwrap_or_else(|| refuse(format_args!("bad hash for `{}`", name)));
++            match name {
++                "kernel" => kernel = Some(hash),
++                "initfs" => initfs = Some(hash),
++                _ => refuse(format_args!("unknown manifest entry `{}`", name)),
++            }
++        }
++        Some(Manifest {
++            kernel: kernel.unwrap_or_else(|| refuse(format_args!("the manifest names no kernel"))),
++            initfs: initfs.unwrap_or_else(|| refuse(format_args!("the manifest names no initfs"))),
++        })
++    }
++
++    pub fn check_kernel(&self, data: &[u8]) {
++        check("kernel", &self.kernel, data);
++    }
++
++    pub fn check_initfs(&self, data: &[u8]) {
++        check("initfs", &self.initfs, data);
++    }
++}
++
++fn check(name: &str, expected: &[u8; 64], data: &[u8]) {
++    if &sha512::Hash::hash(data) != expected {
++        refuse(format_args!(
++            "the {} does not match the signed manifest",
++            name
++        ));
++    }
++    println!("Verified boot: {} matches the signed manifest", name);
++}
