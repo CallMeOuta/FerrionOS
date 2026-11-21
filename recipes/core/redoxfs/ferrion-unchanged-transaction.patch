@@ -1,0 +1,161 @@
+FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc.
+
+Unchanged transactions must not trigger periodic allocator GC on a read-only boot disk. Explicit squash remains a writing operation; the next changed transaction at the threshold still compacts the log.
+
+diff --git a/src/transaction.rs b/src/transaction.rs
+index d0931e5..7ffb84e 100644
+--- a/src/transaction.rs
++++ b/src/transaction.rs
+@@ -266,6 +266,15 @@ impl<'a, D: Disk> Transaction<'a, D> {
+ 
+     /// Write all changes cached in this [`Transaction`] to disk.
+     pub fn sync(&mut self, force_squash: bool) -> Result<bool> {
++        if !force_squash
++            && !self.header_changed
++            && self.write_cache.is_empty()
++            && self.allocator_log.is_empty()
++            && self.deallocate.is_empty()
++        {
++            return Ok(false);
++        }
++
+         // Make sure alloc is synced
+         self.sync_allocator(force_squash)?;
+ 
+diff --git a/tests/read_only_transaction.rs b/tests/read_only_transaction.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/read_only_transaction.rs
+@@ -0,0 +1,84 @@
++use redoxfs::{ALLOC_GC_THRESHOLD, Disk, DiskMemory, FileSystem, Node, TreePtr};
++use syscall::error::{Error, Result, EROFS};
++
++struct WriteGuard {
++    disk: DiskMemory,
++    read_only: bool,
++    writes: usize,
++}
++
++impl Disk for WriteGuard {
++    unsafe fn read_at(&mut self, block: u64, buffer: &mut [u8]) -> Result<usize> {
++        unsafe { self.disk.read_at(block, buffer) }
++    }
++
++    unsafe fn write_at(&mut self, block: u64, buffer: &[u8]) -> Result<usize> {
++        self.writes += 1;
++        if self.read_only {
++            return Err(Error::new(EROFS));
++        }
++        unsafe { self.disk.write_at(block, buffer) }
++    }
++
++    fn size(&mut self) -> Result<u64> {
++        self.disk.size()
++    }
++}
++
++#[test]
++fn unchanged_transactions_do_not_write_at_allocator_gc_generation() {
++    let disk = WriteGuard {
++        disk: DiskMemory::new(16 * 1024 * 1024),
++        read_only: false,
++        writes: 0,
++    };
++    let mut fs = FileSystem::create(disk, None, 0, 0).unwrap();
++    let initially_free = fs.allocator().free();
++    let root = TreePtr::<Node>::root();
++
++    for threshold in [ALLOC_GC_THRESHOLD, 2 * ALLOC_GC_THRESHOLD] {
++        while fs.header.generation() < threshold {
++            fs.tx(|tx| {
++                tx.create_node(root, "temporary", Node::MODE_FILE | 0o600, 0, 0)?;
++                tx.remove_node(root, "temporary", Node::MODE_FILE)
++            })
++            .unwrap();
++        }
++        assert_eq!(fs.header.generation(), threshold);
++        fs.disk.read_only = true;
++        fs.disk.writes = 0;
++        let header = fs.header.to_vec();
++        let free = fs.allocator().free();
++        for _ in 0..3 {
++            fs.tx(|tx| {
++                assert_eq!(tx.read_tree(root)?.data().size(), 0);
++                Ok(())
++            })
++            .expect("reading at the GC generation must not write");
++            fs.tx(|_| Ok(())).unwrap();
++        }
++        assert_eq!(fs.disk.writes, 0);
++        assert_eq!(&fs.header[..], header);
++        assert_eq!(fs.allocator().free(), free);
++
++        // A header-only write must still reclaim the accumulated allocator log.
++        fs.disk.read_only = false;
++        fs.tx(|tx| {
++            tx.header_changed = true;
++            Ok(())
++        })
++        .unwrap();
++        assert!(fs.disk.writes > 0);
++        assert_eq!(fs.header.generation(), threshold + 1);
++        assert_eq!(fs.allocator().free(), initially_free);
++
++        fs.disk.read_only = true;
++        fs.disk.writes = 0;
++        fs = FileSystem::open(fs.disk, None, None, false).unwrap();
++        assert_eq!(fs.header.generation(), threshold + 1);
++        assert_eq!(fs.allocator().free(), initially_free);
++        fs.tx(|tx| tx.read_tree(root)).unwrap();
++        assert_eq!(fs.disk.writes, 0);
++        fs.disk.read_only = false;
++    }
++}
+diff --git a/examples/boot_gc_generation.rs b/examples/boot_gc_generation.rs
+new file mode 100644
+--- /dev/null
++++ b/examples/boot_gc_generation.rs
+@@ -0,0 +1,18 @@
++use redoxfs::{ALLOC_GC_THRESHOLD, Disk, DiskFile, FileSystem, HEADER_RING};
++
++fn main() {
++    let path = std::env::args_os().nth(1).expect("usage: boot_gc_generation IMAGE");
++    let mut fs = FileSystem::open(DiskFile::open(path).unwrap(), None, None, false).unwrap();
++    assert!(!fs.header.encrypted(), "the fixture requires an unencrypted image");
++    let previous = fs.header.generation();
++    let generation = (previous / ALLOC_GC_THRESHOLD + 1) * ALLOC_GC_THRESHOLD;
++    fs.header.generation = (generation - 1).into();
++    assert_eq!(fs.header.update(None), generation);
++    assert!(fs.header.valid());
++    let block = fs.block + generation % HEADER_RING;
++    let written = unsafe { fs.disk.write_at(block, &fs.header).unwrap() };
++    assert_eq!(written, fs.header.len());
++    let fs = FileSystem::open(fs.disk, None, None, false).unwrap();
++    assert_eq!(fs.header.generation(), generation);
++    println!("generation {previous} -> {generation}; header block {block}");
++}
+--- a/src/disk/mod.rs
++++ b/src/disk/mod.rs
+@@ -1,3 +1,4 @@
++use alloc::boxed::Box;
+ use syscall::error::Result;
+ 
+ #[cfg(feature = "std")]
+--- a/src/filesystem.rs
++++ b/src/filesystem.rs
+@@ -2,6 +2,7 @@
+ use alloc::{
+     collections::{BTreeMap, VecDeque},
+     vec,
++    vec::Vec,
+ };
+ use syscall::error::{EKEYREJECTED, ENOENT, ENOKEY, Error, Result};
+ use xts_mode::{Xts128, get_tweak_default};
+--- a/src/record.rs
++++ b/src/record.rs
+@@ -1,4 +1,4 @@
+-use alloc::vec;
++use alloc::{vec, vec::Vec};
+ use core::ops;
+ 
+ use crate::{BlockLevel, BlockTrait, RECORD_LEVEL};

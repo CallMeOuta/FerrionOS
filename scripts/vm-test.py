@@ -2598,6 +2598,23 @@ def ferrion_run_checks(vm, args, port, seen):
     return True, f"--no-network curl fails with {error.group(0).strip()!r}; held socket and profile denied; see {vm.out}"
 
 
+def test_boot_gc_generation(args, out):
+    """A copy whose RedoxFS generation is an allocator-GC threshold reaches the graphical login. Build RedoxFS's boot_gc_generation host example and install it in build/fstools/bin first."""
+    helper = ROOT / "build" / "fstools" / "bin" / "boot_gc_generation"
+    with tempfile.TemporaryDirectory(prefix="ferrion-vm-test-boot-gc-") as scratch:
+        image = Path(scratch) / "harddrive.img"
+        shutil.copyfile(ROOT / "build" / args.arch / args.config / "harddrive.img", image)
+        prepared = subprocess.run([str(helper), str(image)], check=True,
+                                  capture_output=True, text=True)
+        (out / "generation.txt").write_text(prepared.stdout)
+        vm = VM(args, out, make=[f"DISK={image}"])
+        try:
+            ok, note = test_boot(vm, args)
+            return ok, f"{prepared.stdout.strip()}; {note}"
+        finally:
+            vm.close()
+
+
 # Disk encryption (plans/disk-encryption.md DE2 and DE6). These tests boot copies of the image
 # without -snapshot, because a key change or an installation must survive a reboot; the copies
 # live in a temporary directory that is removed afterwards.
@@ -4043,6 +4060,7 @@ OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["wayland-client"] = run_wayland_client
 OWN_IMAGE["pointer-latency"] = run_pointer_latency
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
+OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
 OWN_IMAGE["net-hardening"] = test_net_hardening
 OWN_IMAGE["net-calls"] = test_net_calls
