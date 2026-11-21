@@ -1,0 +1,10 @@
+[package]
+description = "Venus Vulkan wire protocol headers for Mesa"
+
+[source]
+git = "https://gitlab.freedesktop.org/virgl/venus-protocol.git"
+rev = "ca19b6358d7cc491bc3e4de76f04c6700876a8fa"
+shallow_clone = true
+
+[build]
+template = "meson"
