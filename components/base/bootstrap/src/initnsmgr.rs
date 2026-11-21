@@ -566,6 +566,45 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
         Ok(buf)
     }
 
+    fn fpath(&mut self, id: usize, buf: &mut [u8], _ctx: &CallerCtx) -> Result<usize> {
+        let access = match self.handles.get(&id).ok_or(Error::new(EBADF))? {
+            Handle::Access(access) | Handle::List(access) => access,
+            _ => return Err(Error::new(EOPNOTSUPP)),
+        };
+        if !access.has_permission(NsPermissions::LIST) {
+            return Err(Error::new(EACCES));
+        }
+        let mut written = 0;
+        let mut push = |text: &str| -> Result<()> {
+            let end = written + text.len();
+            let target = buf.get_mut(written..end).ok_or(Error::new(ENAMETOOLONG))?;
+            target.copy_from_slice(text.as_bytes());
+            written = end;
+            Ok(())
+        };
+        push(if access.hardware {
+            "namespace:hardware=1;schemes="
+        } else {
+            "namespace:hardware=0;schemes="
+        })?;
+        let ns = access.namespace.borrow();
+        let mut separator = "";
+        for name in ns.schemes.keys() {
+            if name.is_empty()
+                || (!access.hardware
+                    && (HARDWARE_SCHEMES.contains(&name.as_str())
+                        || (name == MEMORY_SCHEME && self.restricted_memory.is_none())))
+            {
+                continue;
+            }
+            push(separator)?;
+            push(name)?;
+            separator = ",";
+        }
+        push(";")?;
+        Ok(written)
+    }
+
     fn fstat(&mut self, id: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
         let resource_stat = match self.handles.get(&id).ok_or(Error::new(EBADF))? {
             Handle::List(_) | Handle::OtherScheme { .. } => Stat {

@@ -13,9 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::ops::ControlFlow;
-use std::os::fd::IntoRawFd;
 
 use inputd::{ControlEvent, VtEvent, VtEventKind};
 use libredox::errno::ESTALE;
@@ -193,21 +191,28 @@ impl SchemeSync for InputScheme<'_> {
                 let command = path_parts.next().ok_or(SysError::new(EINVAL))?;
                 match command {
                     "display" => {
-                        let display = match &self.active_display {
+                        let id = match &self.active_display {
                             ActiveDisplay::Unknown => return Err(SysError::new(EINVAL)),
-                            ActiveDisplay::Early { name, .. }
-                            | ActiveDisplay::Regular { name, .. } => name,
+                            ActiveDisplay::Early { id, .. } | ActiveDisplay::Regular { id, .. } => {
+                                *id
+                            }
                         };
-                        // NOTE: File::open for another scheme is deadlock prone. In this case
-                        // however care is taken for the target scheme to never make a request to us
-                        // after initial registration. Instead we push commands to the target scheme.
-                        // Also care is taken to not run this code when doing openat on the scheme
-                        // root. That would currently deadlock due to initnsmgr not handling openat
-                        // requests in parallel: https://gitlab.redox-os.org/redox-os/base/-/work_items/93
+                        let Handle::Display {
+                            device_control: Some(control),
+                            ..
+                        } = self.handles.get(id)?
+                        else {
+                            return Err(SysError::new(EINVAL));
+                        };
+                        // The display holds no synchronous request back to inputd after registration.
                         return Ok(OpenResult::OtherScheme {
-                            fd: File::open(format!("/scheme/{display}/{vt}"))
-                                .map_err(|err| SysError::new(err.raw_os_error().unwrap()))?
-                                .into_raw_fd() as usize,
+                            fd: control
+                                .openat(
+                                    &vt.to_string(),
+                                    libredox::flag::O_RDONLY | libredox::flag::O_CLOEXEC,
+                                    0,
+                                )?
+                                .into_raw(),
                         });
                     }
                     _ => {
@@ -607,6 +612,7 @@ fn daemon(daemon: daemon::SchemeDaemon) -> anyhow::Result<()> {
     let mut handler = Blocking::new(&socket_file, 16);
 
     let _ = daemon.ready_sync_scheme(handler.socket(), &mut scheme);
+    libredox::call::setrens(0, 0)?;
 
     loop {
         scheme.has_new_events = false;

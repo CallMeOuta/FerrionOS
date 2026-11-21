@@ -2097,6 +2097,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "common",
+ "libredox 0.2.0",
 ]
 
 [[package]]
@@ -2557,6 +2558,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "common",
+ "libredox 0.2.0",
  "xhcid",
 ]
 
@@ -2568,6 +2570,7 @@ dependencies = [
  "bitflags 2.13.2",
  "common",
  "inputd",
+ "libredox 0.2.0",
  "log",
  "orbclient",
  "plain",
@@ -2582,6 +2585,7 @@ name = "usbhubd"
 version = "0.1.0"
 dependencies = [
  "common",
+ "libredox 0.2.0",
  "log",
  "redox_syscall 0.9.5",
  "xhcid",

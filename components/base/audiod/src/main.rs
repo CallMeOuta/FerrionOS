@@ -92,7 +92,8 @@ fn daemon(daemon: SchemeDaemon) -> anyhow::Result<()> {
         IoSlice::new(b"rand"), // for HashMap
     ])
     .context("failed to make namespace")?;
-    libredox::call::setns(ns).context("failed to set namespace")?;
+    let previous_ns = libredox::call::setns(ns).context("failed to set namespace")?;
+    libredox::call::close(previous_ns).context("failed to close previous namespace")?;
 
     // Spawn a thread to mix and send audio data
     let inner_thread = scheme.inner.clone();
