@@ -25,6 +25,11 @@ Usage: $0 <redoxfs-binary> <key-dir> <harddrive.img>
                     missing (make uses build/verified-boot)
 
 Environment:
+  REDOXFS_KEY_FILE      file containing the exact disk password bytes (no newline added).
+  INSTALLER            installer executable; together with FILESYSTEM_CONFIG, exports the
+                        merged config to read general.encrypt_disk when no key file is set.
+  FILESYSTEM_CONFIG    filesystem config used to build the image (includes are resolved by
+                        INSTALLER). The extracted password is kept only in a private temp file.
   VERIFIED_BOOT_SIGNER  a PKCS#11 URI of an Ed25519 key on a hardware token, such as
                         'pkcs11:token=YubiKey%20PIV%20%23<serial>;id=%02;type=private' for PIV
                         slot 9c of a YubiKey; the image is signed with it instead of <key-dir>,
@@ -33,7 +38,7 @@ Environment:
                         (libykcs11.so from yubico-piv-tool for a YubiKey); the token asks for its
                         PIN, once for the public key and once for the signature.
 
-Needs openssl 3 or later, python3 and FUSE.
+Needs openssl 3 or later, python3 with tomllib (3.11 or later) and FUSE.
 EOF
     exit 2
 }
@@ -71,12 +76,51 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/ferrion-verified-boot.XXXXXX")"
 BOOT_WORK="$WORK"
 MOUNTED=0
 cleanup() {
+    rm -f "$WORK/redoxfs.key"
     if [ "$MOUNTED" = 1 ]; then
-        $BOOT_FUMOUNT "$WORK/mnt" || true
+        $BOOT_FUMOUNT "$WORK/mnt" || return
     fi
-    rm -rf "$WORK"
+    # Never recursively delete a directory that might still hold a mounted filesystem.
+    if [ -d "$WORK/mnt" ]; then
+        rmdir "$WORK/mnt" || return
+    fi
+    rm -f "$WORK"/*
+    rmdir "$WORK"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ -z "${REDOXFS_KEY_FILE:-}" ] && \
+    { [ -n "${INSTALLER:-}" ] || [ -n "${FILESYSTEM_CONFIG:-}" ]; }; then
+    [ -n "${INSTALLER:-}" ] && [ -n "${FILESYSTEM_CONFIG:-}" ] ||
+        BOOT_EXIT=2 boot_die "INSTALLER and FILESYSTEM_CONFIG must be set together"
+    # Do not put the merged config or password in shell variables, logs or argv; $WORK is
+    # private to this user (mktemp -d), and the config file is removed right after reading.
+    (umask 077 && "$INSTALLER" -c "$FILESYSTEM_CONFIG" --output-config="$WORK/config.toml")
+    python3 -c '
+import os
+import sys
+import tomllib
+
+try:
+    with open(sys.argv[1], "rb") as merged:
+        config = tomllib.load(merged)
+except (ValueError, UnicodeError):
+    sys.exit("verified-boot-sign: cannot parse merged filesystem config")
+password = config.get("general", {}).get("encrypt_disk")
+if password is not None:
+    if not isinstance(password, str):
+        sys.exit("verified-boot-sign: general.encrypt_disk must be a string")
+    fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as key:
+        key.write(password.encode("utf-8"))
+' "$WORK/config.toml" "$WORK/redoxfs.key"
+    rm -f "$WORK/config.toml"
+    if [ -f "$WORK/redoxfs.key" ]; then
+        REDOXFS_KEY_FILE="$WORK/redoxfs.key"
+    fi
+fi
 
 # The public key is the last 32 bytes of its DER form.
 boot_public_pem "$KEY" "$WORK/boot.pub.pem"

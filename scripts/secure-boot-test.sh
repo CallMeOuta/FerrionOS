@@ -36,7 +36,9 @@ Usage: $0 [-o <out-dir>] [-k <key-dir>] [-t <seconds>] [-r <redoxfs>] <harddrive
 Needs qemu-system-x86_64, openssl, mtools (mcopy), python3, virt-fw-vars (package
 virt-firmware) and sbsign (package sbsigntools) or osslsigncode. OVMF is looked for in
 /usr/share/edk2/x64, /usr/share/OVMF and /usr/share/edk2/ovmf; OVMF_CODE and OVMF_VARS
-in the environment override it. Exits 1 when any case fails.
+in the environment override it. For an encrypted image, REDOXFS_KEY_FILE names a file with
+its exact passphrase: the tamper cases mount with it and every boot types it at the
+bootloader. Exits 1 when any case fails.
 
 Example: $0 build/x86_64/desktop/harddrive.img
 EOF
@@ -178,7 +180,7 @@ boot_case() {
     mcopy -o -i "$disk@@$ESP_OFFSET" "$efi" "$BOOT_PATH"
     # -B: loading scripts/vm-test.py leaves no __pycache__ in the tree
     python3 -B - "$name" "$expect" "$OUT/$name" "$WORK" "$OVMF_CODE" "$TIMEOUT" "$KVM" "$disk" <<'EOF'
-import importlib.util, re, socket, subprocess, sys, time
+import importlib.util, os, re, socket, subprocess, sys, time
 from pathlib import Path
 
 name, expect, out, work, code, timeout, kvm, disk = sys.argv[1:]
@@ -245,10 +247,24 @@ def serial():
 REFUSED = re.compile(r"BdsDxe: failed to load .*Access Denied.*")
 VERIFIED_REFUSED = re.compile(r"FerrionOS verified boot refused to start: .*")
 KERNEL = re.compile(r"^kernel::", re.M)  # the kernel prefixes its log lines with its module path
+
+
+def monitor_command(text):
+    monitor.sendall(text.encode() + b"\n")
+    reply(monitor)
+
+
+# An encrypted image (REDOXFS_KEY_FILE, as for the tamper copies) gets its passphrase typed at
+# the bootloader's first prompt, so that the bootloader goes on to check the kernel.
+key_path = os.environ.get("REDOXFS_KEY_FILE")
+passphrase = Path(key_path).read_text() if key_path else None
 ok, note, frame = False, f"neither the login nor a refusal within {timeout:.0f}s", None
 while time.monotonic() - start < timeout:
     frame = screen()
     log = serial()
+    if passphrase is not None and re.search(r"RedoxFS password \(1/", log):
+        vm_test.sendkeys(monitor_command, passphrase + "\n")
+        passphrase = None
     refused = REFUSED.search(log) or VERIFIED_REFUSED.search(log)
     if expect == "boot" and frame.kind() == "login":
         ok = not refused and KERNEL.search(log) is not None

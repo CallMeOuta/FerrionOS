@@ -25,12 +25,17 @@ fi
 
 # boot_mount <redoxfs-binary> <image> <dir>: mounts the image's RedoxFS filesystem on <dir>
 # through FUSE, in the background, and waits for usr/lib/boot/kernel to appear. The caller
-# unmounts with $BOOT_FUMOUNT <dir>, also when it fails.
+# unmounts with $BOOT_FUMOUNT <dir>, also when it fails. REDOXFS_KEY_FILE, when set,
+# supplies the exact password bytes without an interactive prompt.
 boot_mount() {
     local redoxfs="$1" image="$2" dir="$3"
     [ -x "$redoxfs" ] || BOOT_EXIT=2 boot_die "$redoxfs is not executable"
     mkdir -p "$dir"
-    "$redoxfs" "$image" "$dir" >"$dir.log" 2>&1 &
+    local -a key_args=()
+    if [ -n "${REDOXFS_KEY_FILE:-}" ]; then
+        key_args=(--key-file "$REDOXFS_KEY_FILE")
+    fi
+    "$redoxfs" "${key_args[@]}" "$image" "$dir" >"$dir.log" 2>&1 &
     for _ in $(seq 100); do
         [ -f "$dir/usr/lib/boot/kernel" ] && return 0
         sleep 0.1

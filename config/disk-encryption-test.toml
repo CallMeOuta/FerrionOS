@@ -1,0 +1,14 @@
+# Development-only disk encryption fixture; never distribute this image.
+# Build with CONFIG_NAME=disk-encryption-test VERIFIED_BOOT=1, and `make live` with the same
+# variables for scripts/vm-test.py disk-install. The public fixture password is not a
+# production credential; vm-test.py and verified-boot-sign.sh read it from here.
+# The graphical login lets scripts/secure-boot-test.sh judge its signed case.
+include = ["desktop-minimal.toml"]
+
+[general]
+encrypt_disk = "ferrion-disk-test"
+
+[packages]
+# From source: FerrionOS's patches add redoxfs-key and the installer's recovery key.
+installer = "source"
+redoxfs = "source"
