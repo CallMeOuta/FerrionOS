@@ -4,7 +4,7 @@ description = "Essential system components and drivers for FerrionOS"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/base.git"
 rev = "20f7573b4dc011ea5267189185edc0b2f12bab0f"
-patches = ["ferrion-boot-splash.patch"]
+patches = ["ferrion-boot-splash.patch", "ferrion-lockdown.patch"]
 
 [build]
 template = "custom"

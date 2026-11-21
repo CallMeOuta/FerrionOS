@@ -1,0 +1,666 @@
+FerrionOS change to Redox base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with ferrion-boot-splash.patch applied (security roadmap S13, lockdown). It needs ferrion-lockdown.patch of the kernel recipe, which adds the memory scheme's restricted root and port-io handle:
+- the hardware right is a property of a namespace handle. The namespace manager gives it to the boot process alone; a handle without it does not open, list, fork, register or remove irq, serio, kernel.acpi, pci and acpi, and its memory is the kernel's restricted root. A ShrinkPermissions request keeps the right only with the bit 1 << 63, which libredox does not define. An open of a hidden scheme logs the caller's pid and the scheme;
+- init starts a service without the right unless its unit sets `hardware = true`, and every script command without it, through daemon::without_hardware; the units of the drivers and driver managers set it (rtcd, lived, vesad, bcm2835-sdhcid, hwd, both pcid-spawner units, ps2d, and redoxfs, which reads the disk password from the physical address the bootloader passes);
+- drivers get I/O ports from /scheme/memory/port-io instead of the thread handle's Iopl verb;
+- a driver's memory root and PCI channel are close-on-exec, xhcid starts USB class drivers without the right, and redoxerd starts its command without it.
+
+diff --git a/Cargo.lock b/Cargo.lock
+index bc96c6ed..78f78d1d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1206,6 +1206,7 @@ name = "init"
+ version = "0.1.0"
+ dependencies = [
+  "config",
++ "daemon",
+  "libc",
+  "libredox 0.2.0",
+  "plain",
+@@ -2027,6 +2028,7 @@ version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "common",
++ "daemon",
+  "fdt",
+  "libc",
+  "libredox 0.2.0",
+diff --git a/bootstrap/src/initnsmgr.rs b/bootstrap/src/initnsmgr.rs
+index 707b896d..b98b705c 100644
+--- a/bootstrap/src/initnsmgr.rs
++++ b/bootstrap/src/initnsmgr.rs
+@@ -20,13 +20,51 @@ use syscall::error::*;
+ use syscall::schemev2::NewFdFlags;
+ use syscall::{CallFlags, FobtainFdFlags, Stat};
+ 
++/// Schemes that reach hardware directly. Only a namespace handle that still holds the hardware
++/// right opens, lists, forks, registers or removes them (FerrionOS lockdown, S13).
++const HARDWARE_SCHEMES: &[&str] = &["irq", "serio", "kernel.acpi", "pci", "acpi"];
++/// The kernel's memory scheme. Through a handle without the hardware right it is the kernel's
++/// restricted root, which allocates ordinary memory and refuses physical memory and port I/O.
++const MEMORY_SCHEME: &str = "memory";
++/// The bit of a `ShrinkPermissions` request that keeps the hardware right. libredox's
++/// `NsPermissions` does not define it, so a request built from those permissions drops the right.
++const NS_HARDWARE: usize = 1 << (usize::BITS - 1);
++
++/// Whether only a handle with the hardware right may register or remove `name`.
++fn is_protected_scheme(name: &str) -> bool {
++    name == MEMORY_SCHEME || HARDWARE_SCHEMES.contains(&name)
++}
++
+ #[derive(Debug, Clone)]
+ struct Namespace {
+     schemes: HashMap<String, Arc<FdGuard>>,
+ }
+ 
+ impl Namespace {
+-    fn fork(&self, buf: &[u8]) -> Result<Self> {
++    /// The capability `name` stands for, seen through a handle with or without the hardware right.
++    fn resolve(
++        &self,
++        name: &str,
++        hardware: bool,
++        restricted_memory: Option<&Arc<FdGuard>>,
++    ) -> Option<Arc<FdGuard>> {
++        let fd = self.schemes.get(name)?;
++        if hardware {
++            Some(fd.clone())
++        } else if name == MEMORY_SCHEME {
++            restricted_memory.cloned()
++        } else if HARDWARE_SCHEMES.contains(&name) {
++            None
++        } else {
++            Some(fd.clone())
++        }
++    }
++    fn fork(
++        &self,
++        buf: &[u8],
++        hardware: bool,
++        restricted_memory: Option<&Arc<FdGuard>>,
++    ) -> Result<Self> {
+         let mut schemes = HashMap::new();
+         let mut cursor = 0;
+         while cursor < buf.len() {
+@@ -37,24 +75,23 @@ impl Namespace {
+             cursor += len;
+             if name.ends_with('*') {
+                 let prefix = &name[..name.len() - 1];
+-                for (registered_name, fd) in &self.schemes {
+-                    if registered_name.starts_with(prefix) {
+-                        schemes.insert(registered_name.clone(), fd.clone());
++                for registered_name in self.schemes.keys() {
++                    if registered_name.starts_with(prefix)
++                        && let Some(fd) = self.resolve(registered_name, hardware, restricted_memory)
++                    {
++                        schemes.insert(registered_name.clone(), fd);
+                     }
+                 }
+             } else {
+-                let Some(fd) = self.schemes.get(&name) else {
++                let Some(fd) = self.resolve(&name, hardware, restricted_memory) else {
+                     warn!("Scheme {} not found in namespace", name);
+                     continue;
+                 };
+-                schemes.insert(name, fd.clone());
++                schemes.insert(name, fd);
+             }
+         }
+         Ok(Self { schemes })
+     }
+-    fn get_scheme_fd(&self, scheme: &str) -> Option<&Arc<FdGuard>> {
+-        self.schemes.get(scheme)
+-    }
+     fn remove_scheme(&mut self, scheme: &str) -> Option<()> {
+         self.schemes.remove(scheme).map(|_| ())
+     }
+@@ -64,6 +101,8 @@ impl Namespace {
+ struct NamespaceAccess {
+     namespace: Rc<RefCell<Namespace>>,
+     permission: NsPermissions,
++    /// The hardware right. The init process holds it and passes it only to drivers.
++    hardware: bool,
+ }
+ 
+ impl NamespaceAccess {
+@@ -103,6 +142,8 @@ pub struct NamespaceScheme<'sock> {
+     root_namespace: Namespace,
+     next_id: usize,
+     scheme_creation_cap: Rc<FdGuardUpper>,
++    /// What `memory` resolves to without the hardware right; `None` hides `memory` instead.
++    restricted_memory: Option<Arc<FdGuard>>,
+ }
+ 
+ const HIGH_PERMISSIONS: NsPermissions = NsPermissions::SCHEME_CREATE;
+@@ -113,19 +154,36 @@ impl<'sock> NamespaceScheme<'sock> {
+         schemes: HashMap<String, Arc<FdGuard>>,
+         scheme_creation_cap: FdGuardUpper,
+     ) -> Self {
++        // FerrionOS lockdown (S13): the kernel hands its full memory root to the boot process.
++        // Handles without the hardware right get the restricted root derived from it.
++        let restricted_memory = schemes.get(MEMORY_SCHEME).and_then(|memory| {
++            memory
++                .openat("restricted-root", libredox::protocol::O_CLOEXEC, 0)
++                .inspect_err(|err| error!("No restricted memory root, hiding `memory`: {}", err))
++                .ok()
++                .map(Arc::new)
++        });
+         Self {
+             socket,
+             handles: HashMap::new(),
+             root_namespace: Namespace { schemes },
+             next_id: 0,
+             scheme_creation_cap: Rc::new(scheme_creation_cap),
++            restricted_memory,
+         }
+     }
+ 
+-    fn add_namespace(&mut self, id: usize, schemes: Namespace, permission: NsPermissions) {
++    fn add_namespace(
++        &mut self,
++        id: usize,
++        schemes: Namespace,
++        permission: NsPermissions,
++        hardware: bool,
++    ) {
+         let handle = Handle::Access(NamespaceAccess {
+             namespace: Rc::new(RefCell::new(schemes)),
+             permission,
++            hardware,
+         });
+         self.handles.insert(id, handle);
+     }
+@@ -195,13 +253,23 @@ impl<'sock> NamespaceScheme<'sock> {
+ 
+     fn open_scheme_resource(
+         &self,
+-        ns: &Namespace,
++        ns_access: &NamespaceAccess,
+         scheme: &str,
+         flags: usize,
+-        _ctx: &CallerCtx,
++        ctx: &CallerCtx,
+     ) -> Result<FdGuard> {
+-        let Some(cap_fd) = ns.get_scheme_fd(scheme) else {
+-            log::info!("Scheme {:?} not found in namespace", scheme);
++        let namespace = ns_access.namespace.borrow();
++        let Some(cap_fd) =
++            namespace.resolve(scheme, ns_access.hardware, self.restricted_memory.as_ref())
++        else {
++            if namespace.schemes.contains_key(scheme) {
++                warn!(
++                    "pid {} lacks the hardware right for {} (FerrionOS lockdown)",
++                    ctx.pid, scheme
++                );
++            } else {
++                log::info!("Scheme {:?} not found in namespace", scheme);
++            }
+             return Err(Error::new(ENODEV));
+         };
+ 
+@@ -212,26 +280,35 @@ impl<'sock> NamespaceScheme<'sock> {
+         cap_fd.dup(&[])
+     }
+ 
+-    fn fork_namespace(&mut self, namespace: Rc<RefCell<Namespace>>, names: &[u8]) -> Result<usize> {
++    fn fork_namespace(&mut self, ns_access: &NamespaceAccess, names: &[u8]) -> Result<usize> {
+         let new_id = self.next_id;
+-        let new_namespace = namespace.borrow().fork(names).inspect_err(|&e| {
+-            error!("Failed to fork namespace {}: {}", new_id, e);
+-        })?;
++        let new_namespace = ns_access
++            .namespace
++            .borrow()
++            .fork(names, ns_access.hardware, self.restricted_memory.as_ref())
++            .inspect_err(|&e| {
++                error!("Failed to fork namespace {}: {}", new_id, e);
++            })?;
+         self.add_namespace(
+             new_id,
+             new_namespace,
+             NsPermissions::all().difference(HIGH_PERMISSIONS),
++            ns_access.hardware,
+         );
+         self.next_id += 1;
+         Ok(new_id)
+     }
+ 
++    /// `raw_permission` is a set of `NsPermissions`, plus `NS_HARDWARE` to keep the hardware right.
+     fn shrink_permissions(
+         &mut self,
+         mut ns: NamespaceAccess,
+-        permission: NsPermissions,
++        raw_permission: usize,
+     ) -> Result<usize> {
+-        ns.permission = ns.permission.intersection(permission);
++        ns.permission = ns
++            .permission
++            .intersection(NsPermissions::from_bits_truncate(raw_permission));
++        ns.hardware &= raw_permission & NS_HARDWARE != 0;
+         let next_id = self.next_id;
+         self.handles.insert(next_id, Handle::Access(ns));
+         self.next_id += 1;
+@@ -277,12 +354,8 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
+                         })
+                     }
+                     _ => {
+-                        let res_fd = self.open_scheme_resource(
+-                            &ns_access.namespace.borrow(),
+-                            scheme.as_ref(),
+-                            flags,
+-                            ctx,
+-                        )?;
++                        let res_fd =
++                            self.open_scheme_resource(&ns_access, scheme.as_ref(), flags, ctx)?;
+                         Ok(OpenResult::OtherScheme { fd: res_fd.take() })
+                     }
+                 }
+@@ -332,10 +405,13 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
+     }
+ 
+     fn dup(&mut self, id: usize, buf: &[u8], _ctx: &CallerCtx) -> Result<OpenResult> {
+-        let ns_access = self.get_ns_access(id).ok_or_else(|| {
+-            error!("Namespace with ID {} not found", id);
+-            Error::new(ENOENT)
+-        })?;
++        let ns_access = self
++            .get_ns_access(id)
++            .ok_or_else(|| {
++                error!("Namespace with ID {} not found", id);
++                Error::new(ENOENT)
++            })?
++            .clone();
+ 
+         let raw_kind = read_num::<usize>(buf)?;
+         let Some(kind) = NsDup::try_from_raw(raw_kind) else {
+@@ -344,14 +420,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
+         };
+         let payload = &buf[mem::size_of::<NsDup>()..];
+         let new_id = match kind {
+-            NsDup::ForkNs => {
+-                let ns = ns_access.namespace.clone();
+-                self.fork_namespace(ns, payload)?
++            NsDup::ForkNs => self.fork_namespace(&ns_access, payload)?,
++            NsDup::ShrinkPermissions => {
++                self.shrink_permissions(ns_access, read_num::<usize>(payload)?)?
+             }
+-            NsDup::ShrinkPermissions => self.shrink_permissions(
+-                ns_access.clone(),
+-                NsPermissions::from_bits_truncate(read_num::<usize>(payload)?),
+-            )?,
+             NsDup::IssueRegister => {
+                 let name = core::str::from_utf8(payload).map_err(|_| Error::new(EINVAL))?;
+                 let scheme_name = RedoxScheme::new(name).ok_or_else(|| {
+@@ -366,6 +438,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
+                     );
+                     return Err(Error::new(EACCES));
+                 }
++                if !ns_access.hardware && is_protected_scheme(scheme_name.as_ref()) {
++                    error!("Registering {} needs the hardware right", name);
++                    return Err(Error::new(EACCES));
++                }
+                 let new_id = self.next_id;
+                 let register_cap = Handle::Register(SchemeRegister {
+                     target_namespace: ns_access.namespace.clone(),
+@@ -399,6 +475,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
+             error!("Permission denied to remove scheme for namespace {}", fd);
+             return Err(Error::new(EACCES));
+         }
++        if !ns_access.hardware && is_protected_scheme(scheme.as_ref()) {
++            error!("Removing {} needs the hardware right", scheme);
++            return Err(Error::new(EACCES));
++        }
+         match ns.remove_scheme(scheme.as_ref()) {
+             Some(_) => Ok(()),
+             None => {
+@@ -463,7 +543,10 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
+ 
+         let opaque_offset = opaque_offset as usize;
+         for (i, (name, _)) in ns.schemes.iter().enumerate().skip(opaque_offset) {
+-            if name.is_empty() {
++            let hidden = ns
++                .resolve(name, ns_access.hardware, self.restricted_memory.as_ref())
++                .is_none();
++            if name.is_empty() || hidden {
+                 continue;
+             }
+             if let Err(err) = buf.entry(DirEntry {
+@@ -555,7 +638,13 @@ pub fn run(
+ 
+     // send namespace fd to bootstrap
+     let new_id = scheme.next_id;
+-    scheme.add_namespace(new_id, scheme.root_namespace.clone(), NsPermissions::all());
++    // The boot process, and through it init, starts with the hardware right.
++    scheme.add_namespace(
++        new_id,
++        scheme.root_namespace.clone(),
++        NsPermissions::all(),
++        true,
++    );
+     scheme.next_id += 1;
+     let cap_fd = scheme
+         .socket
+diff --git a/daemon/src/lib.rs b/daemon/src/lib.rs
+index 65b0820d..d849948e 100644
+--- a/daemon/src/lib.rs
++++ b/daemon/src/lib.rs
+@@ -7,6 +7,7 @@ use std::os::unix::process::CommandExt;
+ use std::process::Command;
+ 
+ use libredox::Fd;
++use libredox::protocol::{NsDup, NsPermissions};
+ use redox_scheme::Socket;
+ use redox_scheme::scheme::{SchemeAsync, SchemeSync};
+ 
+@@ -138,3 +139,29 @@ impl SchemeDaemon {
+         self.ready_with_fd(Fd::new(cap_fd))
+     }
+ }
++
++/// Makes `cmd` start its program without the hardware right (FerrionOS lockdown, S13).
++///
++/// The program keeps the caller's namespace, seen through a handle that hides the schemes
++/// reaching hardware (`irq`, `serio`, `kernel.acpi`, `pci`, `acpi`) and whose `memory` allocates
++/// ordinary memory only, so it can map no physical memory and use no I/O ports. init starts every
++/// service this way unless its unit sets `hardware`; a driver starts its helpers this way.
++pub fn without_hardware(cmd: &mut Command) {
++    unsafe {
++        cmd.pre_exec(drop_hardware_right);
++    }
++}
++
++fn drop_hardware_right() -> io::Result<()> {
++    let ns = libredox::call::getns()?;
++    let mut request = [0_u8; 2 * size_of::<usize>()];
++    let (kind, permissions) = request.split_at_mut(size_of::<usize>());
++    kind.copy_from_slice(&(NsDup::ShrinkPermissions as usize).to_le_bytes());
++    // Every permission libredox defines; the namespace manager's hardware bit is not among them.
++    permissions.copy_from_slice(&NsPermissions::all().bits().to_le_bytes());
++    let restricted = libredox::call::dup(ns, request)?;
++    // `setns` hands back the handle it replaced; close it so the program cannot inherit it.
++    let previous = libredox::call::setns(restricted)?;
++    libredox::call::close(previous)?;
++    Ok(())
++}
+diff --git a/drivers/common/src/lib.rs b/drivers/common/src/lib.rs
+index 024c5330..26d8534e 100644
+--- a/drivers/common/src/lib.rs
++++ b/drivers/common/src/lib.rs
+@@ -10,7 +10,7 @@ use libredox::errno::EINVAL;
+ use libredox::error::{Error, Result};
+ use libredox::flag::{self, O_CLOEXEC, O_RDONLY, O_RDWR, O_WRONLY};
+ use libredox::Fd;
+-use syscall::{ProcSchemeVerb, PAGE_SIZE};
++use syscall::PAGE_SIZE;
+ 
+ /// The Direct Memory Access (DMA) API for drivers
+ pub mod dma;
+@@ -36,7 +36,8 @@ static MEMORY_ROOT_FD: OnceLock<libredox::Fd> = OnceLock::new();
+ pub fn init() {
+     if MEMORY_ROOT_FD
+         .set(
+-            libredox::Fd::open("/scheme/memory/scheme-root", 0, 0)
++            // Close-on-exec: a program the driver starts does not inherit the memory root.
++            libredox::Fd::open("/scheme/memory/scheme-root", O_CLOEXEC, 0)
+                 .expect("drivers common: failed to open memory root fd"),
+         )
+         .is_err()
+@@ -283,25 +284,18 @@ impl Drop for PhysBorrowed {
+     }
+ }
+ 
+-/// Instructs the kernel to enable I/O ports for this (usermode) process (x86-specific).
++/// Instructs the kernel to enable I/O ports for the calling thread (x86-specific).
+ ///
+ /// On Redox, x86 privilege ring 3 represents userspace. Most Redox drivers run in userspace to
+ /// prevent system instability caused by a faulty driver. Processes with (bitmap-enabled) IO port
+ /// rights can use the IN/OUT instructions. This is not the same as IOPL 3; the CLI instruction is
+ /// still not allowed.
++///
++/// The right comes from the `memory` scheme's `port-io` handle, which only a process holding the
++/// hardware right can open (FerrionOS lockdown, S13).
+ pub fn acquire_port_io_rights() -> Result<()> {
+-    extern "C" {
+-        fn redox_cur_thrfd_v0() -> usize;
+-    }
+-    let kernel_fd = libredox::call::dup(unsafe { redox_cur_thrfd_v0() }, b"open_via_dup")?;
+-    let res = libredox::call::call_wo(
+-        kernel_fd,
+-        &[],
+-        syscall::CallFlags::empty(),
+-        &[ProcSchemeVerb::Iopl as u64],
+-    );
+-    let _ = libredox::call::close(kernel_fd);
+-    res?;
++    let port_io = libredox::Fd::open("/scheme/memory/port-io", O_CLOEXEC, 0)?;
++    libredox::call::call_wo(port_io.raw(), &[], syscall::CallFlags::empty(), &[])?;
+     Ok(())
+ }
+ 
+diff --git a/drivers/pcid/src/driver_interface/mod.rs b/drivers/pcid/src/driver_interface/mod.rs
+index bc5d3b53..2e548900 100644
+--- a/drivers/pcid/src/driver_interface/mod.rs
++++ b/drivers/pcid/src/driver_interface/mod.rs
+@@ -315,6 +315,14 @@ impl PciFunctionHandle {
+                 process::exit(1);
+             }
+         };
++        // FerrionOS lockdown (S13): a program the driver starts does not inherit its device.
++        if unsafe { libc::fcntl(channel_fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
++            log::error!(
++                "PCID_CLIENT_CHANNEL close-on-exec: {}",
++                io::Error::last_os_error()
++            );
++            process::exit(1);
++        }
+         Self::connect_common(channel_fd)
+     }
+ 
+diff --git a/drivers/redoxerd/Cargo.toml b/drivers/redoxerd/Cargo.toml
+index c0a13ebd..b2cb69ea 100644
+--- a/drivers/redoxerd/Cargo.toml
++++ b/drivers/redoxerd/Cargo.toml
+@@ -14,6 +14,7 @@ redox_event.workspace = true
+ redox_syscall.workspace = true
+ redox_termios.workspace = true
+ common = { path = "../common" }
++daemon = { path = "../../daemon" }
+ qemu-exit = "4.0"
+ 
+ [lints]
+diff --git a/drivers/redoxerd/src/main.rs b/drivers/redoxerd/src/main.rs
+index bbef8ca1..d17124e5 100644
+--- a/drivers/redoxerd/src/main.rs
++++ b/drivers/redoxerd/src/main.rs
+@@ -167,6 +167,9 @@ fn inner() -> anyhow::Result<()> {
+             .env("TERM", "xterm-256color")
+             .env("TTY", &pty);
+     }
++    // FerrionOS lockdown (S13): the command under test runs like any program root starts, without
++    // the hardware right this daemon holds to end QEMU through its exit port.
++    daemon::without_hardware(&mut command);
+ 
+     let mut process = command
+         .spawn()
+diff --git a/drivers/usb/xhcid/src/xhci/device/drivers.rs b/drivers/usb/xhcid/src/xhci/device/drivers.rs
+index 3164473f..5450ab3b 100644
+--- a/drivers/usb/xhcid/src/xhci/device/drivers.rs
++++ b/drivers/usb/xhcid/src/xhci/device/drivers.rs
+@@ -117,20 +117,22 @@ impl<const N: usize> Xhci<N> {
+                 } else {
+                     "/usr/lib/drivers/".to_owned() + command
+                 };
+-                let process = process::Command::new(command)
+-                    .args(
+-                        args.into_iter()
+-                            .map(|arg| {
+-                                arg.replace("$SCHEME", &self.scheme_name)
+-                                    .replace("$PORT", &format!("{}", port))
+-                                    .replace("$IF_NUM", &format!("{}", ifdesc.number))
+-                                    .replace("$IF_PROTO", &format!("{}", ifdesc.protocol))
+-                            })
+-                            .collect::<Vec<_>>(),
+-                    )
+-                    .stdin(process::Stdio::null())
+-                    .spawn()
+-                    .or(Err(Error::new(ENOENT)))?;
++                let mut cmd = process::Command::new(command);
++                cmd.args(
++                    args.into_iter()
++                        .map(|arg| {
++                            arg.replace("$SCHEME", &self.scheme_name)
++                                .replace("$PORT", &format!("{}", port))
++                                .replace("$IF_NUM", &format!("{}", ifdesc.number))
++                                .replace("$IF_PROTO", &format!("{}", ifdesc.protocol))
++                        })
++                        .collect::<Vec<_>>(),
++                )
++                .stdin(process::Stdio::null());
++                // FerrionOS lockdown (S13): class drivers talk to this driver's scheme, not to
++                // hardware, so they start without the hardware right.
++                daemon::without_hardware(&mut cmd);
++                let process = cmd.spawn().or(Err(Error::new(ENOENT)))?;
+                 self.drivers.alter(port, |children_opt| {
+                     let mut children = children_opt.unwrap_or_else(|| Vec::new());
+                     children.push(process);
+diff --git a/init.d/00_pcid-spawner.service b/init.d/00_pcid-spawner.service
+index 8ba6fc6c..2e443fb8 100644
+--- a/init.d/00_pcid-spawner.service
++++ b/init.d/00_pcid-spawner.service
+@@ -4,3 +4,5 @@ description = "PCI driver spawner"
+ [service]
+ cmd = "pcid-spawner"
+ type = "oneshot"
++# Opens PCI devices and starts their drivers, which inherit the right.
++hardware = true
+diff --git a/init.initfs.d/00_rtcd.service b/init.initfs.d/00_rtcd.service
+index ffe8ea2e..15b45136 100644
+--- a/init.initfs.d/00_rtcd.service
++++ b/init.initfs.d/00_rtcd.service
+@@ -5,3 +5,5 @@ default_dependencies = false
+ [service]
+ cmd = "rtcd"
+ type = "oneshot"
++# Reads the real-time clock through I/O ports.
++hardware = true
+diff --git a/init.initfs.d/10_lived.service b/init.initfs.d/10_lived.service
+index 7745f4b7..ea8e5eba 100644
+--- a/init.initfs.d/10_lived.service
++++ b/init.initfs.d/10_lived.service
+@@ -5,3 +5,5 @@ description = "Live disk"
+ [service]
+ cmd = "lived"
+ type = "notify"
++# Serves the live disk image from physical memory.
++hardware = true
+diff --git a/init.initfs.d/20_vesad.service b/init.initfs.d/20_vesad.service
+index 4d907c31..1b72c2f0 100644
+--- a/init.initfs.d/20_vesad.service
++++ b/init.initfs.d/20_vesad.service
+@@ -11,3 +11,5 @@ inherit_envs = [
+     "FRAMEBUFFER_STRIDE",
+ ]
+ type = "notify"
++# Maps the bootloader's framebuffer from physical memory.
++hardware = true
+diff --git a/init.initfs.d/40_bcm2835-sdhcid.service b/init.initfs.d/40_bcm2835-sdhcid.service
+index 8c054620..2486e27e 100644
+--- a/init.initfs.d/40_bcm2835-sdhcid.service
++++ b/init.initfs.d/40_bcm2835-sdhcid.service
+@@ -7,3 +7,5 @@ condition_board = ["raspi3bp"]
+ [service]
+ cmd = "bcm2835-sdhcid"
+ type = "notify"
++# Drives the SD host controller.
++hardware = true
+diff --git a/init.initfs.d/40_hwd.service b/init.initfs.d/40_hwd.service
+index cba12dde..0308d389 100644
+--- a/init.initfs.d/40_hwd.service
++++ b/init.initfs.d/40_hwd.service
+@@ -6,3 +6,5 @@ requires_weak = ["10_inputd.service", "10_lived.service", "20_graphics.target"]
+ cmd = "hwd"
+ inherit_envs = ["RSDP_ADDR", "RSDP_SIZE"]
+ type = "notify"
++# Reads ACPI tables and starts acpid and pcid, which inherit the right.
++hardware = true
+diff --git a/init.initfs.d/40_pcid-spawner-initfs.service b/init.initfs.d/40_pcid-spawner-initfs.service
+index 6945b9ea..9acd4eba 100644
+--- a/init.initfs.d/40_pcid-spawner-initfs.service
++++ b/init.initfs.d/40_pcid-spawner-initfs.service
+@@ -6,3 +6,5 @@ requires_weak = ["10_inputd.service", "20_graphics.target", "40_hwd.service"]
+ cmd = "pcid-spawner"
+ args = ["--initfs"]
+ type = "oneshot"
++# Opens PCI devices and starts their drivers, which inherit the right.
++hardware = true
+diff --git a/init.initfs.d/40_ps2d.service b/init.initfs.d/40_ps2d.service
+index 881e75ea..f39965c6 100644
+--- a/init.initfs.d/40_ps2d.service
++++ b/init.initfs.d/40_ps2d.service
+@@ -6,3 +6,5 @@ condition_architecture = ["x86", "x86_64"]
+ [service]
+ cmd = "ps2d"
+ type = "notify"
++# Drives the PS/2 controller through serio and I/O ports.
++hardware = true
+diff --git a/init.initfs.d/50_rootfs.service b/init.initfs.d/50_rootfs.service
+index c2d8e477..af1e6d99 100644
+--- a/init.initfs.d/50_rootfs.service
++++ b/init.initfs.d/50_rootfs.service
+@@ -7,3 +7,5 @@ cmd = "redoxfs"
+ args = ["--uuid" ,"$REDOXFS_UUID", "file", "$REDOXFS_BLOCK"]
+ inherit_envs = ["REDOXFS_PASSWORD_ADDR", "REDOXFS_PASSWORD_SIZE"]
+ type = "oneshot"
++# Reads the disk password from the physical address the bootloader passes.
++hardware = true
+diff --git a/init/Cargo.toml b/init/Cargo.toml
+index b0ae14a8..fc31f0fc 100644
+--- a/init/Cargo.toml
++++ b/init/Cargo.toml
+@@ -15,6 +15,7 @@ serde_json.workspace = true
+ toml.workspace = true
+ 
+ config = { path = "../config" }
++daemon = { path = "../daemon" }
+ 
+ [lints]
+ workspace = true
+diff --git a/init/src/script.rs b/init/src/script.rs
+index 1f80246a..1838b4c8 100644
+--- a/init/src/script.rs
++++ b/init/src/script.rs
+@@ -98,6 +98,8 @@ impl Command {
+         command.env_clear();
+         command.envs(&config.envs).envs(&process.envs);
+         command.current_dir(&config.cwd);
++        // A script cannot ask for the hardware right (FerrionOS lockdown, S13).
++        daemon::without_hardware(&mut command);
+ 
+         let mut child = match command.spawn() {
+             Ok(child) => child,
+diff --git a/init/src/service.rs b/init/src/service.rs
+index d4e79056..534a90c3 100644
+--- a/init/src/service.rs
++++ b/init/src/service.rs
+@@ -24,6 +24,12 @@ pub struct Service {
+     pub type_: ServiceType,
+     #[serde(default)]
+     pub priority: Option<i32>,
++    /// The hardware right (FerrionOS lockdown, S13): the service may open `irq`, `serio`,
++    /// `kernel.acpi`, `pci` and `acpi`, map physical memory and use I/O ports, and what it starts
++    /// inherits the right. Only drivers and the driver managers set it; every other service,
++    /// root's included, starts without it.
++    #[serde(default)]
++    pub hardware: bool,
+ }
+ 
+ #[derive(Clone, Debug, Default, Deserialize)]
+@@ -47,6 +53,9 @@ impl Service {
+             }
+         }
+         command.envs(base_envs).envs(&self.envs);
++        if !self.hardware {
++            daemon::without_hardware(&mut command);
++        }
+ 
+         let (mut read_pipe, write_pipe) = io::pipe().unwrap();
+         unsafe { pass_fd(&mut command, "INIT_NOTIFY", write_pipe.as_raw_fd()) };

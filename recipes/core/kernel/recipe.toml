@@ -4,7 +4,7 @@ description = "The FerrionOS microkernel"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/kernel.git"
 rev = "e7f1d4231d0f4b55fbef229d9cd9459302c101f4"
-patches = ["ferrion-quiet-boot.patch", "ferrion-boot-name.patch"]
+patches = ["ferrion-quiet-boot.patch", "ferrion-boot-name.patch", "ferrion-lockdown.patch"]
 
 [build]
 template = "custom"
