@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# This script generates build/relibc-doc and build/relibc-doc.tar.gz
 
 rm -rf build/relibc-doc build/relibc-doc.tar.gz
 mkdir -p build/relibc-doc

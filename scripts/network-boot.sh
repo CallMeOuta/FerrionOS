@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-# Your host must use the static IP ${NETWORK}.1 and subnet mask 255.255.255.0
-# 'Rx' in ascii is 82 and 120, adjust to taste
 NETWORK=10.82.120
 
 set -ex
@@ -33,17 +31,13 @@ ARGS=(
     "--dhcp-option=6,1.1.1.1,1.0.0.1"
     "--enable-tftp"
     "--tftp-root=$(realpath "${BUILD}")"
-    # BIOS
     "--dhcp-match=set:bios,option:client-arch,0"
     "--dhcp-boot=tag:!ipxe,tag:bios,undionly.kpxe"
-    # EFI x86_64
     "--dhcp-match=set:efi-x86_64,option:client-arch,7"
     "--dhcp-match=set:efi-x86_64,option:client-arch,9"
     "--dhcp-boot=tag:!ipxe,tag:efi-x86_64,ipxe-x86_64.efi"
-    # EFI aarch64
     "--dhcp-match=set:efi-aarch64,option:client-arch,11"
     "--dhcp-boot=tag:!ipxe,tag:efi-aarch64,ipxe-aarch64.efi"
-    # IPXE
     "--dhcp-userclass=set:ipxe,iPXE"
     "--dhcp-boot=tag:ipxe,redox.ipxe"
 )

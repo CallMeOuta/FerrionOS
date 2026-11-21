@@ -1,26 +1,4 @@
 #!/usr/bin/env python3
-# Builds the mockups of plans/desktop-design.md, at the reference screen of
-# 1280 by 800 pixels, from what the identity kit and the desktop image already hold:
-#   branding/color.tokens.json   ground and ink, the two base colors
-#   branding/mark.svg            the mark
-#   Fira Sans and Fira Mono      from the fetched source of the orbdata package
-#   symbolic icons               from the fetched source of the cosmic-icons package
-# Every other neutral is ground or ink at a fixed share over the other (SHARES below);
-# the shares, the one accent and the three colors of the window controls are the ones
-# of the maintainer's prototype, named in the plan.
-# Each screen is written twice. Beside this file is the rich picture: soft shadows and
-# translucent panels, what a GPU renderer draws. Under flat/ is the picture a CPU
-# renderer draws: the same boxes with opaque fills and no shadow. The flat files carry
-# their regions as <rect> elements under <g id="regions">: the rectangle a part of the
-# shell occupies, and probe pixels with the color expected there. The slices of the plan
-# compare screenshots of the virtual machine against them.
-# Text is outlined, so a mockup looks the same in every viewer.
-# Run it after changing a token, a size or a scene:
-#   python3 scripts/desktop-fixtures/mockups.py            writes the SVG files here
-#   python3 scripts/desktop-fixtures/mockups.py --check    renders flat/ and reads every probe back
-#   python3 scripts/desktop-fixtures/mockups.py --tokens   prints the token tables of the plan
-# It needs fontTools, and `make f.orbdata f.cosmic-icons` to have fetched the two sources;
-# --check also needs rsvg-convert (librsvg) and magick (ImageMagick) on PATH.
 
 import json
 import sys
@@ -34,26 +12,22 @@ FONTS = ROOT / "recipes/gui/orbdata/source/usr/share/fonts"
 ICONS = ROOT / "recipes/icons/cosmic-icons/source"
 SVG_NS = "{http://www.w3.org/2000/svg}"
 
-W, H = 1280, 800  # the reference screen: QEMU's default mode, and scripts/vm-test.py's
-BAR = 44  # height of the top bar
-GAP = 12  # between tiled windows, and between a window and the edge of the working area
-TITLE = 32  # height of the title strip the compositor draws on a free window
-RADIUS = 14  # corner radius of a window
-PANEL_RADIUS = 16  # corner radius of a shell panel: dock, popovers
-ISLAND = (128, 32)  # the island at rest
+W, H = 1280, 800
+BAR = 44
+GAP = 12
+TITLE = 32
+RADIUS = 14
+PANEL_RADIUS = 16
+ISLAND = (128, 32)
 DOCK_ITEM, DOCK_PAD, DOCK_GAP, DOCK_BOTTOM = 44, 6, 4, 12
 DOCK_H = DOCK_ITEM + 2 * DOCK_PAD
-DOT = 24  # pitch of the dot grid behind the windows
+DOT = 24
 
-# The one accent. Amber is the prototype's default; the others are the set it offers.
 ACCENT = 0xE68E0D
 ACCENTS = {"amber": 0xE68E0D, "blood": 0xC8202A, "ash": 0xA8A29C, "sakura": 0xE0608A, "venom": 0x5CB83A,
            "ice": 0x3A9FD8, "dusk": 0x8A5CF0}
-# The three window controls take the red, yellow and green of the terminal's sixteen colors.
 CONTROLS = {"dark": (0xD35F5F, 0xE6B450, 0x86B37E), "light": (0xC4453C, 0xB07D10, 0x5F8A12)}
 
-# Shares, in percent, of the foreground over the background: ink over ground in the dark
-# theme, ground over ink in the light one.
 SHARES = {
     "dark": {"line": 8, "line-strong": 14, "raise": Fraction(11, 2), "raise-2": Fraction(19, 2), "fg-2": 72,
              "muted": 57, "ring": 50, "soft": 16},
@@ -129,7 +103,6 @@ class Theme:
         dark_ink = blend(0x000000, ground, 40)
         c["accent-ink"] = max((dark_ink, 0xFFFFFF), key=lambda ink_: contrast(ink_, c["accent"]))
         c["title"] = blend(c["well"], self.bg, 86)
-        # On paper each control is darkened until it reaches 3:1 on the title strip it sits on.
         c["red"], c["yellow"], c["green"] = (readable(v, c["title"], 3) for v in CONTROLS[name])
         c["dot"] = blend(self.fg, self.bg, 10)
         self.c = c
@@ -235,12 +208,11 @@ class Face:
         return pen.getCommands()
 
 
-# Shadows of the rich picture, as the prototype sets them: (dy, blur radius, opacity) per layer.
 SHADOWS = {
     "dark": {"win": ((10, 32, 0.32), (2, 6, 0.18)), "panel": ((16, 40, 0.42),)},
     "light": {"win": ((10, 28, 0.16), (1, 4, 0.10)), "panel": ((16, 40, 0.14),)},
 }
-PANEL_ALPHA = 0.78  # a shell panel over what is behind it, where the renderer can blur
+PANEL_ALPHA = 0.78
 
 
 class Canvas:
@@ -253,7 +225,6 @@ class Canvas:
         self.rich = theme.tier == "rich"
         self.filters = set()
 
-    # Text
 
     def measure(self, text, face="r", size=13, tabular=False):
         _, advance = self.faces[face].shape(text, tabular)
@@ -280,7 +251,6 @@ class Canvas:
         """The baseline that centers the capitals of a line of text in a box."""
         return top + height / 2 + self.faces[face].cap * size / 2
 
-    # Shapes
 
     def color(self, value):
         return value if value.startswith("#") else self.t[value]
@@ -349,7 +319,7 @@ class Canvas:
         parts, color = [], self.color(fill)
         for el in root.iter(SVG_NS + "path"):
             if float(el.attrib.get("fill-opacity", 1)) < 0.05:
-                continue  # the transparent square that pads every icon to its box
+                continue
             attrs = f' d="{el.attrib["d"]}"'
             for key in ("fill-rule", "clip-rule", "opacity", "stroke-width", "stroke-linecap"):
                 if key in el.attrib:
@@ -358,7 +328,6 @@ class Canvas:
                 attrs += f' stroke="{color}"'
                 attrs += "" if el.attrib.get("fill", "none") != "none" else ' fill="none"'
             parts.append(f"<path{attrs}/>")
-        # A few icons are drawn in a box one pixel wider or taller than 16: center the box.
         dx, dy = x - (vw - 16) / 2 * scale, y - (vh - 16) / 2 * scale
         self.body.append(f'<g transform="translate({number(dx)} {number(dy)}) scale({number(scale)})" '
                          f'fill="{color}">{"".join(parts)}</g>')
@@ -386,7 +355,6 @@ class Canvas:
             for i in range(3):
                 self.rect(x + i * 4.5, y, 3, 12, r=1, fill=fill)
 
-    # Structure
 
     def clip(self, x, y, w, h, r=0):
         """Opens a group clipped to a box; close it with `end`."""
@@ -440,7 +408,6 @@ class Canvas:
         (folder / name).write_text("\n".join(out) + "\n")
 
 
-# The desktop behind the windows
 
 
 def wallpaper(c, x=0, y=0, w=W, h=H):
@@ -458,7 +425,6 @@ def clear_of_dots(x, y):
     return x % DOT not in (11, 12) and y % DOT not in (11, 12)
 
 
-# The parts of the shell
 
 
 def island(c, cx, top, size=ISLAND):
@@ -474,7 +440,7 @@ def bar(c, app, workspaces):
     """The top bar: the mark, the name of the app in use, the workspaces, the island and the status.
     `workspaces` is a list of (mode, icons, focused index or None); the first one is the active one."""
     t = c.t
-    c.mark(16, 15, 2)  # 8 by 14 pixels, as branding/mark-16.svg draws it
+    c.mark(16, 15, 2)
     x = 36
     if app:
         x += c.text(x, c.baseline(0, BAR, "s"), app, "s") + 16
@@ -532,7 +498,6 @@ PINNED = ["system-file-manager", "utilities-terminal", "web-browser", "format-in
           "accessories-text-editor", "preferences-system"]
 
 
-# Windows
 
 
 def title_strip(c, x, y, w, title, focused):
@@ -599,7 +564,7 @@ CODE = [
     [("    println!(", "fg-2"), ('"Hello from {name}!"', "fg"), (");", "fg-2")],
     [("}", "fg-2")],
 ]
-CURSOR_LINE = 11  # the line the text cursor is on, counted from 1
+CURSOR_LINE = 11
 
 
 def editor_body(c, x, top, w, h, focused):
@@ -667,7 +632,6 @@ def browser_body(c, x, top, w, h, focused):
         c.text(x + 48, top + 132 + i * 24, line, fill="fg-2")
 
 
-# Where the three windows of the first workspace sit when it is free: (x, y, w, h, title, focused, body).
 FREE = [
     (96, 84, 520, 400, "Files", False, files_body),
     (760, 72, 440, 300, "Terminal", False, terminal_body),
@@ -696,11 +660,10 @@ def columns(c):
     return (x1, top, third, height), (x2, top, half, height), (x3, top, half, height)
 
 
-APPS = ["system-file-manager", "utilities-terminal", "format-indent-more"]  # of the first workspace, in order
+APPS = ["system-file-manager", "utilities-terminal", "format-indent-more"]
 RUNNING = ("system-file-manager", "utilities-terminal", "format-indent-more", "web-browser")
 
 
-# The screens
 
 
 def desktop_traditional(theme, faces):
@@ -748,7 +711,6 @@ def overview(theme, faces):
                "left; the dock.")
     t = c.t
     c.rect(0, 0, W, H, fill="well")
-    # The column of workspaces: the vertical order of the desktop, at a glance.
     rail_x, thumb_w, thumb_h = 24, 168, 105
     zoom = thumb_w / W
     cards = []
@@ -770,7 +732,6 @@ def overview(theme, faces):
         c.text(rail_x + 22, y + thumb_h + 20, f"Workspace {label}", "s" if index == 0 else "r", 11,
                "fg" if index == 0 else "muted")
         cards.append((rail_x, y))
-    # The windows of this workspace in one layer, in the order they sit from left to right.
     scale, gap = 0.54, 40
     order = sorted(FREE, key=lambda win: win[0])
     total = sum(win[2] for win in order) * scale + gap * (len(order) - 1)
@@ -860,8 +821,8 @@ def lock(theme, faces):
                "clock, the date, the name of the person whose session is locked, and one password field.")
     t = c.t
     c.rect(0, 0, W, H, fill="bg")
-    c.mark(608, 86, 16)  # where branding/mark.rs puts it: 314 pixels above the center of the screen
-    base = 230 + faces["r"].cap * 96  # the cap line of the name on the login screen is the cap line of the time
+    c.mark(608, 86, 16)
+    base = 230 + faces["r"].cap * 96
     c.text(W / 2, base, "14:07", "r", 96, anchor="middle", tabular=True)
     c.text(W / 2, base + 36, "Saturday, 21 November", fill="fg-2", anchor="middle")
     field = 382

@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-# Checks a commit message against the format in docs/code-policy.md: a
-# "Category: Description" subject in the imperative, an empty second line,
-# lines of at most 72 characters (a URL may stand alone on a longer line),
-# no merge commits and no Signed-off-by line.
-# Usage: scripts/lint-commit-message.py <message-file>    (a commit-msg hook)
-#        scripts/lint-commit-message.py --range <rev-range>  (existing commits)
-# Python standard library only.
 
 import re
 import subprocess

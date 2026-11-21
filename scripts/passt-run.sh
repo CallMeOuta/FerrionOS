@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Runs a command next to a passt vhost-user network backend, for `make ch`.
-#   passt-run.sh <socket>.sock [passt options...] -- <command...>
-# Under SELinux, passt may only use sockets in $XDG_RUNTIME_DIR or /tmp.
 
 set -euo pipefail
 
-STARTUP_TIMEOUT=5 # seconds
+STARTUP_TIMEOUT=5
 
 die() {
   echo "passt: $*" >&2
@@ -26,7 +23,7 @@ while [[ $# -gt 0 && "$1" != "--" ]]; do
   shift
 done
 [[ $# -ge 2 ]] || usage
-shift # the "--"
+shift
 
 [[ "${SOCK}" == *.sock ]] || die "socket '${SOCK}' must end in .sock"
 [[ ${#SOCK} -lt 108 ]] || die "socket path too long (${#SOCK} bytes): ${SOCK}"
@@ -72,7 +69,6 @@ start_passt() {
 
 start_failed() {
   if [[ -s "${LOG}" ]]; then
-    # After a bad option passt prints its whole usage text.
     sed '/^Usage:/,$d' "${LOG}" | tail -n 20 >&2
     die "$1; see ${LOG}"
   fi
@@ -92,5 +88,4 @@ start_passt
 wait_for_socket
 echo "passt: user-mode network at ${SOCK} (log: ${LOG})" >&2
 
-# Not exec'd, so cleanup runs when the command ends.
 "$@"

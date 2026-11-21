@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 
-# This script create a list with:
-# "recipe-name = {} #TODO"
-# For quick testing of WIP recipes
 
-# Given a string, find recipe.toml files containing that string.
-# Create a list that can be copy/pasted into a filesystem config.
 
 if [ -z "$*" ]
 then

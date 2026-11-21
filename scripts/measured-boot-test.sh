@@ -1,35 +1,4 @@
 #!/usr/bin/env bash
-# Proves measured boot for an x86_64 FerrionOS image in QEMU (security roadmap S16, slice 3).
-# Each case boots a copy of the image with OVMF and, for the TPM cases, a software TPM (swtpm)
-# on a CRB interface:
-#   tpm         as built: must reach the graphical login with PCRs 7, 8 and 9 measured
-#   tpm-initfs  usr/lib/boot/initfs grown by 4 KiB (on a verified-boot image the manifest is
-#               signed again with the image's key): must reach the login with another PCR 9
-#               and the same PCR 8
-#   tpm-menu    a key in the bootloader's first second opens its mode menu, Enter boots: the
-#               environment lacks QUIET=1, so PCR 8 must differ and PCR 9 must not
-#   no-tpm      no TPM device: must reach the login
-# FerrionOS has no TPM driver, so everything is read from the host. When the login shows, the
-# guest's memory is saved and searched for the boot environment's TPM_EVENT_LOG_ADDR and
-# TPM_EVENT_LOG_SIZE, which locate the bootloader's copy of the TCG event log; then QEMU is
-# killed, swtpm stores its volatile state, and a second swtpm resumes from it so that
-# tpm2_pcrread can read the PCRs. A TPM case passes when:
-#   - the log's SHA-256 events replay to the PCRs 7, 8 and 9 the TPM holds;
-#   - PCR 9 equals the value computed here from the image's manifest (verified-boot images
-#     only), kernel and initfs, then a separator;
-#   - PCR 8 holds the entry name, the environment (each event's digest is the SHA-256 of the
-#     logged bytes) and a separator; PCR 7 holds the bootloader's key slot.
-# The image itself is never changed. Each case leaves serial.log and screen.png, the TPM cases
-# also pcrs.txt, eventlog.bin, eventlog.yaml (tpm2_eventlog's reading) and environment.txt,
-# under the output directory beside summary.txt.
-# With swtpm, OVMF loses its TPM in most boots whose QEMU monitor stays idle through the firmware
-# phase: it waits on a TPM command for about 100 seconds, or longer than the timeout, then boots
-# without measuring. So every wait here keeps talking to the monitor (screenshots, or `info
-# status` before the tpm-menu keys) from power-on. A boot whose firmware still never started the
-# bootloader, or whose PCR 4 (the firmware's measurement of the bootloader) is empty, is a stall:
-# the case runs once more, and two stalls make it BLOCKED rather than FAIL. summary.txt counts
-# the stalls.
-# Run from the repository root.
 
 set -euo pipefail
 
@@ -118,7 +87,6 @@ range="$(boot_esp_range "$IMAGE")"
 read -r ESP_OFFSET _ <<< "$range"
 cp --reflink=auto "$IMAGE" "$WORK/harddrive.img"
 mcopy -n -i "$WORK/harddrive.img@@$ESP_OFFSET" "$(boot_esp_loader "$WORK/harddrive.img" "$ESP_OFFSET")" "$WORK/bootloader.efi"
-# The bootloader's verified-boot key slot (after the marker FerrionBootKey/1), measured into PCR 7.
 SLOT="$(python3 - "$WORK/bootloader.efi" <<'EOF'
 import sys
 data = open(sys.argv[1], "rb").read()
@@ -131,8 +99,6 @@ EOF
 VERIFIED=0
 [ "$SLOT" != "$(printf '0%.0s' $(seq 64))" ] && VERIFIED=1
 
-# Mounts $WORK/<case>.img, optionally changes the initfs (tpm-initfs), and copies the files
-# the bootloader measures into PCR 9 to $WORK/<case>.files/.
 prepare() {
     local name="$1"
     cp --reflink=auto "$WORK/harddrive.img" "$WORK/$name.img"
@@ -166,13 +132,10 @@ prepare() {
 KVM=0
 [ -w /dev/kvm ] && KVM=1
 
-# Boots one case, reads the TPM and the event log, and judges them. Arguments: case name, disk
-# image, the directory with the files PCR 9 covers (empty for no-tpm).
 boot_case() {
     local name="$1" disk="$2" files="$3"
     mkdir -p "$OUT/$name"
     cp "$OVMF_VARS" "$WORK/vars.fd"
-    # -B: loading scripts/vm-test.py leaves no __pycache__ in the tree
     python3 -B - "$name" "$disk" "$files" "$OUT/$name" "$WORK" "$OVMF_CODE" "$TIMEOUT" "$KVM" "$SLOT" <<'EOF'
 import hashlib, importlib.util, mmap, re, shutil, socket, struct, subprocess, sys, time
 from pathlib import Path
@@ -446,8 +409,6 @@ print(f"PASS {name}: login at {login:.1f}s; PCR 9 {pcrs[9].hex()} = {' + '.join(
 EOF
 }
 
-# Runs boot_case, once more when the firmware stalled before starting the bootloader; two stalls
-# in a row are BLOCKED, not FAIL: the case proved nothing either way.
 FAILED=0
 BLOCKED=0
 BOOTS=0
@@ -472,7 +433,6 @@ run_case() {
     esac
 }
 
-# Compares one PCR of two cases, which must be the same or differ.
 compare() {
     local pcr="$1" a="$2" b="$3" expect="$4" result words
     [ -f "$OUT/$a/pcr$pcr.hex" ] && [ -f "$OUT/$b/pcr$pcr.hex" ] || return 0

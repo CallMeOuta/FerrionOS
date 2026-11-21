@@ -1,18 +1,9 @@
-# Helpers for the scripts that sign and check FerrionOS's boot files (secure-boot-keys.sh,
-# secure-boot-test.sh, verified-boot-sign.sh). Source it after setting BOOT_PROG, the calling
-# script's name, which prefixes every message:
-#   BOOT_PROG=my-script; . scripts/boot-signing-lib.sh
-# and set BOOT_WORK to the caller's scratch directory before signing with a token key.
-# A key is a key file, or the PKCS#11 URI ("pkcs11:token=...;object=...") of a key on a hardware
-# token, used through OpenSSL 3's pkcs11 provider (boot_pkcs11_conf). Nothing here changes the
-# shell's options; the callers run with set -euo pipefail.
 
 boot_die() {
     echo "$BOOT_PROG: $*" >&2
     exit "${BOOT_EXIT:-1}"
 }
 
-# boot_need <command> <what to install>: stops with exit code 2 when the command is missing.
 boot_need() {
     command -v "$1" >/dev/null || BOOT_EXIT=2 boot_die "$1 is missing; install $2"
 }
@@ -23,10 +14,6 @@ else
     BOOT_FUMOUNT="fusermount -u"
 fi
 
-# boot_mount <redoxfs-binary> <image> <dir>: mounts the image's RedoxFS filesystem on <dir>
-# through FUSE, in the background, and waits for usr/lib/boot/kernel to appear. The caller
-# unmounts with $BOOT_FUMOUNT <dir>, also when it fails. REDOXFS_KEY_FILE, when set,
-# supplies the exact password bytes without an interactive prompt.
 boot_mount() {
     local redoxfs="$1" image="$2" dir="$3"
     [ -x "$redoxfs" ] || BOOT_EXIT=2 boot_die "$redoxfs is not executable"
@@ -44,8 +31,6 @@ boot_mount() {
     boot_die "could not mount $image"
 }
 
-# boot_esp_range <image>: prints the byte offset and the size of the image's EFI system
-# partition, read from its GPT.
 boot_esp_range() {
     python3 - "$1" "$BOOT_PROG" <<'EOF'
 import struct, sys, uuid
@@ -69,8 +54,6 @@ else:
 EOF
 }
 
-# boot_esp_loader <image> <esp-offset>: prints the mtools path of the bootloader the firmware
-# starts from the EFI system partition, such as ::/EFI/BOOT/BOOTX64.EFI.
 boot_esp_loader() {
     local found
     found="$(mdir -b -i "$1@@$2" ::/EFI/BOOT 2>/dev/null | grep -i -E '/BOOT[A-Z0-9]+\.EFI$' || true)"
@@ -79,7 +62,6 @@ boot_esp_loader() {
     echo "$found"
 }
 
-# boot_is_uri <key>: true when the key is a PKCS#11 URI rather than a file.
 boot_is_uri() {
     case "$1" in
         pkcs11:*) return 0 ;;
@@ -87,12 +69,6 @@ boot_is_uri() {
     esac
 }
 
-# boot_pkcs11_conf: writes $BOOT_WORK/openssl-pkcs11.cnf, an OpenSSL configuration that loads
-# the pkcs11 provider (package pkcs11-provider) beside the default one, and prints its path.
-# The token's own PKCS#11 module comes from PKCS11_PROVIDER_MODULE (for a YubiKey,
-# libykcs11.so from yubico-piv-tool) or, unset, from p11-kit's proxy. The provider offers no
-# digests here, so a module that hashes with OpenSSL itself (SoftHSM, YKCS11) is not called
-# back into, and it skips deinitialization, which crashes SoftHSM 2.7 at exit.
 boot_pkcs11_conf() {
     local modules provider conf="$BOOT_WORK/openssl-pkcs11.cnf"
     modules="${OPENSSL_MODULES:-$(openssl version -m | sed -e 's/^MODULESDIR: "//' -e 's/"$//')}"
@@ -116,9 +92,6 @@ EOF
     echo "$conf"
 }
 
-# boot_with_key <key> <command...>: runs the command, with the pkcs11 provider loaded when the
-# key is a PKCS#11 URI. The token asks for its PIN on the terminal unless the URI carries
-# pin-source.
 boot_with_key() {
     local key="$1"
     shift
@@ -129,18 +102,14 @@ boot_with_key() {
     fi
 }
 
-# boot_sign_manifest <key> <file> <signature>: the Ed25519 signature of a file that the
-# verified-boot bootloader checks, 64 raw bytes.
 boot_sign_manifest() {
     boot_with_key "$1" openssl pkeyutl -sign -rawin -inkey "$1" -in "$2" -out "$3"
 }
 
-# boot_public_pem <key> <out.pem>: the public half of a key file or token key.
 boot_public_pem() {
     boot_with_key "$1" openssl pkey -in "$1" -pubout -out "$2"
 }
 
-# sb_find_signer: sets SB_SIGNER to the Authenticode signer found, sbsign or osslsigncode.
 sb_find_signer() {
     if command -v sbsign >/dev/null; then
         SB_SIGNER=sbsign
@@ -151,10 +120,6 @@ sb_find_signer() {
     fi
 }
 
-# sb_make_cert <key-dir> <name> <subject> [<token-key>]: makes <key-dir>/<name>.crt, a
-# self-signed RSA certificate with SHA-256. Without a token key it also makes
-# <key-dir>/<name>.key, RSA-2048 (the size every UEFI implementation must accept),
-# unencrypted. An existing certificate is kept.
 sb_make_cert() {
     local dir="$1" name="$2" subject="$3" key="${4:-}"
     [ -f "$dir/$name.crt" ] && return 0
@@ -169,9 +134,6 @@ sb_make_cert() {
     fi
 }
 
-# sb_sign_efi <key> <cert> <in.efi> <out.efi>: Authenticode signature with $SB_SIGNER
-# (sb_find_signer). A token key needs an sbsign with OpenSSL provider support (sbsigntools
-# commit 53922bc1, which Arch's 0.9.5-5 carries).
 sb_sign_efi() {
     local key="$1" cert="$2" in="$3" out="$4"
     if [ "$SB_SIGNER" = sbsign ]; then
@@ -184,7 +146,6 @@ sb_sign_efi() {
     fi
 }
 
-# sb_is_signed <file.efi>: true when the PE file's certificate table holds a signature.
 sb_is_signed() {
     python3 - "$1" <<'EOF'
 import struct, sys
@@ -198,7 +159,6 @@ sys.exit(0 if size else 1)
 EOF
 }
 
-# sb_verify_efi <cert> <file.efi>: checks that the file carries a signature by the certificate.
 sb_verify_efi() {
     if [ "$SB_SIGNER" = sbsign ]; then
         sbverify --cert "$1" "$2" >/dev/null

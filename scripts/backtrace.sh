@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-# This script allow the user to copy a Rust backtrace from FerrionOS
-# and retrieve the symbols
 
 usage()
 {
@@ -52,17 +50,14 @@ then
     usage
 fi
 
-# if no command name is given, assume it's the same as the recipe name
 RECIPE_DIR="$(target/release/repo find $RECIPE_NAME)"
 if [ -z "$COMMAND" ]
 then
     COMMAND="$RECIPE_NAME"
 fi
 
-# look for the debug version of the command
 EXECUTABLE="$RECIPE_DIR"/target/"$ARCH"-unknown-redox/build/target/"$ARCH"-unknown-redox/debug/"$COMMAND"
 
-# try the release version next
 if [ ! -f "$EXECUTABLE" -o ! -z "$RELEASE" ]
 then
     EXECUTABLE="$RECIPE_DIR"/target/"$ARCH"-unknown-redox/build/target/"$ARCH"-unknown-redox/release/"$COMMAND"

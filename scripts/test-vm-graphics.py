@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Check VM graphics capture and host capability verdicts without booting an image.
 import concurrent.futures
 import contextlib
 import io
@@ -183,7 +182,7 @@ class GraphicsTests(unittest.TestCase):
         def answer(read, send):
             read(10)
             while True:
-                send(b"\x02")  # Bell, forever, each well inside the per-read timeout.
+                send(b"\x02")
                 time.sleep(0.02)
 
         with self.assertRaisesRegex(RuntimeError, "deadline"):

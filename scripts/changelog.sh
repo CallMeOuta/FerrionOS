@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# This script show the changelog of all FerrionOS components
 
 set -e
 
@@ -28,7 +27,6 @@ do
     REPOS+=("${package}=${package_source}/source")
 done
 
-# TODO: resolve dependencies instead of manually adding these initfs packages
 for package in init logd ramfs randd zerod
 do
     package_source="$(target/release/repo find ${package})"

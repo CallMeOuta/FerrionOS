@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# Host setup for `make ch net=tap`: tap `redox0`, IPv4 forwarding, firewalld NAT
-# and dnsmasq DHCP/DNS. Needs firewalld and dnsmasq. Re-run after a reboot.
-# As root without sudo, set TAP_USER=<user>.
 
 set -euo pipefail
 
-# Debian does not put the sbin directories in a normal user's PATH.
 PATH="${PATH}:/usr/local/sbin:/usr/sbin:/sbin"
 
 TAP=redox0
@@ -19,7 +15,7 @@ ZONE=chnet
 POLICY=chnet-nat
 SYSCTL_DROPIN=/etc/sysctl.d/90-redox-tap.conf
 DNSMASQ_PID=/run/redox0-dnsmasq.pid
-WAIT_TIMEOUT=3 # seconds
+WAIT_TIMEOUT=3
 
 step() {
     printf '\n==> %s\n' "$*"
@@ -51,8 +47,6 @@ wait_until() {
     done
 }
 
-# Only tun/tap devices have tun_flags. IFF_TAP is 0x0002, IFF_UP is 0x1,
-# owner -1 means none.
 tap_exists() {
     [[ -e "/sys/class/net/${TAP}" ]]
 }
@@ -115,7 +109,6 @@ fw_ensure() {
     fi
 }
 
-# --get-target is permanent-only. The runtime value is the target: line.
 policy_accepts() {
     [[ "$(firewall-cmd --policy="${POLICY}" --list-all | awk '$1 == "target:" { print $2 }')" == "ACCEPT" ]]
 }
@@ -124,7 +117,6 @@ dnsmasq_pids() {
     pgrep -f "(^|/)dnsmasq .*--interface=${TAP}( |$)" || true
 }
 
-# dnsmasq binds DHCP to `0.0.0.0%redox0:67` but DNS to `192.168.249.1:53`.
 dhcp_listening() {
     ss -H -uln | awk -v t="${TAP}" '$4 ~ ("%" t ":67$") { f = 1 } END { exit !f }'
 }
@@ -260,8 +252,6 @@ setup_firewalld() {
     else
         info "nothing changed, no reload needed"
     fi
-    # firewalld does not always attach an interface that appeared after it
-    # started.
     if firewall-cmd --zone="${ZONE}" --query-interface="${TAP}" >/dev/null; then
         info "${TAP} is in zone ${ZONE} at runtime"
     else
@@ -270,8 +260,6 @@ setup_firewalld() {
     fi
 }
 
-# dnsmasq --bind-interfaces keeps the old interface index, so a new tap needs
-# a new dnsmasq.
 setup_dnsmasq() {
     step "dnsmasq on ${TAP} (DHCP ${DHCP_FIRST}-${DHCP_LAST}, gateway and DNS ${TAP_ADDR})"
     local pids pid
@@ -297,7 +285,6 @@ setup_dnsmasq() {
     fi
 
     info "starting dnsmasq (pid file ${DNSMASQ_PID})"
-    # --conf-file=/dev/null: /etc/dnsmasq.conf must not add other interfaces.
     as_root dnsmasq \
         --conf-file=/dev/null \
         --interface="${TAP}" \

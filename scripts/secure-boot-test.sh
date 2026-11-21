@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# Proves UEFI Secure Boot for an x86_64 FerrionOS image in QEMU (security roadmap S16, slices 1
-# and 2). It makes test keys (PK, KEK, db and one key that is never enrolled), enrolls PK, KEK
-# and db into a copy of OVMF's variable store with Secure Boot on, and boots copies of the image
-# with OVMF_CODE.secboot, each with a different bootloader in the EFI system partition:
-#   signed         signed with the db key: must reach the graphical login
-#   unsigned       as built: the firmware must refuse it
-#   wrong-key      signed with the key that is not in db: the firmware must refuse it
-# On a verified-boot image (VERIFIED_BOOT=1, its bootloader holds a key) three more cases boot
-# the signed bootloader on a copy whose files were changed; the bootloader must refuse each:
-#   tamper-kernel  one byte of usr/lib/boot/kernel changed
-#   tamper-initfs  one byte of usr/lib/boot/initfs changed
-#   tamper-sig     usr/lib/boot/manifest.sig signed by another key
-# The image itself is never changed. Each case leaves serial.log and screen.png under the
-# output directory, beside summary.txt and the enrolled variable store. The keys are test
-# keys, stored unencrypted: never sign anything that leaves the build machine with them.
-# Run from the repository root.
 
 set -euo pipefail
 
@@ -99,7 +83,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Test keys, and one that is never enrolled, made fresh each run.
 for name in PK KEK db; do
     sb_make_cert "$KEYS" "$name" "/CN=FerrionOS Secure Boot test $name/"
 done
@@ -107,7 +90,6 @@ sb_make_cert "$WORK" other "/CN=FerrionOS Secure Boot test other/"
 [ -f "$KEYS/owner.guid" ] || python3 -c 'import uuid; print(uuid.uuid4())' > "$KEYS/owner.guid"
 OWNER="$(cat "$KEYS/owner.guid")"
 
-# PK, KEK and db enrolled, Secure Boot on: the firmware leaves setup mode.
 VARS="$OUT/OVMF_VARS.enrolled.fd"
 virt-fw-vars --loglevel warning -i "$OVMF_VARS" -o "$VARS" \
     --set-pk "$OWNER" "$KEYS/PK.crt" --add-kek "$OWNER" "$KEYS/KEK.crt" \
@@ -128,7 +110,6 @@ sb_verify_efi "$KEYS/db.crt" "$WORK/signed.efi"
 KVM=0
 [ -w /dev/kvm ] && KVM=1
 
-# A verified-boot image: the bootloader's key slot (after the marker FerrionBootKey/1) holds a key.
 VERIFIED="$(python3 - "$WORK/unsigned.efi" <<'EOF'
 import sys
 data = open(sys.argv[1], "rb").read()
@@ -137,7 +118,6 @@ print(1 if at >= 0 and any(data[at + 16:at + 48]) else 0)
 EOF
 )"
 
-# Makes $WORK/<case>.img: a copy of the image with one change in its filesystem.
 tamper() {
     local name="$1"
     cp --reflink=auto "$WORK/harddrive.img" "$WORK/$name.img"
@@ -157,7 +137,6 @@ tamper() {
     MOUNTED=0
 }
 
-# Inverts the byte in the middle of a file, in place.
 flip_byte() {
     python3 - "$1" <<'EOF'
 import os, sys
@@ -170,15 +149,11 @@ with open(sys.argv[1], "r+b") as f:
 EOF
 }
 
-# Boots one case and judges it from the serial console and QEMU's screen. The screen
-# classifier is the one scripts/vm-test.py uses. Arguments: case name, expected outcome
-# (boot, refuse, verified-refuse), bootloader file, disk image.
 boot_case() {
     local name="$1" expect="$2" efi="$3" disk="$4"
     mkdir -p "$OUT/$name"
     cp "$VARS" "$WORK/vars.fd"
     mcopy -o -i "$disk@@$ESP_OFFSET" "$efi" "$BOOT_PATH"
-    # -B: loading scripts/vm-test.py leaves no __pycache__ in the tree
     python3 -B - "$name" "$expect" "$OUT/$name" "$WORK" "$OVMF_CODE" "$TIMEOUT" "$KVM" "$disk" <<'EOF'
 import importlib.util, os, re, socket, subprocess, sys, time
 from pathlib import Path

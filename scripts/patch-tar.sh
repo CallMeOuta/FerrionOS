@@ -2,7 +2,6 @@
 
 set -e
 
-# This script generates a "redox.patch" for a tar-based recipe
 
 if [ -z "$1" ]
 then

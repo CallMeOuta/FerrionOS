@@ -11,7 +11,6 @@
 #include <string.h>
 #define W 256
 #define H 256
-/* corners in 1/8-pixel units: multiples of 2 are quarter pixels */
 static const int V[3][2] = {{258, 258}, {1794, 390}, {774, 1764}};
 static const unsigned char BG[4] = {15, 14, 12, 255}, FG[4] = {255, 153, 51, 255};
 static long long edge(int a, int b, long long x, long long y) {

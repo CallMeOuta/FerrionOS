@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 
-# This script wraps llvm-config that intended for cross compiling to FerrionOS.
-# Because we can't run llvm-config compiled to FerrionOS, we wrap it here
-# and filter out architectures that do not match the current $TARGET.
 
 import os
 import sys
@@ -11,7 +8,6 @@ import re
 
 LLVM_CONFIG = "/bin/llvm-config" 
 
-# name of (--targets-built, --components prefix, --libs prefix)
 ARCH_MAP = {
     "x86_64":    ("X86", "x86", "X86"),
     "aarch64":   ("AArch64", "aarch64", "AArch64"),
@@ -24,11 +20,9 @@ ALL_ARCH_LIBS = ["X86", "AArch64", "RISCV", "WebAssembly"]
 def is_unwanted_arch(item, allowed_prefix, all_prefixes, is_lib=False):
     matched_arch = None
     for arch in all_prefixes:
-        # libraries e.g., -lLLVMX86CodeGen / libLLVMAArch64Desc.a
         if is_lib and f"LLVM{arch}" in item:
             matched_arch = arch
             break
-        # components e.g., x86codegen, aarch64desc
         elif not is_lib and item.startswith(arch):
             matched_arch = arch
             break
@@ -70,8 +64,6 @@ def main():
     args_set = set(sys.argv[1:])
 
     if result.returncode != 0:
-        # static libs is not part of the toolchain, but they do
-        # exist for platforms without dynamic library support
         if "--link-static" in args_set and "--libfiles" in args_set:
             output = result.stderr.strip()
             output = output.replace("llvm-config: error: missing: ", "")
@@ -80,7 +72,7 @@ def main():
             libpath = toolchain_path + "/lib"
             output = output.replace(f"llvm-config: error: missing: {libpath}/lib", "-l")
             output = output.replace(f".a", "")
-            output = re.sub('-lLLVMX86\w+ ?', '', output, count=0, flags=0) # TODO: why?
+            output = re.sub('-lLLVMX86\w+ ?', '', output, count=0, flags=0)
             output = f"-L{libpath} {output}"
         else:
             print(result.stderr)
@@ -104,7 +96,6 @@ def main():
         filtered = [l for l in libs if not is_unwanted_arch(l, lib_prefix, ALL_ARCH_LIBS, is_lib=True)]
         output = " ".join(filtered)
         
-        # if "--ldflags" in args_set:
         output = output.replace(toolchain_path, sysroot_path)
     else: 
         output = output.replace(toolchain_path, sysroot_path)

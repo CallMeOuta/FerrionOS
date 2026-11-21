@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# This script print all recipe executable names to find duplicates and verify executable name conflicts
 
 usage() {
     echo "List executable names to find duplicates"

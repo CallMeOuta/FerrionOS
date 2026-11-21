@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# Makes a FerrionOS image a verified-boot image (security roadmap S16, slice 2). `make image` runs it
-# on harddrive.img when VERIFIED_BOOT=1, the default (mk/config.mk). It writes into the image:
-#   usr/lib/boot/manifest       SHA-512 of usr/lib/boot/kernel and usr/lib/boot/initfs
-#   usr/lib/boot/manifest.sig   Ed25519 signature of the manifest
-# and puts the public key into the key slot of the UEFI bootloader, both the copy in the EFI system
-# partition and usr/lib/boot/bootloader.efi. A bootloader with a key starts only the kernel and
-# initfs the manifest names; the cooked bootloader has an empty slot and verifies nothing.
-# The key is the development key pair in <key-dir> (boot.key, boot.pub), generated on first use,
-# unless VERIFIED_BOOT_SIGNER names a key on a hardware token. A development key never signs an
-# image that leaves the build machine.
-# Run from the repository root.
 
 set -euo pipefail
 
@@ -55,12 +44,10 @@ BOOT_PROG=verified-boot-sign
 for tool in openssl python3; do
     command -v "$tool" >/dev/null || BOOT_EXIT=2 boot_die "$tool is missing; VERIFIED_BOOT=1 needs it on the host (or build with VERIFIED_BOOT=0, an image that verifies nothing)"
 done
-# Ed25519 through pkeyutl -rawin is tested with OpenSSL 3.5 and 4.1; LibreSSL (macOS's openssl) is not.
 openssl version | grep -q '^OpenSSL [3-9]' || BOOT_EXIT=2 boot_die "$(openssl version) found; OpenSSL 3 or later is needed"
 if [ -n "$SIGNER" ]; then
     boot_is_uri "$SIGNER" || BOOT_EXIT=2 boot_die "VERIFIED_BOOT_SIGNER must be a PKCS#11 URI (pkcs11:...), not $SIGNER"
     KEY="$SIGNER"
-    # Messages leave out the URI's query, which can hold the PIN.
     KEY_NAME="${SIGNER%%\?*}"
 else
     KEY="$KEY_DIR/boot.key"
@@ -80,7 +67,6 @@ cleanup() {
     if [ "$MOUNTED" = 1 ]; then
         $BOOT_FUMOUNT "$WORK/mnt" || return
     fi
-    # Never recursively delete a directory that might still hold a mounted filesystem.
     if [ -d "$WORK/mnt" ]; then
         rmdir "$WORK/mnt" || return
     fi
@@ -95,8 +81,6 @@ if [ -z "${REDOXFS_KEY_FILE:-}" ] && \
     { [ -n "${INSTALLER:-}" ] || [ -n "${FILESYSTEM_CONFIG:-}" ]; }; then
     [ -n "${INSTALLER:-}" ] && [ -n "${FILESYSTEM_CONFIG:-}" ] ||
         BOOT_EXIT=2 boot_die "INSTALLER and FILESYSTEM_CONFIG must be set together"
-    # Do not put the merged config or password in shell variables, logs or argv; $WORK is
-    # private to this user (mktemp -d), and the config file is removed right after reading.
     (umask 077 && "$INSTALLER" -c "$FILESYSTEM_CONFIG" --output-config="$WORK/config.toml")
     python3 -c '
 import os
@@ -122,7 +106,6 @@ if password is not None:
     fi
 fi
 
-# The public key is the last 32 bytes of its DER form.
 boot_public_pem "$KEY" "$WORK/boot.pub.pem"
 openssl pkey -pubin -in "$WORK/boot.pub.pem" -outform DER | tail -c 32 > "$WORK/boot.pub"
 case "$(openssl pkey -pubin -in "$WORK/boot.pub.pem" -noout -text)" in
@@ -149,11 +132,6 @@ openssl pkeyutl -verify -rawin -pubin -inkey "$WORK/boot.pub.pem" \
 cp "$WORK/manifest" "$WORK/manifest.sig" "$BOOT/"
 cp "$BOOT/bootloader.efi" "$WORK/bootloader.efi"
 
-# Writes the key after the slot's marker: once in the bootloader file, once in the EFI system
-# partition, where the bootloader's bytes around the slot must match the file's, so that a
-# fragmented FAT copy, or a bootloader other than the file's, is caught instead of patched
-# blindly. The slot itself may already hold a key: signing an image again (after a push
-# changed its kernel or initfs) rewrites it.
 python3 - "$WORK/bootloader.efi" "$IMAGE" "$WORK/boot.pub" "$ESP_OFFSET" "$ESP_SIZE" <<'EOF'
 import sys
 

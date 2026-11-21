@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# PID 1 of the offline Linux reference guest. Every subprocess is bounded.
 
 import hashlib
 import json
@@ -58,7 +57,6 @@ def gl_test(name, env):
                            "differing_pixels": int(match[4]), "centers_on_edge": int(match[5])}
     passed = (versions["exit_code"] == 0 and len(result["apis"]) == 2 and scene["exit_code"] == 0 and match
               and match[2] == EXPECTED_HASH and tuple(map(int, match.group(3, 4, 5))) == (17540, 0, 0))
-    # The scene's renderer and both renderers the version probe saw must be the one asked for.
     renderers = [match[1]] if match else []
     renderers += [api["renderer"] for api in result["apis"].values()]
     passed = bool(passed) and all(renderer_ok(name, renderer) for renderer in renderers)
@@ -147,7 +145,6 @@ def main():
                 if gl["name"] in ("intel-native", "zink-native"):
                     gl["probe_status"] = gl["status"]
                     gl["status"] = "UNAVAILABLE"
-    # Native contexts are a recorded experiment, outside the Venus baseline.
     good = all(g["status"] == "PASS" for g in result["gl"] if g["name"] in ("virgl", "llvmpipe", "zink-venus"))
     devices = result["vulkan"][0]["devices"]
     mode = re.search(r"gpu_reference=(\w+)", Path("/proc/cmdline").read_text())[1]
@@ -162,13 +159,11 @@ def main():
     return result
 
 
-if __name__ == "__main__":  # The guest runs this file as PID 1; the host's tests only import it.
+if __name__ == "__main__":
     try:
         result = main()
     except Exception as error:
         result = {"status": "FAIL", "error": str(error), "traceback": traceback.format_exc()}
-    # Kernel shutdown messages otherwise interleave with a long serial record.
-    # Keep the earlier kernel log in the record, then drain the UART before S5.
     Path("/proc/sys/kernel/printk").write_text("0\n")
     print("GPU_REFERENCE_JSON=" + json.dumps(result, separators=(",", ":")), flush=True)
     termios.tcdrain(sys.stdout.fileno())

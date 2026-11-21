@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# FerrionOS's own UEFI Secure Boot keys, the way sbctl handles a machine owner's (security roadmap
-# S16, slices 4 and 5). Three commands:
-#   create   makes the PK, KEK and db certificates (and, for development, their keys)
-#   sign     signs the UEFI bootloader of an image with the db key, in place
-#   export   writes what a user enrolls in a PC's firmware: certificates, EFI signature lists,
-#            authenticated variable updates (.auth) and README.txt with the firmware steps
-# Development keys are made unencrypted in <key-dir> and sign only what stays on the build
-# machine. Release keys live on a hardware token: SECURE_BOOT_PK, SECURE_BOOT_KEK and
-# SECURE_BOOT_DB name them by PKCS#11 URI, and <key-dir> then holds only their certificates.
-# Run from the repository root.
 
 set -euo pipefail
 
@@ -80,7 +70,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# key <name>: the token URI given for PK, KEK or db, or else its key file.
 key() {
     local uri
     case "$1" in
@@ -96,7 +85,6 @@ key() {
     fi
 }
 
-# have <name>: stops unless <key-dir> holds the certificate, and the key unless it is on a token.
 have() {
     [ -f "$KEYS/$1.crt" ] || boot_die "$KEYS/$1.crt is missing; run $0 -k $KEYS create first"
     local k
@@ -166,7 +154,6 @@ export_keys() {
             KEK) signer=PK ;;
             db) signer=KEK ;;
         esac
-        # PK replaces; KEK and db append to what the firmware holds, Microsoft's keys included.
         local a="$attrs"
         [ "$name" = PK ] || a="$attrs,APPEND_WRITE"
         boot_with_key "$(key "$signer")" sbvarsign --key "$(key "$signer")" --cert "$KEYS/$signer.crt" \

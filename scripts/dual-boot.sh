@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-# This script install FerrionOS in the free space of your storage device
-# and add a boot entry (if you are using the systemd-boot boot loader)
 
 set -e
 

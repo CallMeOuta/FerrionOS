@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-# FerrionOS has no X11 (AGENTS.md "Display"). Fails when a tracked recipe lists an X11 package
-# in [build] dependencies or dev-dependencies, [package] dependencies or an optional package's
-# dependencies, when a filesystem config installs one, or when a recipe of that name exists.
-# Prints each finding and exits 1 when there is one. Run from the repository root.
-# Python standard library only.
 
 import re
 import subprocess
@@ -13,7 +8,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# X11 servers, client libraries, protocol headers and the X11 builds of other packages.
 X11 = re.compile(
     r"^(libx11|libx11-compat|libxcb|libxau|libxdmcp|libice|libsm|libfs|libdmx|libfontenc"
     r"|libx(aw|composite|cursor|cvt|damage|ext|fixes|font2|ft|i|inerama|kbfile|klavier|mu|pm"

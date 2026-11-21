@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Build and boot an offline, pinned Linux GPU reference for FerrionOS.
-# Downloads are data on the host; all downloaded programs run inside QEMU.
 
 import argparse
 import concurrent.futures
@@ -33,10 +31,6 @@ FEDORA_KEYS = {
     "45": "4F50A6114CD5C6976A7F1179655A4B02F577861E",
     "46": "D924B10D3E810DABDD8B56B596E7E91491211FCE",
 }
-# Fingerprints published at https://fedoraproject.org/security/.
-# Each pin was authenticated through its RPM RSA header signature and the
-# signed header's SHA-256 of the compressed payload. No scriptlets execute.
-# The archive paths name exact builds, not a changing Fedora mirror.
 KOJI = "https://kojipkgs.fedoraproject.org/packages/"
 PACKAGE_PINS = """
 9a3060e6686dd00a239a86e95140816968fa68a782cb385613dea620676c1dfb binutils/2.47/1.fc45/data/signed/f577861e/x86_64/binutils-2.47-1.fc45.x86_64.rpm
@@ -134,7 +128,6 @@ e32f87eee997ffb44b2045b56ac7c5b9c0393e239edda9171e5dd350cb5413fa vulkan-loader/1
 587c17c60ddb7fb1553064c2533cf80a7ff1d7b2ad215cefe6e7d587a21109a5 xz/5.8.3/2.fc45/data/signed/f577861e/x86_64/xz-libs-5.8.3-2.fc45.x86_64.rpm
 1bab05fecdd71fc4a946852d83405f238c89cccb63987c0941c7f2f0184a99e2 zlib-ng/2.3.3/6.fc45/data/signed/f577861e/x86_64/zlib-ng-compat-2.3.3-6.fc45.x86_64.rpm
 """
-# Fedora 45 plus rawhide Mesa and its required glibc runtime upgrade.
 CURRENT_PINS = """
 f5da12a56dfb8b97a853877cca9d7c0f2e4f5ae66ab1054a0e77f55e52a08b53 glibc/2.44.9000/7.fc46/data/signed/91211fce/x86_64/glibc-2.44.9000-7.fc46.x86_64.rpm
 0ada7c1087c3904750e90f84a060f07e2637cd83436026e4a29186675b2defcc mesa/26.3.1/1.fc46/data/signed/91211fce/x86_64/mesa-dri-drivers-26.3.1-1.fc46.x86_64.rpm
@@ -326,9 +319,6 @@ def rpm_tar(path):
         contents = {}
         for target, names in groups.items():
             if archive.getmember(target).size == 0:
-                # RPM's cpio can carry a hard-link group's data on its last
-                # member. A tar conversion makes that member a data-less link.
-                # Read the group from the original archive to retain its bytes.
                 contents[target] = subprocess.run(["bsdtar", "-xOf", str(path), "--", *names],
                                                   capture_output=True, check=True).stdout
 
@@ -383,9 +373,6 @@ def assemble(cache, packages):
                     continue
                 if name.startswith("/") or ".." in PurePosixPath(name).parts:
                     raise ValueError(f"Unsafe archive path: {name}")
-                # RPMs can still name /lib64 while Fedora's filesystem aliases
-                # it into /usr. The kernel's cpio unpacker does not traverse
-                # those parent symlinks, so emit every child at its real path.
                 if name.split("/", 1)[0] in ("bin", "sbin", "lib", "lib64"):
                     name = "usr/" + name
                 if name.startswith("boot/vmlinuz-") or name.endswith("/vmlinuz"):
@@ -402,7 +389,6 @@ def assemble(cache, packages):
                     continue
                 if name.startswith("usr/share/doc/") and not name.endswith(("/copyright", "/LICENSE", "/COPYING")):
                     continue
-                # No package privilege bits are needed by this one-shot root init.
                 mode = member.mode & 0o777
                 if member.isdir():
                     files[name] = (stat.S_IFDIR | mode, b"")
@@ -445,11 +431,8 @@ def assemble(cache, packages):
         if source.is_file():
             files["probe/" + source.name] = (stat.S_IFREG | 0o644, source.read_bytes())
     files["probe/modules.json"] = (stat.S_IFREG | 0o644, json.dumps(order).encode())
-    # Retain a static PID 1 if the dynamic loader cannot start Python, so its
-    # diagnostic reaches the serial log instead of being lost in a panic.
     init = "#!/bin/sh\n/usr/bin/python3 /probe/guest.py\n/bin/busybox sleep 1\n/bin/busybox poweroff -f\n"
     files["init"] = (stat.S_IFREG | 0o755, init.encode())
-    # Directory records precede children, including the merged-/usr aliases.
     for name in list(files):
         for parent in PurePosixPath(name).parents:
             if str(parent) != ".":

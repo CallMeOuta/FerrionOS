@@ -33,7 +33,6 @@ unmount_fs() {
 }
 
 check_dependencies() {
-    # Try to find redoxfs in multiple locations
     REDOXFS_BIN=""
     if [ -x "build/fstools/bin/redoxfs" ]; then
         REDOXFS_BIN="build/fstools/bin/redoxfs"

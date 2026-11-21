@@ -28,46 +28,33 @@ Exit code 1 when a `fail` line is absent from {BASELINE.relative_to(ROOT)}."""
 
 NAME = re.compile(r"redox", re.IGNORECASE)
 
-# Rules ------------------------------------------------------------------------
-# This checker and its baseline quote the name as data and are not scanned.
 SKIP_PATHS = {"scripts/naming-check.py", "scripts/naming-check.baseline.jsonl"}
 
-# The rules below are checked in this order; the first that matches gives the class.
 
-# Files applied byte-exact from upstream (exception 3), by path.
 UPSTREAM_PATHS = [
     r"\.patch$",
     r"(^|/)recipes/.*/source/",
 ]
 
-# Legal notices (exception 1): (path regex, line regex).
 LEGAL_LINES = [
     (r"^LICENSE$", r"(?i)copyright"),
     (r"", r"(?i)\b(copyright|spdx-license-identifier)\b|\(c\)\s*\d{4}"),
     (r"(^|/)Cargo\.toml$", r"^\s*authors\s*="),
 ]
 
-# The fork sentence, the one other place the name appears: the README and the book's
-# introduction carry it once each. (path regex, line regex).
 README_FORK = [
     (r"^(README\.md|book/src/introduction\.md)$", r"(?i)\bfork\b.*\bnot affiliated\b|\bnot affiliated\b.*\bfork\b"),
 ]
 
-# Identifiers and machine-matched strings (exception 2). Case-sensitive. Every occurrence of
-# the name on a line must sit inside one of these matches for the line to count as `identifier`.
 IDENTIFIERS = [
-    # target triples, GNU triples and the variables cargo and bindgen derive from them
     r"[\w$(){}.-]*-unknown-redox\b",
-    # make qemu's share=redox value, which shares the build tree under the tag "redox"
     r"\|redox>",
     r"\b\w+_unknown_redox\b",
-    # URLs that code or a recipe fetches: GitLab, static files, packages, GitHub mirrors
     r"https?://[\w.-]*redox-os\.org[^\s\"'`)>\]]*",
     r"\b[\w.-]*redox-os\.org[^\s\"'`)>\]]*",
     r"https?://github\.com/redox-os/[^\s\"'`)>\]]*",
     r"\bredox-os/[\w.-]+",
     r"\bdocker\.io/redoxos/[\w$().-]*",
-    # crate, package, recipe, file, branch and directory names
     r"\b[\w-]*redox[\w-]*\.(rs|toml|patch|sh|mk|py|md|img|iso|ion|ipxe|cmake|c|h|json|lock|zst)\b",
     r"[\w-]*redox-live\.iso",
     r"[\w.-]*Redox[\w.-]*\.patch\b",
@@ -82,32 +69,26 @@ IDENTIFIERS = [
     r"--[\w-]*redox[\w-]*",
     r"[\w./$()-]*/redox\b[\w./-]*",
     r"\bredox/[\w./-]*",
-    # make and environment variables, C macros and Rust cfgs
     r"\b[A-Z0-9_]*REDOX[A-Z0-9_]*\b",
     r"__redox__",
     r"\btarget_os\s*=\s*\\?\"redox\\?\"",
     r"\bshare=redox\b",
     r"\bfilter redox redox:ro\b",
     r"\bredox(=|:ro\b)",
-    # Rust type and variant names from upstream's crates, such as `RedoxDrmEvent`
     r"\bRedox[A-Z]\w*",
-    # shell functions, make targets and directories named after the upstream project
     r"\bredox\(\)",
     r"^\s*redox \"\$",
     r"\bcd redox\b",
     r"-C src redox\b",
     r"\*-redox\*",
-    # the uname -s value, values that build systems compare, os-release
     r"ID_LIKE=\"?redox[\w-]*\"?",
     r"[\"'][Rr]edox[\"']",
     r"\b[\w-]+=[Rr]edox\b(:\$\w+)?",
     r"\bredox\)",
     r",Redox\)",
-    # a backtick-quoted value in prose names an identifier
     r"`[^`]*[Rr]edox[^`]*`",
 ]
 
-# Matching ---------------------------------------------------------------------
 
 UPSTREAM_RE = [re.compile(p) for p in UPSTREAM_PATHS]
 LEGAL_RE = [(re.compile(p), re.compile(l)) for p, l in LEGAL_LINES]

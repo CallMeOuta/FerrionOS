@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Host-only checks for the reference harness; no download, GPU, or guest needed.
 
 import importlib.util
 import shutil

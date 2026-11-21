@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# This script run the recipe command options on some Cookbook category
 
 if [ -z "$1" ] || [ -z "$2" ]
 then
@@ -11,5 +10,4 @@ then
     exit 1
 fi
 
-# Cookbook accept "." as replacement to "/"
 make "${1#-}"."--category-${2//\//.}"

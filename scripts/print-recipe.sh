@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# This script print the recipe configuration
 
 FILE=${2:-recipe.toml}
 

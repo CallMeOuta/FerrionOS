@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# This script create and copy the FerrionOS bootable image to an Ventoy-formatted device
 
 set -e
 

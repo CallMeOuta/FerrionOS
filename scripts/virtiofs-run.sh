@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Runs a command next to one virtiofsd per shared directory, for
-# `make qemu share=...` and `make ch share=...`.
-#   virtiofs-run.sh --share <socket>.sock <tag>=<dir>[:ro] [--share ...] -- <command...>
 
 set -euo pipefail
 
-STARTUP_TIMEOUT=5 # seconds
+STARTUP_TIMEOUT=5
 
 die() {
   echo "virtiofs: $*" >&2
@@ -37,9 +34,8 @@ while [[ "${1:-}" == --share ]]; do
   shift 3
 done
 [[ ${#SOCKS[@]} -gt 0 && "${1:-}" == -- && $# -ge 2 ]] || usage
-shift # the "--"
+shift
 
-# virtiofsd holds a lock on <socket>.pid for as long as it runs.
 share_in_use() {
   [[ -e "$1.pid" ]] && ! flock -n "$1.pid" true
 }
@@ -145,5 +141,4 @@ for i in "${!SOCKS[@]}"; do
   echo "virtiofs: sharing '${TAGS[$i]}' = ${DIRS[$i]}${LABELS[$i]} (log: ${SOCKS[$i]%.sock}.log)" >&2
 done
 
-# Not exec'd, so cleanup runs when the command ends.
 "$@"
