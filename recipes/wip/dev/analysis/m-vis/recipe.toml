@@ -1,4 +1,3 @@
-#TODO can't find PlatformMemory value in source
 [source]
 git = "https://github.com/SickleFire/m-vis"
 shallow_clone = true

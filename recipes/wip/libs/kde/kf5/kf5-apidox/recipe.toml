@@ -1,4 +1,3 @@
-#TODO maybe incomplete script, lacking build instructions
 [source]
 tar = "https://download.kde.org/stable/frameworks/5.112/kapidox-5.112.0.tar.xz"
 [build]

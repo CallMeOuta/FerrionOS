@@ -1,4 +1,3 @@
-#TODO can't run
 [source]
 git = "https://github.com/richox/orz"
 shallow_clone = true

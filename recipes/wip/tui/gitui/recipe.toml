@@ -1,4 +1,3 @@
-#TODO: Page fault
 [source]
 git = "https://github.com/extrawurst/gitui"
 

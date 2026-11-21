@@ -1,4 +1,3 @@
-#TODO update the winit version
 [source]
 git = "https://github.com/bddap/watch-stl-rust"
 [build]

@@ -1,4 +1,3 @@
-#TODO test more
 [source]
 git = "https://github.com/jackpot51/seatd"
 branch = "redox"

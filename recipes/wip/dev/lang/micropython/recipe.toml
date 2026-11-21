@@ -1,19 +1,12 @@
-#TODO compile and test
-# build instructions:
-# https://github.com/micropython/micropython#the-micropython-cross-compiler-mpy-cross
-# https://github.com/micropython/micropython/blob/master/ports/unix/README.md
 [source]
 tar = "https://micropython.org/resources/source/micropython-1.28.0.tar.xz"
 [build]
 template = "custom"
-#dependencies = [
- #   "libffi",
-#]
 script = """
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 cd ports/unix
 DYNAMIC_INIT
-make -C ../../mpy-cross # build cross-compiler
+make -C ../../mpy-cross
 MAKEFLAGS=(
     VARIANT=minimal
 )

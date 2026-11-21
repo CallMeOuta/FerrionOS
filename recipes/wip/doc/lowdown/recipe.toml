@@ -1,5 +1,3 @@
-#TODO need to use gnu autotools and bmake (portable version of netbsd make)
-# build instructions: https://kristaps.bsd.lv/lowdown/
 [source]
 git = "https://github.com/kristapsdz/lowdown"
 rev = "VERSION_3_1_1"

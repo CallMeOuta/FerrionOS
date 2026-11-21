@@ -1,7 +1,3 @@
-# userspace implementation: https://github.com/andreas-abel/nanoBench#user-space-version
-#TODO build and test
-#TODO add command for installation
-#TODO package msr-tools: https://01.org/sites/default/files/downloads/msr-tools/msr-tools-1.3.zip
 [source]
 git = "https://github.com/andreas-abel/nanoBench"
 rev = "36c077fd30db11e8c83cedfcb58daa505d1d0b12"

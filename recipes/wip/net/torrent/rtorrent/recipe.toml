@@ -1,4 +1,3 @@
-#TODO fix libtorrent
 [source]
 tar = "https://github.com/rakshasa/rtorrent-archive/raw/master/rtorrent-0.9.8.tar.gz"
 [build]

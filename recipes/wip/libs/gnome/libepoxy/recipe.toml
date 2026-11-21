@@ -11,10 +11,8 @@ dev-dependencies = [
 script = """
 DYNAMIC_INIT
 if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
-    # EGL without X11
     COOKBOOK_MESON_FLAGS+=(-Degl=yes)
 else
-    # No EGL, No wayland
     COOKBOOK_MESON_FLAGS+=(-Degl=no)
 fi
 

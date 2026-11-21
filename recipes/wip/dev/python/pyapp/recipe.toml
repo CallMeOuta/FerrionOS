@@ -1,4 +1,3 @@
-#TODO serde crate error
 [source]
 git = "https://github.com/ofek/pyapp"
 [build]

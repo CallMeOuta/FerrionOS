@@ -1,4 +1,3 @@
-#TODO compiled but untested
 [source]
 git = "https://github.com/janet-lang/janet"
 rev = "v1.42.1"
@@ -11,7 +10,6 @@ mesonflags = [
 script = """
 DYNAMIC_INIT
 COOKBOOK_MESON_FLAGS+=(
-    #-Dassembler=false # needed by bytecode compiler?
     -Dnet=false
     -Dipv6=false
     -Dkqueue=false

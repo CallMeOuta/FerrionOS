@@ -1,4 +1,3 @@
-#TODO promote
 [source]
 tar = "https://www.php.net/distributions/php-8.0.30.tar.xz"
 patches = [
@@ -36,7 +35,6 @@ script = """
 DYNAMIC_INIT
 export SUFFIX="80"
 
-# extension stuff
 export CURL_LIBS="-lcurl -lnghttp2 -lssl -lcrypto"
 export CXXFLAGS="-std=c++17"
 COOKBOOK_CONFIGURE_FLAGS+=(
@@ -48,7 +46,6 @@ COOKBOOK_CONFIGURE_FLAGS+=(
     --disable-opcache
     --enable-bcmath
     --enable-calendar
-#    --enable-fpm  # need times function
     --enable-gd
     --enable-intl
     --enable-mbstring

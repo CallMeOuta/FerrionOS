@@ -1,4 +1,3 @@
-#TODO can't find SDL.h
 [source]
 git = "https://github.com/rswinkle/sdl_img"
 rev = "0.101.0"

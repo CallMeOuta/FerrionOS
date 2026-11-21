@@ -1,6 +1,4 @@
-#TODO compiled but not tested
 [source]
-# later version uses GTK4
 tar = "https://download.gnome.org/sources/gtksourceview/3.24/gtksourceview-3.24.9.tar.xz"
 patches = ["redox.patch"]
 [build]

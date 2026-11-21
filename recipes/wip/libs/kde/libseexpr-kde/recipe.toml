@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://invent.kde.org/graphics/kseexpr#super-impatient-cmake-building-and-installing-guide
 [source]
 git = "https://invent.kde.org/graphics/kseexpr"
 rev = "v6.0.0.0"

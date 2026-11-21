@@ -1,5 +1,3 @@
-#TODO disasm crate error
-#TODO make sdl3-sys crate use sdl3 recipe
 [source]
 git = "https://github.com/ioncodes/gecko"
 shallow_clone = true

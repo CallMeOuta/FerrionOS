@@ -1,7 +1,3 @@
-#TODO missing cross-compilation variables in build.py script
-#TODO build with libwrap instead of dbus
-#TODO discover minimum dependencies
-# build instructions: https://docs.jami.net/en_US/build/index.html
 [source]
 git = "https://git.jami.net/savoirfairelinux/jami-client-qt"
 branch = "stable/20260216.0"

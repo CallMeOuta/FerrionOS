@@ -1,4 +1,3 @@
-#TODO compiled but untested
 [source]
 git = "https://github.com/1jehuang/mermaid-rs-renderer"
 shallow_clone = true

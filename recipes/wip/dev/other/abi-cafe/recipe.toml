@@ -1,4 +1,3 @@
-#TODO compiled but not tested (after an update on the libc crate)
 [source]
 git = "https://github.com/Gankra/abi-cafe"
 shallow_clone = true

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/patriciogonzalezvivo/glslViewer/wiki/Compile-on-linux#3-compile
 [source]
 git = "https://github.com/patriciogonzalezvivo/glslViewer"
 rev = "7eb6254cb4cedf03f1c78653f90905fe0c3b48fb"

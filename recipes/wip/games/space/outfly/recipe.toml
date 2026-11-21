@@ -1,4 +1,3 @@
-#TODO bevy_embedded_assets crate error
 [source]
 git = "https://codeberg.org/outfly/outfly"
 shallow_clone = true

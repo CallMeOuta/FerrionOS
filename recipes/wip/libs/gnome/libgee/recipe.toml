@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://download.gnome.org/sources/libgee/0.20/libgee-0.20.8.tar.xz"
 [build]

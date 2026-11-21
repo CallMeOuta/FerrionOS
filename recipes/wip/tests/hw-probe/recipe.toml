@@ -1,6 +1,3 @@
-#TODO test
-# dependencies: https://github.com/linuxhw/hw-probe/blob/master/INSTALL.md#install-from-source
-# how to use for system testing: https://wiki.archlinux.org/title/Hardware_probe#Benchmarking
 [source]
 git = "https://github.com/linuxhw/hw-probe"
 rev = "1.6"
@@ -19,9 +16,4 @@ dependencies = [
     "pciutils",
     "usbutils",
     "dmidecode",
-    #"memtester",
-    #"sysstat",
-    #"mesa-demos",
-    #"smartmontools",
-    #"acpica",
 ]

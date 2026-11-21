@@ -1,4 +1,3 @@
-#TODO: null pointer crash
 [source]
 tar = "https://github.com/crawl/crawl/releases/download/0.34.1/stone_soup-0.34.1-nodeps.tar.xz"
 patches = [
@@ -17,7 +16,6 @@ dependencies = [
 ]
 script = """
 DYNAMIC_INIT
-# Copy source to build directory
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 
 cd source

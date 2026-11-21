@@ -1,6 +1,3 @@
-#TODO build and test
-#TODO add command for installation
-# build instructions: https://git.simple-cc.org/scc/file/README.html
 [source]
 git = "https://git.simple-cc.org/scc/"
 rev = "1ed0ff0000999561feee336c289252faf2502a7e"

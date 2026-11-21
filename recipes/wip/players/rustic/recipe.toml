@@ -1,4 +1,3 @@
-#TODO can't update the crates, patch the "fragile" crate version
 [source]
 git = "https://github.com/rustic-music-player/rustic"
 [build]

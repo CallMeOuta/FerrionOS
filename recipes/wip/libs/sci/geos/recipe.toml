@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://libgeos.org/usage/download/
 [source]
 tar = "https://download.osgeo.org/geos/geos-3.14.1.tar.bz2"
 [build]

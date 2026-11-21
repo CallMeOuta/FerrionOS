@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://librepcb.org/docs/installation/build-from-sources/
-# commented out optional dependencies
 [source]
 git = "https://github.com/LibrePCB/LibrePCB"
 rev = "1.3.0"
@@ -16,6 +13,4 @@ dependencies = [
     "qt6-imageformats",
     "openssl3",
     "zlib",
-    #"opencascade",
-    #"mesa-glu",
 ]

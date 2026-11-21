@@ -1,4 +1,3 @@
-# TODO compiles but needs testing
 [source]
 git = "https://github.com/jawah/charset_normalizer"
 rev = "3.4.9"

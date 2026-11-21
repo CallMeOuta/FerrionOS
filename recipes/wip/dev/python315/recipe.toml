@@ -1,4 +1,3 @@
-# TODO: Not tested
 [source]
 tar = "https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tar.xz"
 blake3 = "be2eb5c42e774473b40d02c6c74839dec00b779ec24c593cb324b4f8c460acf4"
@@ -54,7 +53,6 @@ fi
 
 cookbook_configure
 
-# A same file to save 73MB
 (cd "${COOKBOOK_STAGE}/usr/lib/python3.15/config-3.15-${ARCH}-${OS}" && \
     rm -f libpython3.15.a && ln -s ../../libpython3.15.a)
 """

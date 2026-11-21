@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-#TODO determine minimum dependencies from meson log
 [source]
 tar = "https://codeberg.org/lo-vely/nucleus/archive/v2.tar.gz"
 [build]

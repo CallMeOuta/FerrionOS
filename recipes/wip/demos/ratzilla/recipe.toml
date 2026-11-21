@@ -1,4 +1,3 @@
-#TODO compiled but not tested
 [source]
 git = "https://github.com/orhun/ratzilla"
 shallow_clone = true
@@ -6,7 +5,7 @@ shallow_clone = true
 template = "custom"
 script = """
 DYNAMIC_INIT
-COOKBOOK_CARGO_FLAGS=() # remove --locked
+COOKBOOK_CARGO_FLAGS=()
 COOKBOOK_CARGO_PATH="examples/animations" cookbook_cargo_build
 COOKBOOK_CARGO_PATH="examples/canvas_stress_test" bin_name="canvas-stress-test" cookbook_cargo_build
 COOKBOOK_CARGO_PATH="examples/canvas_waves" bin_name="canvas-waves" cookbook_cargo_build

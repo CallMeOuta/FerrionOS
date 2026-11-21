@@ -1,5 +1,3 @@
-# TODO requires testing
-# FIXME remove --no-deps when pip dependency handling works properly (pip thinks python3-packaging isn't high enough version but it is)
 [source]
 git = "https://github.com/pypa/hatch"
 rev = "hatchling-v1.31.0"

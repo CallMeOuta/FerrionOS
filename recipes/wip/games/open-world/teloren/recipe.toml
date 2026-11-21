@@ -1,4 +1,3 @@
-#TODO quinn-udp crate error
 [source]
 git = "https://github.com/zesterer/teloren"
 shallow_clone = true

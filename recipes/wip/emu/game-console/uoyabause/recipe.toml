@@ -1,5 +1,3 @@
-#TODO fix dependencies
-# build instructions: https://github.com/devmiyax/yabause/blob/master/yabause/README.LIN#L77
 [source]
 git = "https://github.com/devmiyax/yabause"
 rev = "71c973f92966d33de464c1ba4dac1953af6ec462"

@@ -1,15 +1,10 @@
-#TODO fix libstatgrab dep
-# build instructions: https://github.com/TheTumultuousUnicornOfDarkness/CPU-X/wiki/manual-build#build-and-install-cpu-x
 [source]
 git = "https://github.com/TheTumultuousUnicornOfDarkness/CPU-X"
 rev = "41f5d1ac3b13e60aa30212f2b9f38de646fd2b07"
 [build]
 template = "custom"
 dependencies = [
-    #"gtk3mm",
     "ncursesw",
-    #"glfw3",
-    #"libvulkan",
     "libstatgrab",
     "libcpuid",
     "pciutils",

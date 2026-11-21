@@ -1,7 +1,3 @@
-#TODO add script for gnu make: https://gitea.wildfiregames.com/0ad/0ad/wiki/BuildInstructions#linux
-#TODO The Atlas editor needs to be disabled with the build option "--disable-atlas" to avoid GTK3 dependency (WxWidgetsGTK)
-#TODO Maybe needs to run update-workspaces.sh before
-#TODO Require recipes for SpiderMonkey and libicu (Unicode)
 [source]
 tar = "https://releases.wildfiregames.com/0ad-0.0.26-alpha-unix-build.tar.xz"
 [build]

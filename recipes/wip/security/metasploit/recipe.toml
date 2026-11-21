@@ -1,5 +1,3 @@
-#TODO compile and test
-# installation instructions: https://github.com/rapid7/metasploit-framework#installing-metasploit
 [source]
 git = "https://github.com/rapid7/metasploit-framework"
 rev = "6.4.133"

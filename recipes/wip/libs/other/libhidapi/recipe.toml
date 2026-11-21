@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/libusb/hidapi/blob/master/BUILD.cmake.md
 [source]
 git = "https://github.com/libusb/hidapi"
 rev = "hidapi-0.15.0"

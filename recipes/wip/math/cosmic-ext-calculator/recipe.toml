@@ -1,5 +1,3 @@
-#TODO compiled but untested
-#TODO fix configuration commands
 [source]
 git = "https://github.com/cosmic-utils/calculator"
 shallow_clone = true

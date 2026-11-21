@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://invent.kde.org/multimedia/kwave"
 rev = "v26.04.3"
@@ -14,9 +13,4 @@ cmakeflags = [
 dependencies = [
     "libpulse",
     "libmad",
-    #"libsamplerate",
-    #"libogg",
-    #"libvorbis",
-    #"libflac",
-    #"fftw",
 ]

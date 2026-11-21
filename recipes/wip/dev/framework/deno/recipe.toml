@@ -1,5 +1,3 @@
-#TODO v8 crate error
-#TODO lacking librusty_v8 crate binaries for FerrionOS
 [source]
 git = "https://github.com/denoland/deno"
 shallow_clone = true

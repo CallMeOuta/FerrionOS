@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://portablecl.org/docs/html/install.html
 [source]
 git = "https://github.com/pocl/pocl"
 rev = "v7.1"
@@ -8,10 +6,7 @@ shallow_clone = true
 template = "cmake"
 cmakeflags = [
     "-DENABLE_TESTS=OFF"
-    #"-DENABLE_HOST_CPU_DEVICES_OPENMP=ON" # probably used to enable multi-threading
 ]
 dependencies = [
     "llvm21-common",
-    #"hwloc", # better performance
-    #"openmp", # needed for multi-threading?
 ]

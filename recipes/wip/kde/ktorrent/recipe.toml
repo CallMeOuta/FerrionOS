@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-#TODO discover minimum dependencies from cmake log
 [source]
 git = "https://invent.kde.org/network/ktorrent"
 rev = "v26.04.2"

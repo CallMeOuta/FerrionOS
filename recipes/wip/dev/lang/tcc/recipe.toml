@@ -1,5 +1,3 @@
-#TODO add cross-compilation flags
-# build instructions: https://repo.or.cz/tinycc.git/blob/HEAD:/README
 [source]
 tar = "https://download.savannah.nongnu.org/releases/tinycc/tcc-0.9.27.tar.bz2"
 [build]

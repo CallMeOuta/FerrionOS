@@ -1,4 +1,3 @@
-#TODO trash and mlua-sys crate errors
 [source]
 git = "https://github.com/sxyazi/yazi"
 [build]

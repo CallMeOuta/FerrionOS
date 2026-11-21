@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/rafaelmardojai/share-preview"
 shallow_clone = true

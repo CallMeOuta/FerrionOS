@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/kdave/xfstests"
 rev = "v2026.03.20"

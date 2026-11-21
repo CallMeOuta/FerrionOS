@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/kenianbei/plurimus"
 shallow_clone = true

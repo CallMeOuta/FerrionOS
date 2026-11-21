@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/cea-sec/sanzu"
 shallow_clone = true

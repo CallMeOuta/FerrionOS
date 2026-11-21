@@ -1,4 +1,3 @@
-#TODO build and test
 [source]
 tar = "http://www.cs.virginia.edu/~skadron/lava/rodinia/Packages/rodinia_3.1.tar.bz2"
 [build]

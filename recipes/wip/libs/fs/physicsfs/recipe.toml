@@ -1,5 +1,3 @@
-#TODO compiled but untested
-# build instructions: https://github.com/icculus/physfs/blob/main/docs/INSTALL.txt
 [source]
 git = "https://github.com/icculus/physfs"
 branch = "stable-3.2"

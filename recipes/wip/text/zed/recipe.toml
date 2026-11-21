@@ -1,10 +1,5 @@
-#TODO not compiled or tested: with these patches, cargo check for x86_64-unknown-redox passes for cli and remote_server; not cooked yet
-#TODO the editor ("zed" package) needs a GPUI platform backend for Orbital; X11 stays off
-# Only zstd is linked from the system: SQLite is bundled, git is run as a program, TLS is rustls
-# build instructions - https://zed.dev/docs/development/linux
 [source]
 git = "https://github.com/zed-industries/zed"
-# release v1.29.3
 rev = "d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7"
 patches = [
     "ferrion-toolchain.patch",
@@ -13,10 +8,6 @@ patches = [
     "ferrion-no-webrtc.patch",
     "ferrion-dependencies.patch",
 ]
-# ferrion-dependencies.patch builds wasmtime, wasmtime-wasi and zbus from patched copies in
-# ferrion-vendor/: each crate archive from crates.io, checked against its sha256 in Zed's
-# Cargo.lock, with the patch of the same name from this directory. The cookbook does not hash
-# those three patches, so after changing one, delete source/ to fetch again.
 script = """
 recipe_dir="$(dirname "${PWD}")"
 vendor_crate() {
@@ -44,5 +35,4 @@ script = """
 cookbook_cargo_packages cli
 mv "${COOKBOOK_STAGE}/usr/bin/cli" "${COOKBOOK_STAGE}/usr/bin/zed-cli"
 bin_name=remote-server bin_flags="--package remote_server" bin_final_name=zed-remote-server cookbook_cargo_build
-#mv "${COOKBOOK_STAGE}/usr/bin/zed" "${COOKBOOK_STAGE}/usr/bin/zed-editor"
 """

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/MidnightCommander/mc/blob/master/doc/INSTALL
 [source]
 tar = "https://ftp.osuosl.org/pub/midnightcommander/mc-4.8.33.tar.xz"
 [build]

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/Reference-LAPACK/lapack#installation
 [source]
 git = "https://github.com/Reference-LAPACK/lapack"
 rev = "v3.12.1"

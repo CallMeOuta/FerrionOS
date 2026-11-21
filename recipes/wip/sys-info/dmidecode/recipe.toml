@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 tar = "https://download.savannah.gnu.org/releases/dmidecode/dmidecode-3.7.tar.xz"
 [build]

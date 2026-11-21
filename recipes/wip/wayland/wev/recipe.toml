@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://git.sr.ht/~sircmpwn/wev"
 rev = "1.1.0"

@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://download.gnome.org/sources/gnome-clocks/49/gnome-clocks-49.0.tar.xz"
 [build]

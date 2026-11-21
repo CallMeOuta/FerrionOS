@@ -1,4 +1,3 @@
-#TODO fix libunwind dep
 [source]
 git = "https://github.com/rust-fuzz/honggfuzz-rs"
 shallow_clone = true

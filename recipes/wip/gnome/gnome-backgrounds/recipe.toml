@@ -1,4 +1,3 @@
-#TODO promote
 [source]
 tar = "https://download.gnome.org/sources/gnome-backgrounds/50/gnome-backgrounds-50.0.tar.xz"
 [build]

@@ -1,4 +1,3 @@
-#TODO minifb crate error
 [source]
 git = "https://github.com/zesterer/euc"
 shallow_clone = true

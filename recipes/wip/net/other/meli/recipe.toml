@@ -1,4 +1,3 @@
-#TODO ahash crate error
 [source]
 git = "https://git.meli-email.org/meli/meli"
 [build]

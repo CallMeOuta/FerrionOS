@@ -1,4 +1,3 @@
-#TODO cargo-util crate error
 [source]
 git = "https://github.com/est31/cargo-udeps"
 shallow_clone = true

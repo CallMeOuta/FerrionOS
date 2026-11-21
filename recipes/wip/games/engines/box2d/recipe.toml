@@ -1,4 +1,3 @@
-#TODO glfw dependency can't find timerfd function
 [source]
 git = "https://github.com/erincatto/box2d"
 rev = "v3.1.1"

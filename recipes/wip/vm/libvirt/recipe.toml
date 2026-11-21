@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://libvirt.org/compiling.html#configuring-the-project
 [source]
 tar = "https://download.libvirt.org/libvirt-12.5.0.tar.xz"
 [build]

@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/ligurio/unreliablefs"
 rev = "fa432252c117e82a0a36343895936f4fae246b56"

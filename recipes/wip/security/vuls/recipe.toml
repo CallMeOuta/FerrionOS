@@ -1,5 +1,3 @@
-#TODO add script for cross-compilation: https://vuls.io/docs/en/install-manually.html
-#TODO which sql database implementation is needed?
 [source]
 git = "https://github.com/future-architect/vuls"
 rev = "v0.39.2"

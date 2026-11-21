@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://download.gnome.org/sources/evince/48/evince-48.1.tar.xz"
 [build]

@@ -1,4 +1,3 @@
-#TODO compiled but not tested
 [source]
 tar = "http://prdownloads.sourceforge.net/tcl/tcl9.1.0-src.tar.gz"
 blake3 = "a5c4860fdbd9e01f002ab2cf8508f912f43ab218a5035d93cad23d57ac8b8db3"

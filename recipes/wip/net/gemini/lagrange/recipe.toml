@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/skyjake/lagrange#how-to-compile
 [source]
 tar = "https://git.skyjake.fi/gemini/lagrange/releases/download/v1.19.4/lagrange-1.19.4.tar.gz"
 [build]
@@ -17,5 +15,4 @@ dependencies = [
     "pcre",
     "fribidi",
     "libunistring",
-    #"mpg123",
 ]

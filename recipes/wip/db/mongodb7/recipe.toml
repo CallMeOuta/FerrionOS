@@ -1,5 +1,3 @@
-#TODO missing script for SCons
-# build instructions: https://github.com/mongodb/mongo/blob/master/docs/building.md
 [source]
 git = "https://github.com/mongodb/mongo"
 branch = "v7.2"

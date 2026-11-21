@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/Yesh-02/psleep"
 shallow_clone = true

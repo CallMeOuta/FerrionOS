@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/pixop/video-compare"
 rev = "20260708"

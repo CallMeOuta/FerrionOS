@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/aguacero7/rkik"
 shallow_clone = true

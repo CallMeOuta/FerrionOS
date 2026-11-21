@@ -1,4 +1,3 @@
-#TODO update mio crate version
 [source]
 git = "https://github.com/jawline/Mimic"
 shallow_clone = true

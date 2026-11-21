@@ -1,4 +1,3 @@
-# TODO fails to compile on mlua and aws-lc-sys
 [source]
 git = "https://github.com/outragedevs/repartee"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO cubecl-macros crate error
 [source]
 git = "https://github.com/tracel-ai/cubecl"
 shallow_clone = true

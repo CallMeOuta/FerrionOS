@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/SamiPerttu/fundsp"
 shallow_clone = true

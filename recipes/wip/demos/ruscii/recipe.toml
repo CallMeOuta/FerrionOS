@@ -1,4 +1,3 @@
-#TODO device_query crate error
 [source]
 git = "https://github.com/lemunozm/ruscii"
 shallow_clone = true

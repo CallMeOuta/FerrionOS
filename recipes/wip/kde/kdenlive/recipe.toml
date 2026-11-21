@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://invent.kde.org/multimedia/kdenlive/-/blob/master/dev-docs/build.md#build-and-install-the-projects
 [source]
 git = "https://invent.kde.org/multimedia/kdenlive"
 rev = "v26.04.2"
@@ -35,10 +33,8 @@ dependencies = [
      "kxmlgui6",
      "knotifications6",
      "kguiaddons6",
-    #  "ktextwidgets6",
      "kiconthemes6",
      "solid6",
      "kfilemetadata6",
      "purpose6",
-#     "breeze-icons",
 ]

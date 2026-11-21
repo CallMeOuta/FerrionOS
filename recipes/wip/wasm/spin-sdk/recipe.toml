@@ -1,6 +1,3 @@
-# TODO spin-sdk and spin-sdk-macro are in a subfolder crates
-# cookbook_cargo_packages doesn't allow specifying files with / in them
-# fails to compile because can't find them from workspace
 [source]
 git = "https://github.com/spinframework/spin-rust-sdk"
 [build]

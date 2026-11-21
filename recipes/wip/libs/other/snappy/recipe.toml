@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/google/snappy#building
 [source]
 git = "https://github.com/google/snappy"
 rev = "1.2.2"

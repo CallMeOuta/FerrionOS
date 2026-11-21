@@ -1,5 +1,3 @@
-#TODO determine missing dependencies
-#TODO make it use sdl2 and sdl2-mixer recipes, maybe others if needed
 [source]
 git = "https://github.com/GlPortal/glPortal"
 rev = "d0d801044666d3baa147a10dc26e7c27342c0574"

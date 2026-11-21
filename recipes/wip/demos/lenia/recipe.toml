@@ -1,4 +1,3 @@
-#TODO update dependencies
 [source]
 git = "https://github.com/BirdbrainEngineer/lenia"
 shallow_clone = true

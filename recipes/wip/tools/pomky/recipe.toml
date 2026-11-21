@@ -1,4 +1,3 @@
-#TODO waiting gdk-pixbuf conversion to TOML
 [source]
 git = "https://github.com/developomp/pomky"
 [build]

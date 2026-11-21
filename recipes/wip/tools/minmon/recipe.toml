@@ -1,4 +1,3 @@
-#TODO port to FerrionOS
 [source]
 git = "https://github.com/flo-at/minmon"
 [build]

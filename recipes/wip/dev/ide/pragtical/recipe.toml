@@ -1,5 +1,3 @@
-#TODO fix sdl3 dep
-# build instructions: https://pragtical.dev/docs/setup/building
 [source]
 git = "https://github.com/pragtical/pragtical"
 rev = "v3.12.0"

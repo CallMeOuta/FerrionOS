@@ -1,4 +1,3 @@
-#TODO not tested
 [source]
 tar = "https://releases.wildfiregames.com/0ad-0.0.26-alpha-unix-data.tar.xz"
 [build]

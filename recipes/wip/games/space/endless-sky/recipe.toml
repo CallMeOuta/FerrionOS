@@ -1,5 +1,3 @@
-#TODO fix libmad dep
-# build instructions: https://github.com/endless-sky/endless-sky/blob/master/docs/readme-cmake.md#building-the-game
 [source]
 git = "https://github.com/endless-sky/endless-sky"
 rev = "v0.11.2"

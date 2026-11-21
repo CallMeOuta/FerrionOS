@@ -1,4 +1,3 @@
-#TODO users crate error
 [source]
 git = "https://github.com/jamesmcm/vopono"
 [build]

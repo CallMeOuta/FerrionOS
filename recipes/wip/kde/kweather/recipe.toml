@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 tar = "https://invent.kde.org/utilities/kweather/-/archive/v26.04.3/kweather-v26.04.3.tar.bz2"
 shallow_clone = true

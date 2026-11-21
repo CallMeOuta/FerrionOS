@@ -1,6 +1,3 @@
-#TODO remove the X11 libraries from the makefile and let SDL handle the window, as it does for the Windows target: https://github.com/djbozkosz/Light-Propagation-Volumes/blob/master/Makefile#L15
-#TODO force geometry shader implementation for better performance on cpu rendering
-#TODO add command to install
 [source]
 git = "https://github.com/djbozkosz/Light-Propagation-Volumes"
 rev = "74020d5e5fcaaf0e22ba3cd9314baee0a9a7757a"

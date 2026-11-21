@@ -1,4 +1,3 @@
-#TODO patch cmake to disable proprietary irrklang dependency (music): https://github.com/GTruf/SolarSystem-3D/issues/5
 [source]
 git = "https://github.com/GTruf/SolarSystem-3D"
 rev = "91f1f7b14cae59740704aaf4bc6e1e7c5846005b"

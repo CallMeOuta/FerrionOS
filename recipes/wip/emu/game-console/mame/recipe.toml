@@ -1,18 +1,9 @@
-#TODO compile and test
-# cross-compilation doc: https://docs.mamedev.org/initialsetup/compilingmame.html#cross-compiling-mame
 [source]
 git = "https://github.com/mamedev/mame"
 rev = "mame0282"
 shallow_clone = true
 [build]
 template = "custom"
-#dependencies = [
-#    "sdl2",
-#    "sdl2-ttf",
-#    "fontconfig",
-#    "qt5-base",
-#    "qt5-tools",
-#]
 script = """
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 DYNAMIC_INIT

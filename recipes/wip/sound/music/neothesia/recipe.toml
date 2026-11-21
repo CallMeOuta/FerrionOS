@@ -1,4 +1,3 @@
-#TODO midir crate error
 [source]
 git = "https://github.com/PolyMeilex/Neothesia"
 shallow_clone = true

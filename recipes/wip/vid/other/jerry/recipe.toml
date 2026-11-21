@@ -1,4 +1,3 @@
-#TODO fix fzf dependency
 [source]
 git = "https://github.com/justchokingaround/jerry"
 shallow_clone = true
@@ -14,6 +13,5 @@ dependencies = [
     "gnu-grep",
     "sed",
     "curl",
-    #"fzf",
     "mpv",
 ]

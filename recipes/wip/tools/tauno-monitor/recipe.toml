@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# lacking build instructions
 [source]
 git = "https://github.com/taunoe/tauno-monitor"
 rev = "fecab98710bf6918141f34709f4ee1a055413056"

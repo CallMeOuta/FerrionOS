@@ -1,4 +1,3 @@
-#TODO add script for scons: https://github.com/gordan-bobic/zfs-fuse/blob/master/INSTALL#L37
 [source]
 git = "https://github.com/gordan-bobic/zfs-fuse"
 rev = "d286672f25602583aaf91ef0fa511d03ab4d3aab"
@@ -7,6 +6,5 @@ shallow_clone = true
 template = "custom"
 dependencies = [
     "libfuse2",
-    #"libaio",
     "zlib",
 ]

@@ -1,5 +1,3 @@
-#TODO add gusb dep
-#TODO discover minimum dependencies from meson log
 [source]
 git = "https://github.com/hughsie/colord"
 rev = "1.4.8"
@@ -8,7 +6,6 @@ shallow_clone = true
 template = "meson"
 mesonflags = [
     "-Dsystemd=false",
-    #"-Dudev-rules=false",
     "-Dintrospection=false",
     "-Dtests=false",
     "-Ddocs=false",

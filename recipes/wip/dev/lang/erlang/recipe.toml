@@ -1,5 +1,3 @@
-#TODO discover current status
-# build instructions: https://www.erlang.org/doc/installation_guide/install
 [source]
 tar = "https://github.com/erlang/otp/releases/download/OTP-28.3.1/otp_src_28.3.1.tar.gz"
 [build]

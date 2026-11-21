@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/Kei-K23/curlio"
 shallow_clone = true

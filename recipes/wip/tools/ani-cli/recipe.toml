@@ -1,4 +1,3 @@
-#TODO move to the "tools" category
 [source]
 git = "https://github.com/pystardust/ani-cli"
 rev = "4a77bca5d95ae755ab5ac129c2db2025feab217b"

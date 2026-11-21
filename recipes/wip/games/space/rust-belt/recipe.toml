@@ -1,4 +1,3 @@
-#TODO outdated winit crate (after cargo update)
 [source]
 git = "https://github.com/johnthagen/rust-belt"
 [build]

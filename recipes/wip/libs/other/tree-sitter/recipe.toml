@@ -9,7 +9,6 @@ patches = [
 template = "custom"
 script = """
 DYNAMIC_INIT
-# TODO: port rquickjs crate
 COOKBOOK_CARGO_PATH=crates/cli cookbook_cargo --no-default-features
 cookbook_cmake "${COOKBOOK_SOURCE}"/lib
 """

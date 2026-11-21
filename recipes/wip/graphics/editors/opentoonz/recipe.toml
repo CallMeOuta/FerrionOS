@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-#TODO missing dependencies
-# build instructions: https://github.com/opentoonz/opentoonz/blob/master/doc/how_to_build_linux.md
 [source]
 git = "https://github.com/opentoonz/opentoonz"
 rev = "dd4cb36142ebf65a2aa74ff8575002863d3e17fc"

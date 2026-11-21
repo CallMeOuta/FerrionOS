@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://opencolorio.readthedocs.io/en/latest/quick_start/installation.html#building-from-source
 [source]
 tar = "https://github.com/AcademySoftwareFoundation/OpenColorIO/releases/download/v2.5.1/OpenColorIO-2.5.1.tar.gz"
 [build]

@@ -1,5 +1,3 @@
-#TODO compile and test
-#TODO add command to install
 [source]
 git = "https://github.com/t3nma/sdl2-TicTacToe"
 rev = "c4a48774df3b75aa234df2b60696dbe12673ebbd"

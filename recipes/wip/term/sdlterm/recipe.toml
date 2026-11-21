@@ -1,5 +1,3 @@
-#TODO compile and test
-#TODO make it use libvterm recipe
 [source]
 git = "https://github.com/palomena/sdlterm"
 rev = "8c121d26f65cdb2225ddf3f858c70b4c89d65fa6"
@@ -10,7 +8,6 @@ dependencies = [
     "sdl2",
     "sdl2-ttf",
     "sdl2-image",
-    #"libvterm",
 ]
 script = """
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./

@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://qmcpack.readthedocs.io/en/develop/installation.html#building-with-cmake
-# probably missing dependencies
 [source]
 git = "https://github.com/QMCPACK/qmcpack"
 rev = "v4.2.0"

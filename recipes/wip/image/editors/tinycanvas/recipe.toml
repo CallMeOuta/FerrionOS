@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/ni5arga/TinyCanvas"
 rev = "053871f72ba2ecad44bf7d3a815adb6ec316e03a"

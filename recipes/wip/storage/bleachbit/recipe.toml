@@ -1,5 +1,3 @@
-#TODO test
-# dependencies: https://docs.bleachbit.org/dev/running-from-source-code.html
 [source]
 tar = "https://download.bleachbit.org/get/bleachbit-5.0.2.tar.bz2"
 [build]

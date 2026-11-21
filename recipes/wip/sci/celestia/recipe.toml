@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/CelestiaProject/Celestia/blob/master/INSTALL.md#celestia-install-instructions-for-unix
-# sdl2 frontend is limited, qt6 or qt5 is preferred
 [source]
 tar = "https://github.com/CelestiaProject/Celestia/releases/download/1.6.4/celestia-1.6.4.tar.xz"
 [build]
@@ -20,5 +17,4 @@ dependencies = [
     "libpng",
     "libjpeg",
     "luajit",
-    #"qt6-base",
 ]

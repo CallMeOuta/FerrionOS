@@ -1,4 +1,3 @@
-# runtime dependencies - https://electrum.org/#download
 [source]
 tar = "https://download.electrum.org/4.5.5/Electrum-4.5.5.tar.gz"
 [build]

@@ -1,4 +1,3 @@
-#TODO compiled (after cargo update) but not tested
 [source]
 git = "https://github.com/kettle11/devserver"
 shallow_clone = true

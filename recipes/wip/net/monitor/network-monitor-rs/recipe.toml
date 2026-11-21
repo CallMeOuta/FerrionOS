@@ -1,4 +1,3 @@
-#TODO port gtk4
 [source]
 git = "https://github.com/grigio/network-monitor"
 shallow_clone = true

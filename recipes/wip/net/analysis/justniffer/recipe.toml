@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://onotelli.github.io/justniffer/
 [source]
 git = "https://github.com/onotelli/justniffer"
 rev = "v0.6.13"

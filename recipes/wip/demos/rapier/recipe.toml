@@ -1,4 +1,3 @@
-#TODO rfd crates error
 [source]
 git = "https://github.com/dimforge/rapier"
 shallow_clone = true

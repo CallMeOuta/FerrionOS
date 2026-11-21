@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://gitlab.gnome.org/World/Upscaler#meson
 [source]
 git = "https://gitlab.gnome.org/World/Upscaler"
 rev = "1.6.3"
@@ -10,7 +8,7 @@ mesonflags = [
     "-Dnetwork_tests=false",
 ]
 dev-dependencies = [
-    "host:blueprint" # add script for linux compilation
+    "host:blueprint"
 ]
 dependencies = [
     "gtk4",

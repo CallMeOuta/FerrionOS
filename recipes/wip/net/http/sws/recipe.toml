@@ -1,4 +1,3 @@
-#TODO update async-tar crate
 [source]
 git = "https://github.com/static-web-server/static-web-server"
 shallow_clone = true

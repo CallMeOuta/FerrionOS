@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/kainjow/Mustache"
 rev = "3f654942a70c46a775070d7a09ca7acfa3e205b7"

@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://rawpedia.rawtherapee.com/Linux#Compile_RawTherapee
-#TODO missing dependencies, see https://rawpedia.rawtherapee.com/Linux#Dependencies
 [source]
 tar = "https://rawtherapee.com/shared/source/rawtherapee-5.9.tar.xz"
 [build]
@@ -16,7 +13,6 @@ dependencies = [
     "liblcms",
     "libpng",
     "librsvg",
-    # "libsigc++",
     "libtiff",
     "zlib",
 ]

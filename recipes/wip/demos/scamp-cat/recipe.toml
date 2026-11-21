@@ -1,4 +1,3 @@
-#TODO outdated ioctl-rs crate error
 [source]
 git = "https://github.com/LordAizen1/scamp-cat"
 shallow_clone = true

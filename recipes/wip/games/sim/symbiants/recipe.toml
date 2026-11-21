@@ -1,4 +1,3 @@
-#TODO the Bevy engine require rustc 1.76 or newer
 [source]
 git = "https://github.com/MeoMix/symbiants"
 [build]

@@ -1,4 +1,3 @@
-#TODO make the "less" dependency work
 [source]
 git = "https://github.com/dandavison/delta"
 [build]

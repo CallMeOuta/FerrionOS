@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/crosshare-org/crosshare"
 shallow_clone = true

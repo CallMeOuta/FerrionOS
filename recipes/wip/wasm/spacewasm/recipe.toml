@@ -1,4 +1,3 @@
-# TODO compiles fine but unsure what input it needs
 [source]
 git = "https://github.com/nasa/spacewasm"
 shallow_clone = true

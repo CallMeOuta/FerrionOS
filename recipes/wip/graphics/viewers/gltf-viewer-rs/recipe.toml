@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/adrien-ben/gltf-viewer-rs"
 shallow_clone = true

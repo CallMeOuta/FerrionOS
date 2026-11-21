@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://wiki.hyprland.org/Getting-Started/Installation/#cmake-recommended
 [source]
 tar = "https://github.com/hyprwm/Hyprland/releases/download/v0.55.4/source-v0.55.4.tar.gz"
 [build]

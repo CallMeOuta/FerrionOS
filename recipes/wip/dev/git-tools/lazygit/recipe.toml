@@ -1,4 +1,3 @@
-#TODO: unable to init TUI due to bugs in pty
 [source]
 git = "https://github.com/willnode/lazygit"
 branch = "redox"

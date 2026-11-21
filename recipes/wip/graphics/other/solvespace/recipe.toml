@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://github.com/solvespace/solvespace/releases/download/v3.2/solvespace-3.2.tar.xz"
 [build]

@@ -1,4 +1,3 @@
-#TODO need openat (patched), posix_spawn
 [source]
 tar = "https://dlm.mariadb.com/4509471/MariaDB/mariadb-12.1.2/source/mariadb-12.1.2.tar.gz"
 blake3 = "749a293e1c4fd13be936fbda33de38b1ccc8c737c30a55c187c028d3ce74f70c"
@@ -27,10 +26,8 @@ dev-dependencies = [
 script = """
 DYNAMIC_INIT
 
-# see https://mariadb.com/kb/en/cross-compiling-mariadb/
 mkdir -p host
 pushd host
-# todo: should use native generate_cookbook_cmake_file if possible
 (unset CC CXX AR && cmake ${COOKBOOK_SOURCE} -DWITH_SSL=system -DCMAKE_CROSSCOMPILING=False -DCMAKE_FIND_ROOT_PATH=${COOKBOOK_TOOLCHAIN})
 make import_executables
 popd

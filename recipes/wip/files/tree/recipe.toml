@@ -1,4 +1,3 @@
-#TODO compiled but untested
 [source]
 tar = "https://gitlab.com/OldManProgrammer/unix-tree/-/archive/2.3.2/unix-tree-2.3.2.tar.bz2"
 [build]

@@ -1,4 +1,3 @@
-#TODO make gtk4 work
 [source]
 git = "https://github.com/gabm/Satty"
 [build]

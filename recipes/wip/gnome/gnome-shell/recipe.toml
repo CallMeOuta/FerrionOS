@@ -1,5 +1,3 @@
-#TODO discover minimum dependencies from meson log
-# build instructions: https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/gnome-49/docs/building-and-running.md
 [source]
 tar = "https://download.gnome.org/sources/gnome-shell/49/gnome-shell-49.7.tar.xz"
 [build]

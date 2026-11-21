@@ -1,4 +1,3 @@
-#TODO determine minimum dependencies from meson log
 [source]
 tar = "https://sources.phosh.mobi/releases/phosh-mobile-settings/phosh-mobile-settings-0.56.0.tar.xz"
 [build]

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/Ragnt/AngryOxide#building-from-source
 [source]
 git = "https://github.com/Ragnt/AngryOxide"
 [build]

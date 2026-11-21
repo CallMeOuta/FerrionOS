@@ -21,8 +21,6 @@ softbuffer = { version = "0.4", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 
-# On FerrionOS winit and softbuffer use Orbital, which needs no feature. On a Linux build
-# machine they use Wayland, so the crate also builds and runs there for comparison.
 [target.'cfg(target_os = "linux")'.dependencies]
 softbuffer = { version = "0.4", default-features = false, features = ["wayland", "wayland-dlopen"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen"] }

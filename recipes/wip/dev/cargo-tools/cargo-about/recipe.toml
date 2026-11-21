@@ -1,4 +1,3 @@
-#TODO camino crate error
 [source]
 git = "https://github.com/EmbarkStudios/cargo-about"
 shallow_clone = true

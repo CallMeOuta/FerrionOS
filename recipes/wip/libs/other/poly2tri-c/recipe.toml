@@ -5,8 +5,6 @@ patches = [
     "redox.patch"
 ]
 script = """
-# find . -type d -exec touch {}/Makefile.in \\;
-# touch aclocal.m4 configure configure.ac Makefile.am
 autotools_recursive_regenerate
 """
 

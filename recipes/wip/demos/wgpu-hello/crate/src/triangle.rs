@@ -1,5 +1,3 @@
-//! The scene both binaries draw: one triangle on a dark blue background, rendered into an
-//! RGBA texture and read back into memory.
 
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -40,7 +38,6 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Opens the first Vulkan adapter, which on FerrionOS is Mesa's lavapipe (llvmpipe on the CPU).
     pub fn new() -> Result<Gpu, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
@@ -127,7 +124,6 @@ impl Gpu {
         })
     }
 
-    /// Renders the triangle turned by `angle` radians and returns the pixels, RGBA, row by row.
     pub fn render(&self, width: u32, height: u32, angle: f32) -> Vec<u8> {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),

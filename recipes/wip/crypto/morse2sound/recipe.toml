@@ -1,4 +1,3 @@
-#TODO slice-deque crate error (after cargo update)
 [source]
 git = "https://github.com/irevenko/morse2sound"
 [build]

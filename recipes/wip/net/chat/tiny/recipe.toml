@@ -1,4 +1,3 @@
-#TODO compiles, fails to run: termbox crate: Termbox::init() function
 [source]
 git = "https://github.com/osa1/tiny"
 shallow_clone = true

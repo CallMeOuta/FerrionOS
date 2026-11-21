@@ -1,4 +1,3 @@
-#TODO jemalloc-sys crate error
 [source]
 git = "https://github.com/ryanfowler/lines"
 [build]

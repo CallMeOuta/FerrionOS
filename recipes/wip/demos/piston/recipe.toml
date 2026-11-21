@@ -1,4 +1,3 @@
-#TODO update redox_syscall crate version
 [source]
 git = "https://github.com/pistondevelopers/piston-examples"
 shallow_clone = true

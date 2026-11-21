@@ -1,4 +1,3 @@
-#TODO Make GTK3 work
 [source]
 git = "https://github.com/pragha-music-player/pragha"
 [build]

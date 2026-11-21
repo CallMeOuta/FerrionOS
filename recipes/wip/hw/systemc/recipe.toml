@@ -1,6 +1,3 @@
-#TODO compile and test
-# quickthreads seems to be better than posix threads, does it's worth to port?
-# build instructions: https://github.com/accellera-official/systemc/blob/main/INSTALL.md
 [source]
 git = "https://github.com/accellera-official/systemc"
 rev = "3.0.2"

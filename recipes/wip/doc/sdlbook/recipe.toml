@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/rofl0r/SDLBook"
 rev = "9ebf64275bc8a0c35ce38dea989f8af7d54f4999"

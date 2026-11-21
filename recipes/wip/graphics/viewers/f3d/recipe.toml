@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://github.com/f3d-app/f3d/blob/master/doc/dev/05-BUILD.md
 [source]
 git = "https://github.com/f3d-app/f3d"
 rev = "v3.5.0"

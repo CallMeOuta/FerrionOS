@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/projectM-visualizer/projectm/wiki/Building-libprojectM#build-and-install-projectm
 [source]
 tar = "https://github.com/projectM-visualizer/projectm/releases/download/v4.1.6/libprojectM-4.1.6.tar.gz"
 [build]

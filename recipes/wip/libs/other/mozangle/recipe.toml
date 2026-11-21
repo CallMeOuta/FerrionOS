@@ -1,4 +1,3 @@
-#TODO verify current state
 [source]
 git = "https://gitlab.redox-os.org/njskalski/mozangle.git"
 branch = "redox_mods"

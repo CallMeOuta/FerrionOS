@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://openexr.com/en/latest/install.html#linux-macos
 [source]
 tar = "https://github.com/AcademySoftwareFoundation/openexr/releases/download/v3.4.7/openexr-3.4.7.tar.gz"
 [build]

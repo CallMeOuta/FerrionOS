@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/greatest-ape/aquatic"
 shallow_clone = true

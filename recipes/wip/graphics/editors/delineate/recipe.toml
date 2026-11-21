@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/SeaDve/Delineate"
 shallow_clone = true

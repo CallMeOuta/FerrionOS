@@ -1,4 +1,3 @@
-#TODO compiled but untested
 [source]
 git = "https://github.com/weggli-rs/weggli"
 shallow_clone = true

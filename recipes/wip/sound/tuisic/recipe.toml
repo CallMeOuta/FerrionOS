@@ -1,4 +1,3 @@
-#TODO rustc-serialize crate error
 [source]
 git = "https://github.com/saubuny/tuisic"
 [build]

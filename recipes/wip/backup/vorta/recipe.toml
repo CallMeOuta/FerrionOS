@@ -1,5 +1,3 @@
-#TODO missing script for pip
-# build instructions: https://vorta.borgbase.com/install/linux/#install-from-source
 [source]
 git = "https://github.com/borgbase/vorta"
 rev = "v0.11.3"

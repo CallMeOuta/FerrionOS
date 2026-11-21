@@ -1,4 +1,3 @@
-#TODO wry and tao crate error
 [source]
 git = "https://github.com/DioxusLabs/dioxus"
 shallow_clone = true

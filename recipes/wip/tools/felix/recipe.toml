@@ -1,4 +1,3 @@
-#TODO replace the terminal prompt with nothing on execution
 [source]
 git = "https://github.com/kyoheiu/felix"
 [build]

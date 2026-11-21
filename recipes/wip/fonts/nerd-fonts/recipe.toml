@@ -1,4 +1,3 @@
-#TODO not tested
 [source]
 git = "https://github.com/ryanoasis/nerd-fonts"
 rev = "v3.4.0"

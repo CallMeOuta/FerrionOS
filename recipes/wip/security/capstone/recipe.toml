@@ -1,5 +1,3 @@
-#TODO build and test
-# build instructions: https://github.com/capstone-engine/capstone/blob/next/BUILDING.md
 [source]
 git = "https://github.com/capstone-engine/capstone"
 rev = "release-5.0.9"

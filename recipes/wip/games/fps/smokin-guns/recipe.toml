@@ -1,6 +1,3 @@
-#TODO build and test
-# bundled with the ioquake3 engine?
-#TODO determine dependencies
 [source]
 git = "https://github.com/smokin-guns/SmokinGuns"
 rev = "v1.1"

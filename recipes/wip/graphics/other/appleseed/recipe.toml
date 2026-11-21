@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/appleseedhq/appleseed/wiki/Building-appleseed-on-Linux
 [source]
 git = "https://github.com/appleseedhq/appleseed"
 rev = "015adb503af58cb80103e0c3ddeefc20d99d204f"

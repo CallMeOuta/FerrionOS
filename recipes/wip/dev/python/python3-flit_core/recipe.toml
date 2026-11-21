@@ -1,4 +1,3 @@
-# TODO successfully compiles but needs testing
 [source]
 git = "https://github.com/pypa/flit"
 rev = "3.12.0"

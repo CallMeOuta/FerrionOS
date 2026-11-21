@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://gitlab.inria.fr/scotch/scotch#installation
 [source]
 tar = "https://gitlab.inria.fr/scotch/scotch/-/archive/v7.0.11/scotch-v7.0.11.tar.bz2"
 [build]

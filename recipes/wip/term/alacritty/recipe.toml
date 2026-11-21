@@ -1,4 +1,3 @@
-#TODO need to patch glutin
 [source]
 git = "https://github.com/alacritty/alacritty"
 shallow_clone = true

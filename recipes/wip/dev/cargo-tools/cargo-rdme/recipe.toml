@@ -1,4 +1,3 @@
-#TODO camino crate error
 [source]
 git = "https://github.com/orium/cargo-rdme"
 shallow_clone = true

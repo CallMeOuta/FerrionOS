@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://github.com/teeworlds/teeworlds/releases/download/0.7.5/teeworlds-0.7.5-src.tar.gz"
 shallow_clone = true

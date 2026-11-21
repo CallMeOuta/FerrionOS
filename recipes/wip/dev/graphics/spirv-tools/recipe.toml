@@ -1,5 +1,3 @@
-#TODO can't find spirv-headers
-# build instructions: https://github.com/KhronosGroup/SPIRV-Tools#build
 [source]
 git = "https://github.com/KhronosGroup/SPIRV-Tools"
 rev = "vulkan-sdk-1.4.350.0"

@@ -1,4 +1,3 @@
-#TODO nettle-sys crate error
 [source]
 git = "https://gitlab.com/sequoia-pgp/sequoia-sq"
 shallow_clone = true

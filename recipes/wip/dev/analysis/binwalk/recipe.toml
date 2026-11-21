@@ -1,4 +1,3 @@
-#TODO compilation take too long, temporary crates.io problem?
 [source]
 git = "https://github.com/ReFirmLabs/binwalk"
 shallow_clone = true

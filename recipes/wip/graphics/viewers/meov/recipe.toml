@@ -1,5 +1,3 @@
-#TODO make it use sdl2 recipe instead of bundled sdl2
-# dependencies: https://github.com/seigtm/meov/tree/Baranov_0.3.0_Linux_Builds/dependencies
 [source]
 git = "https://github.com/seigtm/meov"
 branch = "Baranov_0.3.0_Linux_Builds"

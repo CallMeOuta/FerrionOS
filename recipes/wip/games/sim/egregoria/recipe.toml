@@ -1,4 +1,3 @@
-#TODO winit crate error
 [source]
 git = "https://github.com/Uriopass/Egregoria"
 shallow_clone = true

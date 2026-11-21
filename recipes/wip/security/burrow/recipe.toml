@@ -1,4 +1,3 @@
-#TODO cargo package error
 [source]
 git = "https://github.com/hackclub/burrow"
 [build]

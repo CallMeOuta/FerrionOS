@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://git.dynare.org/Dynare/dynare#general-instructions
 [source]
 tar = "https://www.dynare.org/release/source/dynare-7.0.tar.xz"
 [build]

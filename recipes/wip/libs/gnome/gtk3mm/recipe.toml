@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://gnome.pages.gitlab.gnome.org/gtkmm-documentation/sec-install-unix-and-linux.html
 [source]
 tar = "https://download.gnome.org/sources/gtkmm/3.24/gtkmm-3.24.10.tar.xz"
 [build]

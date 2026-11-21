@@ -1,5 +1,3 @@
-#TODO gwen dep build error
-# build instructions: https://github.com/bulletphysics/bullet3#build-instructions-for-bullet-using-premake-you-can-also-use-cmake-instead
 [source]
 git = "https://github.com/bulletphysics/bullet3"
 rev = "3.25"

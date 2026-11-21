@@ -1,5 +1,3 @@
-#TODO test
-# installation instructions: https://xon.sh/install.html
 [source]
 git = "https://github.com/xonsh/xonsh"
 rev = "0.23.6"

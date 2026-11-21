@@ -1,4 +1,3 @@
-#TODO build error
 [source]
 git = "https://github.com/lightspark/lightspark"
 rev = "0.10.0"
@@ -16,8 +15,6 @@ dependencies = [
     "mesa",
     "curl",
     "zlib",
-    #"ffmpeg6",
-    #"rtmpdump",
     "sdl2",
     "libjpeg",
     "libpng",

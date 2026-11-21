@@ -1,4 +1,3 @@
-#TODO build error
 [source]
 git = "https://github.com/JakWai01/lurk"
 shallow_clone = true

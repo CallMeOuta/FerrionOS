@@ -1,4 +1,3 @@
-#TODO openssl-sys crate error
 [source]
 git = "https://github.com/MarcoIeni/release-plz"
 rev = "68baf26d77a887c3ad90e4ad75ce77d9788f2442"

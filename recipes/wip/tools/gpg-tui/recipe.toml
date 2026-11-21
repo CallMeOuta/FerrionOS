@@ -1,4 +1,3 @@
-#TODO make dependencies work
 [source]
 git = "https://github.com/orhun/gpg-tui"
 [build]

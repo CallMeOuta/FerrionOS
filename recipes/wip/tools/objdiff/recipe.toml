@@ -1,4 +1,3 @@
-#TODO can't find the fontconfig dependency
 [source]
 git = "https://github.com/encounter/objdiff"
 [build]

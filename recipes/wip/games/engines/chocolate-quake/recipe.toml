@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/Henrique194/chocolate-quake"
 rev = "chocolate-quake-2.1.0"

@@ -1,4 +1,3 @@
-#TODO missing script for Bazel
 # build instructions: https://cockroachlabs.atlassian.net/wiki/spaces/CRDB/pages/181338446/Getting+and+building+CockroachDB+from+source
 [source]
 git = "https://github.com/cockroachdb/cockroach"

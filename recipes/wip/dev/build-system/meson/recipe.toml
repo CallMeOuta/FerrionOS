@@ -1,4 +1,3 @@
-#TODO compiled but not tested
 [source]
 git = "https://github.com/mesonbuild/meson"
 rev = "1.12.1"

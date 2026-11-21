@@ -1,5 +1,3 @@
-#TODO missing script for GNU Autotools, see
-# build instructions: https://github.com/openwall/john/blob/bleeding-jumbo/doc/INSTALL
 [source]
 tar = "https://www.openwall.com/john/k/john-1.9.0-jumbo-1.tar.xz"
 [build]

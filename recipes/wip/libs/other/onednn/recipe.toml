@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://oneapi-src.github.io/oneDNN/dev_guide_build.html#linux-macos
 [source]
 git = "https://github.com/uxlfoundation/oneDNN"
 rev = "v3.11.1"

@@ -1,4 +1,3 @@
-#TODO discover minimum dependencies from configure log
 [source]
 tar = "https://sourceforge.net/projects/tcl/files/Tcl/8.6.18/tk8.6.18-src.tar.gz"
 [build]

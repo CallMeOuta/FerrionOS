@@ -1,5 +1,3 @@
-#TODO missing script for cargo-xtask, see: https://github.com/alvr-org/ALVR/wiki/Building-From-Source
-#TODO probably missing dependencies, see: https://github.com/alvr-org/ALVR/wiki/Building-From-Source#streamer-building
 [source]
 git = "https://github.com/alvr-org/ALVR"
 [build]

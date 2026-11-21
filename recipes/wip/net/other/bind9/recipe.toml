@@ -1,7 +1,5 @@
-#TODO compiled but not tested
 [source]
 git = "https://github.com/isc-projects/bind9"
-# last version before ipv6 being mandatory
 rev = "v9.12.3"
 patches = [
     "redox.patch"
@@ -14,8 +12,7 @@ dependencies = [
     "openssl3",
     "liburcu",
     "libuv",
-    "nghttp2", # DoH support
-    #"jemalloc", # enable to improve performance
+    "nghttp2",
 ]
 script = """
 DYNAMIC_INIT

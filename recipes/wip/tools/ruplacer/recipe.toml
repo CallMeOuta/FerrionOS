@@ -1,4 +1,3 @@
-#TODO promote
 [source]
 git = "https://github.com/your-tools/ruplacer"
 [build]

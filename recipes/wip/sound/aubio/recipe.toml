@@ -1,4 +1,3 @@
-#TODO missing script for the waf build system, see https://aubio.org/installation
 [source]
 tar = "https://aubio.org/pub/aubio-0.4.7.tar.bz2"
 [build]

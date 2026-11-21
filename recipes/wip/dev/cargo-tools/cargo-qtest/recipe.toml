@@ -1,4 +1,3 @@
-#TODO compiled but not tested
 [source]
 git = "https://github.com/onur-ozkan/cargo-qtest"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/trasta298/keifu"
 shallow_clone = true

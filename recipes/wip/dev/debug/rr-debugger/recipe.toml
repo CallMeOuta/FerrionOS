@@ -1,5 +1,3 @@
-#TODO fix capnproto dep
-# build instructions: https://github.com/rr-debugger/rr/wiki/Building-And-Installing
 [source]
 git = "https://github.com/rr-debugger/rr"
 rev = "5.9.0"

@@ -1,4 +1,3 @@
-#TODO missing script for vcpkg: https://github.com/netheril96/securefs#build-from-source
 [source]
 git = "https://github.com/netheril96/securefs"
 rev = "v2.0.0"

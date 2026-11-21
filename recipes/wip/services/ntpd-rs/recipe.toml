@@ -1,5 +1,3 @@
-#TODO clock-steering and libc crate errors
-#TODO configure the service: https://docs.ntpd-rs.pendulum-project.org/guide/installation/#running-as-a-system-service
 [source]
 git = "https://github.com/pendulum-project/ntpd-rs"
 shallow_clone = true

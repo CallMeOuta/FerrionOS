@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://docs.lammps.org/Build_cmake.html
 [source]
 tar = "https://github.com/lammps/lammps/releases/download/stable_22Jul2025_update3/lammps-src-22Jul2025_update3.tar.gz"
 [build]

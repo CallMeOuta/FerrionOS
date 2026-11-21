@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/mufeedali/Wordbook"
 rev = "1.0.0"

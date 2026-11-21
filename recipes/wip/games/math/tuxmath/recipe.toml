@@ -1,5 +1,3 @@
-#TODO fix t4kcommon dep
-# build instructions: https://github.com/tux4kids/tuxmath/blob/master/doc/INSTALL
 [source]
 git = "https://github.com/tux4kids/tuxmath"
 rev = "febcf7b"

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/ddnet/ddnet/blob/master/docs/BUILDING.md
 [source]
 tar = "https://ddnet.org/downloads/DDNet-19.8.tar.xz"
 [build]

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://specfem3d.readthedocs.io/en/latest/02_getting_started/
 [source]
 git = "https://github.com/SPECFEM/specfem3d"
 rev = "v4.1.1"

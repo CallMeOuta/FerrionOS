@@ -1,6 +1,3 @@
-#TODO missing cross-compilation variables and a command to move the executable to the package
-#TODO determine minimum dependencies from mach log
-# build instructions - https://developer.thunderbird.net/thunderbird-development/building-thunderbird
 [source]
 tar = "https://archive.mozilla.org/pub/thunderbird/releases/140.7.0esr/source/thunderbird-140.7.0esr.source.tar.xz"
 [build]

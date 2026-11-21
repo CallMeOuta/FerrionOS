@@ -1,7 +1,3 @@
-#TODO not compiled or tested
-#TODO determine minimum dependencies from meson log
-# build instructions: https://github.com/maoschanz/drawing/blob/master/CONTRIBUTING.md#install-from-source-code
-# dependencies: https://github.com/maoschanz/drawing/blob/master/CONTRIBUTING.md#dependencies
 [source]
 git = "https://github.com/maoschanz/drawing"
 branch = "1.0.x-stable"
@@ -11,7 +7,3 @@ template = "meson"
 mesonflags = [
     "-Denable-translations-and-appdata=false"
 ]
-#dependencies = [
-#    "gtk3",
-#    "cairo",
-#]

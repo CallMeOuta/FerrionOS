@@ -1,4 +1,3 @@
-#TODO linking errors
 [source]
 git = "https://github.com/fabiangreffrath/crispy-doom"
 rev = "crispy-doom-7.1"
@@ -11,6 +10,4 @@ cmakeflags = [
 ]
 dependencies = [
     "sdl2",
-    #"sdl2-mixer",
-    #"sdl2-net",
 ]

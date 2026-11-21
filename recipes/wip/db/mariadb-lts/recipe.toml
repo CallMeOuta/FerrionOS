@@ -1,7 +1,3 @@
-#TODO not compiled or tested
-# build instructions:
-# https://mariadb.com/kb/en/generic-build-instructions/
-# https://mariadb.com/kb/en/cross-compiling-mariadb/
 [source]
 tar = "https://archive.mariadb.org/mariadb-10.11.6/source/mariadb-10.11.6.tar.gz"
 [build]

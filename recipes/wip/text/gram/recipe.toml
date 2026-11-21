@@ -1,5 +1,3 @@
-#TODO not compiled or tested; build gpui with its wayland feature and without its x11 feature
-# Linux build dependencies: https://codeberg.org/GramEditor/gram/src/branch/main/script/linux#L23
 [source]
 git = "https://codeberg.org/GramEditor/gram"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO xcap crate error
 [source]
 git = "https://github.com/mediar-ai/uniOCR"
 shallow_clone = true

@@ -1,6 +1,3 @@
-#TODO build configuration error
-#TODO some failling tests
-# build instructions: https://github.com/dolphin-emu/dolphin/wiki/Building-for-Linux
 [source]
 git = "https://github.com/dolphin-emu/dolphin"
 rev = "2606"
@@ -26,7 +23,6 @@ cmakeflags = [
 ]
 dependencies = [
     "libhidapi",
-    # "mbedtls",
     "sdl3",
     "libusb",
     "lz4",
@@ -36,7 +32,6 @@ dependencies = [
     "xxhash",
     "bzip2",
     "libenet",
-    # "pugixml",
     "glslang",
     "libfmt",
 ]

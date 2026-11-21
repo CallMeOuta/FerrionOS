@@ -1,11 +1,9 @@
-#TODO compiled but untested
 [source]
 git = "https://github.com/bartobri/no-more-secrets"
 rev = "v1.0.1"
 shallow_clone = true
 [build]
 template = "custom"
-#dependencies = ["ncursesw"] # enable if needed
 script = """
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 DYNAMIC_INIT

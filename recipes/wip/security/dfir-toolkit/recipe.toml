@@ -1,4 +1,3 @@
-#TODO forensic-rs crate error
 [source]
 git = "https://github.com/dfir-dd/dfir-toolkit"
 [build]

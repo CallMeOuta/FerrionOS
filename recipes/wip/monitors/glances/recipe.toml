@@ -1,4 +1,3 @@
-#TODO add script for proper packaging: https://github.com/nicolargo/glances#source
 [source]
 git = "https://github.com/nicolargo/glances"
 rev = "v4.5.4"

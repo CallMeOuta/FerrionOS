@@ -1,4 +1,3 @@
-#TODO use of unstable library feature `int_format_into`
 [source]
 git = "https://github.com/tokio-rs/topcoat"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO maybe incomplete script, see https://invent.kde.org/frameworks/karchive/-/blob/master/INSTALL?ref_type=heads
 [source]
 tar = "https://download.kde.org/stable/frameworks/5.112/karchive-5.112.0.tar.xz"
 [build]

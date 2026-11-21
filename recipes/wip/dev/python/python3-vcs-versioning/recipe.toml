@@ -1,5 +1,3 @@
-# TODO compiles but needs testing
-# TODO remove --no-deps hack when possible (PYTHONPATH is not read by pip; pip --find-links only works with wheel archives)
 [source]
 git = "https://github.com/pypa/setuptools-scm"
 rev = "vcs-versioning-v2.2.2"

@@ -1,4 +1,3 @@
-#TODO glutin crate error
 [source]
 git = "https://github.com/QuantumBadger/Speedy2D"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://download.gnome.org/sources/atkmm/2.36/atkmm-2.36.3.tar.xz"
 [build]

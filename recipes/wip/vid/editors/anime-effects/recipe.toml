@@ -1,4 +1,3 @@
-#TODO missing script for QMake, see https://github.com/AnimeEffectsDevs/AnimeEffects#clone--building
 [source]
 git = "https://github.com/AnimeEffectsDevs/AnimeEffects"
 rev = "6080497684809aa5c73bf015fec36e88443f6d11"

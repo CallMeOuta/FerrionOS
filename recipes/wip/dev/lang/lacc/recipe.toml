@@ -1,4 +1,3 @@
-#TODO missing files
 [source]
 git = "https://github.com/larmel/lacc"
 rev = "30839843daaff9d87574b5854854c9ee4610cdcd"

@@ -1,4 +1,3 @@
-#TODO wayland-backend crate error
 [source]
 git = "https://github.com/Jkeyuk/JDbrowser"
 [build]

@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-#TODO missing dependencies: https://github.com/Stellarium/stellarium/blob/master/BUILDING.md#qt6
-# build instructions: https://github.com/Stellarium/stellarium/blob/master/BUILDING.md#building
 [source]
 tar = "https://github.com/Stellarium/stellarium/releases/download/v26.1/stellarium-26.1.tar.xz"
 [build]

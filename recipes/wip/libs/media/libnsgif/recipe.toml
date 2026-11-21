@@ -9,10 +9,8 @@ dev-dependencies = [
 script = """
 DYNAMIC_INIT
 
-# Netsurf does not currently support out-of-tree builds :(
 rsync -av --delete "${COOKBOOK_SOURCE}/" ./
 
-# netsurf mixes up CFLAGS for host and build
 export CC="${CC} ${CPPFLAGS}"
 export NSSHARED=${COOKBOOK_SYSROOT}/usr/share/netsurf-buildsystem
 export PREFIX=/usr

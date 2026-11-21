@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/avast/retdec#process
 [source]
 git = "https://github.com/avast/retdec"
 rev = "9450585"

@@ -1,6 +1,3 @@
-#TODO build and test
-#TODO does binary strip target is needed?
-# build instructions: https://github.com/jarun/bcal#installation
 [source]
 tar = "https://github.com/jarun/bcal/releases/download/v2.5/bcal-v2.5.tar.gz"
 [build]

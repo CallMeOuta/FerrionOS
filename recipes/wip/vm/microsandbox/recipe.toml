@@ -1,4 +1,3 @@
-#TODO require revirt-u (our linux kvm equivalent proposal)
 [source]
 git = "https://github.com/superradcompany/microsandbox"
 shallow_clone = true

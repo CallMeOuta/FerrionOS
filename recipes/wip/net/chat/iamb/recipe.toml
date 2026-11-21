@@ -1,4 +1,3 @@
-#TODO fails to compile, matrix-sdk needs higher recursion limit
 [source]
 git = "https://github.com/ulyssa/iamb"
 shallow_clone = true

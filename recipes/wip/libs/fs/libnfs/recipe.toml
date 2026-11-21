@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/sahlberg/libnfs/blob/master/INSTALL
 [source]
 git = "https://github.com/sahlberg/libnfs"
 rev = "libnfs-6.0.2"

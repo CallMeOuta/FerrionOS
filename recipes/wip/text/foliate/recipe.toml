@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/johnfactotum/foliate"
 rev = "3.3.0"

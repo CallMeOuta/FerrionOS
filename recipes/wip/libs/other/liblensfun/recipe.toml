@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/lensfun/lensfun?tab=readme-ov-file#build-instructions
 [source]
 git = "https://github.com/lensfun/lensfun"
 branch = "release_0.3.x"

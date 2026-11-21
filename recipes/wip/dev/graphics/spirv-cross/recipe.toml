@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/KhronosGroup/SPIRV-Cross"
 rev = "vulkan-sdk-1.4.350.0"

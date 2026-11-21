@@ -1,4 +1,3 @@
-#TODO pango and pango-sys crate errors
 [source]
 git = "https://github.com/orhun/runst"
 shallow_clone = true

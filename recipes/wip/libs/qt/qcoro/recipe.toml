@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/qcoro/qcoro/releases"
 rev = "v0.13.0"

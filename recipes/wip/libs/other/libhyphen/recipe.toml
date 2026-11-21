@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/hunspell/hyphen"
 shallow_clone = true

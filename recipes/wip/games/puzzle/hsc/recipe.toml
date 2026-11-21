@@ -1,4 +1,3 @@
-#TODO rustix crate error; build without the x11 feature that pulls in x11rb
 [source]
 git = "https://github.com/HactarCE/Hyperspeedcube"
 branch = "v1"
@@ -6,9 +5,3 @@ shallow_clone = true
 [build]
 template = "cargo"
 cargopackages = ["hyperspeedcube"]
-#dependencies = [ # needed?
- #   "glib",
- #   "gtk3",
- #   "atk",
- #   "libxkbcommon",
-#]

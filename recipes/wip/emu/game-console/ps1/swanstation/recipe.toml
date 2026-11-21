@@ -1,6 +1,3 @@
-# using DuckStation fork from when it was licensed as GPLv3 and the fork still had the Qt and ImGui? frontends (libretro fork don't have them anymore)
-#TODO can't fetch submodules
-# build instructions: https://github.com/piepacker/swanstation#linux-1
 [source]
 git = "https://github.com/piepacker/swanstation"
 rev = "096c810"
@@ -17,7 +14,4 @@ cmakeflags = [
 dependencies = [
     "sdl2",
     "curl",
-    #"qt6-base",
-    #"qt6-svg",
-    #"qt6-tools",
 ]

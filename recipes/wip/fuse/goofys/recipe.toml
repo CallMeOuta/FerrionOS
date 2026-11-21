@@ -1,5 +1,3 @@
-#TODO implement go template
-# build instructions: https://github.com/kahing/goofys/#installation
 [source]
 git = "https://github.com/kahing/goofys"
 rev = "v0.24.0"

@@ -1,5 +1,3 @@
-#TODO build and test
-# build script: https://github.com/google/rowhammer-test/blob/master/make.sh
 [source]
 git = "https://github.com/google/rowhammer-test"
 rev = "c1d2bd9"

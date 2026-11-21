@@ -73,7 +73,6 @@ COOKBOOK_CONFIGURE_FLAGS=(
 )
 "${COOKBOOK_CONFIGURE}" "${COOKBOOK_CONFIGURE_FLAGS[@]}"
 "${COOKBOOK_MAKE}" -j "${COOKBOOK_MAKE_JOBS}"
-# make install not possible, just copy love
 mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
 cp -v love "${COOKBOOK_STAGE}/usr/bin/love"
 """

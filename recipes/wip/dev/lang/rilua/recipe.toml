@@ -1,4 +1,3 @@
-#TODO can't find stdin, stdout and stderr values
 [source]
 git = "https://github.com/wowemulation-dev/rilua"
 shallow_clone = true

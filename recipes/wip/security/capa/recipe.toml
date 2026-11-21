@@ -1,4 +1,3 @@
-#TODO add script for proper packaging: https://github.com/mandiant/capa/blob/master/doc/installation.md
 [source]
 git = "https://github.com/mandiant/capa"
 rev = "v9.4.0"

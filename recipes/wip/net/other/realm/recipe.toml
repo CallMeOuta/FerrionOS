@@ -1,4 +1,3 @@
-#TODO realm_syscall crate error
 [source]
 git = "https://github.com/zhboner/realm"
 [build]

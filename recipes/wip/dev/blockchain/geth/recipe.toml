@@ -1,4 +1,3 @@
-#TODO missing script for gnu make: https://geth.ethereum.org/docs/getting-started/installing-geth#build-from-source
 [source]
 git = "https://github.com/ethereum/go-ethereum"
 branch = "release/1.16"

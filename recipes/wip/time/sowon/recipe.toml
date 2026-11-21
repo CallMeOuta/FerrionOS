@@ -1,5 +1,3 @@
-# the sdl2 frontend was removed in newer commits
-#TODO compile and test
 [source]
 git = "https://github.com/tsoding/sowon"
 rev = "36a55237477a88e0d13204788a1957c007e297b0"

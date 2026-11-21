@@ -1,5 +1,3 @@
-#TODO test
-# installation instructions: https://github.com/Nuitka/Nuitka#installation
 [source]
 git = "https://github.com/Nuitka/Nuitka"
 rev = "4.1"

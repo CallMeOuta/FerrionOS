@@ -1,4 +1,3 @@
-#TODO missing script, see https://github.com/jgaeddert/liquid-dsp#installation-and-dependencies
 [source]
 git = "https://github.com/jgaeddert/liquid-dsp"
 rev = "v1.7.0"

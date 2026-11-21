@@ -1,4 +1,3 @@
-#TODO rustix crate error; build without the x11 feature that pulls in x11rb
 [source]
 git = "https://github.com/kmj-007/lazygh"
 shallow_clone = true

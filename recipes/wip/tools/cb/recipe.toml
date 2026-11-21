@@ -1,4 +1,3 @@
-#TODO discover how to cross-compile: https://github.com/yaa110/cb#build-manually
 [source]
 git = "https://github.com/yaa110/cb"
 [build]

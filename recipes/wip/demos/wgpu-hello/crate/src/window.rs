@@ -1,7 +1,3 @@
-//! Opens a winit window and shows the triangle turning. wgpu renders each frame into a texture,
-//! and softbuffer copies the pixels into the window: Mesa's Vulkan has no surface for Orbital
-//! windows, so a wgpu surface is only tried and its result printed.
-//! Usage: wgpu-hello-window [--frames N]  (exits after N frames; default: runs until closed)
 
 mod triangle;
 

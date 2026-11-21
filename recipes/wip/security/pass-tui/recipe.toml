@@ -1,4 +1,3 @@
-#TODO fix gpgme dep
 [source]
 git = "https://codeberg.org/frofor/pass-tui"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO compilation error - unknown type name "sigjmp_buf"
 [source]
 tar = "https://downloads.sourceforge.net/project/enlightenment/imlib2-src/1.12.5/imlib2-1.12.5.tar.xz"
 blake3 = "535b6a986538295af5194e81281a11a1d7e79ae518959ca434f1e53bfa67e86d"

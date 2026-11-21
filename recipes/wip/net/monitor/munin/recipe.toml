@@ -1,4 +1,3 @@
-#TODO missing script for gnu make: https://guide.munin-monitoring.org/en/latest/installation/install.html#installing-munin-from-source
 [source]
 git = "https://github.com/munin-monitoring/munin"
 rev = "2.0.76"

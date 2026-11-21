@@ -1,4 +1,3 @@
-#TODO camino crate error (after a patch on the ring crate)
 [source]
 git = "https://github.com/rustsec/rustsec"
 shallow_clone = true

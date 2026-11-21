@@ -1,4 +1,3 @@
-#TODO build and test
 [source]
 git = "https://github.com/wolfpld/tracy"
 rev = "v0.13.0"
@@ -13,8 +12,6 @@ dependencies = [
 ]
 script = """
 DYNAMIC_INIT
-#cd "${COOKBOOK_SOURCE}/capture"
-#cookbook_cmake # build once the profiler works
 cd "${COOKBOOK_SOURCE}/profiler"
 COOKBOOK_CMAKE_FLAGS+=(
     -DNO_FILESELECTOR=ON

@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://download.kde.org/stable/frameworks/6.27/karchive-6.27.0.tar.xz"
 [build]
@@ -9,7 +8,6 @@ cmakeflags = [
 dependencies = [
     "bzip2",
     "xz",
-    #"openssl3",
     "zstd",
     "zlib",
 ]

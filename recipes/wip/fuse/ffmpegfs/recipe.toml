@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/nschlia/ffmpegfs/blob/master/INSTALL.md#building-ffmpegfs-yourself
 [source]
 tar = "https://github.com/nschlia/ffmpegfs/releases/download/v2.17/ffmpegfs-2.17.tar.gz"
 [build]

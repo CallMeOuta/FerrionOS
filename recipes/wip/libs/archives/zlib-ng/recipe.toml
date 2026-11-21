@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/zlib-ng/zlib-ng"
 rev = "2.3.3"

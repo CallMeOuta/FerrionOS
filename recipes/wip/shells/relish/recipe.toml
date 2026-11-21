@@ -1,4 +1,3 @@
-#TODO program source code error
 [source]
 git = "https://gitlab.com/whom/relish"
 [build]

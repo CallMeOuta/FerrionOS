@@ -1,4 +1,3 @@
-#TODO can't fetch the submodules because they need login
 [source]
 git = "https://github.com/oxc-project/oxc"
 [build]

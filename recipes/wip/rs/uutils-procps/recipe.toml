@@ -1,4 +1,3 @@
-#TODO: common libc functions such as getsid and utmpx in rustix
 [source]
 git = "https://github.com/uutils/procps"
 rev = "ee98c0a78fe2abe72589f80eb05b455fa228e757"
@@ -10,7 +9,6 @@ script = """
 DYNAMIC_INIT
 
 BINS=(
-    #free
     hugetop
     pgrep
     pidof
@@ -23,9 +21,7 @@ BINS=(
     snice
     sysctl
     tload
-    #top
     vmstat
-    #w
     watch
 )
 
@@ -36,6 +32,5 @@ do
   ln -sv procps "${COOKBOOK_STAGE}/usr/bin/$bin"
 done
 
-# conflict with coreutils
 rm "${COOKBOOK_STAGE}/usr/bin/ps"
 """

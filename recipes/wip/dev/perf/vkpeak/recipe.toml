@@ -1,5 +1,3 @@
-#TODO fix libvulkan dep
-# build instructions: https://github.com/nihui/vkpeak#build-from-source
 [source]
 git = "https://github.com/nihui/vkpeak"
 rev = "20251010"

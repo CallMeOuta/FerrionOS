@@ -1,5 +1,3 @@
-#TODO compiled and tested
-#TODO cpal can't find an audio device
 [source]
 git = "https://github.com/pdeljanov/Symphonia"
 [build]

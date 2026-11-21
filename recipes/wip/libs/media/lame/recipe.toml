@@ -1,4 +1,3 @@
-#TODO The FerrionOS target is not supported by the configure script
 [source]
 tar = "https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz/download"
 [build]

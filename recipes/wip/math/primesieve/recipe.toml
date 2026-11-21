@@ -1,5 +1,3 @@
-#TODO compiled but untested
-# build instructions: https://github.com/kimwalisch/primesieve/blob/master/doc/BUILD.md
 [source]
 git = "https://github.com/kimwalisch/primesieve"
 rev = "v12.16"

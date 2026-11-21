@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/ospray/ospray_studio#standard-cmake-build
 [source]
 git = "https://github.com/ospray/ospray_studio"
 rev = "d2c83a67c841f1329f47cf9648a56b3dacbcdcaa"
@@ -11,5 +9,4 @@ dependencies = [
     "librkcommon",
     "mesa",
     "glfw3",
-    # "open-image-denoise",
 ]

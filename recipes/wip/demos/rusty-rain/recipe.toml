@@ -1,4 +1,3 @@
-#TODO promote
 [source]
 git = "https://github.com/cowboy8625/rusty-rain"
 rev = "dac8154"

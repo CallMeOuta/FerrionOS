@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-#TODO enable "backend_winit" and "renderer_pixman" feature flags from smithay
-# configuration: https://github.com/YaLTeR/niri#installation
 [source]
 git = "https://github.com/YaLTeR/niri"
 shallow_clone = true

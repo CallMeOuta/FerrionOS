@@ -1,4 +1,3 @@
-#TODO missing script for scons: https://www.gem5.org/documentation/general_docs/building
 [source]
 git = "https://github.com/gem5/gem5"
 branch = "stable"

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/LibVNC/libvncserver#how-to-build
 [source]
 git = "https://github.com/LibVNC/libvncserver"
 rev = "LibVNCServer-0.9.15"
@@ -19,7 +17,6 @@ cmakeflags = [
 ]
 dependencies = [
     "openssl3",
-    #"ffmpeg6",
     "libssh2",
     "sdl2",
     "libpng",

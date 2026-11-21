@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/NilsBrause/waylandpp#building
 [source]
 git = "https://github.com/NilsBrause/waylandpp"
 rev = "1.0.1"

@@ -1,6 +1,3 @@
-#TODO compiled but not tested
-#TODO missing script to properly move the binary
-#TODO require WebAssembly
 [source]
 git = "https://github.com/sile/pixcil"
 [build]

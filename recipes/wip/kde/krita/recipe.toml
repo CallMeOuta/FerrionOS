@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://docs.krita.org/en/untranslatable_pages/building_krita.html#building-on-linux
 [source]
 git = "https://invent.kde.org/graphics/krita"
 rev = "v6.0.2.1"
@@ -25,35 +23,4 @@ dependencies = [
      "ki18n6",
      "kitemviews6",
      "kwidgetsaddons6",
-#     "gexiv2",
-#     "ffmpeg6",
-#     "fftw",
-#     "fontconfig",
-#     "freetype2",
-#     "fribidi",
-#     "libgif",
-#     "harfbuzz",
-#     "liblcms",
-#     "libpng",
-#     "libtiff",
-#     "libwebp",
-#     "zlib",
-#     "libmypaint",
-#     "boost",
-#     "libheif",
-#     "libjpeg",
-#     "libjxl",
-#     "mlt",
-#     "opencolorio",
-#     "openexr",
-#     "openjpeg",
-#     "sdl2",
-#     "zlib",
-#     "libeigen",
-#     "libgsl",
-#     "libseexpr-kde",
-#     "liblager",
-#     "libunibreak",
-#     "libxsimd",
-#     "libxtl",
 ]

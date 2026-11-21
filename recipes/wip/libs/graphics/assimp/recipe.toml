@@ -1,4 +1,3 @@
-#TODO determine minimum dependencies from cmake log
 [source]
 git = "https://github.com/assimp/assimp"
 rev = "v6.0.5"

@@ -1,4 +1,3 @@
-#TODO promote
 [source]
 git = "https://github.com/pop-os/cosmic-wallpapers"
 shallow_clone = true

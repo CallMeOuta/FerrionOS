@@ -1,5 +1,3 @@
-#TODO fix source path in script
-#TODO discover minimum dependencies from configure log
 [source]
 tar = "https://gitlab.com/scilab/scilab/-/archive/2026.0.1/scilab-2026.0.1.tar.bz2"
 [build]

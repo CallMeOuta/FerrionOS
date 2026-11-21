@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-#TODO determine minimum dependencies
-# build instructions: https://github.com/mpv-player/mpv#compilation
 [source]
 git = "https://github.com/mpv-player/mpv"
 branch = "release/0.41"
@@ -19,6 +16,5 @@ dependencies = [
     "libjpeg",
     "libiconv",
     "zlib",
-    #"mesa",
     "sdl2",
 ]

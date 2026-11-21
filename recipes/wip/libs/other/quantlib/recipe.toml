@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://www.quantlib.org/install/cmake.shtml
 [source]
 tar = "https://github.com/lballabio/QuantLib/releases/download/v1.41/QuantLib-1.41.tar.gz"
 [build]

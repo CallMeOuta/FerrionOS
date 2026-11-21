@@ -1,4 +1,3 @@
-#TODO iroh-quinn-udp crate error
 [source]
 git = "https://github.com/fishfolk/bones"
 shallow_clone = true

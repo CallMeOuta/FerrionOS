@@ -1,5 +1,3 @@
-#TODO build and test
-# build instructions: https://gitlab.com/xonotic/xonotic/-/wikis/Compiling
 [source]
 tar = "https://gitlab.com/xonotic/xonotic/-/archive/xonotic-v0.8.6/xonotic-xonotic-v0.8.6.tar.bz2"
 [build]

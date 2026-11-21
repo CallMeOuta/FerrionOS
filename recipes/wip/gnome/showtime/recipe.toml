@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://download.gnome.org/sources/showtime/49/showtime-49.1.tar.xz"
 [build]

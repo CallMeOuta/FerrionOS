@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/ttytm/wthrr-the-weathercrab"
 shallow_clone = true

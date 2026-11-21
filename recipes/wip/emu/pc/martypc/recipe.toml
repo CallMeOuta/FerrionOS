@@ -1,5 +1,3 @@
-#TODO serialport-rs crate error
-# build instructions: https://github.com/dbalsom/martypc/wiki/Building-MartyPC#building-for-linux
 [source]
 git = "https://github.com/dbalsom/martypc"
 shallow_clone = true
@@ -9,10 +7,8 @@ rev = "0.4.1"
 template = "custom"
 script = """
 DYNAMIC_INIT
-# there's a lot of git dependencies
 COOKBOOK_CARGO_FLAGS=( -Zgit=shallow-index,shallow-deps )
 
-# clang specifics
 PREFIX_INCLUDE="$COOKBOOK_HOST_SYSROOT/$TARGET/include"
 export CLANGFLAGS="-I $PREFIX_INCLUDE/c++/13.2.0 -I $PREFIX_INCLUDE/c++/13.2.0/$TARGET -I $PREFIX_INCLUDE/c++/13.2.0/backward -I $PREFIX_INCLUDE"
 

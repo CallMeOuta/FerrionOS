@@ -1,4 +1,3 @@
-#TODO nix and rustix crate error
 [source]
 git = "https://github.com/astral-sh/uv"
 shallow_clone = true

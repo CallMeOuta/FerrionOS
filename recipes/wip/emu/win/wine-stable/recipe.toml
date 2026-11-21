@@ -1,5 +1,3 @@
-#TODO port to FerrionOS
-#build instructions: https://gitlab.winehq.org/wine/wine/-/wikis/Building-Wine
 [source]
 git = "https://gitlab.winehq.org/wine/wine"
 branch = "stable"
@@ -20,14 +18,12 @@ dependencies = [
     "libstdcxx",
     "libwayland",
     "libxkbcommon",
-    #"libxkbregistry",
 ]
 script = """
 DYNAMIC_INIT
 
 mkdir -p wine-tools
 pushd wine-tools
-#TODO: easier way to build for host?
 HOST_ENV=(
     env
     --unset=AR

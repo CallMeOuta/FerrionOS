@@ -1,5 +1,3 @@
-#TODO bundled mbedtls build error
-# build instructions: https://github.com/cuberite/cuberite/blob/master/COMPILING.md#building-1
 [source]
 git = "https://github.com/cuberite/cuberite"
 rev = "7fd3fa5"

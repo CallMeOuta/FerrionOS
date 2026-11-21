@@ -1,4 +1,3 @@
-#TODO cargo-util crate error
 [source]
 git = "https://github.com/JanLikar/cargo-clone"
 shallow_clone = true

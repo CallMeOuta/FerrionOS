@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# launch instructions: https://github.com/OpenShot/openshot-qt#launch
 [source]
 git = "https://github.com/OpenShot/openshot-qt"
 rev = "v3.4.0"

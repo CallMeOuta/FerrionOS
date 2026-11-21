@@ -1,6 +1,4 @@
-# TODO: Using patched mozjs from servo, maybe move patcehs into to upstream patches?
 [source]
-# tar = "https://ftp.mozilla.org/pub/nspr/releases/v4.9.6/src/nspr-4.9.6.tar.gz"
 git = "https://github.com/willnode/mozjs"
 branch = "redox"
 rev = "3a6553ea1781f83ceb1d2c9c1ed0d88f8c5b18f4"

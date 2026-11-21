@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/DaemonEngine/Daemon#build-instructions
-# data files - https://github.com/Unvanquished/Unvanquished#downloading-the-games-assets
 [source]
 git = "https://github.com/DaemonEngine/Daemon"
 [build]
@@ -19,7 +16,6 @@ dependencies = [
     "openal",
     "libogg",
     "libvorbis",
-    # "opus",
     "opusfile",
 ]
 script = """

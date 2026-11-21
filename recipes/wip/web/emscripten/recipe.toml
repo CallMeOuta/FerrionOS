@@ -1,4 +1,3 @@
-#TODO missing script for building: https://emscripten.org/docs/building_from_source/index.html
 [source]
 git = "https://github.com/emscripten-core/emscripten"
 rev = "5.0.0"

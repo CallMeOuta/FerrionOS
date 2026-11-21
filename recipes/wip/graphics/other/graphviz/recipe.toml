@@ -1,5 +1,3 @@
-#TODO Not compiled or tested
-#TODO customization - https://graphviz.org/download/source/#dependencies
 [source]
 tar = "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/9.0.0/graphviz-9.0.0.tar.xz"
 [build]

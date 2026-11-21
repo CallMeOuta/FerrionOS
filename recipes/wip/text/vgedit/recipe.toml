@@ -1,5 +1,3 @@
-#TODO compile and test
-#TODO add comand to install
 [source]
 git = "https://github.com/vgmoose/vgedit"
 rev = "v2.2.1"

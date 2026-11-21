@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 tar = "https://www.libsdl.org/projects/SDL_ttf/release/SDL3_ttf-3.2.2.tar.gz"
 [build]

@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://gitlab.com/adhami3310/Switcheroo"
 shallow_clone = true

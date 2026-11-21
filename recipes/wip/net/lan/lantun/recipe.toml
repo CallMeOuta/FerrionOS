@@ -1,4 +1,3 @@
-#TODO update iroh-quinn-udp crate version
 [source]
 git = "https://github.com/maxomatic458/lantun"
 shallow_clone = true

@@ -1,6 +1,3 @@
-#TODO camino crate error
-# broken since https://github.com/http-server-rs/http-server/pull/461
-# because it needs https://trunkrs.dev to work
 [source]
 git = "https://github.com/http-server-rs/http-server"
 shallow_clone = true

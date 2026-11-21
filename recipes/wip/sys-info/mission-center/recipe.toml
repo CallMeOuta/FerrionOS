@@ -1,7 +1,3 @@
-#TODO not compiled or tested
-#TODO disable udev codepath or translate the udev API to FerrionOS like FreeBSD does?
-#TODO patch to disable libgbm
-# build instructions: https://gitlab.com/mission-center-devs/mission-center#building---native
 [source]
 git = "https://gitlab.com/mission-center-devs/mission-center"
 [build]

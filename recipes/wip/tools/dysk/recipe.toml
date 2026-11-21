@@ -1,4 +1,3 @@
-#TODO nix crate error
 [source]
 git = "https://github.com/Canop/dysk"
 [build]

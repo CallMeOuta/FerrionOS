@@ -1,4 +1,3 @@
-#TODO missing script for waf, see https://github.com/FWGS/xash3d-fwgs#build-instructions
 [source]
 git = "https://github.com/FWGS/xash3d-fwgs"
 shallow_clone = true

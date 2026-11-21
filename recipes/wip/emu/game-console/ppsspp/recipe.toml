@@ -1,6 +1,3 @@
-#TODO build error
-# build instructions: https://github.com/hrydgard/ppsspp/wiki/Build-instructions
-#git = "https://github.com/jackpot51/ppsspp" # wip orbital port
 [source]
 tar = "https://github.com/hrydgard/ppsspp/releases/download/v1.19.3/ppsspp-1.19.3.tar.xz"
 [build]
@@ -18,8 +15,6 @@ dependencies = [
 script = """
 DYNAMIC_INIT
 COOKBOOK_CMAKE_FLAGS+=(
-    #-DCMAKE_C_FLAGS="-I${COOKBOOK_SYSROOT}/include" -I${COOKBOOK_SYSROOT}/include/SDL2"
-    #-DCMAKE_CXX_FLAGS="-I${COOKBOOK_SYSROOT}/include" -I${COOKBOOK_SYSROOT}/include/SDL2"
     -DOPENGL_opengl_LIBRARY="/dev/null"
     -DOPENGL_glx_LIBRARY="/dev/null"
     -DUSE_DISCORD=OFF

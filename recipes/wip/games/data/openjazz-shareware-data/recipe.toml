@@ -1,4 +1,3 @@
-# TODO: Requires unrar-free in the build container
 
 [build]
 template = "custom"

@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/slint-ui/slint"
 shallow_clone = true

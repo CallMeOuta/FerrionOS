@@ -1,4 +1,3 @@
-#TODO fix the script
 [source]
 git = "https://github.com/Wayoung7/firework-rs"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO patch makefile to make it use recipe dependencies
 [source]
 git = "https://github.com/new299/hackterm"
 rev = "d940f19cbdc46f14e557d30bdcfbcfdad4d18553"

@@ -1,4 +1,3 @@
-#TODO missing script for "make", see https://github.com/UIUC-PPL/ccs_tools#readme
 [source]
 git = "https://github.com/UIUC-PPL/ccs_tools"
 shallow_clone = true

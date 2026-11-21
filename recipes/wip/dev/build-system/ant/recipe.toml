@@ -1,4 +1,3 @@
-#TODO not tested
 [source]
 tar = "https://dlcdn.apache.org//ant/binaries/apache-ant-1.10.15-bin.tar.xz"
 [build]

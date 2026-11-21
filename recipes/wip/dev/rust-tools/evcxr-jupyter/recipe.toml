@@ -1,4 +1,3 @@
-#TODO sig crate error: cannot find value `SIGPOLL` in crate `libc`
 [source]
 git = "https://github.com/evcxr/evcxr"
 shallow_clone = true

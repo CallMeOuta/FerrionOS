@@ -1,4 +1,3 @@
-#TODO Make nmap work
 [source]
 git = "https://github.com/RustScan/RustScan"
 [build]

@@ -1,4 +1,3 @@
-#TODO update mio to 0.8 (after cargo update)
 [source]
 git = "https://github.com/Atticus64/news"
 [build]

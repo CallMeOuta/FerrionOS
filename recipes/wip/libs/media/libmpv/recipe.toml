@@ -1,6 +1,3 @@
-#TODO can't find ffmpeg
-#TODO missing dependencies
-# build instructions: https://github.com/mpv-player/mpv#compilation
 [source]
 git = "https://github.com/mpv-player/mpv"
 branch = "release/0.41"
@@ -16,9 +13,5 @@ mesonflags = [
 dependencies = [
     "ffmpeg6",
     "libass",
-    #"libjpeg",
-    #"libiconv",
-    #"zlib",
-    #"mesa",
     "sdl2",
 ]

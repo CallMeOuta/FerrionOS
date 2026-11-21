@@ -1,4 +1,3 @@
-#TODO compiling, not tested further
 [source]
 git = "https://github.com/willnode/zig"
 branch = "zig-0.15.2-redox"

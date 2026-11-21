@@ -1,5 +1,3 @@
-#TODO inconsistent types 'unsigned int' and 'long int' deduced for lambda return type
-# build instructions: https://github.com/Z3Prover/z3/blob/master/README-CMake.md
 [source]
 git = "https://github.com/Z3Prover/z3"
 rev = "z3-4.15.4"

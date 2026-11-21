@@ -1,6 +1,3 @@
-#TODO missing script for building, see https://github.com/defold/defold/blob/dev/README_BUILD.md
-#TODO build the editor, see https://github.com/defold/defold/blob/dev/editor/README_BUILD.md
-# probably the SDKs can't run on FerrionOS, avoid them
 [source]
 git = "https://github.com/defold/defold"
 rev = "4e156b7cf37a380122aada30dacbf2b590ead76b"

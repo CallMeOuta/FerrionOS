@@ -1,4 +1,3 @@
-#TODO cannot find function `wait4` in crate `libc`
 [source]
 git = "https://github.com/sharkdp/hyperfine"
 shallow_clone = true

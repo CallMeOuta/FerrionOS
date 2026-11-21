@@ -1,4 +1,3 @@
-#TODO implement go template
 [source]
 git = "https://github.com/containers/skopeo"
 branch = "release-1.16"

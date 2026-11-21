@@ -1,4 +1,3 @@
-#TODO FerrionOS is not supported by the procfs crate
 [source]
 git = "https://github.com/reubeno/brush"
 [build]

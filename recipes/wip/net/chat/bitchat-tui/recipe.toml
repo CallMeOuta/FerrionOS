@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 git = "https://github.com/vaibhav-mattoo/bitchat-tui"
 shallow_clone = true

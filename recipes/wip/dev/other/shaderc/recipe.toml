@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/google/shaderc#getting-and-building-shaderc
 [source]
 git = "https://github.com/google/shaderc"
 rev = "v2026.2"

@@ -1,5 +1,3 @@
-#TODO "unknown option" errors
-#TODO discover the minimum dependencies from autotools log
 [source]
 git = "https://github.com/notaz/picodrive"
 rev = "26ecb2b6358fefba24e3d68b9eb2efba7f10d5ee"

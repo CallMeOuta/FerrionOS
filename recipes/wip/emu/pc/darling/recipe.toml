@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://docs.darlinghq.org/build-instructions.html#building-and-installing
 [source]
 git = "https://github.com/darlinghq/darling"
 shallow_clone = true

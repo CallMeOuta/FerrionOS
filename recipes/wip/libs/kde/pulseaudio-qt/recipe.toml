@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://invent.kde.org/libraries/pulseaudio-qt"
 rev = "v1.8.1"

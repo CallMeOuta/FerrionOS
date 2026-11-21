@@ -1,6 +1,3 @@
-# Y9 version have unnecessary v8 JS dependency
-#TODO build and test; only the server and the terminal game are built, the editor (asciiid) and the windowed game need a Wayland or Orbital port
-# build script: https://github.com/msokalski/asciicker/blob/y8/build.sh
 [source]
 git = "https://github.com/msokalski/asciicker"
 rev = "Y8"

@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/adam900710/btrfs-fuse"
 rev = "b03483b6cc0599c6a940042ff5d31434239b4874"
@@ -8,11 +7,4 @@ template = "meson"
 mesonflags = ["-Dtests=false"]
 dependencies = [
     "libfuse3",
-    #"libuuid",
-    #"libb2",
-    #"openssl3",
-    #"xxhash",
-    #"zlib",
-    #"lz4",
-    #"zstd",
 ]

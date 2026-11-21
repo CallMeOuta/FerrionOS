@@ -1,4 +1,3 @@
-#TODO unrar-ng-sys crate error
 [source]
 git = "https://github.com/ouch-org/ouch"
 shallow_clone = true

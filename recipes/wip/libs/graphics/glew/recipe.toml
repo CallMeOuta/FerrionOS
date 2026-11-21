@@ -1,4 +1,3 @@
-#TODO: compile and test
 [source]
 tar = "https://github.com/nigels-com/glew/releases/download/glew-2.3.1/glew-2.3.1.tgz"
 [build]
@@ -17,19 +16,4 @@ COOKBOOK_CMAKE_FLAGS+=(
     -DGLEW_X11=OFF
 )
 cookbook_cmake "${COOKBOOK_SOURCE}"/build/cmake
-# # Build system is a standalone Makefile
-# COOKBOOK_CONFIGURE="true"
-# COOKBOOK_CONFIGURE_FLAGS=""
-# 
-# # See Makefile for variables to override
-# export GLEW_PREFIX="/usr"
-# export GLEW_DEST="/usr"
-# export PYTHON="python3"
-# 
-# rsync -av --delete "${COOKBOOK_SOURCE}/" ./
-# 
-# # The auto directory needs to be built first and can't be built in parallel
-# # because the Makefile creates files (using Perl and Python!!) that are needed later
-# "${COOKBOOK_MAKE}" -C "${COOKBOOK_BUILD}/auto"
-# cookbook_configure
 """

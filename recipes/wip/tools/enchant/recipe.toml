@@ -1,4 +1,3 @@
-#TODO can't find glib
 [source]
 tar = "https://github.com/AbiWord/enchant/releases/download/v2.6.3/enchant-2.6.3.tar.gz"
 [build]

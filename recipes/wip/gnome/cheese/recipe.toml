@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-# lacking build instructions: https://gitlab.gnome.org/GNOME/cheese/-/blob/master/meson.build
-# probably missing dependencies
 [source]
 tar = "https://download.gnome.org/sources/cheese/44/cheese-44.1.tar.xz"
 [build]

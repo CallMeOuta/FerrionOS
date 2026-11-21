@@ -1,4 +1,3 @@
-# TODO: need j1 relibc function
 [source]
 tar = "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz"
 patches = [

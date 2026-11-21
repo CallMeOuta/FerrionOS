@@ -1,5 +1,3 @@
-#TODO missing dependencies: https://github.com/Huluti/Curtail#tech
-# build instructions: https://github.com/Huluti/Curtail#build-from-source-nightly
 [source]
 git = "https://github.com/Huluti/Curtail"
 rev = "1.13.0"

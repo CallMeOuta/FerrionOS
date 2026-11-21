@@ -1,5 +1,3 @@
-#TODO compile and test
-#TODO add command to install
 [source]
 git = "https://github.com/ffbsoffa/TapeXPlayer"
 rev = "build1866"

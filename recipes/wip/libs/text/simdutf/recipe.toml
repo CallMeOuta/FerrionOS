@@ -1,5 +1,3 @@
-#TODO: promote
-#TODO update to 8.x version
 [source]
 git = "https://github.com/simdutf/simdutf"
 rev = "v7.3.5"

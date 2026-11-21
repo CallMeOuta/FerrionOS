@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/AndreRH/hangover/blob/master/docs/COMPILE.md
 [source]
 git = "https://github.com/AndreRH/hangover"
 rev = "hangover-11.0"
@@ -19,13 +17,11 @@ dependencies = [
     "libstdcxx",
     "libwayland",
     "libxkbcommon",
-    #"libxkbregistry",
 ]
 script = """
 DYNAMIC_INIT
 mkdir -p wine-tools
 pushd wine-tools
-#TODO: easier way to build for host?
 HOST_ENV=(
     env
     --unset=AR
@@ -58,7 +54,6 @@ popd
 
 COOKBOOK_CONFIGURE_FLAGS+=(
     --enable-win64
-    # Windows guest architectures via WoW64 on a 64-bit Unix host; no 32-bit Unix libraries.
 	--enable-archs=x86_64,i386,arm
 	--disable-kerberos
 	--disable-tests

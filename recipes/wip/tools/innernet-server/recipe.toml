@@ -1,4 +1,3 @@
-#TODO shared crate error
 [source]
 git = "https://github.com/tonarino/innernet"
 [build]

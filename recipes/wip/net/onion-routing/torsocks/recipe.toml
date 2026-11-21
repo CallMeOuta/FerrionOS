@@ -1,4 +1,3 @@
-#TODO missing syscall function
 [source]
 tar = "https://gitlab.torproject.org/tpo/core/torsocks/-/archive/v2.5.0/torsocks-v2.5.0.tar.bz2"
 script = """

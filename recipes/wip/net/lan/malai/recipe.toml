@@ -1,4 +1,3 @@
-#TODO update and fix netdev crate
 [source]
 git = "https://github.com/fastn-stack/kulfi"
 shallow_clone = true

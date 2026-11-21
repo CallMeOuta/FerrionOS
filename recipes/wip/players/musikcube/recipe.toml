@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://github.com/clangen/musikcube/wiki/building#linux-and-bsd
 [source]
 git = "https://github.com/clangen/musikcube"
 rev = "3.0.5"

@@ -1,5 +1,3 @@
-#TODO compile and test
-# build instructions: https://lite-xl.com/setup/building-from-source/
 [source]
 git = "https://github.com/lite-xl/lite-xl"
 rev = "v2.1.7"
@@ -8,10 +6,9 @@ shallow_clone = true
 template = "meson"
 mesonflags = [
     "-Drenderer=true",
-    "-Ddirmonitor_backend=dummy", #TODO: change to inotify when implemented
+    "-Ddirmonitor_backend=dummy",
     "-Duse_system_lua=true",
 ]
-#dev-dependencies = ["host:python312"] # needed?
 dependencies = [
     "sdl2",
     "pcre2",

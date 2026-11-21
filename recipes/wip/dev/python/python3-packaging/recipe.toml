@@ -1,4 +1,3 @@
-# TODO compiles but requires testing
 [source]
 git = "https://github.com/pypa/packaging"
 rev = "26.2"

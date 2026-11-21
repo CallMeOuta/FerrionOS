@@ -1,6 +1,3 @@
-#TODO not compiled or tested
-# build instructions - https://contour-terminal.org/install/#unix-like-systems-linux-freebsd-macos
-#TODO missing dependencies, see https://github.com/contour-terminal/contour/blob/master/scripts/install-deps.sh#L328
 [source]
 git = "https://github.com/contour-terminal/contour"
 rev = "116f1d16f6dc33ab8b0f6010a44e7b23eadeb8ca"

@@ -17,7 +17,6 @@ DYNAMIC_INIT
 
 cp -v "${COOKBOOK_RECIPE}/.servobuild" "${COOKBOOK_SOURCE}/.servobuild"
 
-# jemalloc specific configuration
 export JEMALLOC_SYS_WITH_LG_PAGE=16
 
 if [[ "$REDOXER_USE_CLANG" != "1" && "$REDOXER_USE_CLANG" != "true" ]]; then
@@ -35,24 +34,19 @@ export TARGET_CC="$CC"
 export TARGET_CXX="$CXX"
 export MOZJS_FROM_SOURCE=1
 
-# to force libz-sys build.rs to do dylib link
 export LIBZ_SYS_STATIC=0
 export CFLAGS="-L${COOKBOOK_SYSROOT}/usr/lib"
 reexport_flags
 
-# pkg-config crate can only recognize one path to pkgconfig
 export PKG_CONFIG_PATH_x86_64_unknown_redox="${COOKBOOK_SYSROOT}/lib/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_redox="${COOKBOOK_SYSROOT}/lib/pkgconfig"
-# rsync -a -v ${COOKBOOK_SYSROOT}/usr/share/pkgconfig/*.pc ${COOKBOOK_SYSROOT}/lib/pkgconfig/
 
-#Mozjs specifics
 export CCACHE="$CC_WRAPPER"
 unset CC_WRAPPER
 export CARGO_MAKEFLAGS="-j $COOKBOOK_MAKE_JOBS"
 
 COOKBOOK_CARGO_PATH="ports/servoshell" cookbook_cargo
 
-# resources packaging
 mkdir -p "${COOKBOOK_STAGE}/usr/lib/servo/bin" "${COOKBOOK_STAGE}/usr/share/applications"
 mv "${COOKBOOK_STAGE}/usr/bin/servoshell" "${COOKBOOK_STAGE}/usr/lib/servo/bin/"
 rsync -a -v "${COOKBOOK_SOURCE}/resources" "${COOKBOOK_STAGE}/usr/lib/servo/"

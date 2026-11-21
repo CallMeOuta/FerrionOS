@@ -1,4 +1,3 @@
-#TODO OpenSSL error (after a cargo update and a patch to update tokio on Cargo.toml)
 [source]
 git = "https://github.com/fcsonline/drill"
 [build]

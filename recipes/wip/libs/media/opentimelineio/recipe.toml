@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/AcademySoftwareFoundation/OpenTimelineIO"
 rev = "v0.18.1"

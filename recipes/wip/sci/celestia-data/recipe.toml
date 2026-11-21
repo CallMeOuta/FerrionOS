@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/CelestiaProject/Celestia/blob/master/INSTALL.md#installing-the-content
 [source]
 git = "https://github.com/CelestiaProject/CelestiaContent"
 [build]

@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://git.madhouse-project.org/iocaine/iocaine"
 branch = "iocaine-3.x"

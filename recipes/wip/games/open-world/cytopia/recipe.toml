@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/CytopiaTeam/Cytopia/wiki/Build-instructions
 [source]
 git = "https://github.com/CytopiaTeam/Cytopia"
 [build]

@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://github.com/Qalculate/libqalculate/releases/download/v5.9.0/libqalculate-5.9.0.tar.gz"
 [build]

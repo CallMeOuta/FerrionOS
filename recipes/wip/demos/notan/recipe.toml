@@ -1,4 +1,3 @@
-#TODO environment leak on CMake
 [source]
 git = "https://github.com/Nazariglez/notan"
 shallow_clone = true

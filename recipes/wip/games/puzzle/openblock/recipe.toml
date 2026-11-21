@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/mmatyas/openblok"
 rev = "f5cbbde4ac852083e7a0ed32f4122cecbac4f455"

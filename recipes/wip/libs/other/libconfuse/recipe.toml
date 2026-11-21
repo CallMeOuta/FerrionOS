@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 tar = "https://github.com/libconfuse/libconfuse/releases/download/v3.3/confuse-3.3.tar.gz"
 [build]

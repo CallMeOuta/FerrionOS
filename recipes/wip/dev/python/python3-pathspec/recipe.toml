@@ -1,4 +1,3 @@
-# TODO compiles but requires testing
 [source]
 git = "https://github.com/cpburnz/python-pathspec"
 rev = "v1.1.1"

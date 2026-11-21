@@ -1,4 +1,3 @@
-#TODO "No suitable wgpu::Adapter found" error on execution
 [source]
 git = "https://gitlab.redox-os.org/njskalski/jemallocator.git"
 branch = "redox_mods"
@@ -6,7 +5,5 @@ branch = "redox_mods"
 template = "custom"
 
 script = """
-# Build the library crates
 "${COOKBOOK_REDOXER}" build --manifest-path "${COOKBOOK_SOURCE}/Cargo.toml" --workspace --release
-# Library crates don't need installation, they're used as dependencies
 """

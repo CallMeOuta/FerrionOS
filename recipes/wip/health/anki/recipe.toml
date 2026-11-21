@@ -1,6 +1,3 @@
-#TODO add script for proper packaging
-# use the "./run" command to run
-# build instructions: https://github.com/ankitects/anki/blob/main/docs/development.md#building-from-source
 [source]
 git = "https://github.com/ankitects/anki"
 rev = "25.09.4"

@@ -1,5 +1,3 @@
-#TODO not compiled or tested
-# build instructions: https://github.com/flightlessmango/MangoHud#installation---build-from-source
 [source]
 tar = "https://github.com/flightlessmango/MangoHud/releases/download/v0.8.1/MangoHud-v0.8.1-Source.tar.xz"
 [build]

@@ -1,4 +1,3 @@
-#TODO outdated redox_syscall crate
 [source]
 git = "https://github.com/rust-disk-partition-management/gptman"
 [build]

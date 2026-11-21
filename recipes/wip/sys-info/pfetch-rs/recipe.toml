@@ -1,4 +1,3 @@
-#TODO if-addrs crate error
 [source]
 git = "https://github.com/Gobidev/pfetch-rs"
 shallow_clone = true

@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 git = "https://github.com/not-fl3/miniquad"
 shallow_clone = true

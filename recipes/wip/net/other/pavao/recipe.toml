@@ -1,4 +1,3 @@
-#TODO: fails to link libcrypto.so
 [source]
 git = "https://github.com/veeso/pavao.git"
 

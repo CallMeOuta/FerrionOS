@@ -1,4 +1,3 @@
-#TODO glutin crate error
 [source]
 git = "https://github.com/4383/svguru"
 shallow_clone = true

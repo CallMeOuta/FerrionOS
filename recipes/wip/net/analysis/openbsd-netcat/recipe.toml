@@ -1,4 +1,3 @@
-#TODO missing script for gnu make
 [source]
 git = "https://salsa.debian.org/debian/netcat-openbsd"
 rev = "upstream/1.234"

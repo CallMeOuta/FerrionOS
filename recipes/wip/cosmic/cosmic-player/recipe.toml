@@ -28,7 +28,6 @@ mkdir -pv "${COOKBOOK_STAGE}/usr/bin/"
 cp -v "target/${TARGET}/release/cosmic-player" "${COOKBOOK_STAGE}/usr/bin/"
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/ui/apps/"
 cp -v "${COOKBOOK_RECIPE}/manifest" "${COOKBOOK_STAGE}/usr/share/ui/apps/cosmic-player"
-#TODO: install with just?
 APPID="com.system76.CosmicPlayer"
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/applications/"
 cp -v "${COOKBOOK_SOURCE}/res/${APPID}.desktop" "${COOKBOOK_STAGE}/usr/share/applications/"

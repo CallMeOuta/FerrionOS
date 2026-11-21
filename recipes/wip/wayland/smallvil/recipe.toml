@@ -1,8 +1,6 @@
-#TODO fix bad performance
 [source]
 git = "https://github.com/jackpot51/smithay"
 branch = "redox"
-# The branch's head when pinned.
 rev = "13488e2fc469841763495f89db832429534d82f5"
 shallow_clone = true
 patches = ["ferrion-cargo-lock.patch"]

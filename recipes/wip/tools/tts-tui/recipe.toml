@@ -1,4 +1,3 @@
-#TODO make speech-dispatcher work
 [source]
 git = "https://github.com/lesleyrs/tts-tui"
 [build]

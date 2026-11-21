@@ -1,5 +1,3 @@
-//! Renders the triangle without a window and writes it to a PNG.
-//! Usage: wgpu-hello-headless [output.png]  (default: wgpu-hello.png)
 
 mod triangle;
 

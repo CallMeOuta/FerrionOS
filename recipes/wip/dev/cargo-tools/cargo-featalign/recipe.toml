@@ -1,4 +1,3 @@
-#TODO camino crate error
 [source]
 git = "https://github.com/hack-ink/cargo-featalign"
 shallow_clone = true

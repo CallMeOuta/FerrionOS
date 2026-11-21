@@ -1,4 +1,3 @@
-#TODO fontique crate error
 [source]
 git = "https://github.com/DioxusLabs/blitz"
 shallow_clone = true

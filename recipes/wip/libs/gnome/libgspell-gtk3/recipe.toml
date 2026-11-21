@@ -1,4 +1,3 @@
-#TODO make gtk3 work
 [source]
 tar = "https://download.gnome.org/sources/gspell/1.12/gspell-1.12.2.tar.xz"
 [build]

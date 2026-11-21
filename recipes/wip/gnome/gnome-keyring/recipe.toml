@@ -1,4 +1,3 @@
-#TODO not compiled or tested
 [source]
 tar = "https://download.gnome.org/sources/gnome-keyring/48/gnome-keyring-48.0.tar.xz"
 [build]

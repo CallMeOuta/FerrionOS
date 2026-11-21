@@ -1,4 +1,3 @@
-#TODO make the smartmontools dependency work
 [source]
 git = "https://github.com/alttch/shd"
 [build]

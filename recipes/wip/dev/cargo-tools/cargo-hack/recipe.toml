@@ -1,4 +1,3 @@
-#TODO serde crate error
 [source]
 git = "https://github.com/taiki-e/cargo-hack"
 shallow_clone = true

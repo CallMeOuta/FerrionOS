@@ -1,6 +1,3 @@
-#TODO insufficient boost library config or can't find library
-# dependencies are compiled if not found, use recipes to save time and space
-# build instructions: https://github.com/Vita3K/Vita3K/blob/master/building.md#linux
 [source]
 git = "https://github.com/Vita3K/Vita3K"
 shallow_clone = true

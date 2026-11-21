@@ -1,5 +1,3 @@
-#TODO waiting for OpenJDK's AWT on Wayland (Project Wakefield), the headless JDK opens no window
-# usage: https://multiphasicapps.net/doc/tip/assets/doc/usage-standalone.mkd
 [build]
 template = "custom"
 script = """

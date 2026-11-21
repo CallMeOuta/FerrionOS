@@ -1,4 +1,3 @@
-#TODO webbrowser crate error
 [source]
 git = "https://github.com/ergrelet/resym"
 [build]

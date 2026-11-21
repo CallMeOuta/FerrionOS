@@ -1,4 +1,3 @@
-#TODO configuration error
 [source]
 git = "https://github.com/explodingcamera/tinywasm"
 [build]

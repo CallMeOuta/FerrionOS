@@ -1,4 +1,3 @@
-#TODO update and fix pnet_sys crate
 [source]
 git = "https://github.com/bluecatengineering/dora"
 shallow_clone = true

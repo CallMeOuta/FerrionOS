@@ -1,4 +1,3 @@
-#TODO openssl error
 [source]
 git = "https://gitlab.com/imp/cargo-info"
 shallow_clone = true

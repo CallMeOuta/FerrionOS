@@ -1,5 +1,3 @@
-#TODO missing script for qmake and gnu make
-# build instructions - https://dev.pencil2d.org/build_linux.html
 [source]
 git = "https://github.com/pencil2d/pencil"
 branch = "release/0.7.0"

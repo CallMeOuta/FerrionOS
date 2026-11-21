@@ -1,4 +1,3 @@
-#TODO compile and test
 [source]
 tar = "https://mirror.download.kiwix.org/release/libkiwix/libkiwix-14.2.1.tar.xz"
 [build]
@@ -6,7 +5,6 @@ template = "meson"
 dependencies = [
     "libzim",
     "libicu",
-    # "pugixml",
     "mustache",
     "curl",
     "libmicrohttpd",

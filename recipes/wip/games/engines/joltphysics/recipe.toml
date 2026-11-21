@@ -1,13 +1,9 @@
-#TODO "unknown platform" error
 [source]
 git = "https://github.com/jrouwe/JoltPhysics"
 rev = "v5.6.0"
 shallow_clone = true
 [build]
 template = "custom"
-#dependencies = [
- #   "libvulkan",
-#]
 script = """
 DYNAMIC_INIT
 COOKBOOK_CMAKE_FLAGS+=(
@@ -15,7 +11,7 @@ COOKBOOK_CMAKE_FLAGS+=(
     -DTARGET_UNIT_TESTS=OFF
     -DTARGET_VIEWER=OFF
     -DGENERATE_DEBUG_SYMBOLS=OFF
-    -DOVERRIDE_CXX_FLAGS=OFF # used to force debug mode?
+    -DOVERRIDE_CXX_FLAGS=OFF
     -DFLOATING_POINT_EXCEPTIONS_ENABLED=OFF
     -DDEBUG_RENDERER_IN_DEBUG_AND_RELEASE=OFF
     -DPROFILER_IN_DEBUG_AND_RELEASE=OFF

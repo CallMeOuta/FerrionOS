@@ -1,4 +1,3 @@
-#TODO mlua-sys crate can't detect the lua54 dependency
 [source]
 git = "https://github.com/dandyvica/dqy"
 [build]

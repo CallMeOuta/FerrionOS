@@ -1,4 +1,3 @@
-#TODO configure "nob" build system for FerrionOS cross-compilation, with raylib's GLFW built for Wayland (-D_GLFW_WAYLAND)
 [source]
 git = "https://github.com/tsoding/musializer"
 rev = "4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392"
