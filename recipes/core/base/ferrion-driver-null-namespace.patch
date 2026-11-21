@@ -1,0 +1,459 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with ferrion-boot-splash.patch, ferrion-lockdown.patch, ferrion-pty-hangup.patch, ferrion-live-disk-view.patch, ferrion-sigchld.patch, ferrion-signal-handle-perm.patch and ferrion-rand-seed.patch applied (security roadmap S12, driver namespaces). Drivers enter the null namespace (memory and pipe) once they hold their handles:
+- ihdad, nvmed, usbscsid, virtio-gpud, usbhidd, pcid, inputd, rtcd, redoxerd, usbhubd and usbctl's port command call setrens(0, 0) after their last open by path. ihdad opens its shared-memory directory /scheme/shm/audiohw at start and creates the audio ring in it, so the ring's name is audiohw.audio_shm. usbhidd enters it after its first HashMap, which opens the random scheme. rtcd opens the kernel's time offset before it reads the clock. redoxerd enters it after it has started its command.
+- inputd opens a display's VT through the control handle the display driver sent it instead of by path, and driver-graphics answers an open on that control handle as it answers one on its root.
+- fbcond and fbbootlogd enter the null namespace with setrens(0, 0) instead of setns(0), and audiod closes the namespace handle setns returns, so none of them holds its previous namespace handle.
+- pcid-spawner, hwd and xhcid keep their namespace: the drivers they start register their schemes in the namespace they inherit, and a forked namespace is a copy, so those schemes would not appear in the one every other process uses.
+- The namespace manager answers fpath on a namespace handle with `namespace:hardware=<0|1>;schemes=<names>;`, the schemes that handle can open, so /scheme/sys/iostat shows each process's namespace.
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 78f78d1d..2cb87660 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2097,6 +2097,7 @@ version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "common",
++ "libredox 0.2.0",
+ ]
+ 
+ [[package]]
+@@ -2557,6 +2558,7 @@ version = "0.1.0"
+ dependencies = [
+  "clap",
+  "common",
++ "libredox 0.2.0",
+  "xhcid",
+ ]
+ 
+@@ -2568,6 +2570,7 @@ dependencies = [
+  "bitflags 2.13.2",
+  "common",
+  "inputd",
++ "libredox 0.2.0",
+  "log",
+  "orbclient",
+  "plain",
+@@ -2582,6 +2585,7 @@ name = "usbhubd"
+ version = "0.1.0"
+ dependencies = [
+  "common",
++ "libredox 0.2.0",
+  "log",
+  "redox_syscall 0.9.5",
+  "xhcid",
+diff --git a/audiod/src/main.rs b/audiod/src/main.rs
+index 9d253999..07ca9cc3 100644
+--- a/audiod/src/main.rs
++++ b/audiod/src/main.rs
+@@ -92,7 +92,8 @@ fn daemon(daemon: SchemeDaemon) -> anyhow::Result<()> {
+         IoSlice::new(b"rand"), // for HashMap
+     ])
+     .context("failed to make namespace")?;
+-    libredox::call::setns(ns).context("failed to set namespace")?;
++    let previous_ns = libredox::call::setns(ns).context("failed to set namespace")?;
++    libredox::call::close(previous_ns).context("failed to close previous namespace")?;
+ 
+     // Spawn a thread to mix and send audio data
+     let inner_thread = scheme.inner.clone();
+diff --git a/bootstrap/src/initnsmgr.rs b/bootstrap/src/initnsmgr.rs
+index b98b705c..abdf01e0 100644
+--- a/bootstrap/src/initnsmgr.rs
++++ b/bootstrap/src/initnsmgr.rs
+@@ -566,6 +566,45 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
+         Ok(buf)
+     }
+ 
++    fn fpath(&mut self, id: usize, buf: &mut [u8], _ctx: &CallerCtx) -> Result<usize> {
++        let access = match self.handles.get(&id).ok_or(Error::new(EBADF))? {
++            Handle::Access(access) | Handle::List(access) => access,
++            _ => return Err(Error::new(EOPNOTSUPP)),
++        };
++        if !access.has_permission(NsPermissions::LIST) {
++            return Err(Error::new(EACCES));
++        }
++        let mut written = 0;
++        let mut push = |text: &str| -> Result<()> {
++            let end = written + text.len();
++            let target = buf.get_mut(written..end).ok_or(Error::new(ENAMETOOLONG))?;
++            target.copy_from_slice(text.as_bytes());
++            written = end;
++            Ok(())
++        };
++        push(if access.hardware {
++            "namespace:hardware=1;schemes="
++        } else {
++            "namespace:hardware=0;schemes="
++        })?;
++        let ns = access.namespace.borrow();
++        let mut separator = "";
++        for name in ns.schemes.keys() {
++            if name.is_empty()
++                || (!access.hardware
++                    && (HARDWARE_SCHEMES.contains(&name.as_str())
++                        || (name == MEMORY_SCHEME && self.restricted_memory.is_none())))
++            {
++                continue;
++            }
++            push(separator)?;
++            push(name)?;
++            separator = ",";
++        }
++        push(";")?;
++        Ok(written)
++    }
++
+     fn fstat(&mut self, id: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
+         let resource_stat = match self.handles.get(&id).ok_or(Error::new(EBADF))? {
+             Handle::List(_) | Handle::OtherScheme { .. } => Stat {
+diff --git a/drivers/audio/ihdad/src/hda/device.rs b/drivers/audio/ihdad/src/hda/device.rs
+index 308366cf..19e21653 100755
+--- a/drivers/audio/ihdad/src/hda/device.rs
++++ b/drivers/audio/ihdad/src/hda/device.rs
+@@ -145,6 +145,7 @@ pub struct IntelHDA {
+     int_counter: usize,
+     handles: Mutex<HandleMap<Handle>>,
+     consumer: Option<redox_rings::user::Consumer<AudioChunk>>,
++    shm_dir: libredox::Fd,
+ }
+ 
+ impl IntelHDA {
+@@ -198,6 +199,11 @@ impl IntelHDA {
+             int_counter: 0,
+             handles: Mutex::new(HandleMap::new()),
+             consumer: None,
++            shm_dir: libredox::Fd::open(
++                "/scheme/shm/audiohw",
++                libredox::flag::O_DIRECTORY | libredox::flag::O_CLOEXEC,
++                0,
++            )?,
+         };
+ 
+         module.init()?;
+@@ -1073,18 +1079,20 @@ impl SchemeSync for IntelHDA {
+                     return Err(Error::new(ENOENT));
+                 }
+ 
+-                let shm_fd = libredox::Fd::open(
+-                    "/scheme/shm/audio_shm",
+-                    libredox::flag::O_CREAT
+-                        | libredox::flag::O_RDWR
+-                        | libredox::flag::O_CLOEXEC
+-                        | libredox::flag::O_EXCL,
+-                    0,
+-                )
+-                .map_err(|e| {
+-                    log::error!("ihdad: failed to open 'audio_shm': {:?}", e);
+-                    e
+-                })?;
++                let shm_fd = self
++                    .shm_dir
++                    .openat(
++                        "audio_shm",
++                        libredox::flag::O_CREAT
++                            | libredox::flag::O_RDWR
++                            | libredox::flag::O_CLOEXEC
++                            | libredox::flag::O_EXCL,
++                        0,
++                    )
++                    .map_err(|e| {
++                        log::error!("ihdad: failed to open 'audio_shm': {:?}", e);
++                        e
++                    })?;
+ 
+                 let fd = shm_fd.raw();
+ 
+diff --git a/drivers/audio/ihdad/src/main.rs b/drivers/audio/ihdad/src/main.rs
+index 217ee4d4..edd6e80e 100755
+--- a/drivers/audio/ihdad/src/main.rs
++++ b/drivers/audio/ihdad/src/main.rs
+@@ -88,7 +88,7 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> ! {
+             )
+             .unwrap();
+ 
+-        // libredox::call::setrens(0, 0).expect("ihdad: failed to enter null namespace"); Opens shm later!
++        libredox::call::setrens(0, 0).expect("ihdad: failed to enter null namespace");
+ 
+         let all = [Source::Irq, Source::Scheme];
+ 
+diff --git a/drivers/graphics/driver-graphics/src/lib.rs b/drivers/graphics/driver-graphics/src/lib.rs
+index 250f9656..1f7d0d75 100644
+--- a/drivers/graphics/driver-graphics/src/lib.rs
++++ b/drivers/graphics/driver-graphics/src/lib.rs
+@@ -444,6 +444,17 @@ impl<T: GraphicsAdapter> ResourceSync for Control<T> {
+     type SchemeData = GraphicsSchemeData<T>;
+     type ResourceEnum = GraphicsResource<T>;
+ 
++    fn openat(
++        &mut self,
++        scheme_data: &mut Self::SchemeData,
++        path: &str,
++        flags: usize,
++        fcntl_flags: u32,
++        ctx: &CallerCtx,
++    ) -> Result<ResourceOpenResult<Self::ResourceEnum>> {
++        SchemeRoot::<T>(PhantomData).openat(scheme_data, path, flags, fcntl_flags, ctx)
++    }
++
+     fn call(
+         &mut self,
+         scheme_data: &mut Self::SchemeData,
+diff --git a/drivers/graphics/fbbootlogd/src/main.rs b/drivers/graphics/fbbootlogd/src/main.rs
+index 9c9235ee..8f136c52 100644
+--- a/drivers/graphics/fbbootlogd/src/main.rs
++++ b/drivers/graphics/fbbootlogd/src/main.rs
+@@ -83,7 +83,7 @@ fn daemon(daemon: daemon::Daemon) -> ! {
+ 
+     let _ = daemon.ready();
+ 
+-    libredox::call::setns(0).expect("fbbootlogd: failed to enter null namespace");
++    libredox::call::setrens(0, 0).expect("fbbootlogd: failed to enter null namespace");
+ 
+     for event in event_queue.iter() {
+         match event.expect("fbbootlogd: failed to get event").user_data {
+diff --git a/drivers/graphics/fbcond/src/main.rs b/drivers/graphics/fbcond/src/main.rs
+index b772d0c0..e2041254 100644
+--- a/drivers/graphics/fbcond/src/main.rs
++++ b/drivers/graphics/fbcond/src/main.rs
+@@ -64,7 +64,7 @@ fn daemon(daemon: daemon::SchemeDaemon) -> ! {
+ 
+     let _ = daemon.ready_sync_scheme(readiness.socket(), &mut scheme);
+ 
+-    libredox::call::setns(0).expect("fbcond: failed to enter null namespace");
++    libredox::call::setrens(0, 0).expect("fbcond: failed to enter null namespace");
+ 
+     // Handle all events that could have happened before registering with the event queue.
+     handle_event(&mut scheme, &mut readiness, &event_queue, Source::Scheme);
+diff --git a/drivers/graphics/virtio-gpud/src/main.rs b/drivers/graphics/virtio-gpud/src/main.rs
+index 0c2d4e56..7219e822 100644
+--- a/drivers/graphics/virtio-gpud/src/main.rs
++++ b/drivers/graphics/virtio-gpud/src/main.rs
+@@ -571,6 +571,8 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+         )
+         .unwrap();
+ 
++    libredox::call::setrens(0, 0).expect("virtio-gpud: failed to enter null namespace");
++
+     let all = [Source::Scheme, Source::Interrupt];
+     for event in all
+         .into_iter()
+diff --git a/drivers/input/usbhidd/Cargo.toml b/drivers/input/usbhidd/Cargo.toml
+index 05bef7d1..b01455e2 100644
+--- a/drivers/input/usbhidd/Cargo.toml
++++ b/drivers/input/usbhidd/Cargo.toml
+@@ -11,6 +11,7 @@ license = "MIT"
+ [dependencies]
+ anyhow.workspace = true
+ bitflags.workspace = true
++libredox.workspace = true
+ log.workspace = true
+ orbclient.workspace = true
+ plain.workspace = true
+diff --git a/drivers/input/usbhidd/src/main.rs b/drivers/input/usbhidd/src/main.rs
+index bac28d34..585e2ec9 100644
+--- a/drivers/input/usbhidd/src/main.rs
++++ b/drivers/input/usbhidd/src/main.rs
+@@ -98,6 +98,7 @@ fn main() -> Result<()> {
+     let mut last_mouse_pos = (0, 0);
+     let mut last_buttons = [false, false, false];
+     let mut gamepad_state = HashMap::new();
++    libredox::call::setrens(0, 0).context("failed to enter null namespace")?;
+     loop {
+         let timer = time::Instant::now();
+         report_reader::read(
+diff --git a/drivers/inputd/src/main.rs b/drivers/inputd/src/main.rs
+index 4d849c8f..050ac5b0 100644
+--- a/drivers/inputd/src/main.rs
++++ b/drivers/inputd/src/main.rs
+@@ -13,9 +13,7 @@
+ 
+ use std::borrow::Cow;
+ use std::collections::BTreeSet;
+-use std::fs::File;
+ use std::ops::ControlFlow;
+-use std::os::fd::IntoRawFd;
+ 
+ use inputd::{ControlEvent, VtEvent, VtEventKind};
+ use libredox::errno::ESTALE;
+@@ -193,21 +191,28 @@ impl SchemeSync for InputScheme<'_> {
+                 let command = path_parts.next().ok_or(SysError::new(EINVAL))?;
+                 match command {
+                     "display" => {
+-                        let display = match &self.active_display {
++                        let id = match &self.active_display {
+                             ActiveDisplay::Unknown => return Err(SysError::new(EINVAL)),
+-                            ActiveDisplay::Early { name, .. }
+-                            | ActiveDisplay::Regular { name, .. } => name,
++                            ActiveDisplay::Early { id, .. } | ActiveDisplay::Regular { id, .. } => {
++                                *id
++                            }
+                         };
+-                        // NOTE: File::open for another scheme is deadlock prone. In this case
+-                        // however care is taken for the target scheme to never make a request to us
+-                        // after initial registration. Instead we push commands to the target scheme.
+-                        // Also care is taken to not run this code when doing openat on the scheme
+-                        // root. That would currently deadlock due to initnsmgr not handling openat
+-                        // requests in parallel: https://gitlab.redox-os.org/redox-os/base/-/work_items/93
++                        let Handle::Display {
++                            device_control: Some(control),
++                            ..
++                        } = self.handles.get(id)?
++                        else {
++                            return Err(SysError::new(EINVAL));
++                        };
++                        // The display holds no synchronous request back to inputd after registration.
+                         return Ok(OpenResult::OtherScheme {
+-                            fd: File::open(format!("/scheme/{display}/{vt}"))
+-                                .map_err(|err| SysError::new(err.raw_os_error().unwrap()))?
+-                                .into_raw_fd() as usize,
++                            fd: control
++                                .openat(
++                                    &vt.to_string(),
++                                    libredox::flag::O_RDONLY | libredox::flag::O_CLOEXEC,
++                                    0,
++                                )?
++                                .into_raw(),
+                         });
+                     }
+                     _ => {
+@@ -607,6 +612,7 @@ fn daemon(daemon: daemon::SchemeDaemon) -> anyhow::Result<()> {
+     let mut handler = Blocking::new(&socket_file, 16);
+ 
+     let _ = daemon.ready_sync_scheme(handler.socket(), &mut scheme);
++    libredox::call::setrens(0, 0)?;
+ 
+     loop {
+         scheme.has_new_events = false;
+diff --git a/drivers/pcid/src/main.rs b/drivers/pcid/src/main.rs
+index c5a8ef12..8d1bff15 100644
+--- a/drivers/pcid/src/main.rs
++++ b/drivers/pcid/src/main.rs
+@@ -308,6 +308,7 @@ fn daemon(daemon: daemon::Daemon) -> ! {
+         .expect("failed to register pci scheme to namespace");
+ 
+     let _ = daemon.ready();
++    libredox::call::setrens(0, 0).expect("pcid: failed to enter null namespace");
+ 
+     handler
+         .process_requests_blocking(scheme)
+diff --git a/drivers/redoxerd/src/main.rs b/drivers/redoxerd/src/main.rs
+index d17124e5..9d082562 100644
+--- a/drivers/redoxerd/src/main.rs
++++ b/drivers/redoxerd/src/main.rs
+@@ -174,6 +174,7 @@ fn inner() -> anyhow::Result<()> {
+     let mut process = command
+         .spawn()
+         .with_context(|| format!("Failed to spawn {command:?}"))?;
++    libredox::call::setrens(0, 0).context("failed to enter null namespace")?;
+     let status = handle(event_queue, master_fd, timeout_fd, &mut process)
+         .with_context(|| format!("Failed to run {name}"))?;
+     if status.success() {
+diff --git a/drivers/rtcd/Cargo.toml b/drivers/rtcd/Cargo.toml
+index 123b04f6..d3bce2ae 100644
+--- a/drivers/rtcd/Cargo.toml
++++ b/drivers/rtcd/Cargo.toml
+@@ -9,6 +9,7 @@ license = "MIT"
+ 
+ [dependencies]
+ anyhow.workspace = true
++libredox.workspace = true
+ 
+ common = { path = "../common" }
+ 
+diff --git a/drivers/rtcd/src/main.rs b/drivers/rtcd/src/main.rs
+index 30ef5cbd..68da3405 100644
+--- a/drivers/rtcd/src/main.rs
++++ b/drivers/rtcd/src/main.rs
+@@ -12,11 +12,16 @@ fn main() -> Result<()> {
+     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+     {
+         common::acquire_port_io_rights().context("failed to set iopl")?;
++        let mut offset = std::fs::OpenOptions::new()
++            .write(true)
++            .open("/scheme/sys/update_time_offset")
++            .context("failed to open time offset")?;
++        libredox::call::setrens(0, 0).context("failed to enter null namespace")?;
+ 
+         let time_s = self::x86::get_time();
+         let time_ns = u128::from(time_s) * 1_000_000_000;
+ 
+-        std::fs::write("/scheme/sys/update_time_offset", &time_ns.to_ne_bytes())
++        std::io::Write::write_all(&mut offset, &time_ns.to_ne_bytes())
+             .context("failed to write to time offset")?;
+     }
+     // TODO: aarch64 is currently handled in the kernel
+diff --git a/drivers/storage/nvmed/src/main.rs b/drivers/storage/nvmed/src/main.rs
+index 1556add0..803ed739 100644
+--- a/drivers/storage/nvmed/src/main.rs
++++ b/drivers/storage/nvmed/src/main.rs
+@@ -169,8 +169,7 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> ! {
+         event::EventFlags::READ,
+     ));
+ 
+-    // TODO: Drivers-block will open time fd.
+-    // libredox::call::setrens(0, 0).expect("nvmed: failed to enter null namespace");
++    libredox::call::setrens(0, 0).expect("nvmed: failed to enter null namespace");
+ 
+     log::debug!("Starting to listen for scheme events");
+ 
+diff --git a/drivers/storage/usbscsid/src/main.rs b/drivers/storage/usbscsid/src/main.rs
+index 98f6cb1d..a2067f0e 100644
+--- a/drivers/storage/usbscsid/src/main.rs
++++ b/drivers/storage/usbscsid/src/main.rs
+@@ -111,7 +111,7 @@ fn daemon(daemon: daemon::Daemon) -> ! {
+     // FIXME should this wait notifying readiness until the disk scheme is created?
+     daemon.ready();
+ 
+-    //libredox::call::setrens(0, 0).expect("usbscsid: failed to enter null namespace");
++    libredox::call::setrens(0, 0).expect("usbscsid: failed to enter null namespace");
+ 
+     event_queue
+         .subscribe(
+diff --git a/drivers/usb/usbctl/Cargo.toml b/drivers/usb/usbctl/Cargo.toml
+index 5cc99f43..0a0fa8ca 100644
+--- a/drivers/usb/usbctl/Cargo.toml
++++ b/drivers/usb/usbctl/Cargo.toml
+@@ -8,6 +8,7 @@ edition = "2018"
+ 
+ [dependencies]
+ clap.workspace = true
++libredox.workspace = true
+ xhcid = { path = "../xhcid" }
+ common = { path = "../../common" }
+ 
+diff --git a/drivers/usb/usbctl/src/main.rs b/drivers/usb/usbctl/src/main.rs
+index 9b5773d9..89d45839 100644
+--- a/drivers/usb/usbctl/src/main.rs
++++ b/drivers/usb/usbctl/src/main.rs
+@@ -34,6 +34,7 @@ fn main() {
+ 
+         let handle = XhciClientHandle::new(scheme.to_owned(), port)
+             .expect("Failed to open XhciClientHandle");
++        libredox::call::setrens(0, 0).expect("usbctl: failed to enter null namespace");
+ 
+         if let Some(_status_scmd_matches) = port_scmd_matches.subcommand_matches("status") {
+             let state = handle.port_state().expect("Failed to get port state");
+diff --git a/drivers/usb/usbhubd/Cargo.toml b/drivers/usb/usbhubd/Cargo.toml
+index e64355c5..ab3c4054 100644
+--- a/drivers/usb/usbhubd/Cargo.toml
++++ b/drivers/usb/usbhubd/Cargo.toml
+@@ -9,6 +9,7 @@ license = "MIT"
+ 
+ [dependencies]
+ log.workspace = true
++libredox.workspace = true
+ redox_syscall.workspace = true
+ xhcid = { path = "../xhcid" }
+ 
+diff --git a/drivers/usb/usbhubd/src/main.rs b/drivers/usb/usbhubd/src/main.rs
+index 8e198a3b..044b0ca1 100644
+--- a/drivers/usb/usbhubd/src/main.rs
++++ b/drivers/usb/usbhubd/src/main.rs
+@@ -154,6 +154,8 @@ fn main() {
+         });
+     }
+ 
++    libredox::call::setrens(0, 0).expect("usbhubd: failed to enter null namespace");
++
+     //TODO: use change flags?
+     loop {
+         for port in 1..=ports {
