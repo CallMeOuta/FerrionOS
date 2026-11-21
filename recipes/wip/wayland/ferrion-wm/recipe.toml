@@ -1,0 +1,12 @@
+[package]
+description = "ferrion-wm, FerrionOS's window manager: a fork of niri (GPL-3.0-or-later, as are these patches) with a free mode beside its columns, carried as niri's commits exported with git format-patch"
+
+[source]
+git = "https://github.com/niri-wm/niri"
+rev = "ef54ab5421d13ffed2b5fc1f0308998cac4808d0"
+patches = [
+    "F4-workspace-mode.patch",
+    "F5-placement.patch",
+    "F6-minimize.patch",
+    "F7-tiling.patch",
+]
