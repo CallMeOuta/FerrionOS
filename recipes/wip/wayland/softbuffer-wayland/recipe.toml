@@ -2,6 +2,8 @@
 [source]
 git = "https://github.com/jackpot51/softbuffer.git"
 branch = "redox-wayland"
+# Pinned from branch redox-wayland.
+rev = "dd2011e055bacef44b01e3c79d15c48cbf92afc5"
 shallow_clone = true
 [build]
 dependencies = [
