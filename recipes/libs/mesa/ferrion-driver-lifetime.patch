@@ -1,0 +1,18 @@
+FerrionOS: Keep Orbital drivers mapped while relibc retains their exit callbacks.
+Source: https://gitlab.redox-os.org/redox-os/mesa.git at 9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
+
+--- a/src/egl/drivers/dri2/egl_dri2.c
++++ b/src/egl/drivers/dri2/egl_dri2.c
+@@ -1235,7 +1235,11 @@
+        * you get good symbols from the leak reports.
+        */
+ #if !BUILT_WITH_ASAN || defined(NDEBUG)
+-   if (dri2_dpy->driver)
++   /* FerrionOS: relibc retains plain atexit callbacks after dlclose.
++    * Keep the Orbital driver mapped until exit (dso-atexit-probe).
++    * Remove this when relibc runs or drops a closed object's callbacks.
++    */
++   if (dri2_dpy->driver && disp->Platform != _EGL_PLATFORM_REDOX)
+       dlclose(dri2_dpy->driver);
+ #endif
+ 

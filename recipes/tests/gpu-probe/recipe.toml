@@ -1,0 +1,14 @@
+[package]
+description = "Checks CPU graphics rendering against exact reference pixels"
+dependencies = ["mesa"]
+
+[build]
+template = "custom"
+dependencies = ["mesa", "libglvnd"]
+script = """
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=c11 -Wall -Wextra "${COOKBOOK_RECIPE}/main.c" \
+    ${LDFLAGS} $("${PKG_CONFIG}" --cflags --libs egl opengl) -o gpu-probe
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+cp gpu-probe "${COOKBOOK_STAGE}/usr/bin/"
+"""

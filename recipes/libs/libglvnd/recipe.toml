@@ -1,6 +1,10 @@
+[package]
+description = "OpenGL, EGL and GLES dispatch without X11"
+
 [source]
 # meson support not in latest release
 git = "https://github.com/NVIDIA/libglvnd.git"
+rev = "606f6627cf481ee6dcb32387edc010c502cdf38b"
 
 [build]
 template = "meson"

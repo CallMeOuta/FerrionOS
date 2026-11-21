@@ -7,7 +7,7 @@ upstream = "https://gitlab.freedesktop.org/mesa/mesa"
 branch = "redox-24.0"
 rev = "9850ea1ad7d687240757ebf9a73760ceb4ba28a9"
 shallow_clone = true
-patches = ["ferrion-libsync-wait.patch"]
+patches = ["ferrion-libsync-wait.patch", "ferrion-driver-lifetime.patch"]
 [build]
 template = "custom"
 dependencies = [
@@ -16,8 +16,7 @@ dependencies = [
     "liborbital",
     "llvm21",
     "zlib",
-    # disabled for an open upstream bug
-    # "libglvnd",
+    "libglvnd",
 ]
 dev-dependencies = [
     "llvm21.dev",
@@ -32,7 +31,7 @@ export LDFLAGS+=" -lorbital"
 
 if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
     # TODO: Fix wayland-scanner and enable wayland platform
-    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast)
+    COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast -Dglvnd=true)
 else
     # No vulkan, lavapipe or EGL which is strictly requires shared library support
     COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=disabled -Dshared-glapi=disabled -Dgbm=disabled -Dplatforms=)
