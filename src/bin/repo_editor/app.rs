@@ -1,5 +1,3 @@
-// Contains code related to TUI model
-
 use crate::*;
 
 #[derive(PartialEq)]

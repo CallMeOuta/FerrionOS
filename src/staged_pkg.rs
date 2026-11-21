@@ -9,11 +9,6 @@ use pkg::{Package, PackageError, PackageName};
 use crate::bail_other_err;
 use crate::cook::fs;
 
-// This file contains code that caches recipe paths.
-
-// TODO: This file is previously resides in `pkg` crate,
-// and can actually be merged with other logic in this cookbook.
-
 static RECIPE_PATHS: LazyLock<HashMap<PackageName, PathBuf>> = LazyLock::new(|| {
     let mut recipe_paths = HashMap::new();
     for entry_res in ignore::Walk::new("recipes") {
@@ -106,8 +101,6 @@ pub fn new_recursive(
     }
 }
 
-/// List ordered success packages and map of failed packages.
-/// A package can be both success and failed if dependencies aren't satistied.
 pub fn new_recursive_nonstop(
     names: &[PackageName],
     recursion: usize,
@@ -148,7 +141,6 @@ pub fn new_recursive_nonstop(
                         has_invalid_dependency = true;
                     }
                 }
-                // TODO: this check is redundant
                 if !packages_map.contains_key(name) {
                     packages_map.insert(
                         name.clone(),

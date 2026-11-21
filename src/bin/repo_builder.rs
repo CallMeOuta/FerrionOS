@@ -42,14 +42,12 @@ fn main() -> Result<()> {
     Ok(publish_packages(&conf)?)
 }
 
-// TODO: Make this callable from repo bin
 fn publish_packages(config: &CliConfig) -> Result<()> {
     let repo_path = &config.repo_dir.join(redoxer::target());
     if !repo_path.is_dir() {
         fs::create_dir(repo_path)?;
     }
 
-    // Don't publish host packages
     let target_packages = &config
         .recipe_list
         .iter()
@@ -64,20 +62,13 @@ fn publish_packages(config: &CliConfig) -> Result<()> {
         return Ok(());
     }
 
-    // TODO: publish cross target builds?
     if std::env::var("COOKBOOK_CROSS_TARGET").is_ok_and(|x| !x.is_empty()) {
         return Ok(());
     }
 
-    // Runtime dependencies include both `[package.dependencies]` and dynamically
-    // linked packages discovered by auto_deps.
-    //
-    // The following adds the package dependencies of the recipes to the repo as
-    // well.
     let (recipe_list, recipe_map) = staged_pkg::new_recursive_nonstop(target_packages, WALK_DEPTH);
 
     if recipe_list.len() == 0 {
-        // Fail-Safe
         return Err(Error::Other(format!("Zero packages are passing the build")));
     }
 
@@ -85,7 +76,6 @@ fn publish_packages(config: &CliConfig) -> Result<()> {
     let mut packages: BTreeMap<String, String> = BTreeMap::new();
     let mut outdated_packages: BTreeMap<String, SourceIdentifier> = BTreeMap::new();
 
-    // === 1. Push recipes in list ===
     for recipe_toml in &recipe_list {
         let recipe = &recipe_toml.name;
         let Some(recipe_path) = staged_pkg::find(recipe.name()) else {
@@ -120,14 +110,12 @@ fn publish_packages(config: &CliConfig) -> Result<()> {
                     .map_err(|e| Error::from_io_error(e, "Copying file"))?;
             }
 
-            // TODO: Extract from pkgar instead to handle config.cook.clean_target == true
             if stage_dir.join("usr/share/metainfo").exists() {
                 appstream_sources.insert(recipe.name().to_string(), stage_dir.clone());
             }
         }
     }
 
-    // === 2. Optional AppStream generation ===
     if config.appstream {
         eprintln!("\x1b[01;38;5;155mrepo - generating appstream data\x1b[0m");
 
@@ -173,7 +161,6 @@ fn publish_packages(config: &CliConfig) -> Result<()> {
         }
     }
 
-    // === 3. List outdated packages ===
     for (recipe, e) in recipe_map
         .into_iter()
         .filter_map(|(k, v)| v.err().and_then(|e| Some((k, e))))
@@ -217,7 +204,6 @@ fn publish_packages(config: &CliConfig) -> Result<()> {
 
     eprintln!("\x1b[01;38;5;155mrepo - generating repo.toml\x1b[0m");
 
-    // === 4. Read and update repo.toml ===
     let repo_toml_path = repo_path.join("repo.toml");
     if repo_toml_path.exists() {
         let parsed: Repository = fs::read_toml(&repo_toml_path)?;

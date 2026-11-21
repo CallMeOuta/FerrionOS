@@ -13,8 +13,6 @@ use pkg::{
     net_backend::{CurlBackend, DownloadBackend},
 };
 
-// TODO: This is a workaround, but as long as whole
-// fetch operation is in single thread, this is ok
 thread_local! {
 static BINARY_REPO: RefCell<Option<(RepoManager, Repository)>> = const { RefCell::new(None) };
 }
@@ -25,7 +23,6 @@ fn load_cached_repo(path: &Path) -> Option<Repository> {
     if !crate::config::get_config().cook.offline {
         let stale_time = std::time::SystemTime::now().checked_sub(Duration::from_secs(8 * 3600))?;
         if metadata.modified().ok()? < stale_time {
-            // stale cache
             let _ = std::fs::remove_file(path);
             return None;
         }
@@ -60,7 +57,6 @@ fn init_binary_repo() -> (RepoManager, Repository) {
                 })
                 .unwrap_or_default()
             });
-    // reset here to not clobber pty
     repo.callback = Rc::new(RefCell::new(PlainCallback::new()));
     (repo, repo_toml)
 }
@@ -120,7 +116,6 @@ impl PlainPtyCallback {
         }
     }
 
-    /// Set if user require to agree on terminal
     pub fn set_interactive(&mut self, enabled: bool) {
         self.interactive = enabled;
     }
@@ -154,7 +149,6 @@ impl Callback for PlainPtyCallback {
     }
 
     fn fetch_package_name(&mut self, pkg_name: &PackageName) {
-        // resuming after fetch_package_increment
         let _ = write!(&self.pty, " {}", pkg_name.as_str());
         self.flush();
     }
@@ -199,7 +193,6 @@ impl Callback for PlainPtyCallback {
             return;
         }
 
-        // keep using MB for consistency
         let pos_mb = self.pos as f64 / 1_048_576.0;
         let size_mb = self.size as f64 / 1_048_576.0;
         let file_name = self.download_file.as_deref().unwrap_or("");

@@ -1,5 +1,3 @@
-// Contains TUI specific code
-
 use crate::*;
 use cookbook::cook::fetch::FetchResult;
 use cookbook::cook::pty::{UnixSlavePty, flush_pty, setup_pty, write_to_pty};
@@ -217,7 +215,6 @@ impl TuiApp {
         Ok(())
     }
 
-    // Update the state based on a message from a worker thread
     pub fn update_status(&mut self, update: StatusUpdate) {
         let (name, new_status) = match update {
             StatusUpdate::StartFetch(name) => {
@@ -250,8 +247,6 @@ impl TuiApp {
                 return;
             }
             StatusUpdate::FlushLog(name, path) => {
-                // TODO: This blocks the TUI, maybe open separate thread?
-                // FIXME: handle error here?
                 let _ = self.write_log(&name, &path);
                 return;
             }
@@ -298,7 +293,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
     let prompting = Arc::new(AtomicU32::new(0));
     const TICK_RATE: Duration = Duration::from_millis(100);
 
-    // ---- Cooker Thread ----
     let cooker_config = config.clone();
     let cooker_status_tx = status_tx.clone();
     let cooker_prompting = prompting.clone();
@@ -311,7 +305,7 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                 cooker_status_tx
                     .send(StatusUpdate::StartCook(name.clone()))
                     .unwrap();
-                let _ = recipe.reload_recipe(); // reread recipe.toml in case we're retrying
+                let _ = recipe.reload_recipe();
                 let handler = handle_cook(
                     &recipe,
                     &cooker_config,
@@ -319,7 +313,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                     &logger,
                 );
                 if let Some(log_path) = cooker_config.logs_dir.as_ref()
-                    // prefer to retain full build logs
                     && !matches!(handler, Ok(true))
                 {
                     if let Err(err_ctx) = &handler {
@@ -351,12 +344,11 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                             if cooker_prompting.load(Ordering::SeqCst) == 4 {
                                 break 'done;
                             }
-                            // TODO: where to report error?
                             let _ = handle_nonstop_fail(&recipe);
                             break;
                         }
                         while cooker_prompting.load(Ordering::SeqCst) != 0 {
-                            thread::sleep(PROMPT_WAIT); // wait other prompt
+                            thread::sleep(PROMPT_WAIT);
                         }
                         cooker_prompting.swap(1, Ordering::SeqCst);
                         'wait: loop {
@@ -366,16 +358,16 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                                 2 => {
                                     cooker_prompting.swap(0, Ordering::SeqCst);
                                     break 'wait;
-                                } // retry
+                                }
                                 3 => {
                                     cooker_prompting.swap(0, Ordering::SeqCst);
                                     let _ = handle_nonstop_fail(&recipe);
                                     break 'again;
-                                } // skip
+                                }
                                 4 => {
                                     cooker_prompting.swap(0, Ordering::SeqCst);
                                     break 'done;
-                                } // done
+                                }
                                 _ => unreachable!(),
                             }
                         }
@@ -395,7 +387,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
         .into_alternate_screen()
         .unwrap();
 
-    // ----- Input Thread -----
     let (input_tx, input_rx) = mpsc::channel::<Event>();
     let _input_handle = thread::spawn(move || {
         for evt in mstdin.events() {
@@ -407,7 +398,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
         }
     });
 
-    // ---- Fetcher Thread ----
     let fetcher_recipes = recipes.clone();
     let fetcher_status_tx = status_tx.clone();
     let fetcher_config = config.clone();
@@ -421,10 +411,9 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                 fetcher_status_tx
                     .send(StatusUpdate::StartFetch(name.clone()))
                     .unwrap();
-                let _ = recipe.reload_recipe(); // reread recipe.toml in case we're retrying
+                let _ = recipe.reload_recipe();
                 let handler = handle_fetch(&recipe, &fetcher_config, true, &logger);
                 if let Some(log_path) = fetcher_config.logs_dir.as_ref()
-                    // prefer to retain full build logs
                     && !matches!(handler, Ok(FetchResult { cached: true, .. }))
                 {
                     if let Err(err_ctx) = &handler {
@@ -442,7 +431,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                             .send(StatusUpdate::Fetched(recipe.clone()))
                             .unwrap();
                         if work_tx.send((recipe.clone(), fetch)).is_err() {
-                            // Cooker thread died
                             break 'done;
                         }
                         if fetcher_config.cook.nonstop
@@ -464,7 +452,7 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                             break;
                         }
                         while fetcher_prompting.load(Ordering::SeqCst) != 0 {
-                            thread::sleep(PROMPT_WAIT); // wait other prompt
+                            thread::sleep(PROMPT_WAIT);
                         }
                         fetcher_prompting.swap(1, Ordering::SeqCst);
                         'wait: loop {
@@ -474,16 +462,16 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                                 2 => {
                                     fetcher_prompting.swap(0, Ordering::SeqCst);
                                     break 'wait;
-                                } // retry
+                                }
                                 3 => {
                                     fetcher_prompting.swap(0, Ordering::SeqCst);
                                     let _ = handle_nonstop_fail(&recipe);
                                     break 'again;
-                                } // skip
+                                }
                                 4 => {
                                     fetcher_prompting.swap(0, Ordering::SeqCst);
                                     break 'done;
-                                } // done
+                                }
                                 _ => unreachable!(),
                             }
                         }
@@ -530,7 +518,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
             let panel_height = chunks[0].height.saturating_sub(2) as usize;
 
             if !app.is_inspecting {
-                // Left Pane
                 let fetch_items: Vec<ListItem> = app
                     .recipes
                     .iter()
@@ -547,7 +534,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                 );
                 f.render_widget(fetch_list, chunks[0]);
 
-                // Right Pane
                 let cook_items: Vec<ListItem> = app
                     .recipes
                     .iter()
@@ -705,7 +691,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiAp
                 if let Some((app, res)) = handle_prompt_input(&event, &mut app) {
                     prompting.swap(res as u32, Ordering::SeqCst);
                     if res == PromptOption::Exit {
-                        // TODO: This can be a different log with what prompted on nonstop mode
                         let (name, log, line) = app.get_active_log();
                         if let Some(name) = name
                             && let Some(log) = log
@@ -759,7 +744,6 @@ fn handle_main_event(app: &mut TuiApp, event: &Event) {
                 app.log_view_job = JobType::Cook;
             }
             Key::Char('c') => {
-                // as compilers still running, we use this way to stop it
                 kill_everything(None);
             }
             Key::Up => {
@@ -838,7 +822,6 @@ fn handle_inspect_event(event: &Event, app: &mut TuiApp) -> bool {
             }
             Key::Char('\n') => {
                 if let Some(search_results) = app.search_results.as_mut() {
-                    // same as keydown
                     app.search_idx = if app.search_idx + 1 < search_results.len() {
                         app.search_idx + 1
                     } else {
@@ -923,7 +906,6 @@ fn handle_prompt_input<'a>(
         match event {
             Event::Key(key) => match key {
                 Key::Char('q') | Key::Ctrl('c') | Key::Esc => {
-                    // Treat as "Exit"
                     return Some((app, PromptOption::Exit));
                 }
                 Key::Left | Key::BackTab => prompt.prev(),
@@ -937,7 +919,7 @@ fn handle_prompt_input<'a>(
                 }
                 _ => {}
             },
-            _ => {} // Ignore mouse events
+            _ => {}
         }
     }
     None
@@ -1004,7 +986,7 @@ fn draw_prompt(f: &mut ratatui::Frame, prompt: &FailurePrompt, is_nonstop: bool)
 
     let area = f.area();
     let popup_area = Rect {
-        x: area.width.saturating_sub(100) / 2, // Centered better for wider prompts
+        x: area.width.saturating_sub(100) / 2,
         y: area.height / 3,
         width: 100.min(area.width),
         height: 10,
@@ -1033,7 +1015,6 @@ fn spawn_log_reader<R>(
                 .send(StatusUpdate::PushLog(package_name.clone(), buf))
                 .is_err()
             {
-                // TUI thread hung up
                 break;
             }
         }

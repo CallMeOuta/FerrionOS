@@ -4,14 +4,10 @@ pub mod recipe;
 pub mod staged_pkg;
 pub mod web;
 
-/// Default for maximum number of levels to descend down dependencies tree.
 pub const WALK_DEPTH: usize = 16;
 
-/// Default remote package source, for recipes with build type = "remote".
-/// This is overridable with mirrors config (via `cookbook.toml`).
 pub const REMOTE_PKG_SOURCE: &str = "https://static.redox-os.org/pkg";
 
-// TODO: remove if possible
 pub fn is_redox() -> bool {
     cfg!(target_os = "redox")
 }
@@ -32,16 +28,11 @@ pub fn cross_target() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-// Errors
-
 use std::fmt::Display;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
-/// Error types used through cookbook.
-///
-/// When writing IO context, don't use "Failed at XXX". Look at impl Display for suitable word to use.
 #[derive(Debug)]
 pub enum Error {
     Io {

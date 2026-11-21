@@ -11,127 +11,82 @@ use serde::{Deserialize, Serialize};
 
 use crate::{WALK_DEPTH, bail_other_err, cook::package as cook_package, staged_pkg};
 
-/// Specifies how to download the source for a recipe
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum SourceRecipe {
-    /// Reuse the source directory of another package
-    ///
-    /// This is useful when a single source repo contains multiple projects which each have their
-    /// own recipe to build them.
     SameAs {
-        /// Relative path to the package for which to reuse the source dir
         same_as: String,
     },
-    /// Path source
     Path {
-        /// The path to the source
         path: String,
     },
-    /// A git repository source
     Git {
-        /// The URL for the git repository, such as https://example.com/project.git
         git: String,
-        /// The URL for an upstream repository
         upstream: Option<String>,
-        /// The optional branch of the git repository to track, such as master. Please specify to
-        /// make updates to the rev easier
         branch: Option<String>,
-        /// The optional revision of the git repository to use for builds. Please specify for
-        /// reproducible builds
         rev: Option<String>,
-        /// The optional config to clone with treeless clone. Default is true if "rev" added
         shallow_clone: Option<bool>,
-        /// A list of patch files to apply to the source
         #[serde(default)]
         patches: Vec<String>,
-        /// Optional script to run to prepare the source
         script: Option<String>,
     },
-    /// A tar file source
     Tar {
-        /// The URL of a tar source
         tar: String,
-        /// The optional blake3 sum of the tar file. Please specify this to make reproducible
-        /// builds more reliable
         blake3: Option<String>,
-        /// A list of patch files to apply to the source
         #[serde(default)]
         patches: Vec<String>,
-        /// Optional script to run to prepare the source, such as ./autogen.sh
         script: Option<String>,
     },
 }
 
-/// Specifies how to build a recipe
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "template")]
 #[derive(Default)]
 pub enum BuildKind {
-    /// Will not build (for meta packages)
     #[serde(rename = "none")]
     #[default]
     None,
-    /// Will download compiled package from remote
     #[serde(rename = "remote")]
     Remote,
-    /// Will build and install using cargo
     #[serde(rename = "cargo")]
     Cargo {
-        /// Path relative to source dir, where to run Cargo
         #[serde(default)]
         cargopath: Option<String>,
-        /// Additional flags to cargo
         #[serde(default)]
         cargoflags: Vec<String>,
-        /// List of packages to build, if Cargo.toml is a workspace.
-        /// Binary names will not be prefixed.
         #[serde(default)]
         cargopackages: Vec<String>,
-        /// List of examples to build, if there's an "examples" dir.
-        /// Binary names will be prefixed.
         #[serde(default)]
         cargoexamples: Vec<String>,
-        /// whether to remove --locked, common for libraries.
         #[serde(default)]
         clearlocked: bool,
-        /// whether to force prefix packages with recipe name
         #[serde(default)]
         cargopackagesprefixed: bool,
     },
-    /// Will build and install using configure and make
     #[serde(rename = "configure")]
     Configure {
         #[serde(default)]
         configureflags: Vec<String>,
     },
-    /// Will build and install using cmake
     #[serde(rename = "cmake")]
     Cmake {
         #[serde(default)]
         cmakeflags: Vec<String>,
     },
-    /// Will build and install using meson
     #[serde(rename = "meson")]
     Meson {
         #[serde(default)]
         mesonflags: Vec<String>,
     },
-    /// Will build and install using python pip
     #[serde(rename = "python")]
     Python {
         #[serde(default)]
         pyprojectpath: Option<String>,
         #[serde(default)]
         pipflags: Vec<String>,
-        /// Some recipes need to run setup.py,
-        /// other does not allow running setup.py.
-        /// This defaults to not run setup.py, but if build result in error,
-        /// like "invalid command 'dist_info'", set this on.
         #[serde(default)]
         legacysetup: bool,
     },
-    /// Will build and install using custom commands
     #[serde(rename = "custom")]
     Custom { script: String },
 }
@@ -163,17 +118,12 @@ pub struct OptionalPackageRecipe {
     pub files: Vec<String>,
 }
 
-/// Everything required to build a FerrionOS package
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Recipe {
-    /// Specifies how to download the source for this recipe
     pub source: Option<SourceRecipe>,
-    /// Specifies how to build this recipe
     pub build: BuildRecipe,
-    /// Specifies how to package this recipe
     pub package: PackageRecipe,
-    /// Specifies optional packages based from this recipe
     #[serde(rename = "optional-packages")]
     pub optional_packages: Vec<OptionalPackageRecipe>,
 }
@@ -203,7 +153,6 @@ impl BuildRecipe {
 
     pub fn set_as_remote(&mut self) {
         if self.kind == BuildKind::None {
-            // BuildKind::Remote won't handle remote meta-packages
             return;
         }
         self.kind = BuildKind::Remote;
@@ -273,11 +222,8 @@ pub struct CookRecipe {
     pub dir: PathBuf,
     pub recipe: Recipe,
     pub target: &'static str,
-    /// If false, it's listed on install config
     pub is_deps: bool,
-    // TODO: change to Option<RecipeRule>
     pub rule: String,
-    /// whether if this recipe is pinned from cookbook.lock
     pub pinned: bool,
 }
 
@@ -296,7 +242,6 @@ impl Recipe {
     pub fn get_packages_list(&self) -> Vec<Option<&OptionalPackageRecipe>> {
         let mut packages: Vec<Option<&OptionalPackageRecipe>> =
             self.optional_packages.iter().map(Some).collect();
-        // the mandatory package, put last because of cook_build
         packages.push(None);
         packages
     }
@@ -334,7 +279,6 @@ impl CookRecipe {
                 .into_iter()
                 .filter_map(fn_map)
                 .collect();
-            // package deps is not applicable to host recipes
             recipe.package.dependencies = Vec::new()
         }
         Ok(Self {
@@ -385,7 +329,6 @@ impl CookRecipe {
         let recipe = if read_recipe {
             Recipe::new(&file)?
         } else {
-            // clean/unfetch don't need to read recipe
             Recipe::default()
         };
         Self::new(name, dir.to_path_buf(), recipe)
@@ -513,7 +456,6 @@ impl CookRecipe {
         names: &[PackageName],
         include_names: bool,
     ) -> Result<Vec<PackageName>, PackageError> {
-        // recurse_build_deps == true here as libraries (build deps) can have runtime files (package deps)
         let packages = Self::new_recursive(
             names,
             true,
@@ -538,10 +480,8 @@ impl CookRecipe {
         Ok(packages.into_iter().map(|p| p.name).collect())
     }
 
-    /// reload self back to the recipe.toml, with preserving effect from `self.rule`
     pub fn reload_recipe(&mut self) -> Result<(), PackageError> {
         if self.pinned {
-            // TODO: print?
             return Ok(());
         }
         self.recipe = Self::from_path(&self.dir, true, self.name.is_host())?.recipe;
@@ -549,7 +489,6 @@ impl CookRecipe {
         Ok(())
     }
 
-    /// returns stage dir, pkgar file and toml file.
     pub fn stage_paths(&self) -> (PathBuf, PathBuf, PathBuf) {
         let r = self.name.suffix().map(|p| OptionalPackageRecipe {
             name: p.to_string(),
@@ -558,25 +497,18 @@ impl CookRecipe {
         cook_package::package_stage_paths(r.as_ref(), &self.target_dir())
     }
 
-    /// returns target dir which is depending on the "host:" prefix
     pub fn target_dir(&self) -> PathBuf {
         self.dir.join("target").join(self.target)
     }
 
     pub fn apply_filesystem_config(&mut self, rule: &str) -> crate::Result<()> {
         match rule {
-            // build from source as usual
             "source" => {}
-            // keep local changes
             "local" => self.recipe.source = None,
-            // download from remote build
             "binary" => {
                 self.recipe.source = None;
                 self.recipe.build.set_as_remote();
             }
-            // don't build this recipe (unlikely to go here unless some deps need it)
-            // TODO: Note that we're assuming this being ignored from e.g. metapackages
-            // TODO: Will totally broke build if this recipe needed as some other build dependencies
             "ignore" => {
                 self.recipe.source = None;
                 self.recipe.build.set_as_none();
@@ -597,7 +529,7 @@ impl CookRecipe {
     pub fn guess_version(&self) -> Option<String> {
         let recipe = &self.recipe;
         if recipe.build.kind == BuildKind::None {
-            return Some("".into()); // signifies a meta package
+            return Some("".into());
         } else if let Some(v) = &recipe.package.version {
             return Some(v.to_string());
         }
@@ -650,9 +582,7 @@ impl CookRecipe {
         None
     }
 
-    /// Get the name for recipe that is used as the build source
     pub fn canon_recipe_name(&self) -> PackageName {
-        // TODO: I hope nobody is nesting same_as...
         if let Some(SourceRecipe::SameAs { same_as }) = &self.recipe.source {
             if let Some(name) = Path::new(&same_as)
                 .file_name()
@@ -671,8 +601,6 @@ impl CookRecipe {
         self.name.clone()
     }
 }
-
-// TODO: Wrap these vectors in a struct
 
 pub fn recipes_mark_as_deps(names: &[PackageName], packages: &mut Vec<CookRecipe>) {
     for package in packages.iter_mut() {
@@ -697,8 +625,6 @@ pub fn recipes_flatten_package_names(packages: Vec<CookRecipe>) -> Vec<CookRecip
     }
     new_packages
 }
-/// Fail early if a recipe configured as `ignore` is still required as a
-/// build dependency of another recipe that will be built.
 pub fn validate_filesystem_rules(recipes: &[CookRecipe]) -> crate::Result<()> {
     let ignored: BTreeSet<String> = recipes
         .iter()
@@ -716,7 +642,6 @@ pub fn validate_filesystem_rules(recipes: &[CookRecipe]) -> crate::Result<()> {
             recipe.recipe.build.kind,
             BuildKind::None | BuildKind::Remote
         ) {
-            // Not built from source, so build dependencies are irrelevant.
             continue;
         }
         let mut ignored_dependencies: Vec<&str> = Vec::new();
@@ -977,7 +902,6 @@ mod tests {
     fn ignore_leaf_is_allowed() {
         use crate::recipe::{BuildKind, BuildRecipe, CookRecipe, validate_filesystem_rules};
 
-        // e.g. pruning `orbterm` from a metapackage: nothing references it.
         let mut ignored = CookRecipe::dummy(&PackageName::new("orbterm").unwrap());
         ignored.rule = "ignore".into();
 

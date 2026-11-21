@@ -17,8 +17,6 @@ use crate::{
     wrap_io_err, wrap_other_err,
 };
 
-//TODO: pub(crate) for all of these functions
-
 pub fn remove_all(path: &Path) -> Result<()> {
     if path.is_dir() {
         fs::remove_dir_all(path)
@@ -263,7 +261,6 @@ pub fn serialize_and_write<T: Serialize>(file_path: &Path, content: &T) -> Resul
 }
 
 pub fn read_toml<T: DeserializeOwned>(file_path: &Path) -> Result<T> {
-    // TODO: General error rather than from PackageError?
     toml::from_str(&read_to_string(file_path)?)
         .map_err(|e| Error::Package(pkg::PackageError::Parse(e, Some(file_path.to_path_buf()))))
 }
@@ -316,14 +313,12 @@ fn get_blake3_str(s: &str) -> Result<Hash> {
     Ok(hash)
 }
 
-/// get combined hashes from files and scripts
 pub fn get_combined_blake3(
     dir: &PathBuf,
     files: &Vec<String>,
     contents: &Vec<String>,
 ) -> Result<String> {
     if files.is_empty() && contents.is_empty() {
-        // pkgutils allow omiting the field with empty string
         return Ok("".into());
     }
 
@@ -349,7 +344,6 @@ pub fn get_combined_blake3(
     Ok(Hash::from(combined_bytes).to_hex().to_string())
 }
 
-/// get commit rev and return if it's detached or not
 pub fn get_git_head_rev(dir: &PathBuf) -> Result<(String, bool)> {
     let git_head = dir.join(".git/HEAD");
     let head_str = read_to_string(&git_head)?;
@@ -367,7 +361,6 @@ pub fn get_git_head_rev(dir: &PathBuf) -> Result<(String, bool)> {
     }
 }
 
-/// get commit from "rev" which either a full commit hash or a tag name
 pub fn get_git_tag_rev(dir: &PathBuf, tag: &str, logger: &PtyOut) -> Result<String> {
     if tag.len() == 40 && tag.chars().all(|f| f.is_ascii_hexdigit()) {
         return Ok(tag.to_string());
@@ -376,7 +369,6 @@ pub fn get_git_tag_rev(dir: &PathBuf, tag: &str, logger: &PtyOut) -> Result<Stri
     match r {
         Ok(r) => Ok(r),
         Err(_) => {
-            // probably need to run "git gc"
             let mut command = Command::new("git");
             command.arg("-C").arg(dir);
             command.arg("gc");
@@ -387,7 +379,6 @@ pub fn get_git_tag_rev(dir: &PathBuf, tag: &str, logger: &PtyOut) -> Result<Stri
 }
 
 pub fn get_git_ref_entry(dir: &PathBuf, entry: &str) -> Result<String> {
-    // https://git-scm.com/book/en/v2/Git-Internals-Maintenance-and-Data-Recovery
     let git_refs = dir.join(".git/packed-refs");
     let refs_str = read_to_string(&git_refs)?;
     let mut lines = refs_str.lines();
@@ -409,7 +400,6 @@ pub fn get_git_ref_entry(dir: &PathBuf, entry: &str) -> Result<String> {
     Err(wrap_other_err!("Could not find a rev for {}", entry)())
 }
 
-/// get commit rev after fetch
 pub fn get_git_fetch_rev(dir: &PathBuf, remote_url: &str, remote_branch: &str) -> Result<String> {
     let git_fetch_head = dir.join(".git/FETCH_HEAD");
 
@@ -436,15 +426,10 @@ pub fn get_git_fetch_rev(dir: &PathBuf, remote_url: &str, remote_branch: &str) -
 
 #[derive(Default, Debug)]
 pub struct GitRemoteTracking {
-    /// from .git/HEAD
     pub local_branch: String,
-    /// from .git/config -> [branch <local_branch_name>].merge
     pub tracking_branch: String,
-    /// from .git/config -> [branch <local_branch_name>].remote (usually "origin")
     pub remote_name: String,
-    /// from refs/remotes/<remote_name>/HEAD (the default branch on remote)
     pub remote_branch: String,
-    /// from .git/config -> [remote <remote_branch_name>].url
     pub remote_url: String,
 }
 
@@ -588,7 +573,6 @@ fn chop_dot_git(url: &str) -> &str {
 }
 
 fn get_git_branch_name(branch_path: &str) -> Result<String> {
-    // TODO: incorrectly handle branch with slashes
     Ok(branch_path
         .split('/')
         .next_back()

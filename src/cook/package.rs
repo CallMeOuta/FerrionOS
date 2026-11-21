@@ -27,7 +27,6 @@ pub fn package(
     let target_dir = &recipe.target_dir();
     let auto_deps = &build_result.auto_deps;
     if recipe.recipe.build.kind == BuildKind::None {
-        // metapackages don't have stage dir and optional packages
         package_toml(
             target_dir.join("stage.toml"),
             recipe,
@@ -54,7 +53,6 @@ pub fn package(
 
     for package in packages {
         let (stage_dir, package_file, package_meta) = package_stage_paths(package, target_dir);
-        // Rebuild package if stage is newer
         if package_file.is_file() && !build_result.cached {
             log_to_pty!(logger, "DEBUG: updating '{}'", package_file.display());
             remove_all(&package_file)?;
@@ -208,7 +206,6 @@ pub fn package_stage_paths(
 ) -> (PathBuf, PathBuf, PathBuf) {
     let mut target_dir = target_dir.to_path_buf();
     if let Some(cross_target) = crate::cross_target() {
-        // TODO: automatically pass COOKBOOK_CROSS_GNU_TARGET?
         target_dir = target_dir.join(cross_target)
     }
     package_name_paths(package, &target_dir, "stage")
@@ -254,10 +251,8 @@ pub fn package_handle_push(
     let archive_toml = archive_path.with_extension("toml");
     let pkey_path = "build/id_ed25519.pub.toml";
     let pkg_toml = Package::from_file(&archive_toml)?;
-    // "local" is what remote name from installer is hardcoded into
     let remote_name = "local".to_string();
     let Some(state) = state else {
-        // Bare install without metadata, cache mechanism or anything
         if archive_path.is_file() {
             let pkey = PublicKeyFile::open(pkey_path)?.pkey;
             let mut package = PackageFile::new(archive_path, &pkey)?;
@@ -268,10 +263,7 @@ pub fn package_handle_push(
     let (cached, pstate) = match state.installed.get(&pkg_toml.name) {
         Some(s) if pkg_toml.blake3 == s.blake3 => (true, None),
         Some(s) => (false, Some((s.manual, s.dependents.clone()))),
-        None => {
-            // TODO: Handle manual & dependents
-            (false, Some((true, BTreeSet::new())))
-        }
+        None => (false, Some((true, BTreeSet::new()))),
     };
 
     if let Some((manual, dependents)) = pstate {
@@ -290,7 +282,6 @@ pub fn package_handle_push(
             package.split(&head_path, None::<&Path>)?;
         }
 
-        // TODO: Check if we need to inject remote key
         let install_state = InstallState::from_package(&pkg_toml, remote_name, manual, dependents);
         state.installed.insert(pkg_toml.name.clone(), install_state);
     }

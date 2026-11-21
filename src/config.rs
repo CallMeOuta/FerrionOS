@@ -10,34 +10,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CookConfigOpt {
-    /// whether to run offline
     pub offline: Option<bool>,
-    /// whether to set jobs number instead of from nproc
     pub jobs: Option<usize>,
-    /// whether to use TUI to allow parallel build
-    /// default value is yes if "CI" env unset and STDIN is open.
     pub tui: Option<bool>,
-    /// whether to write logs to build/logs dir, default true on TUI
     pub logs: Option<bool>,
-    /// whether to ignore build errors
     pub nonstop: Option<bool>,
-    /// whether to archive packages with compressed format
     pub compressed: Option<bool>,
-    /// whether to clone as treeless clone by default
     pub git_treeless: Option<bool>,
-    /// whether to print everything in progress,
-    /// will always hide cached build logs,
-    /// build failure will be printed anyway
     pub verbose: Option<bool>,
-    /// whether to enable verbosity on build commands,
-    /// Recipes may respect this flag or maybe not
     pub verbose_cmd: Option<bool>,
-    /// whether to always clean the build directory before building
     pub clean_build: Option<bool>,
-    /// whether to always clean the target directory after building
-    /// (deletes everything except pkgar files)
     pub clean_target: Option<bool>,
-    /// whether to always write stage.files metadata
     pub write_filetree: Option<bool>,
 }
 
@@ -191,8 +174,6 @@ pub fn init_config() {
         ));
     }
     if config.mirrors.is_empty() {
-        // The GNU FTP mirror below is automatically inserted for convenience
-        // You can choose other mirrors by setting it on cookbook.toml
         config.mirrors.insert(
             "ftp.gnu.org/gnu".to_string(),
             "mirrors.ocf.berkeley.edu/gnu".to_string(),
@@ -237,7 +218,6 @@ pub fn get_config() -> &'static CookbookConfig {
     CONFIG.get().expect("Configuration is not initialized")
 }
 
-/// Fallible version of get_config(), because it's not loaded when testing
 pub fn try_get_config() -> Option<&'static CookbookConfig> {
     CONFIG.get()
 }
@@ -281,8 +261,6 @@ mod tests {
     use super::*;
 
     fn setup_test_config() {
-        // This will be called for each test. If the config is already set,
-        // it will do nothing, which is fine as all tests use the same config.
         init_config();
     }
 
@@ -344,8 +322,6 @@ mod tests {
     #[test]
     fn test_longest_prefix_match() {
         setup_test_config();
-        // "github.com/foo/bar" is a longer and more specific prefix than "github.com/a",
-        // so it should be chosen for the translation.
         assert_eq!(
             translate_mirror("https://github.com/foo/bar/baz"),
             "https://github.com/baz/bar/baz"

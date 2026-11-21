@@ -1,5 +1,3 @@
-// Contains code related to TUI layout
-
 use cookbook::{
     Error, Result,
     cook::tui::{get_clicked_tab_index, kill_everything, render_build_log},

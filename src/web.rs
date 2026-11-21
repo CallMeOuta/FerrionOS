@@ -17,11 +17,8 @@ pub mod search;
 
 #[derive(Clone)]
 pub struct CliWebConfig {
-    /// path relative to cwd dir to generate web files
     out_dir: PathBuf,
-    /// absolute url to repo (not the web) instead of "/repo"
     repo_url: String,
-    /// this repository build url
     this_repo: String,
 }
 
@@ -43,7 +40,6 @@ impl CliWebConfig {
                     .ok()
                     .unwrap_or("web".to_string()),
             ),
-            // TODO: Hardcoded URL, maybe get this remote-url next time
             this_repo: "https://github.com/CallMeOuta/FerrionOS".to_string(),
         })
     }
@@ -70,7 +66,6 @@ pub fn generate_web(all_packages: &Vec<String>, config: &CliWebConfig) {
             continue;
         };
         let Ok(mut package) = staged_pkg::from_path(recipe_path, package_name.suffix()) else {
-            // TODO: report failed build
             continue;
         };
         let Ok(mut recipe) = CookRecipe::from_path(recipe_path, true, false) else {
@@ -84,9 +79,7 @@ pub fn generate_web(all_packages: &Vec<String>, config: &CliWebConfig) {
                 .insert(package.name.to_string());
         }
 
-        // TODO: temporary bug fix in the suffix lost
         package.name = package_name.clone();
-        // CookRecipe::from_path always have no suffix
         recipe.name = package_name;
 
         valid_packages.push((package, recipe));

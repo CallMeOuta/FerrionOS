@@ -303,10 +303,8 @@ pub fn get_tree_url(git_url: &str, host: &str, commit: &str, folder: Option<&str
     let mut base_url = git_url.trim_end_matches(".git").to_string();
 
     if let Some(ssh_path) = base_url.strip_prefix("git@") {
-        // "git@github.com:user/repo" -> "https://github.com/user/repo"
         base_url = format!("https://{}", ssh_path.replace(':', "/"));
     } else if base_url.starts_with("git://") {
-        // "git://github.com/user/repo" -> "https://github.com/user/repo"
         base_url = base_url.replacen("git://", "https://", 1);
     }
 

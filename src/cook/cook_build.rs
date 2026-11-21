@@ -28,7 +28,6 @@ fn auto_deps_from_dynamic_linking(
     let verbose = crate::config::try_get_config()
         .map(|s| s.cook.verbose)
         .unwrap_or(true);
-    // Base directories may need to be updated for packages that place binaries in odd locations.
     let mut walk = VecDeque::new();
 
     for stage_dir in stage_dirs {
@@ -38,7 +37,6 @@ fn auto_deps_from_dynamic_linking(
         walk.push_back((stage_dir, stage_dir.join("usr/libexec")));
     }
 
-    // Recursively (DFS) walk each directory to ensure nested libs and bins are checked.
     while let Some((rel_path, dir)) = walk.pop_front() {
         if visited.contains(&dir) {
             #[cfg(debug_assertions)]
@@ -107,13 +105,12 @@ fn auto_deps_from_dynamic_linking(
                         log_to_pty!(logger, "DEBUG: {} uses runpath {}", path_rel, name);
                     }
                 }
-                _ => {} // DT_SONAME
+                _ => {}
             }
         }
     }
 
     let mut missing = needed.clone();
-    // relibc and friends will always be installed
     for preinstalled in &["libc.so.6", "libgcc_s.so.1", "libstdc++.so.6"] {
         missing.remove(*preinstalled);
     }
@@ -218,7 +215,6 @@ pub fn build(
         .collect();
     let cli_jobs = cook_config.jobs;
     if recipe.build.kind == BuildKind::None {
-        // metapackages don't need to do anything here
         return Ok(BuildResult::new(stage_dirs, BTreeSet::new()));
     }
 
@@ -256,7 +252,6 @@ pub fn build(
     }
 
     if !check_source {
-        // TODO: when stage_dirs does not exist due to clean_target was true, extract from stage.pkgar?
         let stage_present = stage_pkgars.iter().all(|file| file.is_file());
         if stage_present && auto_deps_file.is_file() {
             log_to_pty!(logger, "DEBUG: using cached build, not checking source");
@@ -296,7 +291,6 @@ pub fn build(
         },
     );
 
-    // Rebuild stage if deps or source is newer
     if !sysroot_cached || !toolchain_cached || {
         build_is_source_newer(
             logger,
@@ -313,7 +307,6 @@ pub fn build(
             remove_stage_dir(stage_dir)?;
         }
         if cook_config.clean_target {
-            // both caches are invalid without init tag
             if sysroot_cached {
                 build_deps_dir(logger, &sysroot_dir, deps_sysroot, true, true)?;
             }
@@ -323,7 +316,6 @@ pub fn build(
         }
     } else {
         log_to_pty!(logger, "DEBUG: using cached build");
-        // stop early otherwise we'll end up rebuilding
         let auto_deps = make_auto_deps!(true)?;
         return Ok(BuildResult::cached(stage_dirs, auto_deps));
     }
@@ -334,11 +326,9 @@ pub fn build(
 
     let build_dir = get_sub_target_dir(target_dir, "build");
     if !stage_dir.is_dir() {
-        // Create stage.tmp
         let stage_dir_tmp = target_dir.join("stage.tmp");
         fs::create_dir_clean(&stage_dir_tmp)?;
 
-        // Create build dir, if it does not exist
         if cook_config.clean_build || !build_dir.is_dir() {
             fs::create_dir_clean(&build_dir)?;
         }
@@ -359,9 +349,6 @@ pub fn build(
         };
 
         let mut allow_cargo_offline = false;
-        //TODO: better integration with redoxer (library instead of binary)
-        //TODO: configurable target
-        //TODO: Add more configurability, convert scripts to Rust?
         let script = match &recipe.build.kind {
             BuildKind::Cargo {
                 cargopath,
@@ -436,7 +423,6 @@ pub fn build(
         };
 
         let command = {
-            //TODO: remove unwraps
             let cookbook_build = build_dir.canonicalize().unwrap();
             let cookbook_recipe = recipe_dir.canonicalize().unwrap();
             let cookbook_root = Path::new(".").canonicalize().unwrap();
@@ -516,7 +502,6 @@ pub fn build(
         );
         fs::run_command_stdin(command, full_script.as_bytes(), logger)?;
 
-        // Move to each features dir
         let mut globs = Vec::new();
         for (i, feat) in recipe.optional_packages.iter().enumerate() {
             let stage_dir = &stage_dirs[i];
@@ -539,7 +524,6 @@ pub fn build(
         )
         .map_err(wrap_io_err!("Moving to stages dir"))?;
 
-        // Move stage.tmp to stage atomically
         fs::rename(&stage_dir_tmp, stage_dir)?;
     }
 
@@ -549,7 +533,6 @@ pub fn build(
         if toolchain_dir.is_dir() {
             clean_deps_dir(&toolchain_dir)?;
         }
-        // don't remove stage dir yet
     }
 
     let auto_deps = make_auto_deps!(false)?;
@@ -616,14 +599,12 @@ pub fn remove_stage_dir(stage_dir: &PathBuf) -> crate::Result<()> {
 pub fn get_stage_dirs(features: &Vec<OptionalPackageRecipe>, target_dir: &Path) -> Vec<PathBuf> {
     let mut target_dir = target_dir.to_path_buf();
     if let Some(cross_target) = crate::cross_target() {
-        // TODO: automatically pass COOKBOOK_CROSS_GNU_TARGET?
         target_dir = target_dir.join(cross_target)
     }
     let mut v = Vec::new();
     for f in features {
         v.push(target_dir.join(format!("stage.{}", f.name)));
     }
-    // intentionally added last as it contains leftover files from package features
     v.push(target_dir.join("stage"));
     v
 }
@@ -631,7 +612,6 @@ pub fn get_stage_dirs(features: &Vec<OptionalPackageRecipe>, target_dir: &Path) 
 pub fn get_sub_target_dir(target_dir: &Path, sub_path: &str) -> PathBuf {
     let mut target_dir = target_dir.to_path_buf();
     if let Some(cross_target) = crate::cross_target() {
-        // TODO: automatically pass COOKBOOK_CROSS_GNU_TARGET?
         target_dir = target_dir.join(cross_target)
     }
     target_dir.join(sub_path)
@@ -651,14 +631,12 @@ fn build_deps_dir(
             if !dep_pkgars.is_empty() {
                 return Err(Error::from(e));
             } else {
-                // should never be accessed
                 Default::default()
             }
         }
     };
     let tags_dir = deps_dir.join(".tags");
     if tags_dir.is_dir() {
-        // check all files present and exact
         let mut cached = fs::check_files_present(
             &tags_dir,
             &dep_pkgars
@@ -702,7 +680,6 @@ fn build_deps_dir(
         fs::remove_all(deps_dir)?;
     }
 
-    // Create sysroot.tmp
     let deps_dir_tmp = deps_dir.with_added_extension("tmp");
     fs::create_dir_clean(&deps_dir_tmp)?;
     let tags_dir = deps_dir_tmp.join(".tags");
@@ -711,10 +688,8 @@ fn build_deps_dir(
     fs::create_dir(&usr_dir)?;
 
     for folder in &["bin", "include", "lib", "share"] {
-        // Make sure sysroot/usr/$folder exists
         fs::create_dir(&usr_dir.join(folder))?;
 
-        // Link sysroot/$folder sysroot/usr/$folder
         fs::symlink(Path::new("usr").join(folder), deps_dir_tmp.join(folder))?;
     }
 
@@ -728,19 +703,15 @@ fn build_deps_dir(
 
     if write_init_tag {
         let init_tag_file = deps_dir_tmp.join(".tags-init");
-        // this file is used to prevent removing deps dir when clean_target
-        // is enabled, then clean_deps_dir will remove the tag after build.
         std::fs::write(init_tag_file, "").map_err(wrap_io_err!("Writing init tag"))?;
     }
 
-    // Move sysroot.tmp to sysroot atomically
     fs::rename(&deps_dir_tmp, deps_dir)?;
 
     Ok(false)
 }
 
 fn clean_deps_dir(deps_dir: &PathBuf) -> Result<bool> {
-    // this retain tags for future check
     let tags_dir = deps_dir.join(".tags");
     let tags_dir_tmp = deps_dir.with_added_extension("tags");
     fs::rename(&tags_dir, &tags_dir_tmp)?;
@@ -750,7 +721,6 @@ fn clean_deps_dir(deps_dir: &PathBuf) -> Result<bool> {
     Ok(false)
 }
 
-/// Calculate automatic dependencies
 fn build_auto_deps(
     recipe: &Recipe,
     auto_deps_path: &Path,
@@ -878,11 +848,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("Failed to create temporary root directory");
 
-        // Hierarchy with an infinite loop
         let dir = root.join("loop");
         unix::fs::symlink(&root, &dir).expect("Linking {dir:?} to {root:?}");
 
-        // Sanity check that we have a loop
         assert_eq!(
             root.canonicalize().unwrap(),
             dir.canonicalize().unwrap(),

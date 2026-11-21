@@ -1,5 +1,3 @@
-// Contains code related to background tasks
-
 use std::fmt::{Display as FmtDisplay, Write as FmtWrite};
 use std::io::Read;
 use std::sync::mpsc;
@@ -91,7 +89,6 @@ impl ExecutionManager {
             return;
         }
 
-        // Scan anything not failed to auto close
         if self.active_job_order.len() > 0 {
             for id in self.active_job_order.clone() {
                 if self
@@ -133,7 +130,6 @@ impl ExecutionManager {
             cmd.arg(target.as_str());
         }
 
-        // TODO: How to handle more ANSI code?
         cmd.env("CI", "1");
 
         self.active_job_order.push(job_id);

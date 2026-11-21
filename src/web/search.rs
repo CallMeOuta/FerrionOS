@@ -36,7 +36,6 @@ impl FileIndexBuilder {
                 .or_insert_with(|| FsNode::Dir(BTreeMap::new()));
 
             if let FsNode::File(_) = node {
-                // previously a file, silently replace to dir
                 *node = FsNode::Dir(BTreeMap::new());
             }
 
@@ -99,10 +98,8 @@ impl FileIndexBuilder {
                 path_stack.push(name.to_string());
             } else {
                 let name = if let Some(paren_idx) = remainder.rfind('(') {
-                    // Strip size
                     remainder[..paren_idx].trim()
                 } else if let Some(paren_idx) = remainder.rfind("->") {
-                    // Strip symlink
                     remainder[..paren_idx].trim()
                 } else {
                     remainder
@@ -112,7 +109,6 @@ impl FileIndexBuilder {
         }
     }
     pub fn write(&self, path: &Path) -> Result<()> {
-        // JSON: because javascript have them natively
         let json_output = serde_json::to_string(&self.inner).unwrap();
         let mut file = File::create(path).map_err(wrap_io_err!(path, "Opening file"))?;
         file.write_all(json_output.as_bytes())

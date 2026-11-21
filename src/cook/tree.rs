@@ -24,32 +24,20 @@ impl WalkTreeEntry {
 }
 
 pub struct TreeData {
-    /// list of deduped packages
     pub visited: HashSet<PackageName>,
-    /// list of dependents, if requested
     pub dependents: HashMap<PackageName, HashSet<PackageName>>,
-    /// total package size, only valid if tree_opt is push
     pub total_size: u64,
-    /// count of packages that not exist in recipe_map
     pub total_missing: u64,
-    /// count of packages that don't have package.toml
     pub total_notbuilt: u64,
-    /// total packages
     pub total_count: u64,
 }
 
 pub struct TreeItem<'a> {
-    /// the recipe data
     pub recipe: &'a CookRecipe,
-    /// prefix for tree
     pub prefix: &'a str,
-    /// last item on tree?
     pub is_last: bool,
-    /// recipe status
     pub entry: WalkTreeEntry,
-    /// dependencies, if not deduped
     pub dependencies: Option<&'a HashSet<&'a PackageName>>,
-    /// dependents, if supplied
     pub dependents: Option<&'a HashSet<PackageName>>,
 }
 
@@ -165,17 +153,13 @@ pub fn build_dependents(
         let mut all_deps_set: HashSet<&PackageName> = HashSet::new();
         let pkg_meta: Package;
         match tree_opt {
-            TreeOptions::Repo => {
-                // no dependency recursion
-            }
+            TreeOptions::Repo => {}
             TreeOptions::Cook => {
-                // recursion from recipe.toml
                 all_deps_set.extend(cook_recipe.recipe.build.dependencies.iter());
                 all_deps_set.extend(cook_recipe.recipe.build.dev_dependencies.iter());
                 all_deps_set.extend(cook_recipe.recipe.package.dependencies.iter());
             }
             TreeOptions::Push => {
-                // recursion from package.toml
                 if let Ok(pkg) = Package::from_file(&cook_recipe.stage_paths().2) {
                     pkg_meta = pkg;
                     all_deps_set.extend(pkg_meta.depends.iter());
@@ -192,10 +176,6 @@ pub fn build_dependents(
     dependents_map
 }
 
-/// Does tree recursion to `op` call.
-/// Tree recursion is different than recursion in [`CookRecipe`],
-/// this version does call `op` from root then to their deps.
-/// dependents can be precalculated with [`build_dependents`].
 pub fn walk_tree_entry(
     package_name: &PackageName,
     recipe_map: &HashMap<&PackageName, &CookRecipe>,
@@ -206,7 +186,6 @@ pub fn walk_tree_entry(
     data: &mut TreeData,
     op: fn(TreeItem) -> Result<bool>,
 ) -> Result<()> {
-    // To avoid confusion
     if package_name.is_host() {
         return Ok(());
     }
@@ -214,7 +193,6 @@ pub fn walk_tree_entry(
     let cook_recipe = match recipe_map.get(package_name) {
         Some(r) => r,
         None => {
-            // Data not provided, will not be processed by the build system
             op(TreeItem {
                 recipe: &CookRecipe::dummy(package_name),
                 prefix,
@@ -243,17 +221,13 @@ pub fn walk_tree_entry(
         };
         let mut all_deps_set: HashSet<&PackageName> = HashSet::new();
         match tree_opt {
-            TreeOptions::Repo => {
-                // no dependency recursion
-            }
+            TreeOptions::Repo => {}
             TreeOptions::Cook => {
-                // recursion from recipe.toml
                 all_deps_set.extend(cook_recipe.recipe.build.dependencies.iter());
                 all_deps_set.extend(cook_recipe.recipe.build.dev_dependencies.iter());
                 all_deps_set.extend(cook_recipe.recipe.package.dependencies.iter());
             }
             TreeOptions::Push => {
-                // recursion from package.toml
                 if let Ok(pkg) = Package::from_file(&pkg_toml) {
                     pkg_meta = pkg;
                     all_deps_set.extend(pkg_meta.depends.iter());
@@ -331,7 +305,6 @@ fn display_tree_fn(item: TreeItem) -> Result<bool> {
         "{}{}{} {}",
         item.prefix, line_prefix, item.recipe.name, size_str
     );
-    // TODO: check dirty build by checking source ident
     Ok(false)
 }
 
@@ -350,7 +323,6 @@ fn display_path_fn(item: TreeItem) -> Result<bool> {
 }
 
 fn display_csv_fn(item: TreeItem) -> Result<bool> {
-    // name, path, status, dependencies, dependents
     if item.entry.is_valid() {
         let mut deps = String::new();
         let mut depz = String::new();
@@ -408,7 +380,6 @@ pub fn walk_file_tree(
             let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
             total_size += walk_file_tree(&path, &new_prefix, buffer)?;
             if buffer.len() == last_len {
-                // pkgar doesn't capture empty directory
                 buffer.pop();
             }
         } else if metadata.is_symlink() {

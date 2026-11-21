@@ -15,7 +15,6 @@ impl IdentifierConfig {
             &std::env::current_dir().expect("unable to get $PWD"),
         )
         .unwrap_or(("".into(), false));
-        // better than importing heavy deps like chrono
         let time = String::from_utf8_lossy(
             Command::new("date")
                 .arg("-u")

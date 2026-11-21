@@ -1,5 +1,3 @@
-// TUI utilities, shared between repo and repo_editor
-
 use ansi_to_tui::IntoText;
 use std::{borrow::Cow, cmp, process};
 
@@ -11,10 +9,8 @@ use ratatui::{
 
 use crate::cook::script::KILL_ALL_PID;
 
-/// Drain `buffer` to `lines` when new lines occurred. Does `"\r"` trimming.
 pub fn drain_buffer_to_lines(buffer: &mut Vec<u8>, lines: &mut Vec<String>) -> usize {
     let mut addition = 0;
-    // TODO: multibyte-aware line split?
     while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
         let line_bytes = buffer.drain(..=newline_pos);
         let line_str = String::from_utf8_lossy(line_bytes.as_slice());
@@ -26,7 +22,6 @@ pub fn drain_buffer_to_lines(buffer: &mut Vec<u8>, lines: &mut Vec<String>) -> u
     addition
 }
 
-/// Render build log lines, stateful
 pub fn render_build_log<'a>(
     panel_height: usize,
     log_text: Option<&'a Vec<String>>,
@@ -50,7 +45,7 @@ pub fn render_build_log<'a>(
             }
         } else {
             if total_log_lines > panel_height {
-                let limit = 2; // arbitrary number
+                let limit = 2;
                 if *intended_scroll_pos >= total_log_lines - limit {
                     if may_autoscroll {
                         *enable_auto_scroll = true;
@@ -115,7 +110,6 @@ pub fn render_build_log<'a>(
     log_lines
 }
 
-/// Join logs for logging
 pub fn join_logs(log: &Vec<String>, line: Option<Cow<'_, str>>) -> String {
     let mut logs = log.join("\n");
     if let Some(line) = line {
@@ -130,7 +124,6 @@ fn handle_cr<'a>(buffer: &'a Cow<'_, str>) -> &'a str {
     st.rsplit('\r').next().unwrap_or(st)
 }
 
-/// Check if point is in rect
 pub fn get_clicked_tab_index(
     area: Rect,
     mp: Position,
@@ -162,7 +155,6 @@ pub fn get_clicked_tab_index(
     None
 }
 
-/// Kill everything under given PID or this process PID.
 pub fn kill_everything(pid: Option<u32>) {
     process::Command::new("bash")
         .arg("-c")

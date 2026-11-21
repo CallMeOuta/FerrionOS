@@ -25,8 +25,6 @@ pub(crate) use log_to_pty;
 
 pub type PtyOut<'a> = Option<(&'a mut UnixSlavePty, &'a mut PipeWriter)>;
 
-/// Setup pty without stdin.
-/// Returns (pty stdout, log out, pty+log writer)
 pub fn setup_pty() -> (
     Box<dyn Read + Send>,
     PipeReader,
@@ -35,8 +33,8 @@ pub fn setup_pty() -> (
     let pty_system = UnixPtySystem::default();
     let pair = pty_system
         .openpty(PtySize {
-            rows: 24, // Standard terminal size
-            cols: 80, // Standard terminal size
+            rows: 24,
+            cols: 80,
             ..Default::default()
         })
         .expect("Unable to open pty");
@@ -51,8 +49,6 @@ pub fn setup_pty() -> (
     (pty_reader, log_reader, pipes)
 }
 
-/// Setup pty with stdin.
-/// Returns (pty stdout, log out, pty stdin, pty+log writer)
 pub fn setup_pty_with_stdin() -> (
     Box<dyn Read + Send>,
     PipeReader,
@@ -90,7 +86,6 @@ pub fn flush_pty(logger: &mut PtyOut) {
     let Some((pty, file)) = logger else {
         return;
     };
-    // Not sure if flush actually working
     let _ = pty.flush();
     std::thread::sleep(Duration::from_millis(10));
     let _ = file.flush();
@@ -128,18 +123,11 @@ pub fn write_to_pty(pty: &PtyOut, text: &str) {
 #[derive(Default)]
 pub struct UnixPtySystem {}
 
-/// Represents the size of the visible display area in the pty
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
-    /// The number of lines of text
     pub rows: u16,
-    /// The number of columns of text
     pub cols: u16,
-    /// The width of a cell in pixels.  Note that some systems never
-    /// fill this value and ignore it.
     pub pixel_width: u16,
-    /// The height of a cell in pixels.  Note that some systems never
-    /// fill this value and ignore it.
     pub pixel_height: u16,
 }
 
@@ -166,7 +154,6 @@ fn openpty(size: PtySize) -> Result<(UnixMasterPty, UnixSlavePty)> {
     };
 
     let result = unsafe {
-        // BSDish systems may require mut pointers to some args
         #[allow(clippy::unnecessary_mut_passed)]
         libc::openpty(
             &mut master,
@@ -188,10 +175,6 @@ fn openpty(size: PtySize) -> Result<(UnixMasterPty, UnixSlavePty)> {
         fd: PtyFd(unsafe { File::from_raw_fd(slave) }),
     };
 
-    // Ensure that these descriptors will get closed when we execute
-    // the child process.  This is done after constructing the Pty
-    // instances so that we ensure that the Ptys get drop()'d if
-    // the cloexec() functions fail (unlikely!).
     cloexec(master.fd.as_raw_fd())?;
     cloexec(slave.fd.as_raw_fd())?;
 
@@ -199,8 +182,6 @@ fn openpty(size: PtySize) -> Result<(UnixMasterPty, UnixSlavePty)> {
 }
 
 pub struct PtyPair {
-    // slave is listed first so that it is dropped first.
-    // The drop order is stable and specified by rust rfc 1857
     pub slave: UnixSlavePty,
     pub master: UnixMasterPty,
 }
@@ -223,13 +204,7 @@ impl std::ops::Deref for PtyFd {
 impl Read for PtyFd {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.0.read(buf) {
-            Err(ref e) if e.raw_os_error() == Some(libc::EIO) => {
-                // EIO indicates that the slave pty has been closed.
-                // Treat this as EOF so that std::io::Read::read_to_string
-                // and similar functions gracefully terminate when they
-                // encounter this condition
-                Ok(0)
-            }
+            Err(ref e) if e.raw_os_error() == Some(libc::EIO) => Ok(0),
             x => x,
         }
     }
@@ -298,9 +273,6 @@ impl PtyFd {
 
         unsafe {
             cmd.pre_exec(move || {
-                // Clean up a few things before we exec the program
-                // Clear out any potentially problematic signal
-                // dispositions that we might have inherited
                 for signo in &[
                     libc::SIGCHLD,
                     libc::SIGHUP,
@@ -315,7 +287,6 @@ impl PtyFd {
                 let empty_set: libc::sigset_t = std::mem::zeroed();
                 libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
 
-                // Establish ourselves as a session leader.
                 if libc::setsid() == -1 {
                     return Err(io::Error::last_os_error());
                 }
@@ -326,11 +297,6 @@ impl PtyFd {
 
         let mut child = cmd.spawn().map_err(wrap_io_err!("Spawning cmd"))?;
 
-        // Ensure that we close out the slave fds that Child retains;
-        // they are not what we need (we need the master side to reference
-        // them) and won't work in the usual way anyway.
-        // In practice these are None, but it seems best to be move them
-        // out in case the behavior of Command changes in the future.
         if stdin {
             child.stdin.take();
         }
@@ -345,19 +311,14 @@ impl PtyFd {
     }
 }
 
-/// Represents the master end of a pty.
-/// The file descriptor will be closed when the Pty is dropped.
 pub struct UnixMasterPty {
     fd: PtyFd,
 }
 
-/// Represents the slave end of a pty.
-/// The file descriptor will be closed when the Pty is dropped.
 pub struct UnixSlavePty {
     fd: PtyFd,
 }
 
-/// Helper function to set the close-on-exec flag for a raw descriptor
 fn cloexec(fd: RawFd) -> Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags == -1 {
