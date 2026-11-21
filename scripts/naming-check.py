@@ -89,6 +89,8 @@ IDENTIFIERS = [
     r"\bshare=redox\b",
     r"\bfilter redox redox:ro\b",
     r"\bredox(=|:ro\b)",
+    # Rust type and variant names from upstream's crates, such as `RedoxDrmEvent`
+    r"\bRedox[A-Z]\w*",
     # shell functions, make targets and directories named after the upstream project
     r"\bredox\(\)",
     r"^\s*redox \"\$",
