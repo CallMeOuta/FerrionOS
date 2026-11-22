@@ -7,10 +7,12 @@ import re
 import subprocess
 import sys
 import termios
+import time
 import traceback
 from pathlib import Path
 
 EXPECTED_HASH = "47972063c7a47bfb"
+POWEROFF_WAIT_S = 5
 ICDS = Path("/usr/share/vulkan/icd.d")
 BASE_ENV = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "XDG_RUNTIME_DIR": "/run",
             "LC_ALL": "C", "MESA_SHADER_CACHE_DISABLE": "true", "LP_NUM_THREADS": "2"}
@@ -173,10 +175,19 @@ if __name__ == "__main__":
         result = main()
     except Exception as error:
         result = {"status": "FAIL", "error": str(error), "traceback": traceback.format_exc()}
-    Path("/proc/sys/kernel/printk").write_text("0\n")
+    try:
+        Path("/proc/sys/kernel/printk").write_text("0\n")
+    except OSError:
+        pass
     print("GPU_REFERENCE_JSON=" + json.dumps(result, separators=(",", ":")), flush=True)
-    termios.tcdrain(sys.stdout.fileno())
-    subprocess.run(["/bin/busybox", "poweroff", "-f"])
-    while True:
-        import time
+    try:
+        termios.tcdrain(sys.stdout.fileno())
+    except (OSError, termios.error):
+        pass
+    try:
+        subprocess.run(["/bin/busybox", "poweroff", "-f"], timeout=POWEROFF_WAIT_S)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for _ in range(POWEROFF_WAIT_S):
         time.sleep(1)
+    os._exit(1)
