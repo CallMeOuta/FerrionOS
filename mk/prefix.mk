@@ -349,7 +349,7 @@ $(PREFIX_RUST_VERSION_TAG):
 	rm -f "$(PREFIX)"/cargo-install.tar.xz
 	rm -f "$(PREFIX)"/rust-std-host-install.tar.xz
 	rm -f "$(PREFIX)"/rust-std-target-install.tar.xz
-	rm -f "$(PREFIX)"/rust-src-install.tar.xz:
+	rm -f "$(PREFIX)"/rust-src-install.tar.xz
 	mkdir -p "$(@D)"
 	touch $@
 
