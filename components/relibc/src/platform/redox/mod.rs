@@ -1628,8 +1628,7 @@ impl Pal for Sys {
                 envs.as_slice(),
                 &extra_info,
                 Some(interp_override),
-            )
-            .unwrap();
+            )?;
         }
 
         let start_fd = child.thr_fd.dup_into_upper(b"start")?;

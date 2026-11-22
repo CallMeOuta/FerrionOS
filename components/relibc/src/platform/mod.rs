@@ -281,6 +281,33 @@ impl<T: Write> Write for CountingWriter<T> {
     }
 }
 
+const AUXV_SCAN_LIMIT: usize = 128;
+static AUXV_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn set_auxv_ptr(ptr: *const usize) {
+    AUXV_PTR.store(ptr as usize, core::sync::atomic::Ordering::Release);
+}
+
+pub fn get_auxv_saved(requested_kind: usize) -> Option<usize> {
+    let raw = AUXV_PTR.load(core::sync::atomic::Ordering::Acquire);
+    if raw == 0 {
+        return None;
+    }
+    let mut ptr = raw as *const usize;
+    for _ in 0..AUXV_SCAN_LIMIT {
+        let kind = unsafe { *ptr };
+        if kind == self::auxv_defs::AT_NULL {
+            return None;
+        }
+        let value = unsafe { *ptr.add(1) };
+        if kind == requested_kind {
+            return Some(value);
+        }
+        ptr = unsafe { ptr.add(2) };
+    }
+    None
+}
+
 // TODO: Set a global variable once get_auxvs is called, and then implement getauxval based on
 // get_auxv.
 

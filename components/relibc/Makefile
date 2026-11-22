@@ -97,10 +97,12 @@ ifeq ($(USE_RUST_LIBM),)
 else
 	$(AR) -rcs "$(DESTDIR)/lib/libm.a"
 endif
-	# Empty libraries for dl, pthread, and rt
+	# Empty libraries for dl, pthread, rt, and ssp
 	$(AR) -rcs "$(DESTDIR)/lib/libdl.a"
 	$(AR) -rcs "$(DESTDIR)/lib/libpthread.a"
 	$(AR) -rcs "$(DESTDIR)/lib/librt.a"
+	$(AR) -rcs "$(DESTDIR)/lib/libssp.a"
+	$(AR) -rcs "$(DESTDIR)/lib/libssp_nonshared.a"
 
 install-tests: tests
 	$(MAKE) -C tests

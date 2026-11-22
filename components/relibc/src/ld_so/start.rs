@@ -469,6 +469,7 @@ fn stage2(
     // we might need global lock for this kind of stuff
     _r_debug.lock().r_ldbase = self_base;
 
+    let sp_ptr: *const Stack = sp;
     let name_or_path = if is_manual {
         // ld.so is run directly by user and not via execve() or similar systemcall
         println!("argv: {:#?}", argv);
@@ -484,6 +485,20 @@ fn stage2(
     } else {
         argv[0].clone()
     };
+
+    crate::platform::set_auxv_ptr(unsafe { (*sp_ptr).auxv().cast() });
+    if let Some(at_random) = crate::platform::get_auxv(&auxv, crate::platform::auxv_defs::AT_RANDOM)
+        && let Some(guard) =
+            unsafe { crate::header::stdlib::stack_chk_guard_from_auxv(at_random) }
+    {
+        unsafe {
+            crate::ld_so::dso::DSO::init_self_stack_chk_guard(
+                self_base as *const u8,
+                my_dyns,
+                guard,
+            );
+        }
+    }
 
     {
         let name = name_or_path.split('/').next_back();

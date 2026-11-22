@@ -141,11 +141,28 @@ pub unsafe extern "C" fn abort() -> ! {
 
 #[cfg(not(target_pointer_width = "64"))]
 #[unsafe(no_mangle)]
-static __stack_chk_guard: uintptr_t = 0x19fcadfe;
+static mut __stack_chk_guard: uintptr_t = 0x19fcadfe;
 
 #[cfg(target_pointer_width = "64")]
 #[unsafe(no_mangle)]
-static __stack_chk_guard: uintptr_t = 0xd048c37519fcadfe;
+static mut __stack_chk_guard: uintptr_t = 0xd048c37519fcadfe;
+
+pub(crate) unsafe fn stack_chk_guard_from_auxv(at_random: usize) -> Option<usize> {
+    if at_random == 0 {
+        return None;
+    }
+    let mut bytes = [0_u8; mem::size_of::<usize>()];
+    unsafe {
+        ptr::copy_nonoverlapping(at_random as *const u8, bytes.as_mut_ptr(), bytes.len());
+    }
+    Some(usize::from_ne_bytes(bytes))
+}
+
+pub(crate) unsafe fn set_stack_chk_guard(guard: usize) {
+    unsafe {
+        ptr::write_volatile(&raw mut __stack_chk_guard, guard as uintptr_t);
+    }
+}
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn __stack_chk_fail() -> ! {

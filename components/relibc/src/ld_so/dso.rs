@@ -397,6 +397,29 @@ pub struct DSO {
 }
 
 impl DSO {
+    pub unsafe fn init_self_stack_chk_guard(base: *const u8, dyns: &[Dyn], guard: usize) {
+        let Ok((dynamic, _)) = Self::parse_dynamic("", base, true, dyns) else {
+            return;
+        };
+        let Some((_, sym)) = dynamic.hash_table.find(
+            "__stack_chk_guard",
+            None,
+            dynamic.symbols,
+            dynamic.dynstrtab,
+            &VersionTable::default(),
+        ) else {
+            return;
+        };
+        if sym.st_shndx(NativeEndian) == elf::SHN_UNDEF {
+            return;
+        }
+        let sym_size = usize::try_from(sym.st_size(NativeEndian)).unwrap_or(0);
+        assert_eq!(sym_size, core::mem::size_of::<usize>());
+        let sym_val = usize::try_from(sym.st_value(NativeEndian)).expect("within bounds");
+        let guard_ptr = unsafe { base.byte_add(sym_val).cast_mut().cast::<usize>() };
+        unsafe { guard_ptr.write_volatile(guard) };
+    }
+
     #[expect(clippy::not_unsafe_ptr_arg_deref, reason = "see FIXME note")]
     pub fn from_raw(
         base: *const u8,

@@ -1,3 +1,4 @@
+sys_includes = ["elf.h"]
 include_guard = "_RELIBC_SYS_AUXV_H"
 language = "C"
 style = "Tag"

@@ -69,6 +69,55 @@ pub struct ExtraInfo<'a> {
     pub same_process: bool,
 }
 
+pub const AT_RANDOM_BYTES: usize = 16;
+const EXEC_RANDOM_MAX_BYTES: usize = 256;
+const EXEC_RANDOM_MAX_READS: usize = 64;
+
+pub fn exec_random_bytes(buf: &mut [u8]) -> Result<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    if buf.len() > EXEC_RANDOM_MAX_BYTES {
+        return Err(Error::new(EINVAL));
+    }
+    let rand_fd = FdGuard::open_into_upper("/scheme/rand", syscall::O_RDONLY | O_CLOEXEC)?;
+    let mut filled = 0;
+    for _ in 0..EXEC_RANDOM_MAX_READS {
+        if filled == buf.len() {
+            return Ok(());
+        }
+        match rand_fd.read(&mut buf[filled..]) {
+            Ok(0) => return Err(Error::new(EIO)),
+            Ok(n) => {
+                assert!(n <= buf.len() - filled);
+                filled += n;
+            }
+            Err(Error { errno: EINTR }) => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    if filled == buf.len() {
+        Ok(())
+    } else {
+        Err(Error::new(EIO))
+    }
+}
+
+#[cfg(feature = "proc")]
+fn is_early_boot_spawner() -> bool {
+    let resugid = crate::sys::posix_getresugid();
+    if resugid.ruid != 0 || resugid.euid != 0 {
+        return false;
+    }
+    let pid = crate::sys::posix_getpid();
+    pid == 1 || crate::sys::posix_getppid() == 1
+}
+
+#[cfg(not(feature = "proc"))]
+fn is_early_boot_spawner() -> bool {
+    true
+}
+
 #[expect(clippy::too_many_arguments)]
 pub fn fexec_impl(
     image_file: FdGuardUpper,
@@ -349,9 +398,22 @@ pub fn fexec_impl(
     )?;
     push(AT_PHENT)?;
 
+    let mut random_bytes = [0_u8; AT_RANDOM_BYTES];
+    let has_random = match exec_random_bytes(&mut random_bytes) {
+        Ok(()) => true,
+        Err(err)
+            if (err == Error::new(ENODEV) || cfg!(not(feature = "proc")))
+                && is_early_boot_spawner() =>
+        {
+            false
+        }
+        Err(err) => return Err(err),
+    };
+
     let total_args_envs_auxvpointee_size = args.iter().map(|arg| arg.len() + 1).sum::<usize>()
         + envs.iter().map(|env| env.len() + 1).sum::<usize>()
-        + extrainfo.cwd.map_or(0, |s| s.len() + 1);
+        + extrainfo.cwd.map_or(0, |s| s.len() + 1)
+        + if has_random { AT_RANDOM_BYTES + 1 } else { 0 };
     let args_envs_size_aligned = total_args_envs_auxvpointee_size.next_multiple_of(PAGE_SIZE);
     let target_args_env_address = mmap_anon_remote(
         &grants_fd,
@@ -386,6 +448,11 @@ pub fn fexec_impl(
             offset += source_slice.len() + 1;
             Ok(address)
         };
+
+        if has_random {
+            push(append(&random_bytes)?)?;
+            push(AT_RANDOM)?;
+        }
 
         if let Some(cwd) = extrainfo.cwd {
             push(append(cwd)?)?;

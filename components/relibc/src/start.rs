@@ -161,6 +161,14 @@ pub unsafe extern "C" fn relibc_start_v1(
     // Ensure correct host system before executing more system calls
     unsafe { relibc_verify_host() };
 
+    crate::platform::set_auxv_ptr(sp.auxv().cast());
+    if let Some(at_random) = unsafe {
+        crate::platform::get_auxv_raw(sp.auxv().cast(), crate::platform::auxv_defs::AT_RANDOM)
+    } && let Some(guard) = unsafe { crate::header::stdlib::stack_chk_guard_from_auxv(at_random) }
+    {
+        unsafe { crate::header::stdlib::set_stack_chk_guard(guard) };
+    }
+
     #[cfg(target_os = "redox")]
     let thr_fd = redox_rt::proc::FdGuard::new(
         unsafe {
