@@ -237,7 +237,7 @@ ok, note, frame = False, f"neither the login nor a refusal within {timeout:.0f}s
 while time.monotonic() - start < timeout:
     frame = screen()
     log = serial()
-    if passphrase is not None and re.search(r"RedoxFS password \(1/", log):
+    if passphrase is not None and re.search(r"(?:RedoxFS p|P)assword \(1/", log):
         vm_test.sendkeys(monitor_command, passphrase + "\n")
         passphrase = None
     refused = REFUSED.search(log) or VERIFIED_REFUSED.search(log)

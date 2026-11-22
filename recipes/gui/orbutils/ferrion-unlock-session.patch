@@ -1,0 +1,42 @@
+FerrionOS change to upstream orbutils (MIT license, kept), made against upstream commit 380995d3e29453dbc6e8a30b39fccf085b07f6ee after ferrion-neutral-login.patch.
+
+orblogin starts the session that unlock-session names, once, before showing the login window.
+
+diff -r a/orbutils/src/orblogin/main.rs b/orbutils/src/orblogin/main.rs
+--- a/orbutils/src/orblogin/main.rs
++++ b/orbutils/src/orblogin/main.rs
+@@ -133,6 +133,19 @@
+     }
+ }
+ 
++fn unlocked_login(launcher_cmd: &str, launcher_args: &[String]) -> Option<(Command, String)> {
++    let output = Command::new("unlock-session").output().ok()?;
++    if !output.status.success() {
++        return None;
++    }
++    let username = str::from_utf8(&output.stdout).ok()?.trim().to_string();
++    let sys_users = AllUsers::authenticator(Config::default()).ok()?;
++    let user = sys_users.get_by_name(&username)?;
++    let mut command = user.login_cmd(launcher_cmd);
++    command.args(launcher_args);
++    Some((command, user.user.clone()))
++}
++
+ struct UiConfig {
+     font: Font,
+ 
+@@ -1043,8 +1056,13 @@
+     let mut event_loop = EventLoop::new().unwrap();
+     let context = softbuffer::Context::new(event_loop.owned_display_handle()).unwrap();
+ 
++    let mut unlocked = unlocked_login(&launcher_cmd, &launcher_args);
+     loop {
+-        match login_window(&launcher_cmd, &launcher_args, &mut event_loop, &context) {
++        let login = match unlocked.take() {
++            Some(login) => Ok(Some(login)),
++            None => login_window(&launcher_cmd, &launcher_args, &mut event_loop, &context),
++        };
++        match login {
+             Ok(Some((mut command, username))) => {
+                 #[cfg(target_os = "redox")]
+                 let before_ns_fd = {

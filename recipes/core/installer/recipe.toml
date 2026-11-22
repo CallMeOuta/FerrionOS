@@ -5,7 +5,7 @@ dependencies = ["redoxfs"]
 [source]
 git = "https://gitlab.redox-os.org/redox-os/installer.git"
 rev = "16d39fe1f20f15fc97fa3aaa216ac7e449637d41"
-patches = ["ferrion-live-disk.patch", "ferrion-install-recovery.patch", "ferrion-install-clear-ring.patch", "ferrion-install-file-copy.patch"]
+patches = ["ferrion-live-disk.patch", "ferrion-install-recovery.patch", "ferrion-install-clear-ring.patch", "ferrion-install-file-copy.patch", "ferrion-one-password.patch"]
 
 [build]
 template = "cargo"

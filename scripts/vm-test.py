@@ -2811,7 +2811,7 @@ def host_recovery_key(image, passphrase, scratch):
 
 def unlock(vm, passphrase, attempt, timeout):
     """Waits for the bootloader's prompt for this attempt and types the passphrase."""
-    if not vm.wait_serial(rf"RedoxFS password \({attempt}/\d+\)", timeout):
+    if not vm.wait_serial(rf"(?:RedoxFS p|P)assword \({attempt}/\d+\)", timeout):
         return False
     sendkeys(vm.command, passphrase + "\n")
     return True
@@ -2995,7 +2995,10 @@ def test_disk_install(args, out):
             if not vm.wait_serial(r"Encrypt this disk\? \[Y/n\]", 30, since):
                 return False, "the installer did not ask about encryption"
             vm.type("\n")
-            for prompt in (r"Disk passphrase: ", r"Confirm passphrase: "):
+            if not vm.wait_serial(r"Account name \[\S+\]: ", 30, since):
+                return False, "the installer did not ask for the account name"
+            vm.type("\n")
+            for prompt in (r"Password for \S+: ", r"Confirm password: "):
                 if not vm.wait_serial(prompt, 30, since):
                     return False, f"no {prompt.strip()} prompt; see {vm.out}"
                 vm.type(installed + "\n")
@@ -3272,6 +3275,162 @@ def ipv4_packet(src, dst, proto, payload):
 def udp_frame(dst_mac, src_ip, dst_ip, sport, dport, payload, src_mac=SLIRP_MAC):
     length = 8 + len(payload)
     udp = sport.to_bytes(2, "big") + dport.to_bytes(2, "big") + length.to_bytes(2, "big") + b"\0\0" + payload
+def one_password_install(args, out, live, target, password):
+    vm = boot_copy(args, out, [f"DISK={live}", f"EXTRA_DISK={target}"])
+    try:
+        if not unlock(vm, config_passphrase(args), 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+            return None
+        since = vm.mark()
+        vm.type("redox_installer_tui\n")
+        choice = vm.wait_serial(r"(\d+): (?:removing handle[^\n]*\n)?\S+: 2\.00 GB", args.timeout, since)
+        if not choice or not vm.wait_serial(r"Select a drive", 10, since):
+            return None
+        vm.type(choice.group(1) + "\n")
+        for prompt, answer in ((r"Encrypt this disk\? \[Y/n\]", ""), (r"Account name \[user\]: ", ""),
+                               (r"Password for user: ", password), (r"Confirm password: ", password)):
+            if not vm.wait_serial(prompt, 30, since):
+                return None
+            vm.type(answer + "\n")
+            since = vm.mark()
+        key = vm.wait_serial(r"Recovery key[^:]*: ([0-9 ]{55})|failed to install: .*", 900, since)
+        if not key or not key.group(1) or not vm.wait_serial(r"Type SAVED", 30, since):
+            return None
+        vm.type("SAVED\n")
+        if not vm.wait_serial(r"root:.*# ", 120, since):
+            return None
+        return key.group(1).replace(" ", "")
+    finally:
+        vm.close()
+
+
+def session_owner(vm):
+    _, output = run_status(vm, "grep launcher /scheme/sys/context")
+    found = re.search(r"(?m)^\s*\d+\s+(\d+)\s.*launcher\s*$", output)
+    return int(found.group(1)) if found else None
+
+
+def wait_session(vm, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        owner = session_owner(vm)
+        if owner is not None:
+            return owner
+        time.sleep(2)
+    return None
+
+
+def screen_kind_within(vm, kinds, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        kind = vm.screenshot().kind()
+        if kind in kinds:
+            return kind
+        time.sleep(0.5)
+    return None
+
+
+def test_one_password(args, out):
+    """DE6a: the installer's one password opens the disk at the bootloader, whose prompt names the account, and reaches that account's desktop with no second prompt; the recovery key reaches the login screen with nobody logged in; a logout and a second login ask; after passwd as that account and a reboot the old password is refused and the new one opens the disk and logs in (use --config disk-encryption-test after `make live`)."""
+    password, new = "ferrion-one-pass", "ferrion-one-changed"
+    scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-onepw-"))
+    live, target, extra = scratch / "live.iso", scratch / "target.img", scratch / "extra.img"
+    disk = [f"DISK={target}", f"EXTRA_DISK={extra}"]
+    notes = []
+    try:
+        shutil.copyfile(ROOT / "build" / args.arch / args.config / "redox-live.iso", live)
+        for path, size in ((target, 2 << 30), (extra, 64 << 20)):
+            path.write_bytes(b"")
+            os.truncate(path, size)
+        recovery = one_password_install(args, out / "install", live, target, password)
+        if not recovery:
+            return False, f"the installer did not finish with one password; see {out / 'install'}"
+
+        vm = boot_copy(args, out / "password", disk)
+        try:
+            if not vm.wait_serial(r"user[\s\S]{0,400}Password \(1/\d+\)", args.timeout):
+                return False, f"the bootloader prompt does not name the account; see {vm.out}"
+            sendkeys(vm.command, password + "\n")
+            if not root_shell(vm, args.timeout * 2):
+                return False, f"no root shell on the serial console; see {vm.out}"
+            owner = wait_session(vm, args.timeout)
+            frame = settle(vm, 20, still=2.0)
+            frame.save_png(vm.out / "desktop.png")
+            _, env = run_status(vm, "grep REDOXFS_UNLOCK /scheme/sys/env")
+            _, uid = run_status(vm, "grep '^user;' /etc/passwd")
+            uid = re.search(r"user;(\d+);", uid)
+            if ("REDOXFS_UNLOCK_KIND=passphrase" not in env or not uid or owner != int(uid.group(1))
+                    or frame.kind() == "login"):
+                return False, (f"no session of user after the unlock (launcher euid {owner}, screen {frame.kind()}, "
+                               f"env {env.strip()!r}); see {vm.out}")
+            notes.append("bootloader password reached user's desktop")
+            _, context = run_status(vm, "grep launcher /scheme/sys/context")
+            for pid in re.findall(r"(?m)^\s*(\d+)\s+\d+\s.*launcher\s*$", context):
+                run_status(vm, f"kill {pid}")
+            if screen_kind_within(vm, ("login",), args.timeout) is None:
+                return False, f"after the session ended the login screen did not come back; see {vm.out}"
+            notes.append("logout shows the login")
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no serial login after root's exit; see {vm.out}"
+            time.sleep(3)
+            since = vm.mark()
+            vm.type("user\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"a second login as user did not ask for the password; see {vm.out}"
+            vm.type(password + "\n")
+            time.sleep(3)
+            since = vm.mark()
+            vm.type("passwd\n")
+            for prompt, answer in ((r"current password: ", password), (r"new password: ", new),
+                                   (r"confirm password: ", new)):
+                if not vm.wait_serial(prompt, 30, since):
+                    return False, f"passwd did not ask {prompt.strip()}; see {vm.out}"
+                vm.type(answer + "\n")
+                since = vm.mark()
+            vm.wait_serial(r"user:\S*\$ ", 120, since)
+            time.sleep(1)
+            vm.type("echo passwd-status-$?\n")
+            status = vm.wait_serial(r"passwd-status-(\d+)", 60, since)
+            (vm.out / "passwd.txt").write_text(vm.text(since))
+            if not status or status.group(1) != "0":
+                return False, f"passwd as user failed; see {vm.out / 'passwd.txt'}"
+            notes.append("second login asked; passwd changed the password")
+        finally:
+            vm.close()
+
+        vm = boot_copy(args, out / "recovery", disk)
+        try:
+            if not unlock(vm, recovery, 1, args.timeout):
+                return False, "no bootloader prompt for the recovery key"
+            if screen_kind_within(vm, ("login",), args.timeout * 2) is None:
+                return False, f"the recovery key did not end at the login screen; see {vm.out}"
+            settle(vm, 10).save_png(vm.out / "login.png")
+            if not root_shell(vm, args.timeout):
+                return False, f"no root shell after the recovery key; see {vm.out}"
+            owner = session_owner(vm)
+            if owner is not None:
+                return False, f"a session (euid {owner}) started after a recovery-key unlock; see {vm.out}"
+            notes.append("recovery key ends at the login with nobody logged in")
+        finally:
+            vm.close()
+
+        vm = boot_copy(args, out / "changed", disk)
+        try:
+            if not unlock(vm, password, 1, args.timeout):
+                return False, "no bootloader prompt after passwd"
+            if not unlock(vm, new, 2, 60):
+                return False, f"the old password was not refused at the bootloader; see {vm.out}"
+            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout) is None:
+                return False, f"the new password did not log user in; see {vm.out}"
+            notes.append("after passwd the old password is refused and the new one opens and logs in")
+        finally:
+            vm.close()
+        return True, "; ".join(notes)
+    finally:
+        shutil.rmtree(scratch)
+
+
     pseudo = socket.inet_aton(src_ip) + socket.inet_aton(dst_ip) + b"\0\x11" + length.to_bytes(2, "big")
     udp = udp[:6] + (inet_sum(pseudo + udp) or 0xFFFF).to_bytes(2, "big") + udp[8:]
     return dst_mac + src_mac + b"\x08\x00" + ipv4_packet(src_ip, dst_ip, 17, udp)
@@ -4397,3 +4556,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+OWN_IMAGE["one-password"] = test_one_password

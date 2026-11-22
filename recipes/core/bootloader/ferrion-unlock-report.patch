@@ -1,0 +1,278 @@
+FerrionOS change to the upstream bootloader (MIT license, kept), made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8 after the existing recipe patches.
+
+The passphrase prompt shows the FerrionOS mark, the account names the installer wrote to EFI/BOOT/UNLOCK.TXT on the EFI system partition, and one password field. After an unlock the kernel environment carries REDOXFS_UNLOCK_SLOT (the key slot that opened the volume) and REDOXFS_UNLOCK_KIND (recovery when the typed key has the shape of a recovery key, else passphrase), written after the measured part; lines with those names typed in the environment editor are removed.
+
+diff -ruN '--exclude=.git' '--exclude=target' '--exclude=Cargo.lock' a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -372,12 +372,58 @@
+     wipe(unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr(), capacity) });
+ }
+ 
+-fn redoxfs<O: Os>(os: &O) -> (redoxfs::FileSystem<O::D>, Option<&'static [u8]>) {
++struct UnlockReport {
++    slot: usize,
++    recovery: bool,
++}
++
++fn recovery_shaped(password: &[u8]) -> bool {
++    password.len() == 48
++        && password.iter().all(u8::is_ascii_digit)
++        && password.chunks_exact(6).all(|group| {
++            let value = group
++                .iter()
++                .fold(0u32, |value, digit| value * 10 + (digit - b'0') as u32);
++            value % 11 == 0 && value / 11 <= u16::MAX as u32
++        })
++}
++
++fn print_centered<O: Os>(os: &O, columns: usize, row: usize, text: &str) {
++    os.set_text_position(columns.saturating_sub(text.len()) / 2, row);
++    loud_print!("{}", text);
++}
++
++fn draw_unlock_prompt<O: Os>(os: &O, accounts: &[String], attempt: usize, attempts: usize) {
++    os.clear_text();
++    os.set_text_highlight(false);
++    let (columns, rows) = os.text_size();
++    let mut row = rows.saturating_sub(6 + accounts.len()) / 2;
++    print_centered(os, columns, row, "FerrionOS");
++    row += 2;
++    for account in accounts {
++        print_centered(os, columns, row, account);
++        row += 1;
++    }
++    row += 1;
++    let label = format!("Password ({}/{}): ", attempt, attempts);
++    os.set_text_position(columns.saturating_sub(label.len() + 20) / 2, row);
++    loud_print!("{}", label);
++}
++
++fn redoxfs<O: Os>(
++    os: &O,
++) -> (
++    redoxfs::FileSystem<O::D>,
++    Option<&'static [u8]>,
++    Option<UnlockReport>,
++) {
+     let attempts = 10;
++    let mut accounts = None;
+     for attempt in 0..=attempts {
+         let mut password_opt = None;
+         if attempt > 0 {
+-            loud_print!("\rRedoxFS password ({}/{}): ", attempt, attempts);
++            let accounts = accounts.get_or_insert_with(|| os.unlock_accounts());
++            draw_unlock_prompt(os, accounts, attempt, attempts);
+ 
+             let mut password = String::with_capacity(64);
+ 
+@@ -391,7 +437,6 @@
+                     }
+                     OsKey::Char(c) => {
+                         loud_print!("*");
+-                        // Grow by hand, so that no reallocation leaves a copy behind
+                         if password.len() + c.len_utf8() > password.capacity() {
+                             let mut bigger = String::with_capacity(password.capacity() * 2);
+                             bigger.push_str(&password);
+@@ -404,10 +449,7 @@
+                 }
+             }
+ 
+-            // Erase password information
+-            while os.get_text_position().0 > 0 {
+-                loud_print!("\x08 \x08");
+-            }
++            os.clear_text();
+ 
+             if !password.is_empty() {
+                 password_opt = Some(password);
+@@ -417,10 +459,17 @@
+         }
+         match os.filesystem(password_opt.as_ref().map(|x| x.as_bytes())) {
+             Ok(fs) => {
++                let report = password_opt.as_ref().and_then(|password| {
++                    fs.header
++                        .unlock(password.as_bytes())
++                        .map(|(slot, _)| UnlockReport {
++                            slot,
++                            recovery: recovery_shaped(password.as_bytes()),
++                        })
++                });
+                 return (
+                     fs,
+                     password_opt.map(|password| {
+-                        // Copy password to page aligned memory, which redoxfs wipes after reading
+                         let password_size = password.len();
+                         let password_base = os.alloc_zeroed_page_aligned(password_size);
+ 
+@@ -436,6 +485,7 @@
+                             slice::from_raw_parts(password_base, password_size)
+                         }
+                     }),
++                    report,
+                 );
+             }
+             Err(err) => {
+@@ -443,7 +493,6 @@
+                     wipe_password(password);
+                 }
+                 match err.errno {
+-                    // Incorrect password, try again
+                     syscall::ENOKEY => (),
+                     _ => {
+                         panic!("Failed to open RedoxFS: {}", err);
+@@ -455,6 +504,24 @@
+     panic!("RedoxFS out of unlock attempts");
+ }
+ 
++fn strip_unlock_lines(env: &mut [u8], len: usize) -> usize {
++    let mut read = 0;
++    let mut write = 0;
++    while read < len {
++        let end = env[read..len]
++            .iter()
++            .position(|&b| b == b'\n')
++            .map_or(len, |i| read + i + 1);
++        if !env[read..end].starts_with(b"REDOXFS_UNLOCK_") {
++            env.copy_within(read..end, write);
++            write += end - read;
++        }
++        read = end;
++    }
++    env[write..len].fill(0);
++    write
++}
++
+ #[derive(PartialEq)]
+ enum Filetype {
+     Elf,
+@@ -588,7 +655,7 @@
+         OsHwDesc::NotFound => (0, 0),
+     };
+ 
+-    let (mut fs, password_opt) = redoxfs(os);
++    let (mut fs, password_opt, unlock) = redoxfs(os);
+ 
+     print!("RedoxFS ");
+     for i in 0..fs.header.uuid().len() {
+@@ -784,11 +851,21 @@
+         }
+         if edit_env {
+             editor::edit_env(os, env_base, &mut w.i, max_env_size);
++            w.i = strip_unlock_lines(w.slice, w.i);
+         }
+         // Everything above, as the kernel will read it; the framebuffer lines below depend on
+         // the monitor and are left out.
+         measure::entry(BOOT_ENTRY);
+         measure::environment(&w.slice[..w.i]);
++        if let Some(unlock) = unlock {
++            writeln!(w, "REDOXFS_UNLOCK_SLOT={}", unlock.slot).unwrap();
++            writeln!(
++                w,
++                "REDOXFS_UNLOCK_KIND={}",
++                if unlock.recovery { "recovery" } else { "passphrase" }
++            )
++            .unwrap();
++        }
+ 
+         for output_i in 0..os.video_outputs() {
+             if let Some(mode) = mode_opts[output_i] {
+diff -ruN '--exclude=.git' '--exclude=target' '--exclude=Cargo.lock' a/src/os/mod.rs b/src/os/mod.rs
+--- a/src/os/mod.rs
++++ b/src/os/mod.rs
+@@ -1,7 +1,6 @@
+ use redoxfs::Disk;
+ 
+-#[cfg(target_arch = "aarch64")]
+-use alloc::vec::Vec;
++use alloc::{string::String, vec::Vec};
+ 
+ #[cfg(all(target_arch = "x86", target_os = "none"))]
+ pub use self::bios::*;
+@@ -115,4 +114,12 @@
+     fn get_text_position(&self) -> (usize, usize);
+     fn set_text_position(&self, x: usize, y: usize);
+     fn set_text_highlight(&self, highlight: bool);
++
++    fn text_size(&self) -> (usize, usize) {
++        (80, 25)
++    }
++
++    fn unlock_accounts(&self) -> Vec<String> {
++        Vec::new()
++    }
+ }
+diff -ruN '--exclude=.git' '--exclude=target' '--exclude=Cargo.lock' a/src/os/uefi/device.rs b/src/os/uefi/device.rs
+--- a/src/os/uefi/device.rs
++++ b/src/os/uefi/device.rs
+@@ -94,6 +94,41 @@
+     Some(buffer)
+ }
+ 
++pub fn esp_unlock_accounts() -> Vec<String> {
++    let Ok(loaded_image) = LoadedImage::handle_protocol(std::handle()) else {
++        return Vec::new();
++    };
++    let Ok(mut esp_fs) = FileSystem::handle_protocol(loaded_image.0.DeviceHandle) else {
++        return Vec::new();
++    };
++    let Ok(mut root) = esp_fs.root() else {
++        return Vec::new();
++    };
++    let mut name: Vec<u16> = "EFI\\BOOT\\UNLOCK.TXT".encode_utf16().collect();
++    name.push(0);
++    let Ok(mut file) = root.open(&name) else {
++        return Vec::new();
++    };
++    let mut data = Vec::new();
++    if file.read_to_end(&mut data).is_err() || data.len() > 4096 {
++        return Vec::new();
++    }
++    core::str::from_utf8(&data)
++        .unwrap_or("")
++        .lines()
++        .map(str::trim)
++        .filter(|line| {
++            !line.is_empty()
++                && line.len() <= 32
++                && line
++                    .bytes()
++                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
++        })
++        .take(8)
++        .map(String::from)
++        .collect()
++}
++
+ pub struct DiskDevice {
+     pub handle: Handle,
+     pub disk: DiskOrFileEfi,
+diff -ruN '--exclude=.git' '--exclude=target' '--exclude=Cargo.lock' a/src/os/uefi/mod.rs b/src/os/uefi/mod.rs
+--- a/src/os/uefi/mod.rs
++++ b/src/os/uefi/mod.rs
+@@ -1,4 +1,4 @@
+-use alloc::vec::Vec;
++use alloc::{string::String, vec::Vec};
+ use core::{cell::RefCell, mem, ptr, slice};
+ use std::proto::Protocol;
+ use uefi::{
+@@ -394,6 +394,19 @@
+         // reports a device error here, and highlighting is cosmetic
+         let _ = status_to_result((self.st.ConsoleOut.SetAttribute)(self.st.ConsoleOut, attr));
+     }
++
++    fn text_size(&self) -> (usize, usize) {
++        let out = &*self.st.ConsoleOut;
++        let (mut columns, mut rows) = (0, 0);
++        match status_to_result((out.QueryMode)(out, out.Mode.Mode as usize, &mut columns, &mut rows)) {
++            Ok(_) if columns > 0 && rows > 0 => (columns, rows),
++            _ => (80, 25),
++        }
++    }
++
++    fn unlock_accounts(&self) -> Vec<String> {
++        device::esp_unlock_accounts()
++    }
+ }
+ 
+ fn status_to_result(status: Status) -> Result<usize> {
