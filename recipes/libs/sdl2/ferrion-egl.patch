@@ -1,4 +1,4 @@
-FerrionOS change to SDL2 (zlib license, kept), made against the upstream platform fork at 7e78d2d9683732a1dbc17f35f3047c55cf381a82: Adapt its Orbital backend to EGL contexts and window presentation.
+FerrionOS change to SDL2 (zlib license, kept), made against the upstream platform fork at 7e78d2d9683732a1dbc17f35f3047c55cf381a82: Adapt its Orbital backend to EGL contexts and window presentation with an explicit orb_gl_state machine.
 Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f35f3047c55cf381a82.
 
 --- a/cmake/sdlchecks.cmake
@@ -17,7 +17,7 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
  endmacro()
 --- a/src/video/orbital/SDL_orbitalopengl.c
 +++ b/src/video/orbital/SDL_orbitalopengl.c
-@@ -18,129 +18,88 @@
+@@ -18,129 +18,178 @@
       misrepresented as being the original software.
    3. This notice may not be removed or altered from any source distribution.
  */
@@ -26,26 +26,48 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
  
  #include "SDL_orbitalopengl.h"
  #include "SDL_orbitalvideo.h"
-+#include <orbital.h>
- 
+-
 -#include <GL/osmesa.h>
 -#include <orbital.h>
--#include <assert.h>
-+/* Platform value provided by Mesa's Orbital port. */
-+#define EGL_PLATFORM_REDOX_EXT 0x31D9
+ #include <assert.h>
++#include <orbital.h>
  
 -/* Passing a NULL path means load pointers from the application */
- int ORBITAL_GL_LoadLibrary(_THIS, const char *path)
+-int ORBITAL_GL_LoadLibrary(_THIS, const char *path)
++#define EGL_PLATFORM_REDOX_EXT 0x31D9
++
++static void orb_gl_assert_state(const SDL_VideoData *data)
  {
 -    return 0;
-+    return SDL_EGL_LoadLibrary(_this, path, EGL_DEFAULT_DISPLAY, EGL_PLATFORM_REDOX_EXT);
++    assert(data != NULL);
++    switch (data->gl_state) {
++    case ORB_GL_NO_WINDOW:
++        assert(data->orb_window == NULL);
++        assert(data->egl_surface == EGL_NO_SURFACE);
++        break;
++    case ORB_GL_WINDOW:
++        assert(data->orb_window != NULL);
++        assert(data->egl_surface == EGL_NO_SURFACE);
++        break;
++    case ORB_GL_SURFACE:
++    case ORB_GL_CURRENT:
++        assert(data->orb_window != NULL);
++        assert(data->egl_surface != EGL_NO_SURFACE);
++        break;
++    default:
++        assert(!"invalid orbital GL state");
++        break;
++    }
  }
  
 -void* ORBITAL_GL_GetProcAddress(_THIS, const char *proc)
-+void *ORBITAL_GL_GetProcAddress(_THIS, const char *proc)
++static void orb_gl_clear_sdl_current(_THIS)
  {
 -    return OSMesaGetProcAddress(proc);
-+    return SDL_EGL_GetProcAddress(_this, proc);
++    _this->current_glwin = NULL;
++    _this->current_glctx = NULL;
++    SDL_TLSSet(_this->current_glwin_tls, NULL, NULL);
++    SDL_TLSSet(_this->current_glctx_tls, NULL, NULL);
  }
  
 -int ORBITAL_GL_SwapWindow(_THIS, SDL_Window* window) {
@@ -56,25 +78,66 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 -
 -    orb_window_sync(video_data->orb_window);
 -    return 0;
-+int ORBITAL_GL_SwapWindow(_THIS, SDL_Window *window)
++static int orb_gl_ensure_surface(_THIS, SDL_VideoData *data)
 +{
-+    SDL_VideoData *data = _this->driverdata;
-+    return SDL_EGL_SwapBuffers(_this, data->egl_surface);
++    orb_gl_assert_state(data);
++    switch (data->gl_state) {
++    case ORB_GL_SURFACE:
++    case ORB_GL_CURRENT:
++        return 0;
++    case ORB_GL_WINDOW:
++        data->egl_surface = SDL_EGL_CreateSurface(_this, (NativeWindowType)(uintptr_t)orb_window_fd(data->orb_window));
++        if (data->egl_surface == EGL_NO_SURFACE) {
++            return -1;
++        }
++        data->gl_state = ORB_GL_SURFACE;
++        orb_gl_assert_state(data);
++        return 0;
++    case ORB_GL_NO_WINDOW:
++    default:
++        return SDL_SetError("Orbital window unavailable for EGL surface");
++    }
  }
  
 -int ORBITAL_GL_MakeCurrent(_THIS, SDL_Window* window, SDL_GLContext ctx) {
 -    SDL_VideoData* video_data = _this->driverdata;
 -    OSMesaContext context = ctx;
 -
--
++int ORBITAL_GL_LoadLibrary(_THIS, const char *path)
++{
++    return SDL_EGL_LoadLibrary(_this, path, EGL_DEFAULT_DISPLAY, EGL_PLATFORM_REDOX_EXT);
++}
+ 
 -    if (ctx == NULL)
 -        return -1;
--
++void *ORBITAL_GL_GetProcAddress(_THIS, const char *proc)
++{
++    return SDL_EGL_GetProcAddress(_this, proc);
++}
+ 
 -    assert(video_data != NULL);
--
++int ORBITAL_GL_SwapWindow(_THIS, SDL_Window *window)
++{
++    SDL_VideoData *data = _this->driverdata;
++    orb_gl_assert_state(data);
++    assert(data->gl_state == ORB_GL_CURRENT);
++    return SDL_EGL_SwapBuffers(_this, data->egl_surface);
++}
+ 
 -    if (video_data->mesa_context == context && video_data->mesa_buffer != NULL) {
 -        return 0; // no-op
--    }
++int ORBITAL_GL_MakeCurrent(_THIS, SDL_Window *window, SDL_GLContext context)
++{
++    SDL_VideoData *data = _this->driverdata;
++    int rc;
++    orb_gl_assert_state(data);
++    if (!window || !context) {
++        rc = SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, NULL);
++        if (rc == 0 && data->gl_state == ORB_GL_CURRENT) {
++            data->gl_state = ORB_GL_SURFACE;
++        }
++        return rc;
+     }
 -
 -    Uint32 width = orb_window_width(video_data->orb_window);
 -    Uint32 height = orb_window_height(video_data->orb_window);
@@ -83,8 +146,9 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 -    if (!OSMesaMakeCurrent(context, buffer, GL_UNSIGNED_BYTE, width, height)) {
 -        fprintf(stderr, "OSMesaMakeCurrent failed\n");
 -        OSMesaDestroyContext(context);
--        return -1;
--    }
++    if (orb_gl_ensure_surface(_this, data) < 0) {
+         return -1;
+     }
 -
 -    //fprintf(stderr, "OSMesaMakeCurrent done\n");
 -
@@ -97,10 +161,12 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 -    fprintf(stderr, "SDL orbital OSMesa buffer binded to context\n");
 -
 -    return 0;
-+int ORBITAL_GL_MakeCurrent(_THIS, SDL_Window *window, SDL_GLContext context)
-+{
-+    SDL_VideoData *data = _this->driverdata;
-+    return SDL_EGL_MakeCurrent(_this, window ? data->egl_surface : EGL_NO_SURFACE, context);
++    assert(data->egl_surface != EGL_NO_SURFACE);
++    rc = SDL_EGL_MakeCurrent(_this, data->egl_surface, context);
++    if (rc == 0) {
++        data->gl_state = ORB_GL_CURRENT;
++    }
++    return rc;
  }
  
 -
@@ -109,21 +175,22 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 -    OSMesaContext ctx = OSMesaCreateContextExt(OSMESA_BGRA, _this->gl_config.depth_size, _this->gl_config.stencil_size, 0, NULL);
 -    if (ctx == NULL) {
 -        fprintf(stderr, "OSMesaCreateContextExt failed\n");
--        return NULL;
 +SDL_GLContext ORBITAL_GL_CreateContext(_THIS, SDL_Window *window)
 +{
 +    SDL_VideoData *data = _this->driverdata;
-+    if (data->egl_surface == EGL_NO_SURFACE) {
-+        data->egl_surface = SDL_EGL_CreateSurface(_this, (NativeWindowType)(uintptr_t)orb_window_fd(data->orb_window));
-+        if (data->egl_surface == EGL_NO_SURFACE) {
-+            return NULL;
-+        }
++    SDL_GLContext ctx;
++    if (orb_gl_ensure_surface(_this, data) < 0) {
+         return NULL;
      }
 -
 -    fprintf(stderr, "SDL orbital OSMesa context created successfully\n");
 -
 -    return ORBITAL_GL_MakeCurrent(_this, window, ctx) >= 0 ? ctx : NULL;
-+    return SDL_EGL_CreateContext(_this, data->egl_surface);
++    ctx = SDL_EGL_CreateContext(_this, data->egl_surface);
++    if (ctx != NULL) {
++        data->gl_state = ORB_GL_CURRENT;
++    }
++    return ctx;
  }
  
 -void ORBITAL_GL_DeleteContext(_THIS, SDL_GLContext context) {
@@ -135,8 +202,13 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 -        video_data->mesa_context = NULL;
 +void ORBITAL_GL_DeleteContext(_THIS, SDL_GLContext context)
 +{
++    SDL_VideoData *data = _this->driverdata;
++    orb_gl_assert_state(data);
 +    if (context == SDL_GL_GetCurrentContext()) {
 +        SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, NULL);
++        if (data->gl_state == ORB_GL_CURRENT) {
++            data->gl_state = ORB_GL_SURFACE;
++        }
      }
 -    video_data->mesa_buffer = NULL;
 -    OSMesaDestroyContext(context);
@@ -177,7 +249,9 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 +{
 +    SDL_VideoData *data = _this->driverdata;
 +    SDL_GLContext context;
-+    if (data->egl_surface == EGL_NO_SURFACE) {
++    int was_current;
++    orb_gl_assert_state(data);
++    if (data->gl_state != ORB_GL_SURFACE && data->gl_state != ORB_GL_CURRENT) {
          return;
      }
 -
@@ -186,22 +260,32 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 -    if (!OSMesaMakeCurrent(video_data->mesa_context, buffer, GL_UNSIGNED_BYTE, width, height)) {
 -        fprintf(stderr, "ORBITAL_GL_SetSize: OSMesaMakeCurrent failed\n");
 -        return;
-+    /* Reopen Mesa's view after liborbital remaps the resized window. */
-+    context = SDL_GL_GetCurrentWindow() == data->window ? SDL_GL_GetCurrentContext() : NULL;
-+    if (context) {
++    was_current = (data->gl_state == ORB_GL_CURRENT && SDL_GL_GetCurrentWindow() == data->window);
++    context = was_current ? SDL_GL_GetCurrentContext() : NULL;
++    if (was_current) {
 +        SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, NULL);
++        data->gl_state = ORB_GL_SURFACE;
++    }
++    SDL_EGL_DestroySurface(_this, data->egl_surface);
++    data->egl_surface = EGL_NO_SURFACE;
++    data->gl_state = ORB_GL_WINDOW;
++    if (orb_gl_ensure_surface(_this, data) == 0) {
++        if (was_current && context) {
++            if (SDL_EGL_MakeCurrent(_this, data->egl_surface, context) == 0) {
++                data->gl_state = ORB_GL_CURRENT;
++            } else {
++                orb_gl_clear_sdl_current(_this);
++            }
++        }
++    } else if (was_current) {
++        orb_gl_clear_sdl_current(_this);
      }
 -
 -    video_data->mesa_buffer = buffer;
-+    SDL_EGL_DestroySurface(_this, data->egl_surface);
-+    data->egl_surface = SDL_EGL_CreateSurface(_this, (NativeWindowType)(uintptr_t)orb_window_fd(data->orb_window));
-+    if (context && data->egl_surface != EGL_NO_SURFACE) {
-+        SDL_EGL_MakeCurrent(_this, data->egl_surface, context);
-+    }
  }
 --- a/src/video/orbital/SDL_orbitalvideo.h
 +++ b/src/video/orbital/SDL_orbitalvideo.h
-@@ -30,7 +30,7 @@
+@@ -30,19 +30,24 @@
  #endif
  
  #include "../SDL_sysvideo.h"
@@ -210,7 +294,15 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
  
  /* Private display data */
  
-@@ -39,10 +39,7 @@
++typedef enum {
++    ORB_GL_NO_WINDOW = 0,
++    ORB_GL_WINDOW,
++    ORB_GL_SURFACE,
++    ORB_GL_CURRENT
++} orb_gl_state;
++
+ typedef struct SDL_VideoData {
+     // SDL window
      SDL_Window* window;
      // Orbital window
      void* orb_window;
@@ -219,12 +311,22 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
 -    // Mesa context
 -    OSMesaContext mesa_context;
 +    EGLSurface egl_surface;
++    orb_gl_state gl_state;
  } SDL_VideoData;
  
  #ifdef __cplusplus
 --- a/src/video/orbital/SDL_orbitalwindow.c
 +++ b/src/video/orbital/SDL_orbitalwindow.c
-@@ -119,7 +119,6 @@
+@@ -63,6 +63,8 @@
+         return -1;
+     }
+     video_data->window = window;
++    video_data->egl_surface = EGL_NO_SURFACE;
++    video_data->gl_state = ORB_GL_WINDOW;
+ 
+     // Always set focus
+     SDL_SetMouseFocus(window);
+@@ -119,7 +121,6 @@
  
      // Set size of orbital window
      orb_window_set_size(video_data->orb_window, window->w, window->h);
@@ -232,24 +334,33 @@ Source: https://gitlab.redox-os.org/redox-os/sdl2.git at 7e78d2d9683732a1dbc17f3
      ORBITAL_GL_SetSize(_this, window->w, window->h);
  }
  
-@@ -168,13 +167,16 @@
+@@ -168,14 +169,25 @@
  void ORBITAL_DestroyWindow(_THIS, SDL_Window* window) {
      SDL_VideoData *video_data = (SDL_VideoData *)_this->driverdata;
      assert(video_data != NULL);
 +    if (video_data->egl_surface != EGL_NO_SURFACE) {
-+        if (SDL_GL_GetCurrentWindow() == window) {
++        if (video_data->gl_state == ORB_GL_CURRENT || SDL_GL_GetCurrentWindow() == window) {
 +            SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, NULL);
++            if (SDL_GL_GetCurrentWindow() == window) {
++                _this->current_glwin = NULL;
++                _this->current_glctx = NULL;
++                SDL_TLSSet(_this->current_glwin_tls, NULL, NULL);
++                SDL_TLSSet(_this->current_glctx_tls, NULL, NULL);
++            }
 +        }
 +        SDL_EGL_DestroySurface(_this, video_data->egl_surface);
 +        video_data->egl_surface = EGL_NO_SURFACE;
++        video_data->gl_state = ORB_GL_WINDOW;
 +    }
      if (video_data->orb_window != NULL) {
          orb_window_destroy(video_data->orb_window);
          video_data->orb_window = NULL;
--    }
+     }
 -    if (video_data->mesa_context != NULL) {
 -        ORBITAL_GL_DeleteContext(_this, video_data->mesa_context);
 -        video_data->mesa_context = NULL;
-     }
+-    }
++    video_data->gl_state = ORB_GL_NO_WINDOW;
      video_data->window = NULL;
  }
+ 
