@@ -123,11 +123,15 @@ pub fn free_ranges(allocator: &Allocator) -> Vec<(u64, u64)> {
     merged
 }
 
-
 pub fn header_generation(bytes: &[u8]) -> u64 {
     let mut word = [0; 8];
     word.copy_from_slice(&bytes[HEADER_GENERATION_OFFSET..HEADER_GENERATION_OFFSET + 8]);
     u64::from_le_bytes(word)
+}
+
+pub enum DiskState {
+    Live,
+    Crashed { inflight: Option<Pending> },
 }
 
 pub struct SimDisk {
@@ -139,8 +143,7 @@ pub struct SimDisk {
     pub reads: u64,
     pub flushes: u64,
     crash_after: Option<u64>,
-    pub inflight: Option<Pending>,
-    pub crashed: bool,
+    pub state: DiskState,
     read_error_at: Option<u64>,
     pub read_errors: u64,
     write_error_at: Option<u64>,
@@ -162,8 +165,7 @@ impl SimDisk {
             reads: 0,
             flushes: 0,
             crash_after: None,
-            inflight: None,
-            crashed: false,
+            state: DiskState::Live,
             read_error_at: None,
             read_errors: 0,
             write_error_at: None,
@@ -172,6 +174,10 @@ impl SimDisk {
             violations: Vec::new(),
             recording: None,
         }
+    }
+
+    pub fn is_crashed(&self) -> bool {
+        matches!(self.state, DiskState::Crashed { .. })
     }
 
     pub fn media(&self) -> &[u8] {
@@ -272,7 +278,7 @@ impl SimDisk {
     }
 
     fn write_block(&mut self, block: u64, data: &[u8]) -> Result<()> {
-        if self.crashed {
+        if self.is_crashed() {
             return Err(Error::new(EIO));
         }
         if (block as usize + 1) * BLOCK > self.media.len() {
@@ -287,11 +293,12 @@ impl SimDisk {
         }
         if let Some(limit) = self.crash_after {
             if self.writes >= limit {
-                self.crashed = true;
-                self.inflight = Some(Pending {
-                    block,
-                    data: new_block(data),
-                });
+                self.state = DiskState::Crashed {
+                    inflight: Some(Pending {
+                        block,
+                        data: new_block(data),
+                    }),
+                };
                 return Err(Error::new(EIO));
             }
         }
@@ -318,11 +325,14 @@ impl SimDisk {
     }
 
     pub fn into_lost(mut self) -> Lost {
-        self.crashed = false;
+        let inflight = match std::mem::replace(&mut self.state, DiskState::Live) {
+            DiskState::Live => None,
+            DiskState::Crashed { inflight } => inflight,
+        };
         Lost {
             media: std::mem::take(&mut self.media),
             cache: std::mem::take(&mut self.cache),
-            inflight: self.inflight.take(),
+            inflight,
             writes: self.writes,
             flushes: self.flushes,
         }
@@ -353,12 +363,12 @@ pub fn take_lost() -> Option<Lost> {
 
 impl Drop for SimDisk {
     fn drop(&mut self) {
-        if self.crashed {
-            self.crashed = false;
+        if let DiskState::Crashed { inflight } = std::mem::replace(&mut self.state, DiskState::Live)
+        {
             let lost = Lost {
                 media: std::mem::take(&mut self.media),
                 cache: std::mem::take(&mut self.cache),
-                inflight: self.inflight.take(),
+                inflight,
                 writes: self.writes,
                 flushes: self.flushes,
             };
@@ -427,7 +437,7 @@ fn image_after_crash(
 
 impl Disk for SimDisk {
     unsafe fn read_at(&mut self, block: u64, buffer: &mut [u8]) -> Result<usize> {
-        if self.crashed {
+        if self.is_crashed() {
             return Err(Error::new(EIO));
         }
         assert!(buffer.len() % BLOCK == 0);
@@ -468,7 +478,7 @@ impl Disk for SimDisk {
     }
 
     fn flush(&mut self) -> Result<()> {
-        if self.crashed {
+        if self.is_crashed() {
             return Err(Error::new(EIO));
         }
         self.flushes += 1;

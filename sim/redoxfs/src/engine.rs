@@ -114,6 +114,20 @@ enum Slot {
     Open { node: NodeId, fs: u32 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mounted {
+    Fresh,
+    CleanRemount,
+    AfterCrash,
+    Reformatted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurableCheck {
+    PerOp { mount_every: u64 },
+    AfterFlush { media_current: bool },
+}
+
 pub struct Engine {
     pub profile: Profile,
     fs: Option<FileSystem<SimDisk>>,
@@ -126,9 +140,19 @@ pub struct Engine {
     lost: Option<disk::Lost>,
     touched: Vec<NodeId>,
     fatal: Option<String>,
-    durable: bool,
+    durable_check: DurableCheck,
     pub stats: Stats,
     pub now: Time,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        if let Some(fs) = self.fs.take() {
+            if fs.disk.is_crashed() {
+                let _ = fs.disk.into_lost();
+            }
+        }
+    }
 }
 
 fn errno(err: Error) -> Errno {
@@ -194,23 +218,37 @@ fn free_at_level(fs: &FileSystem<SimDisk>, level: usize) -> bool {
 
 impl Engine {
     pub fn new(profile: Profile, seed: u64) -> std::result::Result<Engine, String> {
+        assert!(
+            disk::take_lost().is_none(),
+            "stale lost disk left on worker thread"
+        );
         seed_entropy(seed);
         let password = profile.encrypted.then(|| FIRST_PASSWORD.to_string());
         let disk = SimDisk::new(vec![0; profile.disk_bytes as usize], profile.durability);
-        let mut fs = FileSystem::create(
+        let fs = FileSystem::create(
             disk,
             password.as_deref().map(str::as_bytes),
             START_TIME.0,
             START_TIME.1,
         )
         .map_err(|err| format!("mkfs failed: {err}"))?;
-        fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
-        fs.barriers = profile.barriers;
         let mut model = Model::new(START_TIME, TreePtr::<Node>::root().id());
         model.key_slots[0] = password.clone();
+        let durable_check = if profile.barriers {
+            let mount_every = if profile.encrypted {
+                ENCRYPTED_MOUNT_EVERY
+            } else {
+                MOUNT_EVERY
+            };
+            DurableCheck::PerOp { mount_every }
+        } else {
+            DurableCheck::AfterFlush {
+                media_current: false,
+            }
+        };
         let mut engine = Engine {
             profile,
-            fs: Some(fs),
+            fs: None,
             model,
             handles: [Slot::Free; MAX_HANDLES as usize],
             pending_crash: None,
@@ -219,13 +257,28 @@ impl Engine {
             password,
             touched: Vec::new(),
             fatal: None,
-            durable: true,
+            durable_check,
             lost: None,
             stats: Stats::default(),
             now: START_TIME,
         };
+        engine.adopt(fs, Mounted::Fresh);
         engine.check_durable(true, true)?;
         Ok(engine)
+    }
+
+    fn adopt(&mut self, mut fs: FileSystem<SimDisk>, why: Mounted) {
+        assert!(!fs.disk.is_crashed(), "adopting a crashed disk");
+        fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
+        fs.barriers = self.profile.barriers;
+        self.handles = [Slot::Free; MAX_HANDLES as usize];
+        if let DurableCheck::AfterFlush { media_current } = &mut self.durable_check {
+            *media_current = match why {
+                Mounted::Fresh | Mounted::Reformatted => true,
+                Mounted::CleanRemount | Mounted::AfterCrash => false,
+            };
+        }
+        self.fs = Some(fs);
     }
 
     fn fs(&mut self) -> &mut FileSystem<SimDisk> {
@@ -696,7 +749,7 @@ impl Engine {
                 let mut fs = self.fs.take().expect("mounted file system");
                 fs.disk.disarm_read_error();
                 let password = self.password.clone();
-                let mut fs = match mount(fs.disk, password.as_deref()) {
+                let fs = match mount(fs.disk, password.as_deref()) {
                     Ok(fs) => fs,
                     Err(err) => {
                         self.fatal = Some(format!(
@@ -705,14 +758,9 @@ impl Engine {
                         return Err(err);
                     }
                 };
-                fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
-                self.fs = Some(fs);
-                let cleaned = self.fs().cleanup();
-                let barriers = self.profile.barriers;
-                self.fs().barriers = barriers;
-                cleaned?;
+                self.adopt(fs, Mounted::CleanRemount);
+                self.fs().cleanup()?;
                 self.model.clear_release_pending();
-                self.durable = true;
                 Ok(None)
             }
             Op::Reformat => {
@@ -723,13 +771,9 @@ impl Engine {
                 let password = self.profile.encrypted.then(|| FIRST_PASSWORD.to_string());
                 match FileSystem::create(disk, password.as_deref().map(str::as_bytes), now.0, now.1)
                 {
-                    Ok(mut fs) => {
-                        fs.disk.guard =
-                            Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
-                        fs.barriers = self.profile.barriers;
-                        self.durable = true;
-                        self.fs = Some(fs);
+                    Ok(fs) => {
                         self.password = password;
+                        self.adopt(fs, Mounted::Reformatted);
                         Ok(Some(TreePtr::<Node>::root().id()))
                     }
                     Err(err) => {
@@ -784,6 +828,10 @@ impl Engine {
     }
 
     pub fn step(&mut self, step: &Step) -> std::result::Result<(), String> {
+        assert_eq!(
+            self.fs.as_ref().expect("mounted file system").barriers,
+            self.profile.barriers
+        );
         match &step.op {
             Op::Crash { after, kind, salt } => {
                 self.pending_crash = Some((*after, *kind, *salt));
@@ -847,7 +895,10 @@ impl Engine {
             Some(fs) => {
                 fs.disk.disarm_crash();
                 fs.disk.disarm_read_error();
-                (fs.disk.crashed, fs.disk.read_errors != read_errors_before)
+                (
+                    fs.disk.is_crashed(),
+                    fs.disk.read_errors != read_errors_before,
+                )
             }
             None => (true, false),
         };
@@ -1056,13 +1107,12 @@ impl Engine {
         }
         model.close_all();
         self.model = model;
-        self.handles = [Slot::Free; MAX_HANDLES as usize];
         self.password = password;
         self.sync_passwords();
-        fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
-        fs.cleanup()
+        self.adopt(fs, Mounted::AfterCrash);
+        self.fs()
+            .cleanup()
             .map_err(|err| format!("{context}: cleanup after mount failed: {err}"))?;
-        self.fs = Some(fs);
         self.assert_handle_invariants();
         self.take_violations()
             .map_err(|err| format!("{context}: cleanup: {err}"))?;
@@ -1079,15 +1129,13 @@ impl Engine {
         let now = self.now;
         let password = self.profile.encrypted.then(|| FIRST_PASSWORD.to_string());
         let disk = SimDisk::new(image, self.profile.durability);
-        let mut fs = FileSystem::create(disk, password.as_deref().map(str::as_bytes), now.0, now.1)
+        let fs = FileSystem::create(disk, password.as_deref().map(str::as_bytes), now.0, now.1)
             .map_err(|err| {
                 format!("formatting a disk left unformatted by a power loss failed: {err}")
             })?;
-        fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
-        self.fs = Some(fs);
         self.model = model;
-        self.handles = [Slot::Free; MAX_HANDLES as usize];
         self.password = password;
+        self.adopt(fs, Mounted::Reformatted);
         self.assert_handle_invariants();
         self.check_durable(true, true)
     }
@@ -1220,27 +1268,22 @@ impl Engine {
     pub fn check_durable(&mut self, full: bool, squashed: bool) -> std::result::Result<(), String> {
         self.stats.checks += 1;
         let touched = self.touched.clone();
-        let durable = std::mem::take(&mut self.durable);
-        let live_only = if self.profile.barriers {
-            let unflushed = self
-                .fs
-                .as_ref()
-                .expect("mounted file system")
-                .disk
-                .unflushed();
-            if unflushed != 0 {
-                return Err(format!(
-                    "the operation returned with {unflushed} writes still in the volatile cache"
-                ));
+        let live_only = match &mut self.durable_check {
+            DurableCheck::PerOp { mount_every } => {
+                let unflushed = self
+                    .fs
+                    .as_ref()
+                    .expect("mounted file system")
+                    .disk
+                    .unflushed();
+                if unflushed != 0 {
+                    return Err(format!(
+                        "the operation returned with {unflushed} writes still in the volatile cache"
+                    ));
+                }
+                !full && !squashed && self.stats.ops % *mount_every != 0
             }
-            let every = if self.profile.encrypted {
-                ENCRYPTED_MOUNT_EVERY
-            } else {
-                MOUNT_EVERY
-            };
-            !full && !squashed && self.stats.ops % every != 0
-        } else {
-            !durable
+            DurableCheck::AfterFlush { media_current } => !std::mem::take(media_current),
         };
         if live_only {
             let model = &self.model;
@@ -1319,12 +1362,14 @@ impl Engine {
     }
 
     pub fn finish(&mut self) -> std::result::Result<(), String> {
-        if !self.profile.barriers {
+        if matches!(self.durable_check, DurableCheck::AfterFlush { .. }) {
             self.fs()
                 .disk
                 .flush()
                 .map_err(|err| format!("the flush at unmount failed: {err}"))?;
-            self.durable = true;
+            self.durable_check = DurableCheck::AfterFlush {
+                media_current: true,
+            };
         }
         self.check_durable(true, false)?;
         if let Some(fs) = self.fs.as_ref() {
