@@ -149,6 +149,23 @@ impl Dev {
         Ok(res as c_int)
     }
 
+    unsafe fn virtgpu_resource_create_blob(&self, mut buf: IoctlBuffer) -> Result<c_int> {
+        let mut data = unsafe { buf.read::<virtgpu::drm_virtgpu_resource_create_blob>() }?;
+        if data.cmd_size != 0 && data.cmd == 0 {
+            return Err(Errno(EFAULT));
+        }
+        let mut wire = unsafe { data.write() };
+        let res = redox_rt::sys::sys_call_rw(
+            self.fd as usize,
+            &mut wire,
+            syscall::CallFlags::empty(),
+            &[virtgpu::RESOURCE_CREATE_BLOB],
+        )?;
+        unsafe { data.read_from(&wire) };
+        (unsafe { buf.write(data) })?;
+        Ok(res as c_int)
+    }
+
     unsafe fn prime_handle_to_fd(&self, mut buf: IoctlBuffer) -> Result<c_int> {
         let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
         let writable = (data.flags & O_RDWR as u32) != 0;
@@ -191,12 +208,17 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
         0x0D => unsafe { dev.write_ioctl::<drm_set_client_cap>(buf, SET_CLIENT_CAP) },
         0x2D => unsafe { dev.prime_handle_to_fd(buf) },
         0x2E => unsafe { dev.prime_fd_to_handle(buf) },
+        0x41 => unsafe { dev.read_write_ioctl::<virtgpu::drm_virtgpu_map>(buf, virtgpu::MAP) },
         0x43 => unsafe {
             dev.read_write_ioctl::<virtgpu::drm_virtgpu_getparam>(buf, virtgpu::GETPARAM)
+        },
+        0x45 => unsafe {
+            dev.read_write_ioctl::<virtgpu::drm_virtgpu_resource_info>(buf, virtgpu::RESOURCE_INFO)
         },
         0x49 => unsafe {
             dev.read_write_ioctl::<virtgpu::drm_virtgpu_get_caps>(buf, virtgpu::GET_CAPS)
         },
+        0x4A => unsafe { dev.virtgpu_resource_create_blob(buf) },
         0x4B => unsafe { dev.virtgpu_context_init(buf) },
         0xA0 => unsafe { dev.read_write_ioctl::<drm_mode_card_res>(buf, MODE_CARD_RES) },
         0xA1 => unsafe { dev.read_write_ioctl::<drm_mode_crtc>(buf, MODE_GET_CRTC) },
