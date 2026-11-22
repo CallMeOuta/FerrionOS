@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,22 @@
 #include <unistd.h>
 
 #define TAG "gpu-probe-flip"
+#define BLOCKING_READ_LIMIT_S 5
+
+enum blocking_step {
+    BLOCKING_UNSUPPORTED,
+    BLOCKING_SET_FAILED,
+    BLOCKING_ARMED,
+    BLOCKING_DONE,
+};
+
+static volatile sig_atomic_t blocking_timed_out;
+
+static void on_blocking_alarm(int sig)
+{
+    (void)sig;
+    blocking_timed_out = 1;
+}
 
 #define DRM_IOC(dir, nr, size) \
     ((unsigned long)(((unsigned long)(dir) << 30) | ((unsigned long)(size) << 16) | (0x64UL << 8) | (nr)))
@@ -620,8 +637,30 @@ int gpu_probe_flip(int argc, char **argv)
         wait_stdin_line();
     }
 
+    enum blocking_step step = BLOCKING_SET_FAILED;
+    int fl_err = 0;
     int fl = fcntl(drm_fd, F_GETFL);
-    if (fl >= 0 && fcntl(drm_fd, F_SETFL, fl & ~O_NONBLOCK) == 0) {
+    if (fl < 0) {
+        fl_err = errno;
+        step = (fl_err == EOPNOTSUPP) ? BLOCKING_UNSUPPORTED : BLOCKING_SET_FAILED;
+    } else if (fcntl(drm_fd, F_SETFL, fl & ~O_NONBLOCK) < 0) {
+        fl_err = errno;
+        step = (fl_err == EOPNOTSUPP) ? BLOCKING_UNSUPPORTED : BLOCKING_SET_FAILED;
+    } else {
+        step = BLOCKING_ARMED;
+    }
+
+    switch (step) {
+    case BLOCKING_UNSUPPORTED:
+        printf(TAG ": unsupported read-blocking: %s\n", strerror(fl_err));
+        step = BLOCKING_DONE;
+        break;
+    case BLOCKING_SET_FAILED:
+        snprintf(detail, sizeof detail, "could not clear O_NONBLOCK: %s", strerror(fl_err));
+        fail("read-blocking", detail);
+        step = BLOCKING_DONE;
+        break;
+    case BLOCKING_ARMED: {
         struct drm_mode_crtc_page_flip blk_flip = {
             .crtc_id = crtc_id,
             .fb_id = fb0,
@@ -630,16 +669,37 @@ int gpu_probe_flip(int argc, char **argv)
             .user_data = 0x464C495000000602ULL,
         };
         if (ioctl(drm_fd, DRM_IOCTL_MODE_PAGE_FLIP, &blk_flip) == 0) {
+            struct sigaction sa, old_sa;
+            memset(&sa, 0, sizeof sa);
+            sa.sa_handler = on_blocking_alarm;
+            blocking_timed_out = 0;
+            sigaction(SIGALRM, &sa, &old_sa);
+            alarm(BLOCKING_READ_LIMIT_S);
             ssize_t n = read(drm_fd, &ev, sizeof ev);
-            if (n == (ssize_t)sizeof ev && ev.base.type == DRM_EVENT_FLIP_COMPLETE &&
-                ev.user_data == 0x464C495000000602ULL && ev.sequence > prev_seq)
+            int rd_err = errno;
+            alarm(0);
+            sigaction(SIGALRM, &old_sa, NULL);
+            if (n < 0 && rd_err == EINTR && blocking_timed_out)
+                fail("read-blocking", "timed out");
+            else if (n == 0)
+                fail("read-blocking", "blocking read returned no event");
+            else if (n == (ssize_t)sizeof ev && ev.base.type == DRM_EVENT_FLIP_COMPLETE &&
+                     ev.user_data == 0x464C495000000602ULL && ev.sequence > prev_seq)
                 pass("read-blocking", "blocking read delivered flip event");
-            else
-                fail("read-blocking", "blocking read failed or returned bad event");
+            else {
+                snprintf(detail, sizeof detail, "blocking read failed or returned bad event (n=%zd errno=%s)",
+                         n, n < 0 ? strerror(rd_err) : "none");
+                fail("read-blocking", detail);
+            }
         } else {
             fail("read-blocking", strerror(errno));
         }
         (void)fcntl(drm_fd, F_SETFL, fl);
+        step = BLOCKING_DONE;
+        break;
+    }
+    case BLOCKING_DONE:
+        break;
     }
 
 cleanup:
