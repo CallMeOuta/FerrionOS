@@ -32,3 +32,9 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0026](0026-measured-targets.md) | Work is stated as a measured target |
 | [0027](0027-monorepo.md) | The kernel, relibc, base and RedoxFS move into this repository |
 | [0028](0028-gpu-render-handles.md) | A GPU's render handle, its Venus context, and the check that proves them |
+| [0029](0029-gpu-host-visible-blobs.md) | Host-visible GPU blobs, the shared-memory window and render-handle mmap offsets |
+| [0030](0030-gpu-submission-and-fences.md) | GPU command submission, its fences, and waiting for them |
+| [0031](0031-gpu-sync-objects-and-sync-files.md) | DRM sync objects, timelines and sync files on render handles |
+| [0032](0032-gpu-page-flips-and-vblank.md) | DRM page flips and synthesized vertical-blank events on display handles |
+| [0033](0033-venus-on-ferrionos.md) | Mesa's Venus Vulkan driver, its pinned protocol and its render-scheme discovery |
+| [0034](0034-zink-selection.md) | Zink, the EGL platforms that choose it, and its frames in Orbital windows |
