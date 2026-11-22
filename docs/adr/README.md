@@ -42,6 +42,7 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0036](0036-native-window-compositor.md) | The native window compositor, its dependency gates and layout timing check |
 | [0037](0037-stack-guard-and-exec-entropy.md) | Per-process random stack guard, exec entropy helper and fortify checks in relibc |
 | [0038](0038-relro-and-bind-now.md) | RELRO and immediate binding in relibc and the image audit |
+| [0039](0039-redoxfs-page-cache.md) | RedoxFS serves every shared file mapping from one page cache per node |
 | [0040](0040-kernel-iommu-and-dma-handles.md) | The kernel drives the IOMMU, and a device's DMA reaches only what its handle grants |
 | [0041](0041-anonymous-page-discard.md) | In-place private anonymous page discard (syscall 219), madvise and POSIX abort |
 | [0042](0042-sparse-page-table-walks.md) | Sparse page-table walks, resident memory accounting and deferred page-table freeing |
