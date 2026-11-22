@@ -4567,6 +4567,15 @@ def test_mesa_cpu(vm, args):
 
 
 GPU_CONTEXT_TRACE = ("virtio_gpu_features", "virtio_gpu_cmd_ctx_create", "virtio_gpu_cmd_ctx_destroy")
+GPU_BLOB_TRACE = (
+    "virtio_gpu_features",
+    "virtio_gpu_cmd_ctx_create",
+    "virtio_gpu_cmd_ctx_destroy",
+    "virtio_gpu_cmd_res_create_blob",
+    "virtio_gpu_cmd_res_map_blob",
+    "virtio_gpu_cmd_res_unmap_blob",
+    "virtio_gpu_cmd_res_unref",
+)
 VENUS_CAPSET_SHA256 = "11069f17d3858d6b725a3b2b2b810fafc6ae6529ccdedf45bab62acdcb342609"
 
 
@@ -4665,6 +4674,109 @@ def test_gpu_context(vm, args):
                   f"{output.count(f'{tag}: pass ')} probe checks passed")
 
 
+def parse_hostmem_bytes(make_args):
+    value = "4G"
+    for item in make_args:
+        if item.startswith("QEMU_GPU_HOSTMEM="):
+            value = item.split("=", 1)[1].strip()
+    m = re.fullmatch(r"(\d+)([KMG]?)", value, re.IGNORECASE)
+    if not m:
+        return 4 * 1024 * 1024 * 1024
+    mult = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}[m.group(2).upper()]
+    return int(m.group(1)) * mult
+
+
+def test_gpu_blob(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-blob on a 3D device (gpu=venus unless --make names another): verifies the 4 GiB host-visible window size in the boot log, creates/maps/reads back/unmaps/closes host-visible blobs including a 131,268-byte Venus ring blob, and checks QEMU's trace for blob create and map events on the probe's context."""
+    tag = "gpu-probe-blob"
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    status, output = guest_run(vm, "gb", tag, 120)
+    _, schemes = guest_run(vm, "gl", "ls /scheme", 30)
+    log = vm.out / "gpu-blob.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    reasons = []
+    boot_log = vm.text(0)
+    want_window = parse_hostmem_bytes(args.make)
+    win = re.search(
+        r"virtio-gpu: host-visible window bar=(\d+) offset=(0x[0-9a-f]+) phys=(0x[0-9a-f]+) size=(0x[0-9a-f]+)",
+        boot_log,
+    )
+    if not win:
+        reasons.append("serial log has no host-visible window line")
+    else:
+        win_phys = int(win.group(3), 16)
+        win_size = int(win.group(4), 16)
+        if win_phys == 0:
+            reasons.append("host-visible window phys address is 0")
+        if win_size != want_window:
+            reasons.append(f"host-visible window size {win_size:#x}, expected {want_window:#x}")
+    fields = dict(re.findall(rf"(?m)^{tag}: (render|context-name) (\S+)", output))
+    blob_match = re.search(rf"(?m)^{tag}: blob bo=(\d+) res=(\d+) size=(\d+)", output)
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):", output)
+    if "render" not in fields:
+        reasons.append("the probe found no render name")
+    elif status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed checks: {', '.join(failed) or 'no result line'}")
+    if "render" in fields:
+        listed = schemes.split()
+        if fields["render"] not in listed or "display.virtio-gpu" not in listed:
+            reasons.append("/scheme no longer lists the render and display names after the probe")
+    deadline = time.monotonic() + 10
+    while True:
+        trace = vm.trace()
+        destroyed = [int(m.group(1), 16) for line in trace
+                     if (m := re.search(r"virtio_gpu_cmd_ctx_destroy\b.*?\bctx (0x[0-9a-f]+)", line))]
+        if len(destroyed) >= 2 or time.monotonic() >= deadline or "render" not in fields:
+            break
+        time.sleep(0.5)
+    (vm.out / "gpu-blob-trace.txt").write_text("\n".join(trace) + "\n")
+    ctx_name = fields.get("context-name", tag)
+    ctx_ids = [
+        int(m.group(1), 16)
+        for line in trace
+        if (m := re.search(r"virtio_gpu_cmd_ctx_create\b.*?\bctx (0x[0-9a-f]+), name (.*)$", line))
+        and m.group(2).strip() == ctx_name
+    ]
+    create_lines = [line for line in trace if re.search(r"\bvirtio_gpu_cmd_res_create_blob\b", line)]
+    map_lines = [line for line in trace if re.search(r"\bvirtio_gpu_cmd_res_map_blob\b", line)]
+    unref_lines = [line for line in trace if re.search(r"\bvirtio_gpu_cmd_res_unref\b", line)]
+    first_map = re.search(
+        r"virtio-gpu: first map-blob res=(\d+) offset=(0x[0-9a-f]+) size=(0x[0-9a-f]+) map_info=(0x[0-9a-f]+) \((\w+)\)",
+        boot_log,
+    )
+    if not ctx_ids:
+        reasons.append(f"QEMU's trace has no virtio_gpu_cmd_ctx_create line for {ctx_name}")
+    if not create_lines:
+        reasons.append("QEMU's trace has no virtio_gpu_cmd_res_create_blob line")
+    elif blob_match:
+        res_id = int(blob_match.group(2))
+        if not any(re.search(rf"\bres {res_id:#x}, size 135168\b", line) for line in create_lines):
+            reasons.append(f"QEMU's trace has no virtio_gpu_cmd_res_create_blob for res {res_id:#x} size 135168")
+        if not any(re.search(rf"\bres {res_id:#x}\b", line) for line in unref_lines):
+            reasons.append(f"QEMU's trace has no virtio_gpu_cmd_res_unref for res {res_id:#x}")
+    if map_lines:
+        if blob_match:
+            res_id = int(blob_match.group(2))
+            if not any(re.search(rf"\bres {res_id:#x}\b", line) for line in map_lines):
+                reasons.append(f"QEMU's trace has no virtio_gpu_cmd_res_map_blob for res {res_id:#x}")
+    else:
+        if not first_map or (blob_match and int(first_map.group(1)) != int(blob_match.group(2))):
+            reasons.append("no virtio_gpu_cmd_res_map_blob trace line and no driver map-blob log for the ring blob")
+        if f"{tag}: pass host-backing-swap:" not in output:
+            reasons.append("missing host-backing-swap proof on QEMU MAP_FIXED path")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    map_note = (
+        f"{len(map_lines)} map_blob"
+        if map_lines
+        else f"MAP_FIXED fast path (map_info {first_map.group(4)} {first_map.group(5)})"
+    )
+    return True, (f"{fields['render']}: window {win.group(4)} at {win.group(3)}; "
+                  f"trace: {len(create_lines)} create_blob, {map_note}, {len(unref_lines)} unref; "
+                  f"{output.count(f'{tag}: pass ')} probe checks passed")
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -4703,6 +4815,7 @@ TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
 TESTS["gpu-context"] = test_gpu_context
+TESTS["gpu-blob"] = test_gpu_blob
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -4778,6 +4891,10 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_CONTEXT_TRACE]})
+            elif name == "gpu-blob":
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=venus",)
+                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_BLOB_TRACE]})
             try:
                 qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
                 host = host_versions(qemu)

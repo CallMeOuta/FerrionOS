@@ -423,7 +423,7 @@ int gpu_probe_context(int argc, char **argv)
     expect_param(first, "param-resource-blob", VIRTGPU_PARAM_RESOURCE_BLOB, 1);
     expect_param(first, "param-context-init", VIRTGPU_PARAM_CONTEXT_INIT, 1);
     expect_param(first, "param-explicit-debug-name", VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME, 1);
-    expect_param(first, "param-host-visible", VIRTGPU_PARAM_HOST_VISIBLE, 0);
+    expect_param(first, "param-host-visible", VIRTGPU_PARAM_HOST_VISIBLE, 1);
     expect_param(first, "param-cross-device", VIRTGPU_PARAM_CROSS_DEVICE, 0);
     int value;
     expect_errno("param-blob-alignment", getparam(first, VIRTGPU_PARAM_BLOB_ALIGNMENT, &value), ENOENT);
