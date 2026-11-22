@@ -74,13 +74,12 @@ impl RlctMutex {
     }
     fn lock_inner(&self, deadline: Option<&timespec>) -> Result<(), Errno> {
         let this_thread = os_tid_invalid_after_fork();
-
-        //let mut spins_left = SPIN_COUNT;
+        let mut desired = this_thread;
 
         loop {
             let result = self.inner.compare_exchange_weak(
                 STATE_UNLOCKED,
-                this_thread,
+                desired,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             );
@@ -108,26 +107,25 @@ impl RlctMutex {
                 }
                 // CAS failed because some other thread owned the lock. We must now wait.
                 Err(thread) => {
-                    /*if spins_left > 0 {
-                        // TODO: Faster to spin trying to load the flag, compared to CAS?
-                        spins_left -= 1;
-                        core::hint::spin_loop();
-                        continue;
-                    }
+                    let waited = if thread & WAITING_BIT != 0 {
+                        thread
+                    } else {
+                        match self.inner.compare_exchange(
+                            thread,
+                            thread | WAITING_BIT,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => thread | WAITING_BIT,
+                            Err(_) => continue,
+                        }
+                    };
+                    desired = this_thread | WAITING_BIT;
 
-                    spins_left = SPIN_COUNT;
-
-                    let inner = self.inner.fetch_or(WAITING_BIT, Ordering::Relaxed);
-
-                    if inner == STATE_UNLOCKED {
-                        continue;
-                    }*/
-
-                    // If the mutex is not robust, simply futex_wait until unblocked.
-                    //crate::sync::futex_wait(&self.inner, inner | WAITING_BIT, None);
-                    if crate::sync::futex_wait(&self.inner, thread, deadline)
+                    if crate::sync::futex_wait(&self.inner, waited, deadline)
                         == FutexWaitResult::TimedOut
                     {
+                        let _ = crate::sync::futex_wake(&self.inner, i32::MAX);
                         return Err(Errno(ETIMEDOUT));
                     }
                 }
@@ -208,13 +206,9 @@ impl RlctMutex {
             }
         }
 
-        self.inner.store(STATE_UNLOCKED, Ordering::Release);
-        crate::sync::futex_wake(&self.inner, i32::MAX);
-        /*let was_waiting = self.inner.swap(STATE_UNLOCKED, Ordering::Release) & WAITING_BIT != 0;
-
-        if was_waiting {
+        if self.inner.swap(STATE_UNLOCKED, Ordering::Release) & WAITING_BIT != 0 {
             let _ = crate::sync::futex_wake(&self.inner, 1);
-        }*/
+        }
 
         Ok(())
     }
