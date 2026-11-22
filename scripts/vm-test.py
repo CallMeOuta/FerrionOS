@@ -4889,6 +4889,85 @@ def test_gpu_syncobj(vm, args):
                   f"{output.count(f'{tag}: pass ')} probe checks passed")
 
 
+def frame_color_match(frame, rgb):
+    want = bytes(rgb)
+    total = frame.width * frame.height
+    if total == 0:
+        return 0.0
+    matched = sum(1 for offset in range(0, len(frame.rgb), 3) if frame.rgb[offset:offset + 3] == want)
+    return matched / total
+
+
+def test_gpu_flip(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-flip: 600 page flips deliver 600 flip-complete events with monotonic timestamps and sequence numbers, median interval recorded, and screenshots after even (600) and odd (601) flips show the matching solid framebuffer colors via screendump (2D) or VNC (3D)."""
+    tag = "gpu-probe-flip"
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    since = vm.mark()
+    vm.type("bash -c 'gpu-probe-flip --hold; echo gf-end-$?'\n")
+    found = vm.wait_serial(rf"(?m)(?:^{tag}: READY even|gf-end-(\d+))", 180, since)
+    if not found:
+        output = vm.text(since)
+        (vm.out / "gpu-flip.txt").write_text(f"exit None\n{output}\n")
+        return False, f"probe timed out before READY even; see {vm.out / 'gpu-flip.txt'}"
+    even_ratio = odd_ratio = None
+    even_src = odd_src = None
+    if found.group(1) is None:
+        time.sleep(0.3)
+        even_frame = vm.screenshot()
+        even_src = vm.last_capture_source
+        even_frame.save_png(vm.out / "even.png")
+        even_ratio = frame_color_match(even_frame, (255, 96, 32))
+        odd_mark = vm.mark()
+        vm.type("\n")
+        found_odd = vm.wait_serial(rf"(?m)(?:^{tag}: READY odd|gf-end-(\d+))", 60, odd_mark)
+        if not found_odd:
+            output = vm.text(since)
+            (vm.out / "gpu-flip.txt").write_text(f"exit None\n{output}\n")
+            return False, f"probe timed out before READY odd; see {vm.out / 'gpu-flip.txt'}"
+        if found_odd.group(1) is None:
+            time.sleep(0.3)
+            odd_frame = vm.screenshot()
+            odd_src = vm.last_capture_source
+            odd_frame.save_png(vm.out / "odd.png")
+            odd_ratio = frame_color_match(odd_frame, (32, 160, 255))
+            end_mark = vm.mark()
+            vm.type("\n")
+            found_end = vm.wait_serial(r"gf-end-(\d+)", 60, end_mark)
+            status = int(found_end.group(1)) if found_end else None
+        else:
+            status = int(found_odd.group(1))
+    else:
+        status = int(found.group(1))
+    output = vm.text(since)
+    _, schemes = guest_run(vm, "gfl", "ls /scheme", 30)
+    log = vm.out / "gpu-flip.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    reasons = []
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):.*", output)
+    stats = re.search(
+        rf"(?m)^{tag}: flips (\d+) events (\d+) median_us (\d+) min_us (\d+) max_us (\d+) seq_start (\d+) seq_end (\d+)",
+        output,
+    )
+    if status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed: {'; '.join(failed) or 'no result line'}")
+    if not stats or int(stats.group(1)) != 600 or int(stats.group(2)) != 600:
+        reasons.append("did not observe 600 events for 600 flips")
+    if even_ratio is None or even_ratio < 0.99:
+        reasons.append(f"even frame color match {even_ratio} < 0.99")
+    if odd_ratio is None or odd_ratio < 0.99:
+        reasons.append(f"odd frame color match {odd_ratio} < 0.99")
+    want_src = "vnc" if vm.is_3d else "screendump"
+    if even_src != want_src or odd_src != want_src:
+        reasons.append(f"capture sources ({even_src}, {odd_src}) != {want_src}")
+    if "display.virtio-gpu" not in schemes.split():
+        reasons.append("/scheme no longer lists display.virtio-gpu")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, (f"600 flips -> 600 events, median {stats.group(3)} us (min {stats.group(4)}, max {stats.group(5)}), "
+                  f"even match {even_ratio:.4f} ({even_src}), odd match {odd_ratio:.4f} ({odd_src})")
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -4930,6 +5009,7 @@ TESTS["gpu-context"] = test_gpu_context
 TESTS["gpu-blob"] = test_gpu_blob
 TESTS["gpu-submit"] = test_gpu_submit
 TESTS["gpu-syncobj"] = test_gpu_syncobj
+TESTS["gpu-flip"] = test_gpu_flip
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -5013,6 +5093,9 @@ def main():
             elif name == "gpu-syncobj":
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
+            elif name == "gpu-flip":
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=virtio",)
             try:
                 qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
                 host = host_versions(qemu)

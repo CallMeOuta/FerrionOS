@@ -1,0 +1,11 @@
+[package]
+description = "Checks DRM page flips, flip completion events, and vblank queries on a display handle"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/gpu-probe-flip" \
+    "${COOKBOOK_RECIPE}/main.c" "${COOKBOOK_RECIPE}/flip.c" ${LDFLAGS}
+"""
