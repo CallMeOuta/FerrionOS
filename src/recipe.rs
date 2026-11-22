@@ -31,6 +31,9 @@ pub enum SourceRecipe {
         script: Option<String>,
     },
     Tar {
+        #[doc = "Archive URL, pinned by blake3. Tar archives strip one leading path component."]
+        #[doc = "ZIP archives are detected by magic bytes and extracted with unzip, preserving"]
+        #[doc = "all paths, including the top-level directory and files at the archive root."]
         tar: String,
         blake3: Option<String>,
         #[serde(default)]

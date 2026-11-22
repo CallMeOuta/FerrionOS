@@ -449,7 +449,7 @@ pub fn fetch(recipe: &CookRecipe, check_source: bool, logger: &PtyOut) -> Result
                 // Create source.tmp
                 let source_dir_tmp = recipe_dir.join("source.tmp");
                 create_dir_clean(&source_dir_tmp)?;
-                fetch_extract_tar(source_tar, &source_dir_tmp, logger)?;
+                fetch_extract_archive(source_tar, &source_dir_tmp, logger)?;
                 fetch_apply_patches(recipe_dir, patches, script, &source_dir_tmp, logger)?;
 
                 // Move source.tmp to source atomically
@@ -671,6 +671,24 @@ pub(crate) fn fetch_resolve_canon(
         *branch = None;
     }
     Ok(recipe)
+}
+
+fn fetch_extract_archive(archive: PathBuf, destination: &PathBuf, logger: &PtyOut) -> Result<()> {
+    let mut magic = [0; 4];
+    File::open(&archive)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .map_err(wrap_io_err!(archive, "Reading archive signature"))?;
+    if matches!(&magic, b"PK\x03\x04" | b"PK\x05\x06" | b"PK\x07\x08") {
+        let mut command = Command::new("unzip");
+        command.arg("-o");
+        if !crate::config::get_config().cook.verbose {
+            command.arg("-q");
+        }
+        command.arg(&archive).arg("-d").arg(destination);
+        run_command(command, logger)
+    } else {
+        fetch_extract_tar(archive, destination, logger)
+    }
 }
 
 pub(crate) fn fetch_extract_tar(
@@ -975,5 +993,29 @@ mod tests {
         assert!(!source.join("sub/untracked").exists());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn zip_source_preserves_root_files_and_directories() {
+        crate::config::init_config();
+        let root = std::env::temp_dir().join(format!("cookbook-zip-test-{}", std::process::id()));
+        fs::create_dir_all(root.join("source")).unwrap();
+        let archive = root.join("source.tar");
+        fs::write(
+            &archive,
+            b"\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x21\x50\x5b\xf9\xf4\x16\x04\x00\x00\x00\x04\x00\x00\x00\x08\x00\x00\x00root.txtroot\
+              \x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x21\x50\xe9\xc2\xc9\xaa\x06\x00\x00\x00\x06\x00\x00\x00\x0f\x00\x00\x00nested/file.txtnested\
+              \x50\x4b\x01\x02\x14\x03\x14\x00\x00\x00\x00\x00\x00\x00\x21\x50\x5b\xf9\xf4\x16\x04\x00\x00\x00\x04\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00root.txt\
+              \x50\x4b\x01\x02\x14\x03\x14\x00\x00\x00\x00\x00\x00\x00\x21\x50\xe9\xc2\xc9\xaa\x06\x00\x00\x00\x06\x00\x00\x00\x0f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x01\x2a\x00\x00\x00nested/file.txt\
+              \x50\x4b\x05\x06\x00\x00\x00\x00\x02\x00\x02\x00\x73\x00\x00\x00\x5d\x00\x00\x00\x00\x00",
+        )
+        .unwrap();
+        fetch_extract_archive(archive, &root.join("source"), &None).unwrap();
+        assert_eq!(fs::read(root.join("source/root.txt")).unwrap(), b"root");
+        assert_eq!(
+            fs::read(root.join("source/nested/file.txt")).unwrap(),
+            b"nested"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
