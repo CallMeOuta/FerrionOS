@@ -196,13 +196,27 @@ impl Handle {
     }
 }
 
+enum GrantState {
+    ReadOnly {
+        real: String,
+    },
+    ReadWrite {
+        real: String,
+    },
+    Clone {
+        real: String,
+        layer: String,
+        overlay: Overlay,
+    },
+}
+
 enum Phase {
     Configuring {
         spec: Vec<u8>,
     },
     Live {
         scope: Scope,
-        overlays: Vec<Option<Overlay>>,
+        grants: Vec<GrantState>,
     },
     Ended {
         report: Vec<u8>,
@@ -226,16 +240,16 @@ impl Session {
         }
     }
 
-    fn live(&self) -> Result<(&Scope, &[Option<Overlay>])> {
+    fn live(&self) -> Result<(&Scope, &[GrantState])> {
         match &self.phase {
-            Phase::Live { scope, overlays } => Ok((scope, overlays)),
+            Phase::Live { scope, grants } => Ok((scope, grants)),
             Phase::Configuring { .. } | Phase::Ended { .. } => Err(err(EBADF)),
         }
     }
 
-    fn live_mut(&mut self) -> Result<(&Scope, &mut [Option<Overlay>])> {
+    fn live_mut(&mut self) -> Result<(&Scope, &mut [GrantState])> {
         match &mut self.phase {
-            Phase::Live { scope, overlays } => Ok((scope, overlays)),
+            Phase::Live { scope, grants } => Ok((scope, grants)),
             Phase::Configuring { .. } | Phase::Ended { .. } => Err(err(EBADF)),
         }
     }
@@ -283,7 +297,7 @@ impl Session {
 
 struct RealView<'a> {
     dirs: &'a mut DirCache,
-    overlays: &'a [Option<Overlay>],
+    grants: &'a [GrantState],
 }
 
 enum Located {
@@ -291,24 +305,34 @@ enum Located {
     Missing,
 }
 
-fn locate(scope: &Scope, overlays: &[Option<Overlay>], grant: usize, rel: &str) -> Located {
-    let g = &scope.grants[grant];
-    let lower = join(&g.real, rel);
-    match (&overlays[grant], &g.layer) {
-        (Some(ov), Some(layer)) => match ov.lookup(rel, || exists(&lower)) {
-            Lookup::Upper => Located::Real(join(layer, rel), true),
-            Lookup::Lower => Located::Real(lower, false),
-            Lookup::Missing => Located::Missing,
-        },
-        _ => Located::Real(lower, false),
+fn locate(grants: &[GrantState], grant: usize, rel: &str) -> Located {
+    match &grants[grant] {
+        GrantState::ReadOnly { real } | GrantState::ReadWrite { real } => {
+            Located::Real(join(real, rel), false)
+        }
+        GrantState::Clone {
+            real,
+            layer,
+            overlay,
+        } => {
+            let lower = join(real, rel);
+            match overlay.lookup(rel, || exists(&lower)) {
+                Lookup::Upper => Located::Real(join(layer, rel), true),
+                Lookup::Lower => Located::Real(lower, false),
+                Lookup::Missing => Located::Missing,
+            }
+        }
     }
 }
 
 impl View for RealView<'_> {
-    fn kind(&mut self, scope: &Scope, grant: usize, rel: &str) -> std::result::Result<Kind, i32> {
-        let (real, cacheable) = match locate(scope, self.overlays, grant, rel) {
+    fn kind(&mut self, _scope: &Scope, grant: usize, rel: &str) -> std::result::Result<Kind, i32> {
+        let (real, cacheable) = match locate(self.grants, grant, rel) {
             Located::Missing => return Err(ENOENT),
-            Located::Real(real, _) => (real, scope.grants[grant].access != Access::Clone),
+            Located::Real(real, _) => (
+                real,
+                !matches!(self.grants[grant], GrantState::Clone { .. }),
+            ),
         };
         if cacheable && self.dirs.contains(&real) {
             return Ok(Kind::Dir);
@@ -322,11 +346,11 @@ impl View for RealView<'_> {
 
     fn readlink(
         &mut self,
-        scope: &Scope,
+        _scope: &Scope,
         grant: usize,
         rel: &str,
     ) -> std::result::Result<String, i32> {
-        match locate(scope, self.overlays, grant, rel) {
+        match locate(self.grants, grant, rel) {
             Located::Missing => Err(ENOENT),
             Located::Real(real, _) => readlink(&real).map_err(|e| e.errno),
         }
@@ -577,11 +601,11 @@ impl Proxy {
         Ok(id)
     }
 
-    fn live(&self, session: u32) -> Result<(&Scope, &[Option<Overlay>])> {
+    fn live(&self, session: u32) -> Result<(&Scope, &[GrantState])> {
         self.sessions.get(&session).ok_or(err(EBADF))?.live()
     }
 
-    fn live_mut(&mut self, session: u32) -> Result<(&Scope, &mut [Option<Overlay>])> {
+    fn live_mut(&mut self, session: u32) -> Result<(&Scope, &mut [GrantState])> {
         self.sessions
             .get_mut(&session)
             .ok_or(err(EBADF))?
@@ -597,10 +621,10 @@ impl Proxy {
     }
 
     fn walk(&mut self, session: u32, start: &str, path: &str, links: &mut usize) -> Result<Walked> {
-        let (scope, overlays) = self.sessions.get(&session).ok_or(err(EBADF))?.live()?;
+        let (scope, grants) = self.sessions.get(&session).ok_or(err(EBADF))?.live()?;
         let mut view = RealView {
             dirs: &mut self.dirs,
-            overlays,
+            grants,
         };
         scope
             .resolve(&mut view, start, path, false, links)
@@ -801,21 +825,26 @@ impl Proxy {
         Err(err(syscall::error::EEXIST))
     }
 
-    fn overlay_parts(
+    fn clone_grant_mut(
         &mut self,
         session: u32,
         grant: usize,
     ) -> Result<(&mut Overlay, String, String)> {
-        let (scope, overlays) = self.live_mut(session)?;
-        let g = &scope.grants[grant];
-        let layer = g.layer.clone().ok_or(err(EINVAL))?;
-        let lower = g.real.clone();
-        let ov = overlays[grant].as_mut().ok_or(err(EINVAL))?;
-        Ok((ov, lower, layer))
+        let (_, grants) = self.live_mut(session)?;
+        match &mut grants[grant] {
+            GrantState::Clone {
+                real,
+                layer,
+                overlay,
+            } => Ok((overlay, real.clone(), layer.clone())),
+            GrantState::ReadOnly { .. } | GrantState::ReadWrite { .. } => {
+                unreachable!("clone_grant_mut called on non-clone grant")
+            }
+        }
     }
 
     fn copy_up_dirs(&mut self, session: u32, grant: usize, rel: &str) -> Result<()> {
-        let (ov, lower, layer) = self.overlay_parts(session, grant)?;
+        let (ov, lower, layer) = self.clone_grant_mut(session, grant)?;
         let mut chain: Vec<&str> = Vec::new();
         let mut cur = rel;
         while !cur.is_empty() && !ov.has_upper(cur) {
@@ -849,7 +878,7 @@ impl Proxy {
 
     fn copy_up(&mut self, session: u32, grant: usize, rel: &str) -> Result<()> {
         let (lower, layer) = {
-            let (ov, lower, layer) = self.overlay_parts(session, grant)?;
+            let (ov, lower, layer) = self.clone_grant_mut(session, grant)?;
             if ov.has_upper(rel) {
                 return Ok(());
             }
@@ -881,7 +910,7 @@ impl Proxy {
             remove_path(&staged);
             return Err(e);
         }
-        let (ov, _, layer) = self.overlay_parts(session, grant)?;
+        let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
         let mut next_ov = ov.clone();
         if let Err(e) = next_ov.copy_up_done(rel).map_err(err).and_then(|()| {
             next_ov.set_origin_inode(rel, lower_ino);
@@ -906,17 +935,18 @@ impl Proxy {
         follow: bool,
     ) -> Result<Opened> {
         let located = {
-            let (scope, overlays) = self.live(session)?;
-            locate(scope, overlays, grant, rel)
+            let (_, grants) = self.live(session)?;
+            locate(grants, grant, rel)
         };
         let wants_write = accmode_writes(flags) || flags & O_TRUNC != 0;
         match located {
             Located::Real(real, true) => {
-                let origin_inode = self
-                    .live(session)
-                    .ok()
-                    .and_then(|(_, overlays)| overlays[grant].as_ref())
-                    .and_then(|ov| ov.origin_inode(rel));
+                let origin_inode = match &self.live(session)?.1[grant] {
+                    GrantState::Clone { overlay, .. } => overlay.origin_inode(rel),
+                    GrantState::ReadOnly { .. } | GrantState::ReadWrite { .. } => {
+                        unreachable!("open_clone called on non-clone grant")
+                    }
+                };
                 let opened = self.open_real(
                     session,
                     vpath,
@@ -940,7 +970,7 @@ impl Proxy {
                         return Err(err(EISDIR));
                     }
                     self.copy_up(session, grant, rel)?;
-                    let (ov, _, layer) = self.overlay_parts(session, grant)?;
+                    let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
                     let origin_inode = ov.origin_inode(rel);
                     assert!(origin_inode.is_some());
                     return self.open_real(
@@ -973,11 +1003,11 @@ impl Proxy {
                     return Err(err(ENOENT));
                 }
                 {
-                    let (ov, _, _) = self.overlay_parts(session, grant)?;
+                    let (ov, _, _) = self.clone_grant_mut(session, grant)?;
                     ov.can_add_upper(rel).map_err(err)?;
                 }
                 self.copy_up_dirs(session, grant, rel_parent(rel))?;
-                let (_, _, layer) = self.overlay_parts(session, grant)?;
+                let (_, _, layer) = self.clone_grant_mut(session, grant)?;
                 let target = join(&layer, rel);
                 let opened = self.open_real(
                     session,
@@ -990,7 +1020,7 @@ impl Proxy {
                     follow,
                     false,
                 )?;
-                let (ov, _, layer) = self.overlay_parts(session, grant)?;
+                let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
                 let mut next_ov = ov.clone();
                 if let Err(e) = next_ov
                     .created(rel, flags & O_DIRECTORY != 0)
@@ -1014,12 +1044,18 @@ impl Proxy {
         grant: usize,
         rel: &str,
     ) -> Result<Vec<(String, DirentKind, u64)>> {
-        let (scope, overlays) = self.live(session)?;
-        let g = &scope.grants[grant];
-        let ov = overlays[grant].as_ref().ok_or(err(EINVAL))?;
+        let (_, grants) = self.live(session)?;
+        let GrantState::Clone {
+            real,
+            layer,
+            overlay: ov,
+        } = &grants[grant]
+        else {
+            unreachable!("merged called on non-clone grant");
+        };
         let mut names = BTreeMap::new();
         if ov.lower_listed(rel) {
-            let lower = join(&g.real, rel);
+            let lower = join(real, rel);
             if lkind(&lower).is_ok_and(|k| k == Kind::Dir) {
                 list_real(&lower, &mut names)?;
             }
@@ -1031,7 +1067,7 @@ impl Proxy {
             names.retain(|name, _| !ov.lower_hidden(&format!("{prefix}{name}")));
         }
         if rel.is_empty() || ov.has_upper(rel) {
-            let upper = join(g.layer.as_ref().ok_or(err(EINVAL))?, rel);
+            let upper = join(layer, rel);
             if lkind(&upper).is_ok_and(|k| k == Kind::Dir) {
                 list_real(&upper, &mut names)?;
             }
@@ -1093,13 +1129,11 @@ impl Proxy {
                 node.lock_inode,
             )
         };
-        let scope = self.scope(session)?;
-        let g = &scope.grants[grant];
-        match g.access {
-            Access::ReadOnly => return Err(err(EROFS)),
-            Access::ReadWrite => return self.node_fd(id),
-            Access::Clone if place == Some(NodePlace::Upper) => return self.node_fd(id),
-            Access::Clone => {}
+        match &self.live(session)?.1[grant] {
+            GrantState::ReadOnly { .. } => return Err(err(EROFS)),
+            GrantState::ReadWrite { .. } => return self.node_fd(id),
+            GrantState::Clone { .. } if place == Some(NodePlace::Upper) => return self.node_fd(id),
+            GrantState::Clone { .. } => {}
         }
         let (located_session, located_grant, rel, _, located_upper) = self.located_node(id)?;
         if located_session != session || located_grant != grant || located_upper {
@@ -1107,7 +1141,7 @@ impl Proxy {
         }
         debug_assert!(vpath.ends_with(&rel));
         self.copy_up(session, grant, &rel)?;
-        let (_, _, layer) = self.overlay_parts(session, grant)?;
+        let (_, _, layer) = self.clone_grant_mut(session, grant)?;
         let fd = sys_open(
             &join(&layer, &rel),
             (flags & !(O_CREAT | O_EXCL | O_TRUNC)) | O_NOFOLLOW,
@@ -1177,8 +1211,8 @@ impl Proxy {
         }
         let (grant, rel) = self.parent_rel_of(session, &vpath)?;
         let located = {
-            let (scope, overlays) = self.live(session)?;
-            locate(scope, overlays, grant, &rel)
+            let (_, grants) = self.live(session)?;
+            locate(grants, grant, &rel)
         };
         let Located::Real(real, upper) = located else {
             return Err(err(ESTALE));
@@ -1217,8 +1251,8 @@ impl Proxy {
             return Ok(());
         }
         let located = {
-            let (scope, overlays) = self.live(session)?;
-            locate(scope, overlays, grant, &rel)
+            let (_, grants) = self.live(session)?;
+            locate(grants, grant, &rel)
         };
         let Located::Real(real, upper) = located else {
             return Err(err(ENOENT));
@@ -1233,7 +1267,7 @@ impl Proxy {
         if rmdir && !self.merged(session, grant, &rel)?.is_empty() {
             return Err(err(ENOTEMPTY));
         }
-        let (ov, lower, layer) = self.overlay_parts(session, grant)?;
+        let (ov, lower, layer) = self.clone_grant_mut(session, grant)?;
         let lower_had = !ov.lower_hidden(&rel) && exists(&join(&lower, &rel));
         let mut next_ov = ov.clone();
         next_ov.removed(&rel, lower_had).map_err(err)?;
@@ -1302,8 +1336,8 @@ impl Proxy {
             return Ok(());
         }
         let located = {
-            let (scope, overlays) = self.live(session)?;
-            locate(scope, overlays, grant, &old_rel)
+            let (_, grants) = self.live(session)?;
+            locate(grants, grant, &old_rel)
         };
         let Located::Real(real, old_upper) = located else {
             return Err(err(ENOENT));
@@ -1313,11 +1347,17 @@ impl Proxy {
         }
         let src_kind = lkind(&real)?;
         let (lower_had_old, new_located, new_lower_dir) = {
-            let (scope, overlays) = self.live(session)?;
-            let ov = overlays[grant].as_ref().ok_or(err(EINVAL))?;
-            let lower = &scope.grants[grant].real;
+            let (_, grants) = self.live(session)?;
+            let GrantState::Clone {
+                real: lower,
+                overlay: ov,
+                ..
+            } = &grants[grant]
+            else {
+                unreachable!("clone rename on non-clone grant");
+            };
             let lower_had_old = !ov.lower_hidden(&old_rel) && exists(&join(lower, &old_rel));
-            let new_located = locate(scope, overlays, grant, &new_rel);
+            let new_located = locate(grants, grant, &new_rel);
             let new_lower = join(lower, &new_rel);
             let new_lower_dir =
                 !ov.lower_hidden(&new_rel) && lkind(&new_lower).is_ok_and(|k| k == Kind::Dir);
@@ -1350,7 +1390,7 @@ impl Proxy {
             self.copy_up(session, grant, &old_rel)?;
         }
         self.copy_up_dirs(session, grant, rel_parent(&new_rel))?;
-        let (ov, _, layer) = self.overlay_parts(session, grant)?;
+        let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
         let (from, to) = (join(&layer, &old_rel), join(&layer, &new_rel));
         let (a, b) = (cpath(&from)?, cpath(&to)?);
         let mut next_ov = ov.clone();
@@ -1378,10 +1418,10 @@ impl Proxy {
     }
 
     fn exists_in_view(&mut self, session: u32, grant: usize, rel: &str) -> bool {
-        let Ok((scope, overlays)) = self.live(session) else {
+        let Ok((_, grants)) = self.live(session) else {
             return false;
         };
-        match locate(scope, overlays, grant, rel) {
+        match locate(grants, grant, rel) {
             Located::Real(real, _) => exists(&real),
             Located::Missing => false,
         }
@@ -1416,12 +1456,12 @@ impl Proxy {
             )
         } else {
             {
-                let (ov, _, _) = self.overlay_parts(session, grant)?;
+                let (ov, _, _) = self.clone_grant_mut(session, grant)?;
                 ov.can_add_upper(&new_rel).map_err(err)?;
             }
             self.copy_up(session, grant, &old_rel)?;
             self.copy_up_dirs(session, grant, rel_parent(&new_rel))?;
-            let (_, _, layer) = self.overlay_parts(session, grant)?;
+            let (_, _, layer) = self.clone_grant_mut(session, grant)?;
             (join(&layer, &old_rel), join(&layer, &new_rel))
         };
         let (a, b) = (cpath(&from)?, cpath(&to)?);
@@ -1433,7 +1473,7 @@ impl Proxy {
             s.record_link(to.clone());
         }
         if access == Access::Clone {
-            let (ov, _, layer) = self.overlay_parts(session, grant)?;
+            let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
             let mut next_ov = ov.clone();
             if let Err(e) = next_ov
                 .created(&new_rel, false)
@@ -1469,27 +1509,38 @@ impl Proxy {
             eprintln!("ferrion-scope-proxy: {reason}");
             err(EINVAL)
         })?;
-        let mut overlays = Vec::with_capacity(scope.grants.len());
+        let mut grants = Vec::with_capacity(scope.grants.len());
         for g in &scope.grants {
             if !exists(&g.real) {
                 eprintln!("ferrion-scope-proxy: {} does not exist", g.real);
                 return Err(err(ENOENT));
             }
-            overlays.push(match &g.layer {
-                Some(layer) => {
+            let state = match (g.access, &g.layer) {
+                (Access::ReadOnly, None) => GrantState::ReadOnly {
+                    real: g.real.clone(),
+                },
+                (Access::ReadWrite, None) => GrantState::ReadWrite {
+                    real: g.real.clone(),
+                },
+                (Access::Clone, Some(layer)) => {
                     if lkind(&g.real)? != Kind::Dir || lkind(layer)? != Kind::Dir {
                         return Err(err(ENOTDIR));
                     }
-                    let ov = Overlay::default();
-                    save_overlay(layer, &ov)?;
-                    Some(ov)
+                    let overlay = Overlay::default();
+                    save_overlay(layer, &overlay)?;
+                    GrantState::Clone {
+                        real: g.real.clone(),
+                        layer: layer.clone(),
+                        overlay,
+                    }
                 }
-                None => None,
-            });
+                _ => return Err(err(EINVAL)),
+            };
+            grants.push(state);
         }
         let id = self.insert(Handle::Root { session })?;
         let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
-        s.phase = Phase::Live { scope, overlays };
+        s.phase = Phase::Live { scope, grants };
         Ok(OpenResult::ThisScheme {
             number: id,
             flags: NewFdFlags::empty(),
