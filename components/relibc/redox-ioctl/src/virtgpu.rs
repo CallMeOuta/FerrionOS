@@ -594,6 +594,27 @@ define_ioctl_data! {
     }
 }
 
+pub const EXECBUF_MAX_CMD_SIZE: u32 = 4 * 1024 * 1024;
+pub const EXECBUF_MAX_BO_HANDLES: u32 = 1024;
+pub const EXECBUF_MAX_SYNCOBJS: u32 = 1024;
+pub const FENCE_DUP_EXECBUFFER: u64 = EXECBUFFER;
+pub const FENCE_DUP_UNSIGNALED: u64 = 0x4201;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VirtgpuFenceState {
+    pub signaled: u32,
+    pub status: i32,
+    pub fence_id: u64,
+}
+
+define_ioctl_data! {
+    struct drm_virtgpu_3d_wait, VirtgpuWait {
+        handle: u32,
+        flags: u32,
+    }
+}
+
 /// Each request that has a payload: its function number, the name of its
 /// structure in Linux's headers, and the payload's layout.
 pub const PAYLOADS: &[(u64, &str, &WireLayout)] = &[
@@ -609,6 +630,7 @@ pub const PAYLOADS: &[(u64, &str, &WireLayout)] = &[
         "drm_virtgpu_resource_info",
         &VirtgpuResourceInfo::LAYOUT,
     ),
+    (WAIT, "drm_virtgpu_3d_wait", &VirtgpuWait::LAYOUT),
     (GET_CAPS, "drm_virtgpu_get_caps", &VirtgpuGetCaps::LAYOUT),
     (
         RESOURCE_CREATE_BLOB,

@@ -166,6 +166,64 @@ impl Dev {
         Ok(res as c_int)
     }
 
+    unsafe fn virtgpu_execbuffer(&self, mut buf: IoctlBuffer) -> Result<c_int> {
+        let mut data = unsafe { buf.read::<virtgpu::drm_virtgpu_execbuffer>() }?;
+        if data.num_in_syncobjs != 0 || data.num_out_syncobjs != 0 {
+            if data.syncobj_stride
+                != core::mem::size_of::<virtgpu::drm_virtgpu_execbuffer_syncobj>() as u32
+            {
+                return Err(Errno(EINVAL));
+            }
+            if data.num_in_syncobjs > virtgpu::EXECBUF_MAX_SYNCOBJS
+                || data.num_out_syncobjs > virtgpu::EXECBUF_MAX_SYNCOBJS
+            {
+                return Err(Errno(EINVAL));
+            }
+            if (data.num_in_syncobjs != 0 && data.in_syncobjs == 0)
+                || (data.num_out_syncobjs != 0 && data.out_syncobjs == 0)
+            {
+                return Err(Errno(EFAULT));
+            }
+        }
+        if data.num_bo_handles > virtgpu::EXECBUF_MAX_BO_HANDLES {
+            return Err(Errno(EINVAL));
+        }
+        if data.num_bo_handles != 0 && data.bo_handles == 0 {
+            return Err(Errno(EFAULT));
+        }
+        if data.size > virtgpu::EXECBUF_MAX_CMD_SIZE {
+            return Err(Errno(EINVAL));
+        }
+        if data.size != 0 && data.command == 0 {
+            return Err(Errno(EFAULT));
+        }
+
+        let mut wire = unsafe { data.write() };
+        let res = redox_rt::sys::sys_call_rw(
+            self.fd as usize,
+            &mut wire,
+            syscall::CallFlags::empty(),
+            &[virtgpu::EXECBUFFER],
+        )?;
+        unsafe { data.read_from(&wire) };
+
+        if (data.flags & virtgpu::VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0 {
+            let mut metadata = [0u8; 16];
+            metadata[0..8].copy_from_slice(&virtgpu::FENCE_DUP_EXECBUFFER.to_ne_bytes());
+            metadata[8..12].copy_from_slice(&(data.fence_fd as u32).to_ne_bytes());
+            metadata[12..16].copy_from_slice(&0u32.to_ne_bytes());
+            let new_fd = redox_rt::sys::dup(self.fd as usize, &metadata)?;
+            if let Err(err) = redox_rt::sys::fcntl(new_fd, F_SETFD, FD_CLOEXEC as usize) {
+                let _ = redox_rt::sys::close(new_fd);
+                return Err(err.into());
+            }
+            data.fence_fd = new_fd as c_int;
+        }
+
+        unsafe { buf.write(data) }?;
+        Ok(res as c_int)
+    }
+
     unsafe fn prime_handle_to_fd(&self, mut buf: IoctlBuffer) -> Result<c_int> {
         let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
         let writable = (data.flags & O_RDWR as u32) != 0;
@@ -209,11 +267,15 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
         0x2D => unsafe { dev.prime_handle_to_fd(buf) },
         0x2E => unsafe { dev.prime_fd_to_handle(buf) },
         0x41 => unsafe { dev.read_write_ioctl::<virtgpu::drm_virtgpu_map>(buf, virtgpu::MAP) },
+        0x42 => unsafe { dev.virtgpu_execbuffer(buf) },
         0x43 => unsafe {
             dev.read_write_ioctl::<virtgpu::drm_virtgpu_getparam>(buf, virtgpu::GETPARAM)
         },
         0x45 => unsafe {
             dev.read_write_ioctl::<virtgpu::drm_virtgpu_resource_info>(buf, virtgpu::RESOURCE_INFO)
+        },
+        0x48 => unsafe {
+            dev.read_write_ioctl::<virtgpu::drm_virtgpu_3d_wait>(buf, virtgpu::WAIT)
         },
         0x49 => unsafe {
             dev.read_write_ioctl::<virtgpu::drm_virtgpu_get_caps>(buf, virtgpu::GET_CAPS)
