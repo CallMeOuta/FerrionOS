@@ -1,5 +1,5 @@
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
 use core::{
@@ -1473,6 +1473,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
         new_name: &str,
     ) -> Result<()> {
         let orig = self.find_node(orig_parent_ptr, orig_name)?;
+        self.check_move(&orig, orig_parent_ptr, new_parent_ptr)?;
 
         // TODO: only allow ENOENT as an error?
         if let Ok(new) = self.find_node(new_parent_ptr, new_name) {
@@ -1512,6 +1513,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
         new_name: &str,
     ) -> Result<()> {
         let orig = self.find_node(orig_parent_ptr, orig_name)?;
+        self.check_move(&orig, orig_parent_ptr, new_parent_ptr)?;
 
         // The target shouldn't exist.
         if self.find_node(new_parent_ptr, new_name).is_ok() {
@@ -1530,6 +1532,37 @@ impl<'a, D: Disk> Transaction<'a, D> {
             orig.data().mode() & Node::MODE_TYPE,
         )?;
 
+        Ok(())
+    }
+
+    fn check_move(
+        &mut self,
+        orig: &TreeData<Node>,
+        orig_parent_ptr: TreePtr<Node>,
+        new_parent_ptr: TreePtr<Node>,
+    ) -> Result<()> {
+        if !orig.data().is_dir() || new_parent_ptr.id() == orig_parent_ptr.id() {
+            return Ok(());
+        }
+        let mut pending = Vec::from([orig.ptr()]);
+        let mut visited = BTreeSet::new();
+        let mut children = Vec::new();
+        while let Some(dir_ptr) = pending.pop() {
+            if dir_ptr.id() == new_parent_ptr.id() {
+                return Err(Error::new(EINVAL));
+            }
+            if !visited.insert(dir_ptr.id()) {
+                continue;
+            }
+            children.clear();
+            self.child_nodes(dir_ptr, &mut children)?;
+            for child in children.iter() {
+                let child_ptr = child.node_ptr();
+                if self.read_tree(child_ptr)?.data().is_dir() {
+                    pending.push(child_ptr);
+                }
+            }
+        }
         Ok(())
     }
 
