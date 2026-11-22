@@ -1,0 +1,54 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with the FerrionOS patches before it in recipe.toml applied, ferrion-gpu-fences.patch last among them. A blob's GEM handle is known to submissions from its creation to its GEM_CLOSE: EXECBUFFER accepts it in bo_handles and WAIT waits for the last submission that named it; after GEM_CLOSE both answer ENOENT and the blob's fence is dropped.
+
+diff --git a/drivers/graphics/driver-graphics/src/blob.rs b/drivers/graphics/driver-graphics/src/blob.rs
+index 38b31570..c094d725 100644
+--- a/drivers/graphics/driver-graphics/src/blob.rs
++++ b/drivers/graphics/driver-graphics/src/blob.rs
+@@ -76,7 +76,7 @@ impl RenderBlobs {
+         device: &mut dyn RenderDevice,
+         context_id: Option<u32>,
+         mut data: virtgpu::VirtgpuResourceCreateBlob<'_>,
+-    ) -> Result<usize> {
++    ) -> Result<u32> {
+         let features = device.features();
+         if !features.resource_blob {
+             return Err(Error::new(EINVAL));
+@@ -144,7 +144,7 @@ impl RenderBlobs {
+         self.bo_to_slot.insert(slot, slot);
+         data.set_bo_handle(slot);
+         data.set_res_handle(info.res_id);
+-        Ok(0)
++        Ok(slot)
+     }
+ 
+     pub(crate) fn map_ioctl(&self, mut data: virtgpu::VirtgpuMap<'_>) -> Result<usize> {
+diff --git a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+index 654af869..f641acd5 100644
+--- a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
++++ b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+@@ -36,7 +36,13 @@ pub(crate) fn call_render_ioctl<T>(
+     match cmd {
+         drm::VERSION => drm::DrmVersion::with(payload, |data| version(device, data)),
+         drm::GET_CAP => drm::DrmGetCap::with(payload, |data| render_get_cap(data)),
+-        virtgpu::GEM_CLOSE => virtgpu::GemClose::with(payload, |data| handle.blobs.gem_close(device, data)),
++        virtgpu::GEM_CLOSE => virtgpu::GemClose::with(payload, |data| {
++            let bo_handle = data.handle();
++            handle.blobs.gem_close(device, data)?;
++            handle.known_resources.remove(&bo_handle);
++            handle.resource_fences.remove(&bo_handle);
++            Ok(0)
++        }),
+         virtgpu::MAP => virtgpu::VirtgpuMap::with(payload, |data| handle.blobs.map_ioctl(data)),
+         virtgpu::EXECBUFFER => virtgpu::VirtgpuExecbuffer::with(payload, |data| {
+             crate::submit::execbuffer(device, handle, data, in_fence, pending_wait)
+@@ -53,7 +59,9 @@ pub(crate) fn call_render_ioctl<T>(
+         }
+         virtgpu::GET_CAPS => virtgpu::VirtgpuGetCaps::with(payload, |data| get_caps(device, data)),
+         virtgpu::RESOURCE_CREATE_BLOB => virtgpu::VirtgpuResourceCreateBlob::with(payload, |data| {
+-            handle.blobs.create_blob(device, handle.context, data)
++            let bo_handle = handle.blobs.create_blob(device, handle.context, data)?;
++            handle.known_resources.insert(bo_handle);
++            Ok(0)
+         }),
+         virtgpu::CONTEXT_INIT => {
+             virtgpu::VirtgpuContextInit::with(payload, |data| context_init(device, handle, data))

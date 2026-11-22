@@ -53,6 +53,26 @@ struct drm_virtgpu_resource_create_blob {
     uint32_t pad2;
 };
 
+struct drm_virtgpu_execbuffer {
+    uint32_t flags;
+    uint32_t size;
+    uint64_t command;
+    uint64_t bo_handles;
+    uint32_t num_bo_handles;
+    int32_t fence_fd;
+    uint32_t ring_idx;
+    uint32_t syncobj_stride;
+    uint32_t num_in_syncobjs;
+    uint32_t num_out_syncobjs;
+    uint64_t in_syncobjs;
+    uint64_t out_syncobjs;
+};
+
+struct drm_virtgpu_3d_wait {
+    uint32_t handle;
+    uint32_t flags;
+};
+
 struct drm_virtgpu_context_set_param {
     uint64_t param;
     uint64_t value;
@@ -66,7 +86,11 @@ struct drm_virtgpu_context_init {
 
 #define DRM_IOCTL_GEM_CLOSE DRM_IOW(0x09, struct drm_gem_close)
 #define DRM_IOCTL_VIRTGPU_MAP DRM_IOWR(0x41, struct drm_virtgpu_map)
+#define DRM_IOCTL_VIRTGPU_EXECBUFFER DRM_IOWR(0x42, struct drm_virtgpu_execbuffer)
 #define DRM_IOCTL_VIRTGPU_GETPARAM DRM_IOWR(0x43, struct drm_virtgpu_getparam)
+#define DRM_IOCTL_VIRTGPU_WAIT DRM_IOWR(0x48, struct drm_virtgpu_3d_wait)
+#define VIRTGPU_EXECBUF_RING_IDX 0x04
+#define VIRTGPU_WAIT_NOWAIT 0x01
 #define DRM_IOCTL_VIRTGPU_RESOURCE_INFO DRM_IOWR(0x45, struct drm_virtgpu_resource_info)
 #define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB DRM_IOWR(0x4a, struct drm_virtgpu_resource_create_blob)
 #define DRM_IOCTL_VIRTGPU_CONTEXT_INIT DRM_IOWR(0x4b, struct drm_virtgpu_context_init)
@@ -420,9 +444,28 @@ int gpu_probe_blob(int argc, char **argv)
                 ioctl(fd, DRM_IOCTL_GEM_CLOSE, &close_swap);
             }
 
+            uint32_t ring_bo = ring.bo_handle;
+            struct drm_virtgpu_execbuffer blob_submit = {
+                .flags = VIRTGPU_EXECBUF_RING_IDX,
+                .ring_idx = 0,
+                .bo_handles = (uintptr_t)&ring_bo,
+                .num_bo_handles = 1,
+                .fence_fd = -1,
+            };
+            if (expect_ok("submit-with-blob", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &blob_submit)) == 0)
+                pass("submit-with-blob", "EXECBUFFER accepted the blob's handle");
+            struct drm_virtgpu_3d_wait blob_wait = {.handle = ring.bo_handle};
+            if (expect_ok("wait-blob", ioctl(fd, DRM_IOCTL_VIRTGPU_WAIT, &blob_wait)) == 0)
+                pass("wait-blob", "WAIT returned once the submission naming the blob was done");
+            struct drm_virtgpu_3d_wait blob_nowait = {.handle = ring.bo_handle, .flags = VIRTGPU_WAIT_NOWAIT};
+            if (expect_ok("wait-blob-nowait", ioctl(fd, DRM_IOCTL_VIRTGPU_WAIT, &blob_nowait)) == 0)
+                pass("wait-blob-nowait", "idle blob");
+
             struct drm_gem_close close_req = {.handle = ring.bo_handle};
             if (expect_ok("gem-close-ring", ioctl(fd, DRM_IOCTL_GEM_CLOSE, &close_req)) == 0)
                 pass("gem-close-ring", "closed ring blob");
+            expect_errno("submit-closed-blob", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &blob_submit), ENOENT);
+            expect_errno("wait-closed-blob", ioctl(fd, DRM_IOCTL_VIRTGPU_WAIT, &blob_wait), ENOENT);
             expect_errno("gem-close-ring-again", ioctl(fd, DRM_IOCTL_GEM_CLOSE, &close_req), EINVAL);
             struct drm_virtgpu_map closed_map = {.handle = ring.bo_handle};
             expect_errno("map-closed-ring", ioctl(fd, DRM_IOCTL_VIRTGPU_MAP, &closed_map), ENOENT);
