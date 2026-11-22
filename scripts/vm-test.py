@@ -1182,8 +1182,9 @@ def test_scheme_short_read(vm, args):
     log.write_text("".join(f"[{tag}] exit {status}\n{output}\n" for tag, (status, output) in results.items()))
     lines = re.findall(r"scheme-short-read-probe: (?:pass|FAIL|PASS).*", results["probe"][1])
     failed = [line.strip() for line in lines if "FAIL" in line]
-    if results["probe"][0] != 0:
-        return False, f"probe exit {results['probe'][0]}: {'; '.join(failed) or 'no result line'}; see {log}"
+    passed = any(line.strip() == "scheme-short-read-probe: PASS" for line in lines)
+    if results["probe"][0] != 0 or not passed:
+        return False, f"probe exit {results['probe'][0]}: {'; '.join(failed) or 'no PASS line'}; see {log}"
     if results["after"][0] != 0:
         return False, f"the shell could not run `ls /` afterwards (exit {results['after'][0]}); see {log}"
     return True, f"{sum('pass ' in line for line in lines)} short-read cases left the caller's bytes untouched"
