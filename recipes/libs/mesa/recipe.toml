@@ -1,5 +1,6 @@
 [package]
 description = "OpenGL and Vulkan CPU and GPU drivers, and also drivers for other Khronos Group standards"
+dependencies = ["libvulkan"]
 
 [source]
 tar = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"
@@ -13,6 +14,7 @@ patches = [
     "ferrion-jit-diagnostic.patch",
     "ferrion-libsync-wait.patch",
     "ferrion-venus.patch",
+    "ferrion-zink.patch",
 ]
 
 [build]
@@ -49,5 +51,5 @@ cookbook_meson \
     -Dglx=disabled \
     -Dllvm=enabled \
     -Dshader-cache=disabled \
-    -Dgallium-drivers=llvmpipe,softpipe
+    -Dgallium-drivers=llvmpipe,softpipe,zink
 """

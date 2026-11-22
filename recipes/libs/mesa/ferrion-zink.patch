@@ -1,0 +1,289 @@
+FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Zink on the Redox and surfaceless EGL platforms and copy off-screen kopper frames into Orbital windows.
+
+--- a/src/egl/drivers/dri2/platform_redox.c
++++ b/src/egl/drivers/dri2/platform_redox.c
+@@ -25,6 +25,7 @@
+  * DEALINGS IN THE SOFTWARE.
+  */
+ 
++#include <dirent.h>
+ #include <dlfcn.h>
+ #include <fcntl.h>
+ #include <stdio.h>
+@@ -32,6 +33,7 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include "util/libdrm.h"
++#include "util/os_misc.h"
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ 
+@@ -231,8 +233,8 @@
+ 
+ 
+ static void
+-redox_swrast_put_image(struct dri_drawable *draw, int op, int x, int y, int w,
+-                        int h, char *data, void *loaderPrivate)
++redox_swrast_put_image2(struct dri_drawable *draw, int op, int x, int y, int w,
++                         int h, int stride, char *data, void *loaderPrivate)
+ {
+     struct dri2_egl_surface *dri2_surf = loaderPrivate;
+ 
+@@ -271,7 +273,7 @@
+     }
+ 
+     const int bpp = 4;
+-    int src_stride_bytes = w * bpp;
++    int src_stride_bytes = stride > 0 ? stride : w * bpp;
+     int copy_width_bytes = w * bpp;
+     int dst_stride_bytes = dst_width * bpp;
+     int x_offset_bytes = x * bpp;
+@@ -296,6 +298,13 @@
+         src_line += src_stride_bytes;
+         dst_line += dst_stride_bytes;
+     }
++}
++
++static void
++redox_swrast_put_image(struct dri_drawable *draw, int op, int x, int y, int w,
++                        int h, char *data, void *loaderPrivate)
++{
++    redox_swrast_put_image2(draw, op, x, y, w, h, w * 4, data, loaderPrivate);
+ }
+ 
+ static void
+@@ -390,6 +399,26 @@
+ static const __DRIswrastLoaderExtension swrast_loader_extension = {
+     .getDrawableInfo = redox_swrast_get_drawable_info,
+     .putImage = redox_swrast_put_image,
++    .putImage2 = redox_swrast_put_image2,
++};
++
++static void
++redox_kopper_get_drawable_info(struct dri_drawable *draw, int *w, int *h,
++                               void *loaderPrivate)
++{
++    struct dri2_egl_surface *dri2_surf = loaderPrivate;
++    if (dri2_surf->orb_window) {
++        int x, y;
++        redox_swrast_get_drawable_info(draw, &x, &y, w, h, loaderPrivate);
++    } else {
++        *w = dri2_surf->base.Width;
++        *h = dri2_surf->base.Height;
++    }
++}
++
++static const __DRIkopperLoaderExtension redox_kopper_loader_extension = {
++    .GetDrawableInfo = redox_kopper_get_drawable_info,
++    .SetSurfaceCreateInfo = NULL,
+ };
+ 
+ static const struct dri_loader_funcs redox_swrast_loader_funcs = {
+@@ -397,8 +426,45 @@
+     .image_lookup = &image_lookup_extension,
+ };
+ 
++static const struct dri_loader_funcs redox_kopper_loader_funcs = {
++    .swrast = &swrast_loader_extension,
++    .kopper = &redox_kopper_loader_extension,
++    .image_lookup = &image_lookup_extension,
++};
++
+ static bool
+-redox_probe_device_sw(_EGLDisplay *disp)
++redox_render_scheme_exists(void)
++{
++    DIR *dir = opendir("/scheme");
++    if (!dir)
++        return false;
++    struct dirent *entry;
++    bool found = false;
++    while ((entry = readdir(dir)) != NULL) {
++        if (strncmp(entry->d_name, "gpu.", 4) == 0) {
++            found = true;
++            break;
++        }
++    }
++    closedir(dir);
++    return found;
++}
++
++static bool
++redox_want_zink(_EGLDisplay *disp)
++{
++    const char *override = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
++    if (override && override[0] != '\0')
++        return strcmp(override, "zink") == 0;
++
++    if (disp->Options.ForceSoftware)
++        return false;
++
++    return redox_render_scheme_exists();
++}
++
++static bool
++redox_probe_device(_EGLDisplay *disp, bool use_zink)
+ {
+     struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+     struct _egl_device *device = _eglFindDevice(dri2_dpy->fd_render_gpu, true);
+@@ -412,12 +478,14 @@
+     disp->Device = device;
+     assert(disp->Device);
+ 
+-    dri2_dpy->driver_name = strdup("swrast");
++    free(dri2_dpy->driver_name);
++    dri2_dpy->driver_name = strdup(use_zink ? "zink" : "swrast");
+     if (!dri2_dpy->driver_name)
+        return false;
+ 
+     dri2_detect_swrast_kopper(disp);
+-    dri2_dpy->loader_funcs = &redox_swrast_loader_funcs;
++    dri2_dpy->loader_funcs = dri2_dpy->kopper ? &redox_kopper_loader_funcs
++                                              : &redox_swrast_loader_funcs;
+ 
+     return true;
+ }
+@@ -488,7 +556,9 @@
+     bool driver_loaded = false;
+     struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+ 
+-    driver_loaded = redox_probe_device_sw(disp);
++    bool want_zink = redox_want_zink(disp);
++
++    driver_loaded = redox_probe_device(disp, want_zink);
+ 
+     if (!driver_loaded) {
+        err = "DRI2: failed to load driver";
+@@ -498,8 +568,16 @@
+     dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
+ 
+     if (!dri2_create_screen(disp)) {
+-       err = "DRI2: failed to create screen";
+-       goto cleanup;
++       if (want_zink && redox_probe_device(disp, false)) {
++          dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
++          if (!dri2_create_screen(disp)) {
++             err = "DRI2: failed to create screen";
++             goto cleanup;
++          }
++       } else {
++          err = "DRI2: failed to create screen";
++          goto cleanup;
++       }
+     }
+ 
+     dri2_setup_screen(disp);
+--- a/src/egl/drivers/dri2/platform_surfaceless.c
++++ b/src/egl/drivers/dri2/platform_surfaceless.c
+@@ -23,6 +23,9 @@
+  * DEALINGS IN THE SOFTWARE.
+  */
+ 
++#ifdef HAVE_REDOX_PLATFORM
++#include <dirent.h>
++#endif
+ #include <dlfcn.h>
+ #include <fcntl.h>
+ #include <stdio.h>
+@@ -31,6 +34,7 @@
+ #include <unistd.h>
+ #include "pipe/p_screen.h"
+ #include "util/libdrm.h"
++#include "util/os_misc.h"
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ 
+@@ -377,6 +381,28 @@
+    return true;
+ }
+ 
++static bool
++surfaceless_has_redox_gpu(void)
++{
++#ifdef HAVE_REDOX_PLATFORM
++   DIR *dir = opendir("/scheme");
++   if (!dir)
++      return false;
++   struct dirent *entry;
++   bool found = false;
++   while ((entry = readdir(dir)) != NULL) {
++      if (strncmp(entry->d_name, "gpu.", 4) == 0) {
++         found = true;
++         break;
++      }
++   }
++   closedir(dir);
++   return found;
++#else
++   return false;
++#endif
++}
++
+ EGLBoolean
+ dri2_initialize_surfaceless(_EGLDisplay *disp)
+ {
+@@ -389,9 +415,15 @@
+     */
+    driver_loaded = surfaceless_probe_device(disp, disp->Options.ForceSoftware,
+                                             disp->Options.Zink);
+-   if (!driver_loaded && disp->Options.ForceSoftware) {
+-      _eglLog(_EGL_DEBUG, "Falling back to surfaceless swrast without DRM.");
+-      driver_loaded = surfaceless_probe_device_sw(disp);
++   if (!driver_loaded) {
++      const char *override = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
++      bool explicit_zink = override && strcmp(override, "zink") == 0;
++      if (disp->Options.ForceSoftware ||
++          (disp->Options.Zink && (explicit_zink || surfaceless_has_redox_gpu()))) {
++         _eglLog(_EGL_DEBUG, "Falling back to surfaceless %s without DRM.",
++                 disp->Options.Zink ? "zink" : "swrast");
++         driver_loaded = surfaceless_probe_device_sw(disp);
++      }
+    }
+ 
+    if (!driver_loaded) {
+--- a/src/gallium/frontends/dri/kopper.c
++++ b/src/gallium/frontends/dri/kopper.c
+@@ -453,6 +453,34 @@
+ #endif
+ }
+ 
++static void
++kopper_present_swrast(struct pipe_context *pipe,
++                      struct dri_drawable *drawable,
++                      struct pipe_resource *ptex)
++{
++   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
++   if (!loader || (!loader->putImage2 && !loader->putImage))
++      return;
++
++   struct pipe_transfer *transfer = NULL;
++   void *map = pipe_texture_map(pipe, ptex, 0, 0, PIPE_MAP_READ,
++                                0, 0, ptex->width0, ptex->height0,
++                                &transfer);
++   if (!map)
++      return;
++
++   if (loader->putImage2) {
++      loader->putImage2(drawable, __DRI_SWRAST_IMAGE_OP_SWAP,
++                        0, 0, ptex->width0, ptex->height0,
++                        transfer->stride, map, drawable->loaderPrivate);
++   } else if (transfer->stride == ptex->width0 * 4) {
++      loader->putImage(drawable, __DRI_SWRAST_IMAGE_OP_SWAP,
++                       0, 0, ptex->width0, ptex->height0,
++                       map, drawable->loaderPrivate);
++   }
++   pipe_texture_unmap(pipe, transfer);
++}
++
+ int64_t
+ kopperSwapBuffers(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
+ {
+@@ -488,6 +516,8 @@
+    }
+ 
+    kopper_copy_to_front(ctx->st->pipe, drawable, ptex, nrects, stack_boxes);
++   if (!drawable->is_window && drawable->screen->loader.swrast)
++      kopper_present_swrast(ctx->st->pipe, drawable, ptex);
+    if (drawable->is_window && !zink_kopper_check(ptex))
+       return -1;
+    if (!drawable->textures[ST_ATTACHMENT_FRONT_LEFT]) {
