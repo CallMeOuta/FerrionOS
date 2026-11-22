@@ -2071,6 +2071,9 @@ impl<'a, D: Disk> Transaction<'a, D> {
         mtime_nsec: u32,
     ) -> Result<usize> {
         let mut node = self.read_tree(node_ptr)?;
+        if buf.is_empty() {
+            return Ok(0);
+        }
 
         if self.write_node_inner(&mut node, &mut offset, buf)? {
             let node_mtime = node.data().mtime();
