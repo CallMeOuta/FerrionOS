@@ -1,13 +1,12 @@
 FerrionOS change to the upstream installer (MIT license, kept), made against upstream commit 16d39fe1f20f15fc97fa3aaa216ac7e449637d41 after ferrion-live-disk.patch, ferrion-install-recovery.patch and ferrion-install-clear-ring.patch (issue 7). The file-copy install works on a FerrionOS live system:
 - the text and graphical installers list the files to copy from the package heads in var/lib/packages and the repository key in etc/pkg/id_ed25519.pub.toml, where the package manager keeps them, instead of a pkg directory that a FerrionOS root does not have.
 - when a file the configuration wrote is also a package file (/etc/hosts, say), the live system's copy replaces it, as the image build left it; before, the copy stopped with "File exists".
-- with_redoxfs_mount ends its mount by stopping the mount loop and removing the scheme from the process's namespace through the namespace manager. redoxfs::unmount_path removes /scheme/<name> through the mounted scheme itself, which the installer's redoxfs answers with EOPNOTSUPP, and that error used to hide the install's own error.
+- with_redoxfs_mount manages its mount lifecycle through Mounted::finish, asserting IS_UMT == 0 at mount, joining and resetting IS_UMT only when the namespace unmount request succeeds, and always preserving the install's own error first.
 
-diff --git a/gui/src/worker.rs b/gui/src/worker.rs
-index a6fa845..684f0fc 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/gui/src/worker.rs b/gui/src/worker.rs
 --- a/gui/src/worker.rs
 +++ b/gui/src/worker.rs
-@@ -76,9 +76,23 @@ pub fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> anyhow::Result<()>
+@@ -76,9 +76,23 @@
              }
          };
  
@@ -32,7 +31,7 @@ index a6fa845..684f0fc 100644
              .mode(metadata.mode())
              .open(&dest)
          {
-@@ -91,6 +105,15 @@ pub fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> anyhow::Result<()>
+@@ -91,6 +105,15 @@
                  ));
              }
          };
@@ -48,7 +47,7 @@ index a6fa845..684f0fc 100644
  
          loop {
              let count = match src_file.read(buf) {
-@@ -132,11 +155,13 @@ pub fn package_files(
+@@ -132,11 +155,13 @@
      //TODO: Remove packages from config where all files are located (and have valid shasum?)
      config.packages.clear();
  
@@ -64,11 +63,10 @@ index a6fa845..684f0fc 100644
          let item = item_res?;
          let pkg_path = item.path();
          if pkg_path.extension() == Some(OsStr::new("pkgar_head")) {
-diff --git a/src/bin/installer_tui.rs b/src/bin/installer_tui.rs
-index db33184..2b56091 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/bin/installer_tui.rs b/src/bin/installer_tui.rs
 --- a/src/bin/installer_tui.rs
 +++ b/src/bin/installer_tui.rs
-@@ -123,9 +123,23 @@ fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> Result<()> {
+@@ -123,9 +123,23 @@
              }
          };
  
@@ -93,7 +91,7 @@ index db33184..2b56091 100644
              .mode(metadata.mode())
              .open(&dest)
          {
-@@ -134,6 +148,11 @@ fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> Result<()> {
+@@ -134,6 +148,11 @@
                  bail!("failed to create file {}: {}", dest.display(), err);
              }
          };
@@ -105,7 +103,7 @@ index db33184..2b56091 100644
  
          loop {
              let count = match src_file.read(buf) {
-@@ -167,11 +186,13 @@ fn package_files(
+@@ -167,11 +186,13 @@
      //TODO: Remove packages from config where all files are located (and have valid shasum?)
      config.packages.clear();
  
@@ -121,8 +119,7 @@ index db33184..2b56091 100644
          let item = item_res?;
          let pkg_path = item.path();
          if pkg_path.extension() == Some(OsStr::new("pkgar_head")) {
-diff --git a/src/installer.rs b/src/installer.rs
-index dd0cf49..aa71890 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/installer.rs b/src/installer.rs
 --- a/src/installer.rs
 +++ b/src/installer.rs
 @@ -1,7 +1,7 @@
@@ -134,24 +131,103 @@ index dd0cf49..aa71890 100644
  use termion::input::TermRead;
  
  use crate::config::file::FileConfig;
-@@ -449,9 +449,12 @@ where
+@@ -404,6 +404,39 @@
+     mount_path
+ }
+ 
++struct Mounted {
++    join: thread::JoinHandle<()>,
++    path: PathBuf,
++}
++
++impl Mounted {
++    fn finish<T>(self, res: Result<T>) -> Result<T> {
++        let unmount_res = unmount_redoxfs(self.path.as_os_str().to_str().unwrap());
++        if unmount_res.is_ok() {
++            self.join.join().unwrap();
++            #[cfg(target_os = "redox")]
++            redoxfs::IS_UMT.store(0, std::sync::atomic::Ordering::SeqCst);
++            #[cfg(not(target_os = "redox"))]
++            if let Err(err) = fs::remove_dir_all(&self.path) {
++                return match res {
++                    Err(install_err) => {
++                        Err(anyhow::anyhow!("{install_err:#}; cleanup failed: {err}"))
++                    }
++                    Ok(_) => Err(err.into()),
++                };
++            }
++        }
++        match (res, unmount_res) {
++            (Err(install_err), Ok(())) => Err(install_err),
++            (Err(install_err), Err(unmount_err)) => {
++                Err(anyhow::anyhow!("{install_err:#}; unmount failed: {unmount_err:#}"))
++            }
++            (Ok(_), Err(unmount_err)) => Err(unmount_err),
++            (Ok(value), Ok(())) => Ok(value),
++        }
++    }
++}
++
+ pub fn with_redoxfs_mount<D, T, F>(
+     fs: FileSystem<D>,
+     mount_path: Option<&Path>,
+@@ -413,6 +446,9 @@
+     D: Disk + Send + 'static,
+     F: FnOnce(&Path) -> Result<T>,
+ {
++    #[cfg(target_os = "redox")]
++    assert_eq!(redoxfs::IS_UMT.load(std::sync::atomic::Ordering::SeqCst), 0);
++
+     let mount_path = decide_mount_path(mount_path);
+ 
+     if cfg!(not(target_os = "redox")) && !mount_path.exists() {
+@@ -429,35 +465,65 @@
+             match res {
+                 Ok(()) => (),
+                 Err(err) => {
+-                    tx.send(Err(err)).unwrap();
++                    let _ = tx.send(Err(err));
+                 }
+             };
+         })
+     };
+ 
+-    let res = match rx.recv() {
+-        Ok(ok) => match ok {
+-            Ok(real_path) => callback(&real_path),
+-            Err(err) => return Err(err.into()),
+-        },
++    let real_path = match rx.recv() {
++        Ok(Ok(real_path)) => real_path,
++        Ok(Err(err)) => {
++            let _ = join_handle.join();
++            return Err(err.into());
++        }
+         Err(_) => {
++            let _ = join_handle.join();
+             return Err(io::Error::new(
+                 io::ErrorKind::NotConnected,
+                 "redoxfs thread did not send a result",
+             )
+-            .into())
++            .into());
          }
      };
  
 -    unmount_path(&mount_path.as_os_str().to_str().unwrap())?;
-+    unmount_redoxfs(mount_path.as_os_str().to_str().unwrap())?;
+-
+-    join_handle.join().unwrap();
++    let mounted = Mounted {
++        join: join_handle,
++        path: mount_path,
++    };
++    let res = callback(&real_path);
++    mounted.finish(res)
++}
  
-     join_handle.join().unwrap();
-+    // A later mount in this process must not stop at once.
-+    #[cfg(target_os = "redox")]
-+    redoxfs::IS_UMT.store(0, std::sync::atomic::Ordering::SeqCst);
- 
-     if cfg!(not(target_os = "redox")) {
-         fs::remove_dir_all(&mount_path)?;
-@@ -460,6 +463,37 @@ where
-     res
- }
- 
+-    if cfg!(not(target_os = "redox")) {
+-        fs::remove_dir_all(&mount_path)?;
+-    }
 +/// Ends the mount `with_redoxfs_mount` made in this process. `redoxfs::unmount_path` removes
 +/// `/scheme/<name>` through the mounted scheme itself, which this redoxfs answers with
 +/// EOPNOTSUPP on FerrionOS. Instead the mount loop is told to stop, and the scheme leaves this
@@ -176,13 +252,12 @@ index dd0cf49..aa71890 100644
 +    )?;
 +    Ok(())
 +}
-+
+ 
+-    res
 +#[cfg(not(target_os = "redox"))]
 +fn unmount_redoxfs(mount_path: &str) -> Result<()> {
 +    redoxfs::unmount_path(mount_path)?;
 +    Ok(())
-+}
-+
+ }
+ 
  pub fn with_redoxfs_ar<D, T, F>(
-     mut fs: FileSystem<D>,
-     mount_path: Option<&Path>,
