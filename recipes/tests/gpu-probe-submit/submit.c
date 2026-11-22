@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,19 @@
 #include <unistd.h>
 
 #define TAG "gpu-probe-submit"
+#define GATE_JOIN_LIMIT_MS 5000
+
+enum out_result {
+    OUT_REFUSED,
+    OUT_MISSING,
+    OUT_OK,
+};
+
+enum gate_phase {
+    GATE_ARMED,
+    GATE_SIGNALED,
+    GATE_SIGNAL_FAILED,
+};
 
 #define IOC_NR(dir, type, nr, size) \
     ((unsigned long)(((unsigned long)(dir) << 30) | ((unsigned long)(size) << 16) | ((unsigned long)(type) << 8) | (nr)))
@@ -271,8 +285,19 @@ struct blocked_submit {
     int ret;
     int err;
     int out_fd;
-    volatile int done;
+    atomic_int done;
 };
+
+static enum out_result check_out(const char *check, int ret, int has_output, const char *missing_detail)
+{
+    if (expect_ok(check, ret) < 0)
+        return OUT_REFUSED;
+    if (!has_output) {
+        fail(check, missing_detail);
+        return OUT_MISSING;
+    }
+    return OUT_OK;
+}
 
 static void *blocked_submit_thread(void *arg)
 {
@@ -285,7 +310,7 @@ static void *blocked_submit_thread(void *arg)
     b->ret = ioctl(b->fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &submit);
     b->err = errno;
     b->out_fd = submit.fence_fd;
-    b->done = 1;
+    atomic_store(&b->done, 1);
     return NULL;
 }
 
@@ -467,44 +492,47 @@ int gpu_probe_submit(int argc, char **argv)
         .fence_fd = -1,
     };
     int64_t t0 = monotonic_ms();
-    if (expect_ok("submit-ring0", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &submit)) == 0) {
-        if (submit.fence_fd < 0) {
-            fail("submit-fence-fd", "fence_fd was negative");
+    int submit_ret = ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &submit);
+    switch (check_out("submit-ring0", submit_ret, submit.fence_fd >= 0, "fence_fd was negative")) {
+    case OUT_REFUSED:
+    case OUT_MISSING:
+        break;
+    case OUT_OK: {
+        struct pollfd pfd = {.fd = submit.fence_fd, .events = POLLIN};
+        int pret = poll(&pfd, 1, 5000);
+        int64_t waited = monotonic_ms() - t0;
+        uint32_t count = 0;
+        int status = sync_file_status(submit.fence_fd, &count, &first_stamp);
+        if (pret == 1 && (pfd.revents & POLLIN) && status == 1 && count == 1 && first_stamp > 0) {
+            printf(TAG ": submit-ring0 signaled wait_ms=%lld\n", (long long)waited);
+            snprintf(detail, sizeof detail, "sync file of one fence signaled in %lld ms", (long long)waited);
+            pass("submit-ring0-poll", detail);
         } else {
-            struct pollfd pfd = {.fd = submit.fence_fd, .events = POLLIN};
-            int pret = poll(&pfd, 1, 5000);
-            int64_t waited = monotonic_ms() - t0;
-            uint32_t count = 0;
-            int status = sync_file_status(submit.fence_fd, &count, &first_stamp);
-            if (pret == 1 && (pfd.revents & POLLIN) && status == 1 && count == 1 && first_stamp > 0) {
-                printf(TAG ": submit-ring0 signaled wait_ms=%lld\n", (long long)waited);
-                snprintf(detail, sizeof detail, "sync file of one fence signaled in %lld ms", (long long)waited);
-                pass("submit-ring0-poll", detail);
-            } else {
-                snprintf(detail, sizeof detail, "poll=%d revents=%#x status=%d fences=%u wait_ms=%lld",
-                         pret, (unsigned)pfd.revents, status, count, (long long)waited);
-                fail("submit-ring0-poll", detail);
-            }
-
-            pfd.revents = 0;
-            int repoll = poll(&pfd, 1, 0);
-            if (repoll == 1 && (pfd.revents & POLLIN))
-                pass("fence-stays-readable", "zero-timeout poll after signal");
-            else
-                fail("fence-stays-readable", "not readable on second poll");
-
-            int dup_fd = dup(submit.fence_fd);
-            if (expect_ok("fence-dup", dup_fd) >= 0) {
-                struct pollfd dpfd = {.fd = dup_fd, .events = POLLIN};
-                int dret = poll(&dpfd, 1, 0);
-                if (dret == 1 && (dpfd.revents & POLLIN))
-                    pass("fence-dup-poll", "duplicated fence descriptor readable");
-                else
-                    fail("fence-dup-poll", "duplicated fence descriptor not readable");
-                close(dup_fd);
-            }
-            first_fence = submit.fence_fd;
+            snprintf(detail, sizeof detail, "poll=%d revents=%#x status=%d fences=%u wait_ms=%lld",
+                     pret, (unsigned)pfd.revents, status, count, (long long)waited);
+            fail("submit-ring0-poll", detail);
         }
+
+        pfd.revents = 0;
+        int repoll = poll(&pfd, 1, 0);
+        if (repoll == 1 && (pfd.revents & POLLIN))
+            pass("fence-stays-readable", "zero-timeout poll after signal");
+        else
+            fail("fence-stays-readable", "not readable on second poll");
+
+        int dup_fd = dup(submit.fence_fd);
+        if (expect_ok("fence-dup", dup_fd) >= 0) {
+            struct pollfd dpfd = {.fd = dup_fd, .events = POLLIN};
+            int dret = poll(&dpfd, 1, 0);
+            if (dret == 1 && (dpfd.revents & POLLIN))
+                pass("fence-dup-poll", "duplicated fence descriptor readable");
+            else
+                fail("fence-dup-poll", "duplicated fence descriptor not readable");
+            close(dup_fd);
+        }
+        first_fence = submit.fence_fd;
+        break;
+    }
     }
 
     struct drm_virtgpu_execbuffer no_fence = {
@@ -524,7 +552,12 @@ int gpu_probe_submit(int argc, char **argv)
         .ring_idx = 0,
         .fence_fd = -1,
     };
-    if (expect_ok("submit-second", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &submit2)) == 0 && submit2.fence_fd >= 0) {
+    int submit2_ret = ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &submit2);
+    switch (check_out("submit-second", submit2_ret, submit2.fence_fd >= 0, "fence_fd was negative")) {
+    case OUT_REFUSED:
+    case OUT_MISSING:
+        break;
+    case OUT_OK: {
         struct pollfd pfd2 = {.fd = submit2.fence_fd, .events = POLLIN};
         int pret2 = poll(&pfd2, 1, 5000);
         uint64_t stamp2 = 0;
@@ -540,7 +573,12 @@ int gpu_probe_submit(int argc, char **argv)
         }
         if (first_fence >= 0) {
             struct sync_merge_data merge = {.name = "probe-merge", .fd2 = submit2.fence_fd, .fence = -1};
-            if (expect_ok("merge-submission-fences", ioctl(first_fence, SYNC_IOC_MERGE, &merge)) == 0) {
+            int merge_ret = ioctl(first_fence, SYNC_IOC_MERGE, &merge);
+            switch (check_out("merge-submission-fences", merge_ret, merge.fence >= 0, "merged fence fd was negative")) {
+            case OUT_REFUSED:
+            case OUT_MISSING:
+                break;
+            case OUT_OK: {
                 uint32_t count = 0;
                 int status = sync_file_status(merge.fence, &count, NULL);
                 snprintf(detail, sizeof detail, "status=%d fences=%u", status, count);
@@ -549,9 +587,13 @@ int gpu_probe_submit(int argc, char **argv)
                 else
                     fail("merge-submission-fences", detail);
                 close(merge.fence);
+                break;
+            }
             }
         }
         close(submit2.fence_fd);
+        break;
+    }
     }
     if (first_fence >= 0)
         close(first_fence);
@@ -653,10 +695,38 @@ int gpu_probe_submit(int argc, char **argv)
             fail("execbuf-fence-in-waits", "pthread_create failed");
         } else {
             usleep(200000);
-            int done_early = blocked.done;
+            int done_early = atomic_load(&blocked.done);
+            enum gate_phase phase = GATE_ARMED;
             struct drm_syncobj_array signal = {.handles = (uintptr_t)&gate, .count_handles = 1};
-            expect_ok("gate-signal", ioctl(fd, DRM_IOCTL_SYNCOBJ_SIGNAL, &signal));
-            pthread_join(thread, NULL);
+            if (expect_ok("gate-signal", ioctl(fd, DRM_IOCTL_SYNCOBJ_SIGNAL, &signal)) == 0)
+                phase = GATE_SIGNALED;
+            else
+                phase = GATE_SIGNAL_FAILED;
+            switch (phase) {
+            case GATE_SIGNALED:
+                pthread_join(thread, NULL);
+                break;
+            case GATE_SIGNAL_FAILED: {
+                int64_t join_deadline = monotonic_ms() + GATE_JOIN_LIMIT_MS;
+                for (int step = 0; step < GATE_JOIN_LIMIT_MS / 10 && !atomic_load(&blocked.done); step++) {
+                    if (monotonic_ms() >= join_deadline)
+                        break;
+                    usleep(10000);
+                }
+                if (atomic_load(&blocked.done)) {
+                    pthread_join(thread, NULL);
+                } else {
+                    fail("gate-join", "blocked submission thread did not exit after signal failure");
+                    printf(TAG ": FAIL\n");
+                    exit(1);
+                }
+                break;
+            }
+            case GATE_ARMED:
+                fail("gate-join", "unexpected gate phase");
+                printf(TAG ": FAIL\n");
+                exit(1);
+            }
             int64_t blocked_ms = monotonic_ms() - b0;
             snprintf(detail, sizeof detail, "early=%d ret=%d errno=%d returned after %lld ms",
                      done_early, blocked.ret, blocked.ret ? blocked.err : 0, (long long)blocked_ms);
@@ -664,13 +734,21 @@ int gpu_probe_submit(int argc, char **argv)
                 pass("execbuf-fence-in-waits", detail);
             else
                 fail("execbuf-fence-in-waits", detail);
-            if (blocked.ret == 0 && blocked.out_fd >= 0) {
-                struct pollfd opfd = {.fd = blocked.out_fd, .events = POLLIN};
-                if (poll(&opfd, 1, 5000) == 1)
-                    pass("execbuf-fence-in-out-fence", "the submission behind the gate signaled");
-                else
-                    fail("execbuf-fence-in-out-fence", "the submission behind the gate did not signal");
-                close(blocked.out_fd);
+            if (blocked.ret == 0) {
+                switch (check_out("execbuf-fence-in-out-fence", 0, blocked.out_fd >= 0, "out_fd was negative")) {
+                case OUT_REFUSED:
+                case OUT_MISSING:
+                    break;
+                case OUT_OK: {
+                    struct pollfd opfd = {.fd = blocked.out_fd, .events = POLLIN};
+                    if (poll(&opfd, 1, 5000) == 1)
+                        pass("execbuf-fence-in-out-fence", "the submission behind the gate signaled");
+                    else
+                        fail("execbuf-fence-in-out-fence", "the submission behind the gate did not signal");
+                    close(blocked.out_fd);
+                    break;
+                }
+                }
             }
         }
         close(gate_fd);
