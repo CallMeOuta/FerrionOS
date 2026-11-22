@@ -6,24 +6,20 @@ template = "custom"
 script = """
 mkdir -p "${COOKBOOK_STAGE}/usr/bin" "${COOKBOOK_STAGE}/usr/lib/stack-guard-probe"
 ${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fstack-protector-strong \
-    -c "${COOKBOOK_RECIPE}/probe.c" -o probe-static.o
-${CC} probe-static.o ${LDFLAGS} \
+    "${COOKBOOK_RECIPE}/probe.c" ${LDFLAGS} \
     -o "${COOKBOOK_STAGE}/usr/bin/stack-guard-probe-static"
 
 DYNAMIC_INIT
-${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIC -fstack-protector-strong \
-    -c "${COOKBOOK_RECIPE}/dso.c" -o dso.o
-${CC} -shared dso.o ${LDFLAGS} -o libstack-guard-probe.so
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIC -shared -fstack-protector-strong \
+    "${COOKBOOK_RECIPE}/dso.c" ${LDFLAGS} -o libstack-guard-probe.so
 
-${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fno-pie -fstack-protector-strong -DWITH_DSO \
-    -c "${COOKBOOK_RECIPE}/probe.c" -o probe-dynamic.o
-${CC} -no-pie probe-dynamic.o -L. -lstack-guard-probe \
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fno-pie -no-pie -fstack-protector-strong -DWITH_DSO \
+    "${COOKBOOK_RECIPE}/probe.c" -L. -lstack-guard-probe \
     -Wl,-rpath,/usr/lib/stack-guard-probe ${LDFLAGS} \
     -o stack-guard-probe-dynamic
 
-${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIE -fstack-protector-strong -DWITH_DSO \
-    -c "${COOKBOOK_RECIPE}/probe.c" -o probe-pie.o
-${CC} -pie probe-pie.o -L. -lstack-guard-probe \
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIE -pie -fstack-protector-strong -DWITH_DSO \
+    "${COOKBOOK_RECIPE}/probe.c" -L. -lstack-guard-probe \
     -Wl,-rpath,/usr/lib/stack-guard-probe ${LDFLAGS} \
     -o stack-guard-probe-pie
 

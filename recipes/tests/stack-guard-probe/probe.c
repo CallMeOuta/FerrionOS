@@ -77,7 +77,14 @@ static int run_smash_in_child(const char *label, int use_dso, uint64_t fill) {
         _exit(0);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
+    pid_t waited = -1;
+    for (int attempt = 0; attempt < 16; attempt++) {
+        waited = waitpid(pid, &status, 0);
+        if (waited >= 0 || errno != EINTR) {
+            break;
+        }
+    }
+    if (waited < 0) {
         fprintf(stderr, "stack-guard-probe: waitpid failed: %s\n", strerror(errno));
         return 1;
     }
@@ -146,7 +153,14 @@ int main(int argc, char **argv) {
             _exit(127);
         }
         int status = 0;
-        if (waitpid(pid, &status, 0) < 0) {
+        pid_t waited = -1;
+        for (int attempt = 0; attempt < 16; attempt++) {
+            waited = waitpid(pid, &status, 0);
+            if (waited >= 0 || errno != EINTR) {
+                break;
+            }
+        }
+        if (waited < 0) {
             return 1;
         }
         return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : 1;

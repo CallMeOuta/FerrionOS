@@ -7406,6 +7406,33 @@ def test_stack_smash_aborts(vm, args):
     return True, "; ".join(summary)
 
 
+FORTIFY_CASES = ("memcpy", "memmove", "memset", "strcpy", "strcat", "sprintf", "snprintf", "read")
+
+
+def test_fortify_chk_aborts(vm, args):
+    """Runtime-length overflows in -O2 -D_FORTIFY_SOURCE=2 code (static and dynamic) abort through __*_chk / __chk_fail while valid bounded calls succeed (use --config stack-guard)."""
+    if not root_shell(vm, args.timeout):
+        return False, f"no root serial login within {args.timeout}s"
+    summary = []
+    for label, binary in (("static", "/usr/bin/fortify-probe-static"), ("dynamic", "/usr/bin/fortify-probe-dynamic")):
+        status, out = run_status(vm, binary, 30)
+        (vm.out / f"fortify-{label}.txt").write_text(f"exit {status}\n{out}\n")
+        if "fortify-probe: valid OK" not in out:
+            return False, f"{label} valid calls failed (exit {status})"
+        sigs = []
+        for case in FORTIFY_CASES:
+            if f"fortify-probe: {case} SURVIVED" in out:
+                return False, f"{label} {case} overflow survived (not fortified)"
+            found = re.search(rf"fortify-probe: {re.escape(case)} ABORTED sig=(\d+)", out)
+            if not found:
+                return False, f"{label} {case} did not abort via signal (exit {status})"
+            sigs.append(f"{case}:sig={found.group(1)}")
+        if status != 0:
+            return False, f"{label} fortify-probe exited {status}"
+        summary.append(f"{label}({len(sigs)}/{len(FORTIFY_CASES)} aborted)")
+    return True, "; ".join(summary)
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -7468,6 +7495,7 @@ TESTS["hardened-malloc-pt-order"] = test_hardened_malloc_pt_order
 TESTS["hardened-malloc-discard"] = test_hardened_malloc_discard
 TESTS["canary-random"] = test_canary_random
 TESTS["stack-smash-aborts"] = test_stack_smash_aborts
+TESTS["fortify-chk-aborts"] = test_fortify_chk_aborts
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
