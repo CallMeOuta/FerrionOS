@@ -109,6 +109,30 @@ pub fn futex(
 
     let current_addrsp = AddrSpace::current()?;
 
+    if op == FUTEX_WAKE {
+        if target_virtaddr.data().saturating_add(size_of::<usize>()) >= crate::USER_END_OFFSET {
+            return Err(Error::new(EFAULT));
+        }
+        let private_key = {
+            let addr_space_guard = current_addrsp.acquire_read(token.downgrade());
+            match addr_space_guard.grants.contains(page) {
+                Some((_, info))
+                    if matches!(info.provider, Provider::Allocated { .. })
+                        && info.flags().has_user() =>
+                {
+                    Some(FutexKey::Private {
+                        addr_space: Arc::as_ptr(&current_addrsp) as usize,
+                        addr: target_virtaddr,
+                    })
+                }
+                _ => None,
+            }
+        };
+        if let Some(key) = private_key {
+            return Ok(wake_futex(key, val, token));
+        }
+    }
+
     // Keep the address space locked so we can safely read from the physical address. Unlock it
     // before context switching.
     let addr_space_guard = current_addrsp.acquire_read(token.downgrade());
@@ -286,35 +310,35 @@ pub fn futex(
             Err(Error::new(EINTR))
         }
         FUTEX_WAKE => {
-            let mut woken = 0;
-
-            {
-                drop(addr_space_guard);
-                let mut futexes_map = FUTEXES.lock(token.token());
-                let (futexes_map, mut token) = futexes_map.token_split();
-
-                if let Entry::Occupied(mut futexes_entry) = futexes_map.entry(key) {
-                    let futexes = futexes_entry.get_mut();
-                    let mut i = 0;
-                    // TODO: Use something like retain, once it is possible to tell it when to stop iterating...
-                    while i < futexes.len() && woken < val {
-                        if let Some(ctx) = futexes[i].context_lock.upgrade() {
-                            unblock_context(&ctx, &mut token.token().downgrade());
-                        }
-                        futexes.swap_remove(i);
-                        woken += 1;
-                    }
-
-                    if futexes.is_empty() {
-                        futexes_entry.remove();
-                    }
-                }
-            }
-
-            Ok(woken)
+            drop(addr_space_guard);
+            Ok(wake_futex(key, val, token))
         }
         _ => Err(Error::new(EINVAL)),
     }
+}
+
+fn wake_futex(key: FutexKey, val: usize, token: &mut CleanLockToken) -> usize {
+    let mut woken = 0;
+    let mut futexes_map = FUTEXES.lock(token.token());
+    let (futexes_map, mut token) = futexes_map.token_split();
+
+    if let Entry::Occupied(mut futexes_entry) = futexes_map.entry(key) {
+        let futexes = futexes_entry.get_mut();
+        let mut i = 0;
+        while i < futexes.len() && woken < val {
+            if let Some(ctx) = futexes[i].context_lock.upgrade() {
+                unblock_context(&ctx, &mut token.token().downgrade());
+            }
+            futexes.swap_remove(i);
+            woken += 1;
+        }
+
+        if futexes.is_empty() {
+            futexes_entry.remove();
+        }
+    }
+
+    woken
 }
 
 fn remove_futex_entry(
