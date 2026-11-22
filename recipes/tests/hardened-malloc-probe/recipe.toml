@@ -1,0 +1,16 @@
+[package]
+description = "Probes kernel and relibc gaps and benchmarks hardened_malloc variants for S14"
+
+[build]
+template = "custom"
+dependencies = [
+    "hardened-malloc",
+    "libstdcxx",
+]
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} -std=c11 -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/hardened-malloc-probe" "${COOKBOOK_RECIPE}/hardened-malloc-probe.c" ${LDFLAGS}
+${CC} -std=c11 -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/hardened-malloc-bench-dlmalloc" "${COOKBOOK_RECIPE}/hardened-malloc-bench.c" ${LDFLAGS}
+${CC} -std=c11 -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/hardened-malloc-bench-hm" "${COOKBOOK_RECIPE}/hardened-malloc-bench.c" -L"${COOKBOOK_SYSROOT}/usr/lib" -Wl,-rpath-link,"${COOKBOOK_SYSROOT}/usr/lib" -lhardened_malloc -lpthread ${LDFLAGS}
+"""

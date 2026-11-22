@@ -1,0 +1,65 @@
+[package]
+description = "GrapheneOS hardened_malloc (wip port and upstream test suite for S14)"
+
+[source]
+git = "https://github.com/GrapheneOS/hardened_malloc.git"
+rev = "bf37d54560a62b50da72e8fda56abf04f23b5fd2"
+patches = ["ferrion-relibc.patch"]
+
+[build]
+template = "custom"
+dependencies = [
+    "libstdcxx",
+]
+script = """
+DYNAMIC_INIT
+cp -a "${COOKBOOK_SOURCE}/." "${COOKBOOK_BUILD}/"
+cd "${COOKBOOK_BUILD}"
+
+COMMON_ARGS=(
+    CC="${CC}"
+    CSTD="-std=c2x"
+    CONFIG_NATIVE=false
+    CONFIG_WERROR=false
+)
+
+"${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}" "${COMMON_ARGS[@]}" VARIANT=default
+"${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}" "${COMMON_ARGS[@]}" VARIANT=light
+
+mkdir -pv \
+    "${COOKBOOK_STAGE}/usr/lib" \
+    "${COOKBOOK_STAGE}/usr/lib/hardened-malloc/small" \
+    "${COOKBOOK_STAGE}/usr/lib/hardened-malloc/light-small" \
+    "${COOKBOOK_STAGE}/usr/include" \
+    "${COOKBOOK_STAGE}/usr/libexec/hardened-malloc/test" \
+    "${COOKBOOK_STAGE}/usr/share/licenses/hardened-malloc"
+
+cp -av out/libhardened_malloc.so "${COOKBOOK_STAGE}/usr/lib/libhardened_malloc.so"
+cp -av out-light/libhardened_malloc-light.so "${COOKBOOK_STAGE}/usr/lib/libhardened_malloc-light.so"
+cp -av include/h_malloc.h "${COOKBOOK_STAGE}/usr/include/h_malloc.h"
+cp -av LICENSE "${COOKBOOK_STAGE}/usr/share/licenses/hardened-malloc/LICENSE"
+
+"${COOKBOOK_MAKE}" -C test -j"${COOKBOOK_MAKE_JOBS}" \
+    CC="${CC}" \
+    CXX="${CXX}" \
+    CSTD="-std=c2x" \
+    LDFLAGS="-L${COOKBOOK_BUILD}/out ${LDFLAGS} -Wl,-rpath-link,${COOKBOOK_SYSROOT}/usr/lib"
+
+for bin in $(find test -maxdepth 1 -type f -executable); do
+    cp -av "$bin" "${COOKBOOK_STAGE}/usr/libexec/hardened-malloc/test/"
+done
+cp -av test/test_smc.py "${COOKBOOK_STAGE}/usr/libexec/hardened-malloc/test/"
+
+rm -rf out out-light
+"${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}" "${COMMON_ARGS[@]}" \
+    VARIANT=default \
+    CONFIG_CLASS_REGION_SIZE=33554432 \
+    CONFIG_N_ARENA=1
+cp -av out/libhardened_malloc.so "${COOKBOOK_STAGE}/usr/lib/hardened-malloc/small/libhardened_malloc.so"
+
+"${COOKBOOK_MAKE}" -j"${COOKBOOK_MAKE_JOBS}" "${COMMON_ARGS[@]}" \
+    VARIANT=light \
+    CONFIG_CLASS_REGION_SIZE=33554432 \
+    CONFIG_N_ARENA=1
+cp -av out-light/libhardened_malloc-light.so "${COOKBOOK_STAGE}/usr/lib/hardened-malloc/light-small/libhardened_malloc.so"
+"""

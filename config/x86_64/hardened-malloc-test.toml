@@ -1,0 +1,9 @@
+include = ["../minimal.toml"]
+
+[general]
+filesystem_size = 256
+
+[packages]
+bash = {}
+hardened-malloc = "source"
+hardened-malloc-probe = "source"

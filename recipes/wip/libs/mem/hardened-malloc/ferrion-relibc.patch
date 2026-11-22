@@ -1,0 +1,67 @@
+diff --git a/Makefile b/Makefile
+index 4b6c613..e2e9901 100644
+--- a/Makefile
++++ b/Makefile
+@@ -37,7 +37,8 @@ ifeq ($(CONFIG_UBSAN),true)
+     SHARED_FLAGS += -fsanitize=undefined -fno-sanitize-recover=undefined
+ endif
+ 
+-CFLAGS := $(CFLAGS) -std=c23 $(SHARED_FLAGS) -Wmissing-prototypes -Wstrict-prototypes
++CSTD ?= -std=c23
++CFLAGS := $(CFLAGS) $(CSTD) $(SHARED_FLAGS) -Wmissing-prototypes -Wstrict-prototypes
+ CXXFLAGS := $(CXXFLAGS) -std=c++17 -fsized-deallocation $(SHARED_FLAGS)
+ LDFLAGS := $(LDFLAGS) -Wl,-O1,--as-needed,-z,defs,-z,relro,-z,now,-z,nodlopen,-z,text
+ 
+@@ -118,7 +119,7 @@ CPPFLAGS += \
+     -DCONFIG_LABEL_MEMORY=$(CONFIG_LABEL_MEMORY)
+ 
+ $(OUT)/libhardened_malloc$(SUFFIX).so: $(OBJECTS) | $(OUT)
+-	$(CC) $(CFLAGS) $(LDFLAGS) -shared $^ $(LDLIBS) -o $@
++	$(CC) $(filter-out -fstack-protector%,$(CFLAGS)) $(LDFLAGS) -shared $^ $(LDLIBS) -o $@
+ 
+ $(OUT):
+ 	mkdir -p $(OUT)
+ 
+diff --git a/memory.c b/memory.c
+index 9f0b185..0809234 100644
+--- a/memory.c
++++ b/memory.c
+@@ -2,7 +2,9 @@
+ 
+ #include <sys/mman.h>
+ 
++#if CONFIG_LABEL_MEMORY
+ #include <sys/prctl.h>
++#endif
+ 
+ #ifndef PR_SET_VMA
+ #define PR_SET_VMA 0x53564d41
+@@ -104,8 +106,8 @@ void memory_purge(void *ptr, size_t size) {
+ }
+ 
+ bool memory_set_name(UNUSED void *ptr, UNUSED size_t size, UNUSED const char *name) {
+-    if (CONFIG_LABEL_MEMORY) {
+-        return prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, ptr, size, name);
+-    }
++#if CONFIG_LABEL_MEMORY
++    return prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, ptr, size, name);
++#endif
+     return false;
+ }
+diff --git a/test/Makefile b/test/Makefile
+index a3f72d5..4d41e09 100644
+--- a/test/Makefile
++++ b/test/Makefile
+@@ -18,9 +18,10 @@ CPPFLAGS := \
+ 
+ SHARED_FLAGS := -O3
+ 
+-CFLAGS := -std=c23 $(SHARED_FLAGS) -Wmissing-prototypes
++CSTD ?= -std=c23
++CFLAGS := $(CSTD) $(SHARED_FLAGS) -Wmissing-prototypes
+ CXXFLAGS := -std=c++17 -fsized-deallocation $(SHARED_FLAGS)
+-LDFLAGS := -Wl,-L$(dir)../out,-R,$(dir)../out
++LDFLAGS ?= -Wl,-L$(dir)../out,-R,$(dir)../out
+ 
+ LDLIBS := -lpthread -lhardened_malloc
+ 

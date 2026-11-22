@@ -6009,6 +6009,74 @@ def reboot_to_user(vm, args):
     return None
 
 
+def test_hardened_malloc(vm, args):
+    """Logs in as `user` on the serial console, measures sparse PROT_NONE reservation cost (32 MiB to 32 GiB), probes PROT_NONE/mremap/madvise/getrandom/mprotect, runs hardened_malloc's 58-binary upstream test suite on 32 MiB default and light builds, times upstream 32 GiB x 4 arenas launch/exit, and benchmarks dlmalloc vs hardened_malloc default vs light."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("test -x /usr/bin/hardened-malloc-probe && test -s /usr/share/licenses/hardened-malloc/LICENSE && echo HM_READY || echo HM_MISSING\n")
+    ready = vm.wait_serial(r"\r?\n(HM_READY|HM_MISSING)\r?\n", 20, since)
+    if not ready or ready.group(1) != "HM_READY":
+        return False, f"hardened-malloc or hardened-malloc-probe missing on image; see {vm.out / 'serial.log'}"
+    sections = []
+    problems = []
+    metrics = {"loadavg_start": list(os.getloadavg())}
+    steps = (
+        ("license", "test -s /usr/share/licenses/hardened-malloc/LICENSE && head -n 1 /usr/share/licenses/hardened-malloc/LICENSE", 30),
+        ("sparse", "hardened-malloc-probe sparse", 240),
+        ("prot-none", "hardened-malloc-probe prot-none", 60),
+        ("syscalls", "hardened-malloc-probe syscalls", 60),
+        ("suite-default", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/small hardened-malloc-probe run-suite /usr/libexec/hardened-malloc/test", 360),
+        ("suite-light", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/light-small hardened-malloc-probe run-suite /usr/libexec/hardened-malloc/test", 360),
+        ("nop-dlmalloc", "hardened-malloc-probe timed-exec 15000 hardened-malloc-bench-dlmalloc dlmalloc --nop", 45),
+        ("nop-default-small", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/small hardened-malloc-probe timed-exec 15000 hardened-malloc-bench-hm hm-default-small --nop", 45),
+        ("nop-light-small", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/light-small hardened-malloc-probe timed-exec 15000 hardened-malloc-bench-hm hm-light-small --nop", 45),
+        ("nop-default-32g", "LD_LIBRARY_PATH=/usr/lib hardened-malloc-probe timed-exec 20000 hardened-malloc-bench-hm hm-default-32g --nop", 60),
+        ("bench-dlmalloc", "hardened-malloc-bench-dlmalloc dlmalloc 2>/dev/null", 180),
+        ("bench-default", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/small hardened-malloc-bench-hm hm-default 2>/dev/null", 180),
+        ("bench-light", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/light-small hardened-malloc-bench-hm hm-light 2>/dev/null", 180),
+    )
+    outputs = {}
+    for tag, cmd, step_timeout in steps:
+        status, out = guest_run(vm, f"hm{tag.replace('-', '')}", cmd, step_timeout)
+        outputs[tag] = (status, out)
+        sections.append(f"=== {tag} (exit {status}) ===\n{out}\n")
+        if status != 0:
+            problems.append(f"{tag} exit {status}")
+    metrics["loadavg_end"] = list(os.getloadavg())
+    (vm.out / "hardened-malloc.txt").write_text("".join(sections))
+    sparse_rows = re.findall(r"sparse size=(\d+) status=(\S+)[^\r\n]*", outputs["sparse"][1])
+    if len(sparse_rows) != 5 or any(st != "OK" for _, st in sparse_rows):
+        problems.append(f"sparse rows={len(sparse_rows)}")
+    def_sum = re.search(r"suite-summary passed=(\d+) failed=(\d+) total=(\d+)", outputs["suite-default"][1])
+    light_sum = re.search(r"suite-summary passed=(\d+) failed=(\d+) total=(\d+)", outputs["suite-light"][1])
+    if not def_sum or int(def_sum.group(3)) != 58 or int(def_sum.group(1)) < 29:
+        problems.append("default suite below 29/58 strict baseline")
+    if not light_sum or int(light_sum.group(3)) != 58 or int(light_sum.group(1)) < 29:
+        problems.append("light suite below 29/58 strict baseline")
+    abort_detected = len(re.findall(r"suite \S+ match=(?:PASS|FAIL) status=-(?:4|6) expected=-6 [^\r\n]*fatal allocator error:", outputs["suite-default"][1]))
+    if abort_detected != 27:
+        problems.append(f"default abort detections {abort_detected}/27")
+    for btag, blabel in (("bench-dlmalloc", "dlmalloc"), ("bench-default", "hm-default"), ("bench-light", "hm-light")):
+        if f"bench label={blabel} " not in outputs[btag][1]:
+            problems.append(f"missing {btag}")
+    if "timed-exec cmd=" not in outputs["nop-default-32g"][1]:
+        problems.append("missing nop-default-32g")
+    metrics["suite_default"] = dict(zip(("passed", "failed", "total"), map(int, def_sum.groups()))) if def_sum else None
+    metrics["suite_default_abort_detected"] = abort_detected
+    metrics["suite_light"] = dict(zip(("passed", "failed", "total"), map(int, light_sum.groups()))) if light_sum else None
+    (vm.out / "hardened-malloc.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'hardened-malloc.txt'}"
+    return True, (
+        f"default suite {def_sum.group(1)}/{def_sum.group(3)} strict + {abort_detected}/27 abort-detected, "
+        f"light suite {light_sum.group(1)}/{light_sum.group(3)}, "
+        f"sparse 32MiB..32GiB + syscalls + benches measured; see {vm.out / 'hardened-malloc.txt'}"
+    )
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -6059,6 +6127,7 @@ TESTS["gpu-submit"] = test_gpu_submit
 TESTS["gpu-syncobj"] = test_gpu_syncobj
 TESTS["gpu-flip"] = test_gpu_flip
 TESTS["vk-exact"] = test_vk_exact
+TESTS["hardened-malloc"] = test_hardened_malloc
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
