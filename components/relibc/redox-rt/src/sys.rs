@@ -866,6 +866,9 @@ pub fn std_fs_call_rw<T: Call>(
 ) -> Result<usize> {
     sys_call_rw(fd, payload, CallFlags::STD_FS, metadata)
 }
+pub fn posix_std_fs_call(fd: usize, payload: &mut [u8], metadata: &StdFsCallMeta) -> Result<usize> {
+    wrapper(true, false, || std_fs_call_rw(fd, &mut *payload, metadata))
+}
 pub fn fstat(fd: usize, stat: &mut syscall::Stat) -> Result<usize> {
     let res = std_fs_call_ro(fd, stat, &StdFsCallMeta::new(StdFsCallKind::Fstat, 0, 0));
     if res.is_ok() {

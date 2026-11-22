@@ -17,7 +17,7 @@ use crate::{
     c_str::CStr,
     error::Errno,
     fs::File,
-    header::{fcntl, limits, sys_file},
+    header::{fcntl, limits},
     out::Out,
     sync::rwlock::{ReadGuard, RwLock},
 };
@@ -418,40 +418,6 @@ pub fn dir_path_and_fd_path(
     Ok((scheme.canonicalize_as_scheme(dir_to_open.into()), ref_path))
 }
 
-pub struct FileLock(c_int);
-
-impl FileLock {
-    pub fn lock(fd: c_int, op: c_int) -> Result<Self> {
-        const LOCK_SH_NB: c_int = sys_file::LOCK_SH | sys_file::LOCK_NB;
-        const LOCK_EX_NB: c_int = sys_file::LOCK_EX | sys_file::LOCK_NB;
-        const LOCK_UN_NB: c_int = sys_file::LOCK_UN | sys_file::LOCK_NB;
-        match op {
-            sys_file::LOCK_SH
-            | sys_file::LOCK_EX
-            | sys_file::LOCK_UN
-            | LOCK_SH_NB
-            | LOCK_EX_NB
-            | LOCK_UN_NB => {
-                Sys::flock(fd, op)?;
-                Ok(Self(fd))
-            }
-            _ => Err(Error::new(EINVAL)),
-        }
-    }
-
-    pub fn unlock(self) -> Result<()> {
-        Sys::flock(self.0, sys_file::LOCK_UN).map_err(Into::into)
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // FIXME should fd be fed into the flock call below?
-        let _fd = self.0;
-        self.0 = -1;
-        let _ = Sys::flock(self.0, sys_file::LOCK_UN);
-    }
-}
 /// Resolve `path` under `dirfd`.
 ///
 /// See [`openat2`] for more information.
