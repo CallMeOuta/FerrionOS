@@ -170,10 +170,22 @@ fn walk_file<D: Disk>(
     let level3 = level_data.level3;
     let level4 = level_data.level4;
     let tables: [(&[BlockPtr<BlockRaw>], u32); 4] = [
-        (unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level1[..]) }, 1),
-        (unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level2[..]) }, 2),
-        (unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level3[..]) }, 3),
-        (unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level4[..]) }, 4),
+        (
+            unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level1[..]) },
+            1,
+        ),
+        (
+            unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level2[..]) },
+            2,
+        ),
+        (
+            unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level3[..]) },
+            3,
+        ),
+        (
+            unsafe { std::mem::transmute::<&[_], &[BlockPtr<BlockRaw>]>(&level4[..]) },
+            4,
+        ),
     ];
     for (table, depth) in tables {
         let span = LIST_ENTRIES.pow(depth);
@@ -248,10 +260,9 @@ fn walk_dir<D: Disk>(
                 .push(format!("{owner} has a directory list without a marker"));
         }
         if snode.size != 0 {
-            walker.problems.push(format!(
-                "{owner} has no entries but size {}",
-                snode.size
-            ));
+            walker
+                .problems
+                .push(format!("{owner} has no entries but size {}", snode.size));
         }
         return Ok(0);
     }
@@ -282,7 +293,9 @@ fn walk_dir<D: Disk>(
             }
             for entry in list.data().entries() {
                 match entry.name() {
-                    Some(name) => snode.entries.push((name.to_string(), entry.node_ptr().id())),
+                    Some(name) => snode
+                        .entries
+                        .push((name.to_string(), entry.node_ptr().id())),
                     None => walker
                         .problems
                         .push(format!("{owner} has an entry whose name is not UTF-8")),
@@ -336,7 +349,9 @@ pub fn snapshot<D: Disk>(fs: &mut FileSystem<D>) -> Result<Snapshot> {
             let full3 = l3.data().branch_is_full(i3);
             if p2.is_null() {
                 if full3 {
-                    walker.problems.push(format!("tree slot {i3} is marked full but empty"));
+                    walker
+                        .problems
+                        .push(format!("tree slot {i3} is marked full but empty"));
                 }
                 continue;
             }
@@ -372,18 +387,18 @@ pub fn snapshot<D: Disk>(fs: &mut FileSystem<D>) -> Result<Snapshot> {
                     let full1 = l1.data().branch_is_full(i1);
                     if p0.is_null() {
                         if full1 {
-                            walker.problems.push(format!(
-                                "tree slot {i3}.{i2}.{i1} is marked full but empty"
-                            ));
+                            walker
+                                .problems
+                                .push(format!("tree slot {i3}.{i2}.{i1} is marked full but empty"));
                         }
                         continue;
                     }
                     walker.mark(p0, USED_TREE, "tree level 0");
                     let l0: redoxfs::BlockData<TreeList<BlockRaw>> = tx.read_block(p0)?;
                     if full1 != l0.data().tree_list_is_full() {
-                        walker.problems.push(format!(
-                            "tree slot {i3}.{i2}.{i1} has a wrong full flag"
-                        ));
+                        walker
+                            .problems
+                            .push(format!("tree slot {i3}.{i2}.{i1} has a wrong full flag"));
                     }
                     let l0_ptrs = l0.data().ptrs;
                     for i0 in 0..TREE_LIST_ENTRIES {
@@ -392,16 +407,16 @@ pub fn snapshot<D: Disk>(fs: &mut FileSystem<D>) -> Result<Snapshot> {
                         let full0 = l0.data().branch_is_full(i0);
                         if pn.is_null() {
                             if full0 && id != 0 {
-                                walker
-                                    .problems
-                                    .push(format!("tree slot of node {id} is marked full but empty"));
+                                walker.problems.push(format!(
+                                    "tree slot of node {id} is marked full but empty"
+                                ));
                             }
                             continue;
                         }
                         if !full0 {
-                            walker
-                                .problems
-                                .push(format!("tree slot of node {id} is used but not marked full"));
+                            walker.problems.push(format!(
+                                "tree slot of node {id} is used but not marked full"
+                            ));
                         }
                         if nodes.len() >= MAX_NODES {
                             return Err(Error::new(EIO));
@@ -455,7 +470,9 @@ pub fn snapshot<D: Disk>(fs: &mut FileSystem<D>) -> Result<Snapshot> {
         while !alloc_ptr.is_null() {
             chain += 1;
             if chain > MAX_CHAIN {
-                walker.problems.push("allocator log is too long".to_string());
+                walker
+                    .problems
+                    .push("allocator log is too long".to_string());
                 break;
             }
             walker.mark(alloc_ptr, USED_ALLOC, "allocator log");
@@ -496,9 +513,9 @@ pub fn snapshot<D: Disk>(fs: &mut FileSystem<D>) -> Result<Snapshot> {
             }
             for block in start..start + size {
                 if block <= HEADER_RING || block >= total {
-                    walker
-                        .problems
-                        .push(format!("free block {block} is outside the allocatable range"));
+                    walker.problems.push(format!(
+                        "free block {block} is outside the allocatable range"
+                    ));
                     continue;
                 }
                 if free[block as usize] {
@@ -555,7 +572,10 @@ pub fn compare(
 ) -> std::result::Result<Matching, String> {
     let mut ids: BTreeMap<NodeId, u32> = BTreeMap::new();
     let mut back: BTreeMap<u32, NodeId> = BTreeMap::new();
-    let mut assign = |model_id: NodeId, fs_id: u32, node: &MNode| -> std::result::Result<bool, String> {
+    let mut assign = |model_id: NodeId,
+                      fs_id: u32,
+                      node: &MNode|
+     -> std::result::Result<bool, String> {
         if let Some(expected) = node.fs_id {
             if expected != fs_id {
                 return Err(format!(
@@ -611,8 +631,8 @@ pub fn compare(
                 if m.size != s.size {
                     return Err(format!("{path}: size {}, expected {}", s.size, m.size));
                 }
-                if m.links != s.links {
-                    return Err(format!("{path}: {} links, expected {}", s.links, m.links));
+                if m.links() != s.links {
+                    return Err(format!("{path}: {} links, expected {}", s.links, m.links()));
                 }
             }
             Kind::Dir => {
@@ -651,10 +671,12 @@ pub fn compare(
     for orphan in model.orphans() {
         let node = model.node(orphan);
         let Some(fs_id) = node.fs_id else {
-            return Err(format!("open unlinked model node {orphan} has no file system node"));
+            return Err(format!(
+                "open unlinked model node {orphan} has no file system node"
+            ));
         };
         if !snap.release.contains(&fs_id) {
-            if released_allowed && !snap.nodes.contains_key(&fs_id) {
+            if (released_allowed || node.is_release_pending()) && !snap.nodes.contains_key(&fs_id) {
                 continue;
             }
             return Err(format!(
@@ -735,7 +757,9 @@ pub fn compare_contents<D: Disk>(
                 let mut expected = vec![0; stored];
                 m.read(0, &mut expected);
                 if inline[..stored] != expected[..] {
-                    problem = Some(format!("node {fs_id}: inline content differs from the model"));
+                    problem = Some(format!(
+                        "node {fs_id}: inline content differs from the model"
+                    ));
                     return Ok(());
                 }
                 if inline[stored..].iter().any(|&byte| byte != 0) {
@@ -747,7 +771,8 @@ pub fn compare_contents<D: Disk>(
                 let beyond = m.chunks.iter().any(|(&chunk, data)| {
                     let start = chunk as usize * crate::model::CHUNK;
                     let from = inline.len().saturating_sub(start).min(crate::model::CHUNK);
-                    start + crate::model::CHUNK > inline.len() && data[from..].iter().any(|&byte| byte != 0)
+                    start + crate::model::CHUNK > inline.len()
+                        && data[from..].iter().any(|&byte| byte != 0)
                 });
                 if beyond {
                     problem = Some(format!(

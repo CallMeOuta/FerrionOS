@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use syscall::error::{EACCES, EEXIST, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
@@ -19,6 +20,13 @@ pub enum Kind {
     Dir,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Life {
+    Linked { links: NonZeroU32, open: u32 },
+    OpenUnlinked { open: NonZeroU32 },
+    ReleasePending,
+}
+
 #[derive(Clone)]
 pub struct MNode {
     pub kind: Kind,
@@ -27,8 +35,7 @@ pub struct MNode {
     pub entries: BTreeMap<String, NodeId>,
     pub mtime: Option<Time>,
     pub atime: Option<Time>,
-    pub links: u32,
-    pub open: u32,
+    pub life: Life,
     pub fs_id: Option<u32>,
 }
 
@@ -41,10 +48,31 @@ impl MNode {
             entries: BTreeMap::new(),
             mtime: Some(now),
             atime: Some(now),
-            links: 1,
-            open: 0,
+            life: Life::Linked {
+                links: NonZeroU32::new(1).expect("nonzero link"),
+                open: 0,
+            },
             fs_id: None,
         }
+    }
+
+    pub fn links(&self) -> u32 {
+        match self.life {
+            Life::Linked { links, .. } => links.get(),
+            Life::OpenUnlinked { .. } | Life::ReleasePending => 0,
+        }
+    }
+
+    pub fn open_count(&self) -> u32 {
+        match self.life {
+            Life::Linked { open, .. } => open,
+            Life::OpenUnlinked { open } => open.get(),
+            Life::ReleasePending => 0,
+        }
+    }
+
+    pub fn is_release_pending(&self) -> bool {
+        matches!(self.life, Life::ReleasePending)
     }
 
     pub fn read(&self, offset: u64, out: &mut [u8]) {
@@ -167,11 +195,20 @@ impl Model {
     }
 
     fn drop_link(&mut self, id: NodeId) {
-        let node = self.node_mut(id);
-        assert!(node.links > 0);
-        node.links -= 1;
-        if node.links == 0 && node.open == 0 {
-            self.nodes.remove(&id);
+        let next = match self.node(id).life {
+            Life::Linked { links, open } => match NonZeroU32::new(links.get() - 1) {
+                Some(links) => Some(Life::Linked { links, open }),
+                None => NonZeroU32::new(open).map(|open| Life::OpenUnlinked { open }),
+            },
+            Life::OpenUnlinked { .. } | Life::ReleasePending => {
+                panic!("drop_link on unlinked node {id}");
+            }
+        };
+        match next {
+            Some(life) => self.node_mut(id).life = life,
+            None => {
+                self.nodes.remove(&id);
+            }
         }
     }
 
@@ -240,7 +277,11 @@ impl Model {
         node.truncate(len);
     }
 
-    pub fn check_unlink(&self, path: &[String], dir: bool) -> Result<(NodeId, String, NodeId), Errno> {
+    pub fn check_unlink(
+        &self,
+        path: &[String],
+        dir: bool,
+    ) -> Result<(NodeId, String, NodeId), Errno> {
         let child = self.lookup(path)?;
         let (parent, name) = self.parent(path)?;
         let node = self.node(child);
@@ -324,7 +365,11 @@ impl Model {
         Ok(())
     }
 
-    pub fn check_link(&self, from: &[String], to: &[String]) -> Result<(NodeId, NodeId, String), Errno> {
+    pub fn check_link(
+        &self,
+        from: &[String],
+        to: &[String],
+    ) -> Result<(NodeId, NodeId, String), Errno> {
         let orig = self.lookup(from)?;
         let (new_parent, new_name) = self.parent(to)?;
         let orig_kind = self.node(orig).kind;
@@ -346,7 +391,14 @@ impl Model {
         let parent_node = self.node_mut(new_parent);
         parent_node.entries.insert(new_name, orig);
         parent_node.mtime = Some(now);
-        self.node_mut(orig).links += 1;
+        match &mut self.node_mut(orig).life {
+            Life::Linked { links, .. } => {
+                *links = NonZeroU32::new(links.get() + 1).expect("link count overflow");
+            }
+            Life::OpenUnlinked { .. } | Life::ReleasePending => {
+                panic!("link on unlinked node {orig}");
+            }
+        }
         Ok(())
     }
 
@@ -357,29 +409,66 @@ impl Model {
     }
 
     pub fn open(&mut self, id: NodeId) {
-        self.node_mut(id).open += 1;
+        match &mut self.node_mut(id).life {
+            Life::Linked { open, .. } => *open += 1,
+            Life::OpenUnlinked { open } => {
+                *open = NonZeroU32::new(open.get() + 1).expect("open count overflow");
+            }
+            Life::ReleasePending => panic!("open on release-pending node {id}"),
+        }
     }
 
-    pub fn close(&mut self, id: NodeId) {
-        let node = self.node_mut(id);
-        assert!(node.open > 0);
-        node.open -= 1;
-        if node.open == 0 && node.links == 0 {
-            self.nodes.remove(&id);
+    pub fn close(&mut self, id: NodeId, released: bool) {
+        let next = match self.node(id).life {
+            Life::Linked { links, open } => {
+                assert!(open > 0);
+                Some(Life::Linked {
+                    links,
+                    open: open - 1,
+                })
+            }
+            Life::OpenUnlinked { open } => match NonZeroU32::new(open.get() - 1) {
+                Some(open) => Some(Life::OpenUnlinked { open }),
+                None => (!released).then_some(Life::ReleasePending),
+            },
+            Life::ReleasePending => panic!("close on release-pending node {id}"),
+        };
+        match next {
+            Some(life) => self.node_mut(id).life = life,
+            None => {
+                self.nodes.remove(&id);
+            }
         }
+    }
+
+    pub fn clear_release_pending(&mut self) {
+        self.nodes
+            .retain(|_, node| !matches!(node.life, Life::ReleasePending));
     }
 
     pub fn close_all(&mut self) {
-        for node in self.nodes.values_mut() {
-            node.open = 0;
+        let mut remove = Vec::new();
+        for (&id, node) in self.nodes.iter_mut() {
+            match node.life {
+                Life::Linked { links, .. } => node.life = Life::Linked { links, open: 0 },
+                Life::OpenUnlinked { .. } | Life::ReleasePending => {
+                    assert_ne!(id, ROOT);
+                    remove.push(id);
+                }
+            }
         }
-        self.nodes.retain(|&id, node| id == ROOT || node.links > 0);
+        for id in remove {
+            self.nodes.remove(&id);
+        }
     }
 
     pub fn orphans(&self) -> Vec<NodeId> {
         self.nodes
             .iter()
-            .filter(|(id, node)| **id != ROOT && node.links == 0)
+            .filter(|(id, node)| {
+                **id != ROOT
+                    && matches!(node.life, Life::OpenUnlinked { .. } | Life::ReleasePending)
+            })
             .map(|(id, _)| *id)
             .collect()
     }
@@ -405,6 +494,9 @@ impl Model {
     }
 
     pub fn bytes(&self) -> u64 {
-        self.nodes.values().map(|node| node.chunks.len() as u64 * CHUNK as u64).sum()
+        self.nodes
+            .values()
+            .map(|node| node.chunks.len() as u64 * CHUNK as u64)
+            .sum()
     }
 }

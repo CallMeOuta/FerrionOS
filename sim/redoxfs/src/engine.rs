@@ -4,7 +4,9 @@ use redoxfs::{
     ALLOC_GC_THRESHOLD, ALLOC_LIST_ENTRIES, Disk, FileSystem, HEADER_RING, Header, KeySlot, Node,
     Salt, Transaction, TreeData, TreePtr,
 };
-use syscall::error::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, EACCES, Error, Result};
+use syscall::error::{
+    EACCES, EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, Error, Result,
+};
 
 use crate::check::{self, Snapshot};
 use crate::disk::{self, CrashKind, Durability, Guard, SimDisk, View};
@@ -106,18 +108,17 @@ impl Stats {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Handle {
-    model: NodeId,
-    fs: u32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Free,
+    Open { node: NodeId, fs: u32 },
 }
 
 pub struct Engine {
     pub profile: Profile,
     fs: Option<FileSystem<SimDisk>>,
     pub model: Model,
-    handles: [Option<Handle>; MAX_HANDLES as usize],
-    open_counts: BTreeMap<u32, u32>,
+    handles: [Slot; MAX_HANDLES as usize],
     pending_crash: Option<(u32, CrashKind, u64)>,
     pending_read_error: Option<u32>,
     pending_enumerate: Option<u64>,
@@ -211,8 +212,7 @@ impl Engine {
             profile,
             fs: Some(fs),
             model,
-            handles: [None; MAX_HANDLES as usize],
-            open_counts: BTreeMap::new(),
+            handles: [Slot::Free; MAX_HANDLES as usize],
             pending_crash: None,
             pending_read_error: None,
             pending_enumerate: None,
@@ -234,16 +234,99 @@ impl Engine {
 
     pub fn open_handles(&self) -> Vec<u8> {
         (0..MAX_HANDLES)
-            .filter(|&slot| self.handles[slot as usize].is_some())
+            .filter(|&slot| matches!(self.handles[slot as usize], Slot::Open { .. }))
             .collect()
     }
 
     pub fn free_handle(&self) -> Option<u8> {
-        (0..MAX_HANDLES).find(|&slot| self.handles[slot as usize].is_none())
+        (0..MAX_HANDLES).find(|&slot| matches!(self.handles[slot as usize], Slot::Free))
     }
 
     pub fn handle_node(&self, slot: u8) -> Option<NodeId> {
-        self.handles.get(slot as usize).copied().flatten().map(|handle| handle.model)
+        match self.handles.get(slot as usize).copied() {
+            Some(Slot::Open { node, .. }) => Some(node),
+            _ => None,
+        }
+    }
+
+    fn open_count_for_fs(&self, fs_id: u32) -> u32 {
+        self.handles
+            .iter()
+            .filter(|slot| matches!(slot, Slot::Open { fs, .. } if *fs == fs_id))
+            .count() as u32
+    }
+
+    fn close_slot(&mut self, slot: u8) -> Result<()> {
+        let Slot::Open { node, fs } = self.handles[slot as usize] else {
+            panic!("close_slot on free handle slot {slot}");
+        };
+        self.handles[slot as usize] = Slot::Free;
+        let last_for_fs = self.open_count_for_fs(fs) == 0;
+        let result = self.fs().tx(|tx| tx.on_close_node(TreePtr::new(fs)));
+        match result {
+            Ok(()) => {
+                self.model.close(node, true);
+                if last_for_fs {
+                    self.model.clear_release_pending();
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.model.close(node, false);
+                Err(err)
+            }
+        }
+    }
+
+    fn assert_handle_invariants(&self) {
+        let fs = self.fs.as_ref().expect("mounted file system");
+        let mut by_node: BTreeMap<NodeId, u32> = BTreeMap::new();
+        let mut by_fs: BTreeMap<u32, u32> = BTreeMap::new();
+        for slot in self.handles.iter() {
+            if let Slot::Open { node, fs: fs_id } = *slot {
+                let mnode = self
+                    .model
+                    .nodes
+                    .get(&node)
+                    .expect("open slot refers to missing model node");
+                assert!(
+                    !mnode.is_release_pending(),
+                    "open slot refers to release-pending node {node}"
+                );
+                assert_eq!(
+                    mnode.fs_id,
+                    Some(fs_id),
+                    "open slot fs id {fs_id} disagrees with model node {node}"
+                );
+                *by_node.entry(node).or_insert(0) += 1;
+                *by_fs.entry(fs_id).or_insert(0) += 1;
+            }
+        }
+        for (&id, mnode) in self.model.nodes.iter() {
+            let expected = by_node.get(&id).copied().unwrap_or(0);
+            assert_eq!(
+                mnode.open_count(),
+                expected,
+                "model node {id} open count {} differs from open slots {expected}",
+                mnode.open_count()
+            );
+        }
+        for (&fs_id, &count) in by_fs.iter() {
+            let usage = fs.node_usages.get(&fs_id).copied().unwrap_or(0);
+            assert_eq!(
+                usage,
+                u64::from(count),
+                "fs node_usages[{fs_id}] is {usage}, open slots {count}"
+            );
+        }
+        for (&fs_id, &usage) in fs.node_usages.iter() {
+            let count = by_fs.get(&fs_id).copied().unwrap_or(0);
+            assert_eq!(
+                usage,
+                u64::from(count),
+                "fs node_usages[{fs_id}] is {usage}, open slots {count}"
+            );
+        }
     }
 
     fn applicable(&self, op: &Op) -> bool {
@@ -263,7 +346,8 @@ impl Engine {
             }
             Op::Fsync(target) | Op::SetTimes { target, .. } => handle_ok(target),
             Op::Open { handle, .. } => {
-                (*handle as usize) < self.handles.len() && self.handles[*handle as usize].is_none()
+                (*handle as usize) < self.handles.len()
+                    && matches!(self.handles[*handle as usize], Slot::Free)
             }
             Op::Close(handle) => self.handle_node(*handle).is_some(),
             Op::Link { from, .. } => !matches!(
@@ -364,15 +448,14 @@ impl Engine {
             }),
             Op::Open { path, handle } => self.model.lookup(path).map(|id| {
                 self.model.open(id);
-                let fs = self.model.node(id).fs_id.expect("open node has a file system id");
-                self.handles[*handle as usize] = Some(Handle { model: id, fs });
+                let fs = self
+                    .model
+                    .node(id)
+                    .fs_id
+                    .expect("open node has a file system id");
+                self.handles[*handle as usize] = Slot::Open { node: id, fs };
             }),
-            Op::Close(handle) => {
-                let id = self.handle_node(*handle).expect("open handle");
-                self.model.close(id);
-                self.handles[*handle as usize] = None;
-                Ok(())
-            }
+            Op::Close(_) => Ok(()),
             Op::SetKeySlot { slot, password } => {
                 self.model.key_slots[*slot as usize] = Some(password.clone());
                 Ok(())
@@ -381,25 +464,28 @@ impl Engine {
                 self.model.key_slots[*slot as usize] = None;
                 Ok(())
             }
-            Op::Remount => {
-                self.model.close_all();
-                self.handles = [None; MAX_HANDLES as usize];
-                Ok(())
-            }
+            Op::Remount => Ok(()),
             Op::Reformat => {
                 self.model = Model::new(now, TreePtr::<Node>::root().id());
-                self.model.key_slots[0] = self.profile.encrypted.then(|| FIRST_PASSWORD.to_string());
-                self.handles = [None; MAX_HANDLES as usize];
+                self.model.key_slots[0] =
+                    self.profile.encrypted.then(|| FIRST_PASSWORD.to_string());
+                self.handles = [Slot::Free; MAX_HANDLES as usize];
                 Ok(())
             }
             Op::Crash { .. } | Op::ReadError { .. } | Op::Enumerate { .. } => Ok(()),
         };
-        assert!(result.is_ok(), "model rejected an operation it had accepted");
+        assert!(
+            result.is_ok(),
+            "model rejected an operation it had accepted"
+        );
     }
 
     fn handle_ptr(&self, target: &Target) -> Option<TreePtr<Node>> {
         match target {
-            Target::Handle(slot) => self.handles[*slot as usize].map(|handle| TreePtr::new(handle.fs)),
+            Target::Handle(slot) => match self.handles[*slot as usize] {
+                Slot::Open { fs, .. } => Some(TreePtr::new(fs)),
+                Slot::Free => None,
+            },
             Target::Path(_) => None,
         }
     }
@@ -571,26 +657,18 @@ impl Engine {
             }
             Op::Open { path, .. } => {
                 let ptr = self.fs().tx(|tx| Ok(resolve(tx, path)?.ptr()))?;
-                let count = self.open_counts.entry(ptr.id()).or_insert(0);
-                *count += 1;
-                if *count == 1 {
-                    self.fs().tx(|tx| tx.on_open_node(ptr))?;
-                }
+                self.fs().tx(|tx| tx.on_open_node(ptr))?;
                 Ok(Some(ptr.id()))
             }
             Op::Close(slot) => {
-                self.fs().disk.disarm_read_error();
-                let fs_id = self.handles[*slot as usize].expect("open handle").fs;
-                let count = self.open_counts.get_mut(&fs_id).expect("open count");
-                *count -= 1;
-                if *count == 0 {
-                    self.open_counts.remove(&fs_id);
-                    self.fs().tx(|tx| tx.on_close_node(TreePtr::new(fs_id)))?;
-                }
+                self.close_slot(*slot)?;
                 Ok(None)
             }
             Op::SetKeySlot { slot, password } => {
-                let current = self.password.clone().expect("encrypted file system password");
+                let current = self
+                    .password
+                    .clone()
+                    .expect("encrypted file system password");
                 let fs = self.fs();
                 let (_, keys) = fs
                     .header
@@ -607,18 +685,16 @@ impl Engine {
                 Ok(None)
             }
             Op::Remount => {
-                self.fs().disk.disarm_read_error();
-                self.handles = [None; MAX_HANDLES as usize];
-                let open: Vec<u32> = self.open_counts.keys().copied().collect();
-                self.open_counts.clear();
-                for fs_id in open {
-                    self.fs().tx(|tx| tx.on_close_node(TreePtr::new(fs_id)))?;
+                for slot in self.open_handles() {
+                    self.close_slot(slot)?;
                     self.refresh_guard();
                 }
                 self.fs().cleanup()?;
+                self.model.clear_release_pending();
                 self.fs().disk.flush()?;
                 self.refresh_guard();
-                let fs = self.fs.take().expect("mounted file system");
+                let mut fs = self.fs.take().expect("mounted file system");
+                fs.disk.disarm_read_error();
                 let password = self.password.clone();
                 let mut fs = match mount(fs.disk, password.as_deref()) {
                     Ok(fs) => fs,
@@ -635,20 +711,21 @@ impl Engine {
                 let barriers = self.profile.barriers;
                 self.fs().barriers = barriers;
                 cleaned?;
+                self.model.clear_release_pending();
                 self.durable = true;
                 Ok(None)
             }
             Op::Reformat => {
-                self.fs().disk.disarm_read_error();
-                self.handles = [None; MAX_HANDLES as usize];
-                self.open_counts.clear();
+                self.handles = [Slot::Free; MAX_HANDLES as usize];
                 let fs = self.fs.take().expect("mounted file system");
                 let mut disk = fs.disk;
                 disk.guard = None;
                 let password = self.profile.encrypted.then(|| FIRST_PASSWORD.to_string());
-                match FileSystem::create(disk, password.as_deref().map(str::as_bytes), now.0, now.1) {
+                match FileSystem::create(disk, password.as_deref().map(str::as_bytes), now.0, now.1)
+                {
                     Ok(mut fs) => {
-                        fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
+                        fs.disk.guard =
+                            Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
                         fs.barriers = self.profile.barriers;
                         self.durable = true;
                         self.fs = Some(fs);
@@ -658,7 +735,8 @@ impl Engine {
                     Err(err) => {
                         self.lost = disk::take_lost();
                         if self.lost.is_none() {
-                            self.fatal = Some(format!("reformat failed without a power loss: {err}"));
+                            self.fatal =
+                                Some(format!("reformat failed without a power loss: {err}"));
                         }
                         Err(err)
                     }
@@ -694,10 +772,12 @@ impl Engine {
         if !self.profile.encrypted {
             return;
         }
-        let valid = self
-            .password
-            .as_ref()
-            .is_some_and(|password| self.model.key_slots.iter().any(|slot| slot.as_ref() == Some(password)));
+        let valid = self.password.as_ref().is_some_and(|password| {
+            self.model
+                .key_slots
+                .iter()
+                .any(|slot| slot.as_ref() == Some(password))
+        });
         if !valid {
             self.password = self.model.key_slots.iter().flatten().next().cloned();
         }
@@ -755,6 +835,10 @@ impl Engine {
         let writes_before = self.fs().disk.writes;
         let generation_before = self.fs().header.generation();
         let uuid_before = self.fs().header.uuid();
+        let close_target = match op {
+            Op::Close(slot) => self.handle_node(*slot),
+            _ => None,
+        };
         let actual = self.run_fs(op, &data).map_err(errno);
         if let Some(fatal) = self.fatal.take() {
             return Err(fatal);
@@ -774,9 +858,19 @@ impl Engine {
             let before = before.expect("model before a crash");
             let mut after = before.clone();
             if expected.is_ok() {
-                std::mem::swap(&mut self.model, &mut after);
-                self.apply(op, &data, None);
-                std::mem::swap(&mut self.model, &mut after);
+                match op {
+                    Op::Close(_) => {
+                        after.close(close_target.expect("open handle"), true);
+                    }
+                    Op::Remount => {
+                        after.close_all();
+                    }
+                    _ => {
+                        std::mem::swap(&mut self.model, &mut after);
+                        self.apply(op, &data, None);
+                        std::mem::swap(&mut self.model, &mut after);
+                    }
+                }
             }
             let (_, kind, salt) = crash.expect("armed crash");
             return self.crash(kind, salt, vec![before, after], op);
@@ -790,7 +884,7 @@ impl Engine {
                 "{step}: wrote {wrote} blocks although it changed nothing"
             ));
         }
-        if outcome || matches!(op, Op::Remount) {
+        if outcome {
             let created = match (op, &actual) {
                 (Op::Create(_) | Op::Mkdir(_), Ok(created)) => *created,
                 _ => None,
@@ -799,6 +893,7 @@ impl Engine {
         } else {
             self.touched.clear();
         }
+        self.assert_handle_invariants();
         if !outcome {
             self.stats.failed_ops += 1;
         } else if matches!(op, Op::Remount) {
@@ -826,7 +921,9 @@ impl Engine {
         let generation_after = self.fs().header.generation();
         let threshold = generation_after / ALLOC_GC_THRESHOLD * ALLOC_GC_THRESHOLD;
         let squashed = (outcome && matches!(op, Op::Remount | Op::Reformat))
-            || (threshold >= ALLOC_GC_THRESHOLD && generation_before <= threshold && threshold < generation_after);
+            || (threshold >= ALLOC_GC_THRESHOLD
+                && generation_before <= threshold
+                && threshold < generation_after);
         let full = self.stats.ops % self.profile.full_check_every == 0;
         self.check_durable(full, squashed)
     }
@@ -905,7 +1002,10 @@ impl Engine {
         let Some((mut fs, password)) = mounted else {
             if matches!(op, Op::Reformat) {
                 self.stats.unformatted += 1;
-                let after = candidates.into_iter().last().expect("model after the reformat");
+                let after = candidates
+                    .into_iter()
+                    .last()
+                    .expect("model after the reformat");
                 return self.format_lost_disk(image, after);
             }
             return Err(format!(
@@ -914,7 +1014,8 @@ impl Engine {
             ));
         };
         self.stats.crash_mounts += 1;
-        let snapshot = check::snapshot(&mut fs).map_err(|err| format!("{context}: walk failed: {err}"))?;
+        let snapshot =
+            check::snapshot(&mut fs).map_err(|err| format!("{context}: walk failed: {err}"))?;
         if !snapshot.problems.is_empty() {
             return Err(format!("{context}: {}", snapshot.problems.join("; ")));
         }
@@ -930,7 +1031,9 @@ impl Engine {
             match check::compare(&snapshot, candidate, true) {
                 Ok(matching) => {
                     let mut all = candidate.nodes.keys().copied();
-                    match check::compare_contents(&mut fs, &snapshot, candidate, &matching, &mut all) {
+                    match check::compare_contents(
+                        &mut fs, &snapshot, candidate, &matching, &mut all,
+                    ) {
                         Ok(_) => {
                             chosen = Some((index, matching));
                             break;
@@ -953,14 +1056,14 @@ impl Engine {
         }
         model.close_all();
         self.model = model;
-        self.handles = [None; MAX_HANDLES as usize];
-        self.open_counts.clear();
+        self.handles = [Slot::Free; MAX_HANDLES as usize];
         self.password = password;
         self.sync_passwords();
         fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
         fs.cleanup()
             .map_err(|err| format!("{context}: cleanup after mount failed: {err}"))?;
         self.fs = Some(fs);
+        self.assert_handle_invariants();
         self.take_violations()
             .map_err(|err| format!("{context}: cleanup: {err}"))?;
         self.refresh_guard();
@@ -968,18 +1071,24 @@ impl Engine {
             .map_err(|err| format!("{context}: after cleanup: {err}"))
     }
 
-    fn format_lost_disk(&mut self, image: Vec<u8>, model: Model) -> std::result::Result<(), String> {
+    fn format_lost_disk(
+        &mut self,
+        image: Vec<u8>,
+        model: Model,
+    ) -> std::result::Result<(), String> {
         let now = self.now;
         let password = self.profile.encrypted.then(|| FIRST_PASSWORD.to_string());
         let disk = SimDisk::new(image, self.profile.durability);
         let mut fs = FileSystem::create(disk, password.as_deref().map(str::as_bytes), now.0, now.1)
-            .map_err(|err| format!("formatting a disk left unformatted by a power loss failed: {err}"))?;
+            .map_err(|err| {
+                format!("formatting a disk left unformatted by a power loss failed: {err}")
+            })?;
         fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
         self.fs = Some(fs);
         self.model = model;
-        self.handles = [None; MAX_HANDLES as usize];
-        self.open_counts.clear();
+        self.handles = [Slot::Free; MAX_HANDLES as usize];
         self.password = password;
+        self.assert_handle_invariants();
         self.check_durable(true, true)
     }
 
@@ -1052,14 +1161,21 @@ impl Engine {
                     continue;
                 }
                 Err(err) => {
-                    return Err(format!("{}: the file system does not mount: {err}", boundary.label));
+                    return Err(format!(
+                        "{}: the file system does not mount: {err}",
+                        boundary.label
+                    ));
                 }
             };
             mounted.read_only = true;
             let snapshot = check::snapshot(&mut mounted)
                 .map_err(|err| format!("{}: walk failed: {err}", boundary.label))?;
             if !snapshot.problems.is_empty() {
-                return Err(format!("{}: {}", boundary.label, snapshot.problems.join("; ")));
+                return Err(format!(
+                    "{}: {}",
+                    boundary.label,
+                    snapshot.problems.join("; ")
+                ));
             }
             let mut errors = Vec::new();
             let mut matched = false;
@@ -1106,7 +1222,12 @@ impl Engine {
         let touched = self.touched.clone();
         let durable = std::mem::take(&mut self.durable);
         let live_only = if self.profile.barriers {
-            let unflushed = self.fs.as_ref().expect("mounted file system").disk.unflushed();
+            let unflushed = self
+                .fs
+                .as_ref()
+                .expect("mounted file system")
+                .disk
+                .unflushed();
             if unflushed != 0 {
                 return Err(format!(
                     "the operation returned with {unflushed} writes still in the volatile cache"
@@ -1145,8 +1266,8 @@ impl Engine {
         let mut mounted = mount(view, password.as_deref())
             .map_err(|err| format!("the durable state does not mount: {err}"))?;
         mounted.read_only = true;
-        let snapshot = check::snapshot(&mut mounted)
-            .map_err(|err| format!("durable walk failed: {err}"))?;
+        let snapshot =
+            check::snapshot(&mut mounted).map_err(|err| format!("durable walk failed: {err}"))?;
         if snapshot.generation != live_generation {
             return Err(format!(
                 "the disk holds generation {} after the file system committed generation {live_generation}",
@@ -1155,8 +1276,16 @@ impl Engine {
         }
         let rebuilt_free = disk::free_ranges(mounted.allocator());
         if rebuilt_free != live_free {
-            let only_live: Vec<_> = live_free.iter().filter(|range| !rebuilt_free.contains(range)).take(4).collect();
-            let only_rebuilt: Vec<_> = rebuilt_free.iter().filter(|range| !live_free.contains(range)).take(4).collect();
+            let only_live: Vec<_> = live_free
+                .iter()
+                .filter(|range| !rebuilt_free.contains(range))
+                .take(4)
+                .collect();
+            let only_rebuilt: Vec<_> = rebuilt_free
+                .iter()
+                .filter(|range| !live_free.contains(range))
+                .take(4)
+                .collect();
             return Err(format!(
                 "the free set rebuilt from the allocator log differs from the running allocator: running only {only_live:?}, rebuilt only {only_rebuilt:?}"
             ));
@@ -1165,7 +1294,12 @@ impl Engine {
             self.stats.layout_differences += 1;
         }
         if squashed {
-            let entries: usize = mounted.allocator().levels().iter().map(|level| level.len()).sum();
+            let entries: usize = mounted
+                .allocator()
+                .levels()
+                .iter()
+                .map(|level| level.len())
+                .sum();
             let bound = (entries + SQUASH_SLACK_ENTRIES).div_ceil(ALLOC_LIST_ENTRIES) + 2;
             if snapshot.alloc_blocks > bound {
                 return Err(format!(
@@ -1278,6 +1412,12 @@ pub fn errno_name(code: Errno) -> &'static str {
 }
 
 fn op_text(op: &Op) -> String {
-    let text = Step { time: (0, 0), op: op.clone() }.to_string();
-    text.split_once(' ').map(|(_, rest)| rest.to_string()).unwrap_or(text)
+    let text = Step {
+        time: (0, 0),
+        op: op.clone(),
+    }
+    .to_string();
+    text.split_once(' ')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or(text)
 }
