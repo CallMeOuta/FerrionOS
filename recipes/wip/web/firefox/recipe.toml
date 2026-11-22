@@ -9,7 +9,7 @@ git = "https://github.com/willnode/firefox"
 branch = "redox-150"
 rev = "9bf8f0abb65ac35fff3dfd5bf9aef395e4e5497e"
 shallow_clone = true
-patches = ["ferrion-wayland-proxy.patch", "ferrion-remote-backend.patch", "ferrion-fd-limit.patch", "ferrion-eventfd-visibility.patch", "ferrion-binary-path.patch"]
+patches = ["ferrion-wayland-proxy.patch", "ferrion-remote-backend.patch", "ferrion-fd-limit.patch", "ferrion-eventfd-visibility.patch", "ferrion-binary-path.patch", "ferrion-jit-mcontext.patch"]
 [build]
 template = "custom"
 dev-dependencies = ["host:nodejs-host"]

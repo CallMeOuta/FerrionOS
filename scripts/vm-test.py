@@ -2392,6 +2392,223 @@ def test_firefox_start(vm, args):
     return not problems, note + ("; " + "; ".join(problems) if problems else "")
 
 
+FIREFOX_JS_SCRIPT = """
+function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+function workload() {
+  var sum = fib(27);
+  var arr = new Array(200000);
+  for (var r = 0; r < 20; r++) {
+    for (var i = 0; i < arr.length; i++) arr[i] = (i * r) ^ (i >> 3);
+    for (var i = 0; i < arr.length; i++) sum = (sum + arr[i]) | 0;
+  }
+  var objs = [];
+  for (var i = 0; i < 200000; i++) objs.push({x: i, y: i * 2});
+  for (var k = 0; k < objs.length; k++) sum = (sum + objs[k].x + objs[k].y) | 0;
+  var text = "";
+  for (var i = 0; i < 50000; i++) text += String.fromCharCode(97 + i % 26);
+  sum = (sum + text.length + text.charCodeAt(12345)) | 0;
+  var sorted = objs.slice(0, 50000).sort(function (p, q) { return q.x - p.x; });
+  return (sum + sorted[0].x) | 0;
+}
+function wasm() {
+  var out = {present: typeof WebAssembly};
+  if (typeof WebAssembly !== "object") return out;
+  var bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,19,4,96,2,127,127,1,127,96,1,127,1,127,96,1,127,0,96,0,0,3,5,4,0,1,2,3,5,3,1,0,1,7,29,4,3,97,100,100,0,0,4,108,111,97,100,0,1,5,115,116,111,114,101,0,2,4,116,114,97,112,0,3,10,31,4,7,0,32,0,32,1,106,11,7,0,32,0,40,2,0,11,9,0,32,0,65,7,54,2,0,11,3,0,0,11]);
+  var e = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+  out.add = e.add(2, 3);
+  e.store(8);
+  out.inBounds = e.load(8);
+  function attempt(f) { try { return "returned " + f(); } catch (err) { return err.constructor.name + ": " + err.message; } }
+  out.loadOob = attempt(function () { return e.load(65536); });
+  out.loadFar = attempt(function () { return e.load(0x40000000); });
+  out.storeOob = attempt(function () { return e.store(65536); });
+  out.unreachable = attempt(function () { return e.trap(); });
+  return out;
+}
+var start = performance.now();
+var checksum = 0;
+for (var round = 0; round < 5; round++) checksum = (checksum + workload()) | 0;
+var result = {ms: Math.round(performance.now() - start), checksum: checksum, wasm: wasm()};
+var line = "FXJS " + JSON.stringify(result);
+document.title = "JS " + result.ms + " ms";
+document.getElementById("out").textContent = "JavaScript workload: " + result.ms + " ms, checksum " + checksum + ", WebAssembly: " + result.wasm.present;
+dump(line + "\\n");
+console.log(line);
+"""
+FIREFOX_JS_CHECKSUM = 758815123
+FIREFOX_JS_PAGES = [
+    ("js", "file:///tmp/firefox-js/page.html", "800,600", 900, True),
+    ("https", "https://example.com/", "800,600", 900, True),
+    ("kernelbench", "https://kernelbench.com/", "1280,900", 1800, False),
+]
+FIREFOX_KB_DELAYS = (3, 8, 15)
+
+
+def firefox_kb_delayed(seconds):
+    """A page that frames https://kernelbench.com/ and then keeps its own process busy for `seconds`, which holds
+    `--screenshot` back while the framed page, in its own process, loads and runs its scripts."""
+    return ('<!doctype html><body style="margin:0"><iframe src="https://kernelbench.com/" '
+            'style="border:0;width:1280px;height:900px;display:block"></iframe>'
+            f'<script>var end = Date.now() + {seconds} * 1000; while (Date.now() < end) {{}}</script></body>')
+
+
+def png_summary(data):
+    """Returns (width, height, distinct byte values in the image data) of a PNG, or None if it is not one."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    idat, at = b"", 8
+    while at + 8 <= len(data):
+        size, kind = int.from_bytes(data[at:at + 4], "big"), data[at + 4:at + 8]
+        if kind == b"IDAT":
+            idat += data[at + 8:at + 8 + size]
+        at += 12 + size
+    try:
+        return width, height, len(set(zlib.decompress(idat)))
+    except zlib.error:
+        return None
+
+
+def test_firefox_js(vm, args):
+    """Firefox runs a fixed JavaScript workload in a local page and prints its time and checksum, compiles and runs WebAssembly whose out-of-bounds loads and stores and `unreachable` trap as RuntimeErrors (the fault handlers the JIT installs), then screenshots https://example.com/; also records the wall time of a screenshot of https://kernelbench.com/ (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    for wait in (60, 180):
+        since = vm.mark()
+        vm.type("bash --norc --noprofile --noediting\n")
+        if vm.wait_serial(r"bash-[0-9.]+\$ ", wait, since):
+            break
+    else:
+        return False, "no bash prompt after login"
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo FXJSRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)FXJSRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    def fetch_png(name):
+        since = vm.mark()
+        vm.type(f"echo FXJSPNG-BEGIN; base64 -w 0 {directory}/{name}.png; echo; echo FXJSPNG-END\n")
+        found = vm.wait_serial(r"FXJSPNG-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)FXJSPNG-END", 300, since)
+        image = None
+        if found:
+            try:
+                image = base64.b64decode("".join(found.group(1).split()), validate=True)
+            except ValueError:
+                image = None
+        pixels = png_summary(image) if image else None
+        if pixels:
+            (vm.out / f"{name}.png").write_bytes(image)
+        return image, pixels
+
+    def guarded(command, timeout, name):
+        line = (f"{command} > {directory}/{name}.log 2>&1 & fx=$!; n=0; "
+                f"while kill -0 $fx 2>/dev/null && [ $n -lt {timeout} ]; do sleep 1; n=$((n+1)); done; "
+                f"if kill -0 $fx 2>/dev/null; then cat /scheme/sys/context > {directory}/{name}.context 2>&1; "
+                f"cat /scheme/sys/syscall >> {directory}/{name}.context 2>&1; kill -9 $fx; wait $fx; "
+                "echo FXHUNG; false; else wait $fx; fi")
+        started = time.monotonic()
+        status, output = run(line, timeout + 120)
+        seconds = round(time.monotonic() - started, 1)
+        if status is None or re.search(r"(?m)^FXHUNG\s*$", output):
+            samples = []
+            for _ in range(3):
+                samples.append(vm.command("info registers -a"))
+                time.sleep(2)
+            (vm.out / f"{name}.cpus").write_text("\n=====\n".join(samples))
+            _, context = run(f"cat {directory}/{name}.context", 180)
+            (vm.out / f"{name}.context").write_text(context)
+            return None, seconds
+        return status, seconds
+
+    directory = "/tmp/firefox-js"
+    page = ('<!doctype html><meta charset="utf-8"><title>JS</title>'
+            '<body style="background:#fff;font:32px sans-serif"><h1 id="out">running</h1>'
+            f"<script>{FIREFOX_JS_SCRIPT}</script></body>")
+    prefs = ('user_pref("browser.dom.window.dump.enabled", true);\n'
+             'user_pref("devtools.console.stdout.content", true);\n'
+             'user_pref("dom.max_script_run_time", 0);\n')
+    encoded_page = base64.b64encode(page.encode()).decode()
+    encoded_prefs = base64.b64encode(prefs.encode()).decode()
+    status, _ = run(f"rm -rf {directory}; mkdir -p {directory}/profile && "
+                    f"printf '%s' '{encoded_page}' | base64 -d > {directory}/page.html && "
+                    f"printf '%s' '{encoded_prefs}' | base64 -d > {directory}/profile/user.js", 60)
+    if status != 0:
+        return False, f"could not write the page and profile (status {status})"
+    firefox = f"MOZ_HEADLESS=1 firefox --headless --no-remote --profile {directory}/profile"
+    status, seconds = guarded(f"{firefox} --screenshot {directory}/warmup.png about:blank", 600, "warmup")
+    results = {"warmup": {"status": status, "seconds": seconds}}
+    if status != 0:
+        (vm.out / "firefox-js.json").write_text(json.dumps(results, indent=2) + "\n")
+        return False, f"profile warmup failed (status {status})"
+
+    problems = []
+    for name, url, size, timeout, required in FIREFOX_JS_PAGES:
+        line = f"{firefox} --window-size={size} --screenshot {directory}/{name}.png {url}"
+        status, seconds = guarded(line, timeout, name)
+        _, log = run(f"grep -a FXJS {directory}/{name}.log; grep -a -v '^\\[INFO' {directory}/{name}.log | head -n 80", 90)
+        (vm.out / f"{name}.log").write_text(f"$ {line}\nexit status {status}, {seconds}s\n{log}")
+        image, pixels = fetch_png(name)
+        entry = {"url": url, "status": status, "seconds": seconds, "png": list(pixels) if pixels else None}
+        if status is None:
+            reason = f"timed out after {timeout}s"
+        elif status != 0:
+            reason = f"firefox exited {status}"
+        elif not pixels or pixels[2] < 3:
+            reason = "no PNG, or a PNG of one color"
+        else:
+            reason = None
+        if name == "js":
+            page_result = None
+            for report in re.finditer(r"FXJS (\{.*\})", log):
+                try:
+                    page_result = json.loads(report.group(1))
+                    break
+                except ValueError:
+                    continue
+            entry["page"] = page_result
+            wasm = (page_result or {}).get("wasm", {})
+            traps = [wasm.get(key, "") for key in ("loadOob", "loadFar", "storeOob", "unreachable")]
+            if not page_result:
+                reason = reason or "the page printed no FXJS line"
+            elif page_result.get("checksum") != FIREFOX_JS_CHECKSUM:
+                reason = reason or f"checksum {page_result.get('checksum')}, want {FIREFOX_JS_CHECKSUM}"
+            elif wasm.get("present") != "object":
+                reason = reason or f"no WebAssembly (typeof {wasm.get('present')}): the JIT is off"
+            elif wasm.get("add") != 5 or wasm.get("inBounds") != 7:
+                reason = reason or f"WebAssembly computed add={wasm.get('add')} load={wasm.get('inBounds')}"
+            elif not all(trap.startswith("RuntimeError") for trap in traps):
+                reason = reason or f"WebAssembly traps: {traps}"
+        entry["problem"] = reason
+        results[name] = entry
+        timing = f"{seconds}s" + (f", workload {entry['page']['ms']} ms" if entry.get("page") else "")
+        print(f"FIREFOX-JS {name} {'FAIL' if reason else 'PASS'} {timing}" + (f": {reason}" if reason else ""),
+              flush=True)
+        if reason and required:
+            problems.append(f"{name}: {reason}")
+
+    for delay in FIREFOX_KB_DELAYS:
+        name = f"kernelbench-delayed-{delay}"
+        encoded = base64.b64encode(firefox_kb_delayed(delay).encode()).decode()
+        run(f"printf '%s' '{encoded}' | base64 -d > {directory}/{name}.html", 60)
+        line = (f"{firefox} --window-size=1280,900 --screenshot {directory}/{name}.png "
+                f"file://{directory}/{name}.html")
+        status, seconds = guarded(line, 600, name)
+        _, log = run(f"grep -a -i 'error\\|kernelbench' {directory}/{name}.log | tail -n 40", 60)
+        (vm.out / f"{name}.log").write_text(f"$ {line}\nexit status {status}, {seconds}s\n{log}")
+        _, pixels = fetch_png(name)
+        results[name] = {"status": status, "seconds": seconds, "png": list(pixels) if pixels else None}
+        print(f"FIREFOX-JS {name} {results[name]}", flush=True)
+    (vm.out / "firefox-js.json").write_text(json.dumps(results, indent=2) + "\n")
+    summary = "; ".join(f"{name} {results[name]['seconds']}s" for name, *_ in FIREFOX_JS_PAGES)
+    if results["js"].get("page"):
+        summary = f"workload {results['js']['page']['ms']} ms; " + summary
+    return not problems, summary + ("; " + "; ".join(problems) if problems else "") + f"; see {vm.out}"
+
+
 FIREFOX_CJK = [
     ("zh-CN", "SC", "中文汉字骨直"),
     ("zh-TW", "TC", "中文漢字骨直"),
@@ -5179,6 +5396,7 @@ TESTS["fork-wake"] = test_fork_wake
 TESTS["ipc-fd"] = test_ipc_fd
 TESTS["jit-signal"] = test_jit_signal
 TESTS["fdtable-race"] = test_fdtable_race
+TESTS["firefox-js"] = test_firefox_js
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
 TESTS["linux-hello"] = test_linux_hello

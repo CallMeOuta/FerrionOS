@@ -1,0 +1,19 @@
+diff --git a/js/src/wasm/WasmSignalHandlers.cpp b/js/src/wasm/WasmSignalHandlers.cpp
+index 91c620a93c2..f60dff4ce44 100644
+--- a/js/src/wasm/WasmSignalHandlers.cpp
++++ b/js/src/wasm/WasmSignalHandlers.cpp
+@@ -238,6 +238,14 @@ using namespace js::wasm;
+ #      define R01_sig(p) ((p)->uc_mcontext.mc_gpr[1])
+ #      define R32_sig(p) ((p)->uc_mcontext.mc_srr0)
+ #    endif
++#  elif defined(__redox__) && defined(__x86_64__)
++#    define RIP_sig(p) ((p)->uc_mcontext.rip)
++#    define RSP_sig(p) ((p)->uc_mcontext.rsp)
++#    define RBP_sig(p) ((p)->uc_mcontext.rbp)
++#    define R11_sig(p) ((p)->uc_mcontext.r11)
++#    define R13_sig(p) ((p)->uc_mcontext.r13)
++#    define R14_sig(p) ((p)->uc_mcontext.r14)
++#    define R15_sig(p) ((p)->uc_mcontext.r15)
+ #  elif defined(XP_DARWIN)
+ #    define EIP_sig(p) ((p)->thread.uts.ts32.__eip)
+ #    define EBP_sig(p) ((p)->thread.uts.ts32.__ebp)
