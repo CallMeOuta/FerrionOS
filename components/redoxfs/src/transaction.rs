@@ -1202,8 +1202,9 @@ impl<'a, D: Disk> Transaction<'a, D> {
         }
 
         if remove_node {
-            self.sync_tree(parent)?;
-            self.release_node(node.ptr())?;
+            let node_ptr = node.ptr();
+            self.sync_trees(&[parent, node])?;
+            self.release_node(node_ptr)?;
             Ok(Some(node_id))
         } else {
             // Sync both parent and node at the same time
