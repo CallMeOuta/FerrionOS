@@ -89,7 +89,19 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
     def run(command):
         status, output = run_status(vm, 'bash -c ' + shlex.quote('source /tmp/ferrion-wm-session; ' + command), args.timeout)
         if status != 0:
-            raise RuntimeError(f'guest command failed ({status}): {command}: {output[-1000:]}')
+            problem = f'guest command failed ({status}): {command}: {output[-1000:]}'
+            problems.append(problem)
+            save()
+            if status is None:
+                interrupted = vm.mark()
+                vm.type('\x03')
+                vm.wait_serial(r'bash-[\d.]+# ', 10, interrupted)
+            _, diagnostics = run_status(vm, 'tail -n 100 /tmp/ferrion-wm.log; '
+                                        'tail -n 12 /tmp/dd2-files.log /tmp/dd2-editor.log '
+                                        '/tmp/dd2-terminal.log; ps', 20)
+            (vm.out / 'command-failure.txt').write_text(diagnostics)
+            vm.screenshot().save_png(vm.out / 'command-failure.png')
+            raise RuntimeError(problem)
         return output
 
     def ipc(action):
