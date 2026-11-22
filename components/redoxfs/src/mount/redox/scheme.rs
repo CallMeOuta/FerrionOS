@@ -21,8 +21,8 @@ use syscall::error::{
     EOPNOTSUPP, EPERM, EROFS, EXDEV, Error, Result,
 };
 use syscall::flag::{
-    EventFlags, MapFlags, O_ACCMODE, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_RDWR,
-    O_STAT, O_SYMLINK, O_TRUNC, O_WRONLY, StdFsCallKind,
+    EventFlags, F_GETFL, MapFlags, O_ACCMODE, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY,
+    O_RDWR, O_STAT, O_SYMLINK, O_TRUNC, O_WRONLY, StdFsCallKind,
 };
 use syscall::schemev2::NewFdFlags;
 
@@ -129,6 +129,18 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
                 )?
             },
         })
+    }
+
+    pub fn lock_node(&mut self, id: usize) -> Result<(u32, usize)> {
+        let resource = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+        let flags = resource.fcntl(F_GETFL, 0).unwrap_or(O_RDONLY);
+        Ok((resource.node_ptr().id(), flags))
+    }
+
+    pub fn process_alive(&self, pid: usize) -> bool {
+        let mut buffer = [0u8; mem::size_of::<libredox::protocol::ProcMeta>()];
+        libredox::call::get_proc_credentials(self.proc_creds_capability.raw(), pid, &mut buffer)
+            .is_ok()
     }
 
     /// EROFS when the file system is served read-only (`redoxfs --read-only`).
