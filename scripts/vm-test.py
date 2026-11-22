@@ -6542,6 +6542,254 @@ def test_hardened_malloc_hotpath(vm, args):
     )
 
 
+def test_hardened_malloc_sparse(vm, args):
+    """Checks sparse page-table walks, page-table reclaim, PROT_NONE zero eager mapping, resident /scheme/sys/context reporting, fork/CoW/mprotect on 12.25 TiB reservations, and 5-run 32 GiB munmap (<1 ms) + default 12.25 TiB hardened_malloc start-to-exit (<=2x dlmalloc)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("test -x /usr/bin/hardened-malloc-probe && echo HM_READY || echo HM_MISSING\n")
+    ready = vm.wait_serial(r"\r?\n(HM_READY|HM_MISSING)\r?\n", 20, since)
+    if not ready or ready.group(1) != "HM_READY":
+        return False, f"hardened-malloc-probe missing on image; see {vm.out / 'serial.log'}"
+    sections = []
+    problems = []
+    load_start = list(os.getloadavg())
+    st_pn, out_pn = guest_run(vm, "hmspn", "hardened-malloc-probe prot-none", 60)
+    sections.append(f"=== prot-none (exit {st_pn}) ===\n{out_pn}\n")
+    if st_pn != 0:
+        problems.append(f"prot-none exit {st_pn}")
+    for case in ("mmap-none-read", "mmap-none-write", "mprotect-none-read", "mprotect-none-write"):
+        if f"prot-none case={case} status=-11 timed_out=0" not in out_pn:
+            problems.append(f"prot-none {case} failed")
+    st_ops, out_ops = guest_run(vm, "hmsops", "hardened-malloc-probe sparse-ops", 180)
+    sections.append(f"=== sparse-ops (exit {st_ops}) ===\n{out_ops}\n")
+    if st_ops != 0:
+        problems.append(f"sparse-ops exit {st_ops}")
+    m_full = re.search(
+        r"table-reclaim-full mmap_frames=(-?\d+) touched_frames=(-?\d+) unmap_rc=(-?\d+) unmap_us=(\d+) net_frames=(-?\d+)",
+        out_ops,
+    )
+    if not m_full:
+        problems.append("missing table-reclaim-full")
+    else:
+        mf, tf, urc, uus, nf = map(int, m_full.groups())
+        if mf != 0 or tf < 632 or urc != 0 or nf != 0:
+            problems.append(f"table-reclaim-full mmap_frames={mf} touched={tf} rc={urc} net={nf}")
+    m_part = re.search(
+        r"table-reclaim-partial mid_rc=(-?\d+) left_ok=(\d+) right_ok=(\d+) u_left=(-?\d+) u_right=(-?\d+) net_frames=(-?\d+)",
+        out_ops,
+    )
+    if not m_part:
+        problems.append("missing table-reclaim-partial")
+    else:
+        mrc, lok, rok, ul, ur, pnf = map(int, m_part.groups())
+        if mrc != 0 or lok != 1 or rok != 1 or ul != 0 or ur != 0 or pnf != 0:
+            problems.append(f"table-reclaim-partial mid={mrc} left={lok} right={rok} u={ul}/{ur} net={pnf}")
+    m_ro = re.search(
+        r"mprotect-ro-sparse mp_rc=(-?\d+) child_status=(-?\d+) timed_out=(\d+) parent_ok=(\d+) unmap_rc=(-?\d+)",
+        out_ops,
+    )
+    if not m_ro:
+        problems.append("missing mprotect-ro-sparse")
+    else:
+        rmp, rst, rto, pok, rur = map(int, m_ro.groups())
+        if rmp != 0 or rst != -11 or rto != 0 or pok != 1 or rur != 0:
+            problems.append(f"mprotect-ro-sparse mp={rmp} st={rst} to={rto} pok={pok} ur={rur}")
+    m_bfk = re.search(r"fork-baseline status=(-?\d+) timed_out=(\d+) fork_us=(\d+)", out_ops)
+    fork_baseline_us = None
+    if not m_bfk:
+        problems.append("missing fork-baseline")
+    else:
+        bfk_st, bfk_to, bfk_us = map(int, m_bfk.groups())
+        fork_baseline_us = bfk_us
+        if bfk_st != 0 or bfk_to != 0:
+            problems.append(f"fork-baseline st={bfk_st} to={bfk_to}")
+    m_12t = re.search(
+        r"sparse-12t mmap_us=(\d+) mmap_frames=(-?\d+) memstat_rc=(-?\d+) memstat_bytes=(\d+) memstat_us=(\d+) "
+        r"context_rc=(-?\d+) priv_found=(\d+) priv_kib=(\d+) context_us=(\d+) mp_slab_rc=(-?\d+) mp_slab_us=(\d+) "
+        r"mp_32g_rc=(-?\d+) mp_32g_us=(\d+) fork_status=(-?\d+) cow_ok=(\d+) fork_us=(\d+) unmap_rc=(-?\d+) unmap_us=(\d+)",
+        out_ops,
+    )
+    sparse_12t_metrics = None
+    if not m_12t:
+        problems.append("missing sparse-12t")
+    else:
+        vals = list(map(int, m_12t.groups()))
+        keys = (
+            "mmap_us", "mmap_frames", "memstat_rc", "memstat_bytes", "memstat_us",
+            "context_rc", "priv_found", "priv_kib", "context_us", "mp_slab_rc", "mp_slab_us",
+            "mp_32g_rc", "mp_32g_us", "fork_status", "cow_ok", "fork_us", "unmap_rc", "unmap_us",
+        )
+        sparse_12t_metrics = dict(zip(keys, vals))
+        if sparse_12t_metrics["mmap_frames"] != 0:
+            problems.append(f"sparse-12t mmap_frames={sparse_12t_metrics['mmap_frames']}")
+        if sparse_12t_metrics["memstat_rc"] != 0 or sparse_12t_metrics["memstat_us"] >= 500000:
+            problems.append(f"sparse-12t memstat rc={sparse_12t_metrics['memstat_rc']} us={sparse_12t_metrics['memstat_us']}")
+        if (
+            sparse_12t_metrics["context_rc"] != 0
+            or sparse_12t_metrics["priv_found"] != 1
+            or sparse_12t_metrics["priv_kib"] >= 65536
+            or sparse_12t_metrics["context_us"] >= 500000
+        ):
+            problems.append(
+                f"sparse-12t context rc={sparse_12t_metrics['context_rc']} found={sparse_12t_metrics['priv_found']} "
+                f"priv_kib={sparse_12t_metrics['priv_kib']} us={sparse_12t_metrics['context_us']}"
+            )
+        if sparse_12t_metrics["mp_slab_rc"] != 0 or sparse_12t_metrics["mp_32g_rc"] != 0 or sparse_12t_metrics["mp_32g_us"] >= 5000:
+            problems.append(f"sparse-12t mprotect 32g_us={sparse_12t_metrics['mp_32g_us']}")
+        if sparse_12t_metrics["fork_status"] != 0 or sparse_12t_metrics["cow_ok"] != 1 or sparse_12t_metrics["fork_us"] >= 200000:
+            problems.append(
+                f"sparse-12t fork st={sparse_12t_metrics['fork_status']} cow={sparse_12t_metrics['cow_ok']} us={sparse_12t_metrics['fork_us']}"
+            )
+        if sparse_12t_metrics["unmap_rc"] != 0 or sparse_12t_metrics["unmap_us"] >= 1000:
+            problems.append(f"sparse-12t unmap rc={sparse_12t_metrics['unmap_rc']} us={sparse_12t_metrics['unmap_us']}")
+
+    timed_runs = []
+    for idx in range(1, 6):
+        l_before = os.getloadavg()[0]
+        st_sp, out_sp = guest_run(vm, f"hmsp{idx}", "hardened-malloc-probe sparse", 240)
+        st_dl, out_dl = guest_run(
+            vm,
+            f"hmdl{idx}",
+            "hardened-malloc-probe timed-exec 15000 hardened-malloc-bench-dlmalloc dlmalloc --nop",
+            45,
+        )
+        st_hm, out_hm = guest_run(
+            vm,
+            f"hmhm{idx}",
+            "LD_LIBRARY_PATH=/usr/lib hardened-malloc-probe timed-exec 60000 hardened-malloc-bench-hm hm-default-32g --nop",
+            90,
+        )
+        l_after = os.getloadavg()[0]
+        sections.append(f"=== run {idx} sparse (exit {st_sp}) ===\n{out_sp}\n")
+        sections.append(f"=== run {idx} nop-dlmalloc (exit {st_dl}) ===\n{out_dl}\n")
+        sections.append(f"=== run {idx} nop-hm-32g (exit {st_hm}) ===\n{out_hm}\n")
+        m_32g = re.search(
+            r"sparse size=34359738368 status=(\S+) mmap_us=(\d+) mmap_frames=(-?\d+) .*? unmap_rc=(-?\d+) unmap_us=(\d+) unmap_frames=(-?\d+) net_frames=(-?\d+)",
+            out_sp,
+        )
+        m_dl = re.search(r"timed-exec cmd=\S+ status=(-?\d+) timed_out=(\d+) ms=(\d+)", out_dl)
+        m_hm = re.search(r"timed-exec cmd=\S+ status=(-?\d+) timed_out=(\d+) ms=(\d+)", out_hm)
+        run_rec = {
+            "run": idx,
+            "load_before": round(l_before, 2),
+            "load_after": round(l_after, 2),
+            "sparse_32g_unmap_us": int(m_32g.group(5)) if m_32g else None,
+            "sparse_32g_mmap_frames": int(m_32g.group(3)) if m_32g else None,
+            "sparse_32g_net_frames": int(m_32g.group(7)) if m_32g else None,
+            "dlmalloc_nop_ms": int(m_dl.group(3)) if m_dl else None,
+            "hm_32g_nop_ms": int(m_hm.group(3)) if m_hm else None,
+        }
+        timed_runs.append(run_rec)
+        if not m_32g or int(m_32g.group(3)) != 0 or int(m_32g.group(4)) != 0 or int(m_32g.group(7)) != 0:
+            problems.append(f"run {idx} sparse 32g invariants failed")
+        if not m_dl or int(m_dl.group(1)) != 0 or int(m_dl.group(2)) != 0:
+            problems.append(f"run {idx} dlmalloc --nop failed")
+        if not m_hm or int(m_hm.group(1)) != 0 or int(m_hm.group(2)) != 0:
+            problems.append(f"run {idx} hm-default-32g --nop failed")
+
+    unmap_vals = sorted(r["sparse_32g_unmap_us"] for r in timed_runs if r["sparse_32g_unmap_us"] is not None)
+    dl_vals = sorted(r["dlmalloc_nop_ms"] for r in timed_runs if r["dlmalloc_nop_ms"] is not None)
+    hm_vals = sorted(r["hm_32g_nop_ms"] for r in timed_runs if r["hm_32g_nop_ms"] is not None)
+    med_unmap = unmap_vals[len(unmap_vals) // 2] if unmap_vals else None
+    med_dl = dl_vals[len(dl_vals) // 2] if dl_vals else None
+    med_hm = hm_vals[len(hm_vals) // 2] if hm_vals else None
+    if med_unmap is None or med_unmap >= 1000:
+        problems.append(f"median 32g unmap {med_unmap}us >= 1000us")
+    if med_dl is None or med_hm is None or med_hm > 2 * med_dl:
+        problems.append(f"median hm-32g {med_hm}ms > 2x dlmalloc {med_dl}ms")
+
+    metrics = {
+        "loadavg_start": load_start,
+        "loadavg_end": list(os.getloadavg()),
+        "fork_baseline_us": fork_baseline_us,
+        "sparse_12t": sparse_12t_metrics,
+        "runs": timed_runs,
+        "medians": {
+            "sparse_32g_unmap_us": med_unmap,
+            "dlmalloc_nop_ms": med_dl,
+            "hm_32g_nop_ms": med_hm,
+        },
+    }
+    (vm.out / "hardened-malloc-sparse.txt").write_text("".join(sections))
+    (vm.out / "hardened-malloc-sparse.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'hardened-malloc-sparse.txt'}"
+    return True, (
+        f"32g_unmap_med={med_unmap}us, dlmalloc_med={med_dl}ms, hm_32g_med={med_hm}ms, "
+        f"12t_fork={sparse_12t_metrics['fork_us']}us, priv={sparse_12t_metrics['priv_kib']}KiB; "
+        f"see {vm.out / 'hardened-malloc-sparse.txt'}"
+    )
+
+
+def test_hardened_malloc_pt_order(vm, args):
+    """Checks that emptied user page-table frames are freed only after the TLB shootdown completes (0 early-table-free log entries) and runs the multi-threaded remap/unmap smoke test."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    sections = []
+    problems = []
+    st_pt, out_pt = guest_run(vm, "hmpto", "hardened-malloc-probe pt-order", 120)
+    sections.append(f"=== pt-order (exit {st_pt}) ===\n{out_pt}\n")
+    if st_pt != 0:
+        problems.append(f"pt-order exit {st_pt}")
+    m_pt = re.search(
+        r"pt-order log_rc_before=(-?\d+) log_rc_after=(-?\d+) bytes_before=(\d+) bytes_after=(\d+) "
+        r"unmap_rc=(-?\d+) unmap_us=(\d+) before=(\d+) after=(\d+) delta=(\d+)",
+        out_pt,
+    )
+    pt_metrics = None
+    if not m_pt:
+        problems.append("missing pt-order output")
+    else:
+        l0, l1, b0, b1, urc, uus, bef, aft, delta = map(int, m_pt.groups())
+        pt_metrics = {
+            "log_rc_before": l0,
+            "log_rc_after": l1,
+            "bytes_before": b0,
+            "bytes_after": b1,
+            "unmap_rc": urc,
+            "unmap_us": uus,
+            "before": bef,
+            "after": aft,
+            "delta": delta,
+        }
+        if l0 != 0 or l1 != 0 or b0 == 0 or b1 == 0 or urc != 0 or aft != 0 or delta != 0:
+            problems.append(
+                f"pt-order log={l0}/{l1} bytes={b0}/{b1} unmap_rc={urc} before={bef} after={aft} delta={delta}"
+            )
+    st_mt, out_mt = guest_run(vm, "hmmts", "hardened-malloc-probe mt-smoke", 60)
+    sections.append(f"=== mt-smoke (exit {st_mt}) ===\n{out_mt}\n")
+    if st_mt != 0:
+        problems.append(f"mt-smoke exit {st_mt}")
+    m_mt = re.search(
+        r"mt-smoke ok=(\d+) workers=(\d+) churn_iters=(\d+) total_touches=(\d+) unmap_rc=(-?\d+)",
+        out_mt,
+    )
+    mt_metrics = None
+    if not m_mt:
+        problems.append("missing mt-smoke output")
+    else:
+        ok, wk, ch, tch, urc = map(int, m_mt.groups())
+        mt_metrics = {"ok": ok, "workers": wk, "churn_iters": ch, "total_touches": tch, "unmap_rc": urc}
+        if ok != 1 or wk != 4 or ch == 0 or tch == 0 or urc != 0:
+            problems.append(f"mt-smoke ok={ok} ch={ch} tch={tch} urc={urc}")
+    (vm.out / "hardened-malloc-pt-order.txt").write_text("".join(sections))
+    (vm.out / "hardened-malloc-pt-order.json").write_text(
+        json.dumps({"pt_order": pt_metrics, "mt_smoke": mt_metrics}, indent=2) + "\n"
+    )
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'hardened-malloc-pt-order.txt'}"
+    return True, (
+        f"early-table-free delta={pt_metrics['delta']}, unmap={pt_metrics['unmap_us']}us, "
+        f"mt-smoke churn={mt_metrics['churn_iters']} touches={mt_metrics['total_touches']}; "
+        f"see {vm.out / 'hardened-malloc-pt-order.txt'}"
+    )
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -6598,6 +6846,8 @@ TESTS["agent-clone"] = test_agent_clone
 TESTS["agent-scope-overhead"] = test_agent_scope_overhead
 TESTS["hardened-malloc"] = test_hardened_malloc
 TESTS["hardened-malloc-hotpath"] = test_hardened_malloc_hotpath
+TESTS["hardened-malloc-sparse"] = test_hardened_malloc_sparse
+TESTS["hardened-malloc-pt-order"] = test_hardened_malloc_pt_order
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password

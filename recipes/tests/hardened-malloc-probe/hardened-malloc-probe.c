@@ -46,6 +46,15 @@ enum {
     MICRO_STATVFS_ITERS = 100,
     FUTEX_WAIT_POLL_LIMIT = 5000,
     STALE_WAKE_POLL_MS = 1000,
+    MAX_SYS_READ_BYTES = 262144,
+    MAX_SYS_READ_ITERS = 4096,
+    RECLAIM_GIB_PAGES = 32,
+    RECLAIM_RUN_PAGES = 600,
+    RECLAIM_PARTIAL_LEFT = 100,
+    RECLAIM_PARTIAL_MID = 400,
+    MT_WORKERS = 4,
+    MT_DURATION_MS = 2500,
+    MT_MAX_ITERS = 200000,
 };
 
 struct mem_frames {
@@ -1011,6 +1020,290 @@ static int run_mutex_bench(void) {
     return 0;
 }
 
+static int read_sys_file(const char *path, char *buf, size_t cap, size_t *out_len) {
+    assert(path != NULL);
+    assert(buf != NULL);
+    assert(cap > 1);
+    assert(out_len != NULL);
+    *out_len = 0;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    size_t total = 0;
+    for (int iter = 0; iter < MAX_SYS_READ_ITERS; iter++) {
+        size_t avail = (cap - 1) - total;
+        if (avail == 0) {
+            char discard[256];
+            ssize_t n = read(fd, discard, sizeof(discard));
+            if (n <= 0) {
+                break;
+            }
+            continue;
+        }
+        ssize_t n = read(fd, buf + total, avail);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += (size_t)n;
+    }
+    close(fd);
+    buf[total] = '\0';
+    *out_len = total;
+    return 0;
+}
+
+static bool parse_context_private_kib(const char *text, pid_t target_pid, uint64_t *out_kib) {
+    assert(text != NULL);
+    assert(out_kib != NULL);
+    const char *p = text;
+    for (int line = 0; line < MAX_SYS_READ_ITERS && *p != '\0'; line++) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl != NULL ? (size_t)(nl - p) : strlen(p);
+        if (len > 0 && len < 512) {
+            char row[512];
+            memcpy(row, p, len);
+            row[len] = '\0';
+            unsigned long pid_val = 0;
+            char c1[32], c2[32], c3[32], c4[32], c5[32], c6[32], c7[32];
+            double priv_num = 0.0;
+            char priv_unit[16];
+            if (sscanf(row, "%lu %31s %31s %31s %31s %31s %31s %31s %lf %15s",
+                       &pid_val, c1, c2, c3, c4, c5, c6, c7, &priv_num, priv_unit) == 10) {
+                if ((pid_t)pid_val == target_pid) {
+                    if (strcmp(priv_unit, "B") == 0) {
+                        *out_kib = (uint64_t)((priv_num + 1023.0) / 1024.0);
+                        return true;
+                    }
+                    if (strcmp(priv_unit, "KB") == 0) {
+                        *out_kib = (uint64_t)priv_num;
+                        return true;
+                    }
+                    if (strcmp(priv_unit, "MB") == 0) {
+                        *out_kib = (uint64_t)(priv_num * 1024.0);
+                        return true;
+                    }
+                    if (strcmp(priv_unit, "GB") == 0) {
+                        *out_kib = (uint64_t)(priv_num * 1024.0 * 1024.0);
+                        return true;
+                    }
+                }
+            }
+        }
+        if (nl == NULL) {
+            break;
+        }
+        p = nl + 1;
+    }
+    return false;
+}
+
+static int run_sparse_ops(void) {
+    const size_t sz_32g = 32ULL * 1024ULL * 1024ULL * 1024ULL;
+    const size_t sz_1g = 1024ULL * 1024ULL * 1024ULL;
+    const size_t boundary_off = (2ULL * 1024ULL * 1024ULL) - (64ULL * 1024ULL);
+
+    struct mem_frames f0 = read_mem_frames();
+    void *p_full = mmap(NULL, sz_32g, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(p_full != MAP_FAILED);
+    struct mem_frames f1 = read_mem_frames();
+    for (size_t g = 0; g < RECLAIM_GIB_PAGES; g++) {
+        char *pg = (char *)p_full + g * sz_1g;
+        int rc = mprotect(pg, PAGE_BYTES, PROT_READ | PROT_WRITE);
+        assert(rc == 0);
+        pg[0] = (char)(0x20 + g);
+    }
+    char *run_full = (char *)p_full + (16ULL * sz_1g) + boundary_off;
+    assert(mprotect(run_full, RECLAIM_RUN_PAGES * PAGE_BYTES, PROT_READ | PROT_WRITE) == 0);
+    for (size_t k = 0; k < RECLAIM_RUN_PAGES; k++) {
+        run_full[k * PAGE_BYTES] = (char)((k + 17) & 0xff);
+    }
+    struct mem_frames f2 = read_mem_frames();
+    uint64_t tf0 = now_us();
+    int unmap_full_rc = munmap(p_full, sz_32g);
+    uint64_t tf1 = now_us();
+    struct mem_frames f3 = read_mem_frames();
+    printf("table-reclaim-full mmap_frames=%lld touched_frames=%lld unmap_rc=%d unmap_us=%llu net_frames=%lld\n",
+           (long long)((int64_t)f1.used - (int64_t)f0.used),
+           (long long)((int64_t)f2.used - (int64_t)f0.used),
+           unmap_full_rc,
+           (unsigned long long)(tf1 - tf0),
+           (long long)((int64_t)f3.used - (int64_t)f0.used));
+
+    struct mem_frames fp0 = read_mem_frames();
+    void *p_part = mmap(NULL, sz_32g, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(p_part != MAP_FAILED);
+    char *run_part = (char *)p_part + (8ULL * sz_1g) + boundary_off;
+    assert(mprotect(run_part, RECLAIM_RUN_PAGES * PAGE_BYTES, PROT_READ | PROT_WRITE) == 0);
+    for (size_t k = 0; k < RECLAIM_RUN_PAGES; k++) {
+        unsigned char pat = (unsigned char)((k * 37 + 11) & 0xff);
+        run_part[k * PAGE_BYTES] = (char)pat;
+        run_part[k * PAGE_BYTES + PAGE_BYTES - 1] = (char)(pat ^ 0x5A);
+    }
+    int mid_unmap_rc = munmap(run_part + RECLAIM_PARTIAL_LEFT * PAGE_BYTES, RECLAIM_PARTIAL_MID * PAGE_BYTES);
+    int left_ok = 1;
+    for (size_t k = 0; k < RECLAIM_PARTIAL_LEFT; k++) {
+        unsigned char pat = (unsigned char)((k * 37 + 11) & 0xff);
+        if ((unsigned char)run_part[k * PAGE_BYTES] != pat ||
+            (unsigned char)run_part[k * PAGE_BYTES + PAGE_BYTES - 1] != (unsigned char)(pat ^ 0x5A)) {
+            left_ok = 0;
+            break;
+        }
+    }
+    int right_ok = 1;
+    for (size_t k = RECLAIM_PARTIAL_LEFT + RECLAIM_PARTIAL_MID; k < RECLAIM_RUN_PAGES; k++) {
+        unsigned char pat = (unsigned char)((k * 37 + 11) & 0xff);
+        if ((unsigned char)run_part[k * PAGE_BYTES] != pat ||
+            (unsigned char)run_part[k * PAGE_BYTES + PAGE_BYTES - 1] != (unsigned char)(pat ^ 0x5A)) {
+            right_ok = 0;
+            break;
+        }
+    }
+    size_t left_len = (size_t)((run_part + RECLAIM_PARTIAL_LEFT * PAGE_BYTES) - (char *)p_part);
+    char *right_start = run_part + (RECLAIM_PARTIAL_LEFT + RECLAIM_PARTIAL_MID) * PAGE_BYTES;
+    size_t right_len = (size_t)(((char *)p_part + sz_32g) - right_start);
+    int u_left = munmap(p_part, left_len);
+    int u_right = munmap(right_start, right_len);
+    struct mem_frames fp1 = read_mem_frames();
+    printf("table-reclaim-partial mid_rc=%d left_ok=%d right_ok=%d u_left=%d u_right=%d net_frames=%lld\n",
+           mid_unmap_rc,
+           left_ok,
+           right_ok,
+           u_left,
+           u_right,
+           (long long)((int64_t)fp1.used - (int64_t)fp0.used));
+
+    struct mem_frames fro0 = read_mem_frames();
+    void *p_ro = mmap(NULL, sz_32g, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(p_ro != MAP_FAILED);
+    unsigned char *ro_pg = (unsigned char *)p_ro + (4ULL * sz_1g);
+    assert(mprotect(ro_pg, 4 * PAGE_BYTES, PROT_READ | PROT_WRITE) == 0);
+    ro_pg[0] = 0xAB;
+    int ro_mp_rc = mprotect(ro_pg, 4 * PAGE_BYTES, PROT_READ);
+    pid_t ro_pid = fork();
+    assert(ro_pid >= 0);
+    if (ro_pid == 0) {
+        volatile unsigned char *vp = ro_pg;
+        *vp = 0xCD;
+        _exit(0);
+    }
+    bool ro_to = false;
+    int ro_st = wait_child_status(ro_pid, 5000, &ro_to);
+    int ro_val_ok = (ro_pg[0] == 0xAB) ? 1 : 0;
+    int ro_unmap_rc = munmap(p_ro, sz_32g);
+    struct mem_frames fro1 = read_mem_frames();
+    printf("mprotect-ro-sparse mp_rc=%d child_status=%d timed_out=%d parent_ok=%d unmap_rc=%d net_frames=%lld\n",
+           ro_mp_rc,
+           ro_st,
+           ro_to ? 1 : 0,
+           ro_val_ok,
+           ro_unmap_rc,
+           (long long)((int64_t)fro1.used - (int64_t)fro0.used));
+
+    uint64_t tbf0 = now_us();
+    pid_t bfk_pid = fork();
+    assert(bfk_pid >= 0);
+    if (bfk_pid == 0) {
+        _exit(0);
+    }
+    bool bfk_to = false;
+    int bfk_st = wait_child_status(bfk_pid, 15000, &bfk_to);
+    uint64_t tbf1 = now_us();
+    printf("fork-baseline status=%d timed_out=%d fork_us=%llu\n",
+           bfk_st,
+           bfk_to ? 1 : 0,
+           (unsigned long long)(tbf1 - tbf0));
+
+    const size_t sz_12t = 12544ULL * sz_1g;
+    static char sys_buf[MAX_SYS_READ_BYTES];
+    struct mem_frames f12_0 = read_mem_frames();
+    uint64_t t12_m0 = now_us();
+    void *p_12t = mmap(NULL, sz_12t, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t t12_m1 = now_us();
+    assert(p_12t != MAP_FAILED);
+    struct mem_frames f12_1 = read_mem_frames();
+    unsigned char *slab = (unsigned char *)p_12t + (6000ULL * sz_1g);
+    assert(mprotect(slab, 4 * PAGE_BYTES, PROT_READ | PROT_WRITE) == 0);
+    slab[0] = 0xC3;
+    slab[3 * PAGE_BYTES] = 0x55;
+
+    size_t memstat_len = 0;
+    uint64_t tms0 = now_us();
+    int ms_rc = read_sys_file("/scheme/sys/memstat", sys_buf, sizeof(sys_buf), &memstat_len);
+    uint64_t tms1 = now_us();
+
+    size_t ctx_len = 0;
+    uint64_t tcx0 = now_us();
+    int cx_rc = read_sys_file("/scheme/sys/context", sys_buf, sizeof(sys_buf), &ctx_len);
+    uint64_t tcx1 = now_us();
+    uint64_t priv_kib = 0;
+    bool priv_found = (cx_rc == 0) && parse_context_private_kib(sys_buf, getpid(), &priv_kib);
+
+    uint64_t tmp_s0 = now_us();
+    int mp_s1 = mprotect(slab, 4 * PAGE_BYTES, PROT_NONE);
+    int mp_s2 = mprotect(slab, 4 * PAGE_BYTES, PROT_READ | PROT_WRITE);
+    uint64_t tmp_s1 = now_us();
+
+    uint64_t tmp_b0 = now_us();
+    int mp_b1 = mprotect((char *)p_12t + (6000ULL * sz_1g), sz_32g, PROT_READ);
+    int mp_b2 = mprotect((char *)p_12t + (6000ULL * sz_1g), sz_32g, PROT_NONE);
+    int mp_b3 = mprotect(slab, 4 * PAGE_BYTES, PROT_READ | PROT_WRITE);
+    uint64_t tmp_b1 = now_us();
+
+    uint64_t tfk0 = now_us();
+    pid_t fk_pid = fork();
+    assert(fk_pid >= 0);
+    if (fk_pid == 0) {
+        if (slab[0] != 0xC3 || slab[3 * PAGE_BYTES] != 0x55) {
+            _exit(21);
+        }
+        slab[0] = 0x7E;
+        if (slab[0] != 0x7E) {
+            _exit(22);
+        }
+        _exit(0);
+    }
+    bool fk_to = false;
+    int fk_st = wait_child_status(fk_pid, 15000, &fk_to);
+    uint64_t tfk1 = now_us();
+    int cow_ok = (fk_st == 0 && !fk_to && slab[0] == 0xC3 && slab[3 * PAGE_BYTES] == 0x55) ? 1 : 0;
+
+    uint64_t tu12_0 = now_us();
+    int u12_rc = munmap(p_12t, sz_12t);
+    uint64_t tu12_1 = now_us();
+    struct mem_frames f12_2 = read_mem_frames();
+
+    printf("sparse-12t mmap_us=%llu mmap_frames=%lld memstat_rc=%d memstat_bytes=%zu memstat_us=%llu context_rc=%d priv_found=%d priv_kib=%llu context_us=%llu mp_slab_rc=%d mp_slab_us=%llu mp_32g_rc=%d mp_32g_us=%llu fork_status=%d cow_ok=%d fork_us=%llu unmap_rc=%d unmap_us=%llu net_frames=%lld\n",
+           (unsigned long long)(t12_m1 - t12_m0),
+           (long long)((int64_t)f12_1.used - (int64_t)f12_0.used),
+           ms_rc,
+           memstat_len,
+           (unsigned long long)(tms1 - tms0),
+           cx_rc,
+           priv_found ? 1 : 0,
+           (unsigned long long)priv_kib,
+           (unsigned long long)(tcx1 - tcx0),
+           (mp_s1 == 0 && mp_s2 == 0) ? 0 : 1,
+           (unsigned long long)(tmp_s1 - tmp_s0),
+           (mp_b1 == 0 && mp_b2 == 0 && mp_b3 == 0) ? 0 : 1,
+           (unsigned long long)(tmp_b1 - tmp_b0),
+           fk_st,
+           cow_ok,
+           (unsigned long long)(tfk1 - tfk0),
+           u12_rc,
+           (unsigned long long)(tu12_1 - tu12_0),
+           (long long)((int64_t)f12_2.used - (int64_t)f12_0.used));
+    fflush(stdout);
+    return 0;
+}
+
 static int run_micro(void) {
     pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     uint64_t t0 = now_us();
@@ -1146,13 +1439,200 @@ static int run_micro(void) {
     return 0;
 }
 
+static int scan_log_max_early_table_free(uint64_t *out_max, size_t *out_bytes) {
+    assert(out_max != NULL);
+    assert(out_bytes != NULL);
+    *out_max = 0;
+    *out_bytes = 0;
+    int fd = open("/scheme/sys/log", O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    static const char NEEDLE[] = "early-table-free count=";
+    const size_t nlen = sizeof(NEEDLE) - 1;
+    const size_t keep = 64;
+    char buf[4096 + 64 + 1];
+    size_t carry = 0;
+    size_t bytes_read = 0;
+    uint64_t max_val = 0;
+    for (int iter = 0; iter < MAX_SYS_READ_ITERS; iter++) {
+        ssize_t n = read(fd, buf + carry, 4096);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        bytes_read += (size_t)n;
+        size_t total = carry + (size_t)n;
+        buf[total] = '\0';
+        const char *p = buf;
+        for (size_t s = 0; s < total; s++) {
+            const char *hit = strstr(p, NEEDLE);
+            if (hit == NULL) {
+                break;
+            }
+            unsigned long long val = strtoull(hit + nlen, NULL, 10);
+            if ((uint64_t)val > max_val) {
+                max_val = (uint64_t)val;
+            }
+            p = hit + nlen;
+        }
+        if (total > keep) {
+            memmove(buf, buf + (total - keep), keep);
+            carry = keep;
+        } else {
+            carry = total;
+        }
+    }
+    close(fd);
+    *out_max = max_val;
+    *out_bytes = bytes_read;
+    return 0;
+}
+
+static int run_pt_order(void) {
+    uint64_t before = 0;
+    size_t bytes_before = 0;
+    int rc0 = scan_log_max_early_table_free(&before, &bytes_before);
+
+    const size_t sz_32g = 32ULL * 1024ULL * 1024ULL * 1024ULL;
+    const size_t sz_1g = 1024ULL * 1024ULL * 1024ULL;
+    const size_t boundary_off = (2ULL * 1024ULL * 1024ULL) - (64ULL * 1024ULL);
+    void *p = mmap(NULL, sz_32g, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(p != MAP_FAILED);
+    for (size_t g = 0; g < RECLAIM_GIB_PAGES; g++) {
+        char *pg = (char *)p + g * sz_1g;
+        assert(mprotect(pg, PAGE_BYTES, PROT_READ | PROT_WRITE) == 0);
+        pg[0] = (char)(0x30 + g);
+    }
+    char *run = (char *)p + (16ULL * sz_1g) + boundary_off;
+    assert(mprotect(run, RECLAIM_RUN_PAGES * PAGE_BYTES, PROT_READ | PROT_WRITE) == 0);
+    for (size_t k = 0; k < RECLAIM_RUN_PAGES; k++) {
+        run[k * PAGE_BYTES] = (char)(k & 0xff);
+    }
+    uint64_t t0 = now_us();
+    int urc = munmap(p, sz_32g);
+    uint64_t t1 = now_us();
+
+    uint64_t after = 0;
+    size_t bytes_after = 0;
+    int rc1 = scan_log_max_early_table_free(&after, &bytes_after);
+    uint64_t delta = after >= before ? after - before : 0;
+    printf("pt-order log_rc_before=%d log_rc_after=%d bytes_before=%zu bytes_after=%zu unmap_rc=%d unmap_us=%llu before=%llu after=%llu delta=%llu\n",
+           rc0, rc1, bytes_before, bytes_after, urc, (unsigned long long)(t1 - t0),
+           (unsigned long long)before, (unsigned long long)after, (unsigned long long)delta);
+    fflush(stdout);
+    return (rc0 == 0 && rc1 == 0 && bytes_before > 0 && bytes_after > 0 && urc == 0) ? 0 : 1;
+}
+
+struct mt_worker_arg {
+    unsigned char *base;
+    size_t len;
+    unsigned int id;
+    atomic_int *stop;
+    uint64_t touches;
+};
+
+static void *mt_touch_worker(void *raw) {
+    struct mt_worker_arg *arg = (struct mt_worker_arg *)raw;
+    assert(arg != NULL);
+    assert(arg->base != NULL);
+    size_t pages = arg->len / PAGE_BYTES;
+    assert(pages > 0);
+    uint64_t count = 0;
+    for (size_t iter = 0; iter < MT_MAX_ITERS; iter++) {
+        if (atomic_load_explicit(arg->stop, memory_order_relaxed) != 0) {
+            break;
+        }
+        size_t pg = (iter + arg->id * 7) % pages;
+        volatile unsigned char *cell = arg->base + pg * PAGE_BYTES;
+        unsigned char v = (unsigned char)((iter + arg->id) & 0xff);
+        *cell = v;
+        if (*cell != v) {
+            _exit(31);
+        }
+        count++;
+    }
+    arg->touches = count;
+    return NULL;
+}
+
+static int run_mt_smoke(void) {
+    const size_t slot_sz = 4ULL * 1024ULL * 1024ULL;
+    const size_t total_sz = (MT_WORKERS + 4) * slot_sz;
+    unsigned char *region = mmap(NULL, total_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(region != MAP_FAILED);
+    for (size_t i = 0; i < MT_WORKERS; i++) {
+        assert(mprotect(region + i * slot_sz, slot_sz, PROT_READ | PROT_WRITE) == 0);
+    }
+
+    atomic_int stop = 0;
+    pthread_t threads[MT_WORKERS];
+    struct mt_worker_arg args[MT_WORKERS];
+    for (size_t i = 0; i < MT_WORKERS; i++) {
+        args[i].base = region + i * slot_sz;
+        args[i].len = slot_sz;
+        args[i].id = (unsigned int)i;
+        args[i].stop = &stop;
+        args[i].touches = 0;
+        int rc = pthread_create(&threads[i], NULL, mt_touch_worker, &args[i]);
+        assert(rc == 0);
+    }
+
+    unsigned char *churn_base = region + MT_WORKERS * slot_sz;
+    uint64_t deadline = now_us() + (uint64_t)MT_DURATION_MS * 1000ULL;
+    uint64_t churn_iters = 0;
+    for (size_t iter = 0; iter < MT_MAX_ITERS; iter++) {
+        if (now_us() >= deadline) {
+            break;
+        }
+        unsigned char *slot = churn_base + (iter % 4) * slot_sz;
+        void *m = mmap(slot, slot_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        assert(m == slot);
+        for (size_t pg = 0; pg < 32; pg++) {
+            slot[pg * PAGE_BYTES] = (unsigned char)((iter + pg) & 0xff);
+        }
+        assert(mprotect(slot, slot_sz, PROT_READ) == 0);
+        assert(munmap(slot, slot_sz) == 0);
+        churn_iters++;
+    }
+
+    atomic_store_explicit(&stop, 1, memory_order_relaxed);
+    uint64_t total_touches = 0;
+    for (size_t i = 0; i < MT_WORKERS; i++) {
+        int rc = pthread_join(threads[i], NULL);
+        assert(rc == 0);
+        total_touches += args[i].touches;
+    }
+    int urc = munmap(region, MT_WORKERS * slot_sz);
+    printf("mt-smoke ok=%d workers=%d churn_iters=%llu total_touches=%llu unmap_rc=%d\n",
+           urc == 0 ? 1 : 0, MT_WORKERS, (unsigned long long)churn_iters,
+           (unsigned long long)total_touches, urc);
+    fflush(stdout);
+    return urc == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: hardened-malloc-probe <sparse|prot-none|syscalls|mutex-stress|mutex-bench|micro|run-suite DIR|timed-exec MS CMD...>\n");
+        fprintf(stderr, "usage: hardened-malloc-probe <sparse|sparse-ops|pt-order|mt-smoke|prot-none|syscalls|mutex-stress|mutex-bench|micro|run-suite DIR|timed-exec MS CMD...>\n");
         return 2;
     }
     if (strcmp(argv[1], "sparse") == 0) {
         return run_sparse();
+    }
+    if (strcmp(argv[1], "sparse-ops") == 0) {
+        return run_sparse_ops();
+    }
+    if (strcmp(argv[1], "pt-order") == 0) {
+        return run_pt_order();
+    }
+    if (strcmp(argv[1], "mt-smoke") == 0) {
+        return run_mt_smoke();
     }
     if (strcmp(argv[1], "prot-none") == 0) {
         return run_prot_none();
