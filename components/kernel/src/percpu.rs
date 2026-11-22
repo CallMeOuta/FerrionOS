@@ -4,7 +4,7 @@ use alloc::{
 };
 use core::{
     cell::{Cell, RefCell},
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
 };
 
 use rmm::Arch;
@@ -56,6 +56,8 @@ pub struct PercpuBlock {
     pub stats: CpuStats,
 
     pub numa_node: Cell<Option<(NumaNodeID, &'static NumaNode)>>,
+
+    pub live_flushers: AtomicU32,
 }
 
 pub static ALL_PERCPU_BLOCKS: [AtomicPtr<PercpuBlock>; MAX_CPU_COUNT as usize] =
@@ -239,6 +241,7 @@ impl PercpuBlock {
 
             stats: CpuStats::default(),
             numa_node: Cell::new(None),
+            live_flushers: AtomicU32::new(0),
         }
     }
 }

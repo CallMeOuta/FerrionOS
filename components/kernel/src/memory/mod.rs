@@ -1252,6 +1252,17 @@ impl PageInfo {
 
         RefCount::from_raw(refcount)
     }
+
+    pub fn promote_unreferenced_to_one(&self) -> bool {
+        self.refcount
+            .compare_exchange(
+                RC_USED_NOT_FREE,
+                RefCount::One.to_raw(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    }
     fn make_free(&self, order: u32) -> PageInfoFree<'_> {
         // Order needs to be known so we don't for example merge A: [A] A A A B: [B] U U U into a
         // 2^3 page (if U indicates "used").
@@ -1507,6 +1518,37 @@ pub fn init_frame(init_rc: RefCount, must_be_zero: bool) -> Result<Frame, PfErro
 
     Ok(new_frame)
 }
+static ANY_FLUSHER_CREATED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static EARLY_TABLE_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn mark_flusher_created() {
+    if !ANY_FLUSHER_CREATED.load(Ordering::Relaxed) {
+        ANY_FLUSHER_CREATED.store(true, Ordering::Relaxed);
+    }
+}
+
+#[track_caller]
+pub unsafe fn free_user_table_now(frame: Frame) {
+    if ANY_FLUSHER_CREATED.load(Ordering::Relaxed)
+        && crate::percpu::PercpuBlock::current()
+            .live_flushers
+            .load(Ordering::Relaxed)
+            > 0
+    {
+        let count = EARLY_TABLE_FREE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let loc = core::panic::Location::caller();
+        error!(
+            "early-table-free count={} caller={}:{}:{}",
+            count,
+            loc.file(),
+            loc.line(),
+            loc.column()
+        );
+    }
+    unsafe { deallocate_frame(frame) };
+}
+
 #[derive(Debug)]
 pub struct TheFrameAllocator(pub NumaMemoryPolicy);
 
@@ -1524,7 +1566,11 @@ unsafe impl FrameAllocator for TheFrameAllocator {
     }
 
     unsafe fn free(&mut self, address: PhysicalAddress, count: FrameCount) {
-        unsafe { deallocate_contiguous(Frame::containing(address), count.data()) }
+        if count.data() == 1 {
+            unsafe { free_user_table_now(Frame::containing(address)) };
+        } else {
+            unsafe { deallocate_contiguous(Frame::containing(address), count.data()) };
+        }
     }
     fn usage(&self) -> FrameUsage {
         FrameUsage::new(

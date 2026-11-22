@@ -36,6 +36,16 @@ use super::context::HardBlockedReason;
 
 pub const MMAP_MIN_DEFAULT: usize = PAGE_SIZE;
 
+fn defer_user_table_free(table_phys: rmm::PhysicalAddress, flusher: &mut impl GenericFlusher) {
+    let table_frame = Frame::containing(table_phys);
+    let info = get_page_info(table_frame).expect("page-table frame must have PageInfo");
+    assert!(
+        info.promote_unreferenced_to_one(),
+        "page-table frame must be allocated and unreferenced"
+    );
+    flusher.queue(table_frame, None, TlbShootdownActions::FREE);
+}
+
 fn prot_accessible(flags: MapFlags) -> bool {
     flags.intersects(MapFlags::PROT_READ | MapFlags::PROT_WRITE | MapFlags::PROT_EXEC)
 }
@@ -1579,10 +1589,10 @@ impl Grant {
                             //
                             //flush.ignore();
 
-                            let mut src_flusher = Flusher {
-                                active_cpus: &src.addr_space_lock.used_by,
-                                state: src_flusher_state,
-                            };
+                            let mut src_flusher = Flusher::reattach(
+                                &src.addr_space_lock.used_by,
+                                src_flusher_state,
+                            );
                             src_flusher.queue(
                                 frame,
                                 None,
@@ -1980,8 +1990,8 @@ impl Grant {
                     cur,
                     end,
                     &mut batch,
-                    Some(|table_phys| unsafe {
-                        TheFrameAllocator(NumaMemoryPolicy::NodeLocalLeniant).free_one(table_phys);
+                    Some(|table_phys| {
+                        defer_user_table_free(table_phys, src_flusher);
                     }),
                 )
             };
@@ -2106,19 +2116,30 @@ impl Grant {
         if is_phys_contiguous {
             let (phys_base, _) = mapper.translate(self.base.start_address()).unwrap();
             let base_frame = Frame::containing(phys_base);
+            let start = self.base.start_address();
+            let end = self.base.next_by(self.info.page_count).start_address();
+            let mut unmapped_pages: usize = 0;
 
-            for i in 0..self.info.page_count {
-                unsafe {
-                    let (phys, lvl, _, flush) = mapper
-                        .unmap_phys(self.base.next_by(i).start_address())
-                        .expect("all physborrowed grants must be fully Present in the page tables");
-                    flush.ignore();
-                    // TODO: huge pages
-                    debug_assert_eq!(lvl, 0);
-
-                    assert_eq!(phys, base_frame.next_by(i).base());
-                }
+            unsafe {
+                mapper.unmap_range(
+                    start,
+                    end,
+                    |virt, phys, lvl, _flags| {
+                        assert_eq!(lvl, 0);
+                        let i = Page::containing_address(virt).offset_from(self.base);
+                        assert_eq!(phys, base_frame.next_by(i).base());
+                        unmapped_pages += 1;
+                    },
+                    Some(|table_phys| {
+                        defer_user_table_free(table_phys, flusher);
+                    }),
+                );
             }
+            assert_eq!(
+                unmapped_pages,
+                self.info.page_count,
+                "all physborrowed grants must be fully Present in the page tables"
+            );
 
             flusher.queue(
                 base_frame,
@@ -2126,20 +2147,33 @@ impl Grant {
                 TlbShootdownActions::FREE,
             );
         } else {
-            let start = self.base.start_address();
+            const UNMAP_BATCH_PAGES: usize = 64;
+            let mut batch = [(
+                VirtualAddress::new(0),
+                rmm::PhysicalAddress::new(0),
+                0u8,
+                PageFlags::new(),
+            ); UNMAP_BATCH_PAGES];
+            let mut cur = self.base.start_address();
             let end = self.base.next_by(self.info.page_count).start_address();
-            unsafe {
-                mapper.unmap_range(
-                    start,
-                    end,
-                    |_virt, phys, lvl, _flags| {
-                        assert_eq!(lvl, 0);
-                        flusher.queue(Frame::containing(phys), None, TlbShootdownActions::FREE);
-                    },
-                    Some(|table_phys| unsafe {
-                        TheFrameAllocator(NumaMemoryPolicy::NodeLocalLeniant).free_one(table_phys);
-                    }),
-                );
+            while cur < end {
+                let (count, next_cur) = unsafe {
+                    mapper.unmap_range_batch(
+                        cur,
+                        end,
+                        &mut batch,
+                        Some(|table_phys| {
+                            defer_user_table_free(table_phys, flusher);
+                        }),
+                    )
+                };
+                assert!(count <= batch.len());
+                assert!(next_cur > cur);
+                cur = next_cur;
+                for &(_virt, phys, lvl, _flags) in &batch[..count] {
+                    assert_eq!(lvl, 0);
+                    flusher.queue(Frame::containing(phys), None, TlbShootdownActions::FREE);
+                }
             }
         }
 
@@ -3001,6 +3035,7 @@ struct FlusherState<'addrsp> {
     dirty: bool,
 
     ackword: &'addrsp AtomicU32,
+    owner_cpu: crate::cpu_set::LogicalCpuId,
 }
 
 #[derive(Debug)]
@@ -3023,25 +3058,45 @@ pub struct Flusher<'a, 'addrsp> {
 
 impl<'a, 'addrsp> Flusher<'a, 'addrsp> {
     fn with_cpu_set(set: &'a LogicalCpuSet, ackword: &'addrsp AtomicU32) -> Self {
+        crate::memory::mark_flusher_created();
+        let percpu = PercpuBlock::current();
+        let owner_cpu = percpu.cpu_id;
+        let prev = percpu.live_flushers.fetch_add(1, Ordering::Relaxed);
+        assert!(prev < u32::MAX, "live_flushers overflow");
         Self {
             active_cpus: set,
             state: FlusherState {
                 pagequeue: ArrayVec::new(),
                 dirty: false,
                 ackword,
+                owner_cpu,
             },
         }
     }
+    fn reattach(active_cpus: &'a LogicalCpuSet, mut state: FlusherState<'addrsp>) -> Self {
+        let percpu = PercpuBlock::current();
+        let owner_cpu = percpu.cpu_id;
+        let prev = percpu.live_flushers.fetch_add(1, Ordering::Relaxed);
+        assert!(prev < u32::MAX, "live_flushers overflow");
+        state.owner_cpu = owner_cpu;
+        Self { active_cpus, state }
+    }
     fn detach(mut self) -> FlusherState<'addrsp> {
         static DUMMY: AtomicU32 = AtomicU32::new(0);
+        let owner_cpu = self.state.owner_cpu;
         let state = core::mem::replace(
             &mut self.state,
             FlusherState {
                 pagequeue: ArrayVec::new(),
                 ackword: &DUMMY,
                 dirty: false,
+                owner_cpu,
             },
         );
+        let owner = crate::percpu::get_percpu_block(owner_cpu)
+            .expect("flusher owner_cpu percpu block");
+        let prev = owner.live_flushers.fetch_sub(1, Ordering::Relaxed);
+        assert!(prev > 0, "live_flushers underflow");
         core::mem::forget(self);
         state
     }
@@ -3139,6 +3194,10 @@ impl GenericFlusher for Flusher<'_, '_> {
 impl Drop for Flusher<'_, '_> {
     fn drop(&mut self) {
         self.flush();
+        let owner = crate::percpu::get_percpu_block(self.state.owner_cpu)
+            .expect("flusher owner_cpu percpu block");
+        let prev = owner.live_flushers.fetch_sub(1, Ordering::Relaxed);
+        assert!(prev > 0, "live_flushers underflow");
     }
 }
 bitflags::bitflags! {
