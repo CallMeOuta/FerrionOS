@@ -1,0 +1,830 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-gpu-submit.patch last among them. It carries the sync objects, timelines and sync files of slice GP7 (lane gp7-syncobj):
+- redox-ioctl: a sync module with the wire payloads of DRM's sync-object requests (0xBF to 0xC5, 0xCA to 0xCD, 0xCF) and of sync files (type '>': merge, file info, set deadline), with unit tests.
+- sys_ioctl/redox: forwards those requests and DMA_BUF_IOCTL_SYNC (type 'b') to the driver, converts absolute CLOCK_MONOTONIC deadlines to the time remaining before they cross to the driver, and answers ENOTTY for an ioctl type it does not know.
+
+diff --git a/redox-ioctl/src/lib.rs b/redox-ioctl/src/lib.rs
+index ef092cdc..389b3933 100644
+--- a/redox-ioctl/src/lib.rs
++++ b/redox-ioctl/src/lib.rs
+@@ -9,4 +9,5 @@ mod ioctl_data;
+ pub use ioctl_data::{IoctlData, WireArray, WireDirection, WireField, WireLayout};
+ 
+ pub mod drm;
++pub mod sync;
+ pub mod virtgpu;
+diff --git a/redox-ioctl/src/sync.rs b/redox-ioctl/src/sync.rs
+new file mode 100644
+index 00000000..e6ba3814
+--- /dev/null
++++ b/redox-ioctl/src/sync.rs
+@@ -0,0 +1,456 @@
++//! DRM sync objects, timelines and sync files (FerrionOS).
++//!
++//! DRM syncobj structures and constants come from Linux's `include/uapi/drm/drm.h`
++//! (MIT) via `drm_sys`. Sync-file structures and constants come from Linux's
++//! `include/uapi/linux/sync_file.h` (GPL-1.0+ WITH Linux-syscall-note,
++//! Copyright (C) 2012 Google, Inc.).
++
++use alloc::vec::Vec;
++use core::{cmp, ffi::c_char, iter, mem, slice};
++
++pub use drm_sys::{
++    DRM_CAP_SYNCOBJ, DRM_CAP_SYNCOBJ_TIMELINE, DRM_SYNCOBJ_CREATE_SIGNALED,
++    DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE, DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_TIMELINE,
++    DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE, DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_TIMELINE,
++    DRM_SYNCOBJ_QUERY_FLAGS_LAST_SUBMITTED, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
++    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE,
++    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, drm_syncobj_array, drm_syncobj_create,
++    drm_syncobj_destroy, drm_syncobj_eventfd, drm_syncobj_handle, drm_syncobj_timeline_array,
++    drm_syncobj_timeline_wait, drm_syncobj_transfer, drm_syncobj_wait,
++};
++
++pub const SYNCOBJ_CREATE: u64 = 0xBF;
++pub const SYNCOBJ_DESTROY: u64 = 0xC0;
++pub const SYNCOBJ_HANDLE_TO_FD: u64 = 0xC1;
++pub const SYNCOBJ_FD_TO_HANDLE: u64 = 0xC2;
++pub const SYNCOBJ_WAIT: u64 = 0xC3;
++pub const SYNCOBJ_RESET: u64 = 0xC4;
++pub const SYNCOBJ_SIGNAL: u64 = 0xC5;
++pub const SYNCOBJ_TIMELINE_WAIT: u64 = 0xCA;
++pub const SYNCOBJ_QUERY: u64 = 0xCB;
++pub const SYNCOBJ_TRANSFER: u64 = 0xCC;
++pub const SYNCOBJ_TIMELINE_SIGNAL: u64 = 0xCD;
++pub const SYNCOBJ_EVENTFD: u64 = 0xCF;
++
++pub const SYNCOBJ_MAX_HANDLES: u32 = 4096;
++pub const SYNC_MAX_FENCES: u32 = 1024;
++
++pub const SYNC_IOC_MAGIC: u8 = b'>';
++pub const SYNC_MERGE: u64 = 0x03;
++pub const SYNC_FILE_INFO: u64 = 0x04;
++pub const SYNC_SET_DEADLINE: u64 = 0x05;
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug)]
++pub struct sync_merge_data {
++    pub name: [c_char; 32],
++    pub fd2: i32,
++    pub fence: i32,
++    pub flags: u32,
++    pub pad: u32,
++}
++
++impl Default for sync_merge_data {
++    fn default() -> Self {
++        Self {
++            name: [0; 32],
++            fd2: 0,
++            fence: 0,
++            flags: 0,
++            pad: 0,
++        }
++    }
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug)]
++pub struct sync_fence_info {
++    pub obj_name: [c_char; 32],
++    pub driver_name: [c_char; 32],
++    pub status: i32,
++    pub flags: u32,
++    pub timestamp_ns: u64,
++}
++
++impl Default for sync_fence_info {
++    fn default() -> Self {
++        Self {
++            obj_name: [0; 32],
++            driver_name: [0; 32],
++            status: 0,
++            flags: 0,
++            timestamp_ns: 0,
++        }
++    }
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug)]
++pub struct sync_file_info {
++    pub name: [c_char; 32],
++    pub status: i32,
++    pub flags: u32,
++    pub num_fences: u32,
++    pub pad: u32,
++    pub sync_fence_info: u64,
++}
++
++impl Default for sync_file_info {
++    fn default() -> Self {
++        Self {
++            name: [0; 32],
++            status: 0,
++            flags: 0,
++            num_fences: 0,
++            pad: 0,
++            sync_fence_info: 0,
++        }
++    }
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct sync_set_deadline {
++    pub deadline_ns: u64,
++    pub pad: u64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct drm_syncobj_query_array {
++    pub handles: u64,
++    pub points: u64,
++    pub count_handles: u32,
++    pub flags: u32,
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_create, DrmSyncobjCreate {
++        handle: u32,
++        flags: u32,
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_destroy, DrmSyncobjDestroy {
++        handle: u32,
++        pad: u32,
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_handle, DrmSyncobjHandle {
++        handle: u32,
++        flags: u32,
++        fd: i32,
++        pad: u32,
++        point: u64,
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_transfer, DrmSyncobjTransfer {
++        src_handle: u32,
++        dst_handle: u32,
++        src_point: u64,
++        dst_point: u64,
++        flags: u32,
++        pad: u32,
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_wait, DrmSyncobjWait {
++        timeout_nsec: i64,
++        count_handles: u32,
++        flags: u32,
++        first_signaled: u32,
++        pad: u32,
++        deadline_nsec: u64,
++        handles: u64 [in_array<u32, count_handles>],
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_timeline_wait, DrmSyncobjTimelineWait {
++        timeout_nsec: i64,
++        count_handles: u32,
++        flags: u32,
++        first_signaled: u32,
++        pad: u32,
++        deadline_nsec: u64,
++        points: u64 [in_array<u64, count_handles>],
++        handles: u64 [in_array<u32, count_handles>],
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_eventfd, DrmSyncobjEventfd {
++        handle: u32,
++        flags: u32,
++        point: u64,
++        fd: i32,
++        pad: u32,
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_array, DrmSyncobjArray {
++        count_handles: u32,
++        pad: u32,
++        handles: u64 [in_array<u32, count_handles>],
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_timeline_array, DrmSyncobjTimelineSignal {
++        count_handles: u32,
++        flags: u32,
++        points: u64 [in_array<u64, count_handles>],
++        handles: u64 [in_array<u32, count_handles>],
++    }
++}
++
++define_ioctl_data! {
++    struct drm_syncobj_query_array, DrmSyncobjQuery {
++        count_handles: u32,
++        flags: u32,
++        points: u64 [out_array<u64, count_handles>],
++        handles: u64 [in_array<u32, count_handles>],
++    }
++}
++
++define_ioctl_data! {
++    struct sync_file_info, SyncFileInfo {
++        name: [c_char; 32],
++        status: i32,
++        flags: u32,
++        num_fences: u32,
++        pad: u32,
++        sync_fence_info: u64 [out_array<sync_fence_info, num_fences>],
++    }
++}
++
++define_ioctl_data! {
++    struct sync_set_deadline, SyncSetDeadline {
++        deadline_ns: u64,
++        pad: u64,
++    }
++}
++
++pub fn encode_handle_to_fd_dup(handle: u32, flags: u32, point: u64) -> [u8; 24] {
++    let mut buf = [0u8; 24];
++    buf[0..8].copy_from_slice(&SYNCOBJ_HANDLE_TO_FD.to_ne_bytes());
++    buf[8..12].copy_from_slice(&handle.to_ne_bytes());
++    buf[12..16].copy_from_slice(&flags.to_ne_bytes());
++    buf[16..24].copy_from_slice(&point.to_ne_bytes());
++    buf
++}
++
++pub fn decode_handle_to_fd_dup(buf: &[u8]) -> Option<(u32, u32, u64)> {
++    if buf.len() != 24 {
++        return None;
++    }
++    let cmd = u64::from_ne_bytes(buf[0..8].try_into().ok()?);
++    if cmd != SYNCOBJ_HANDLE_TO_FD {
++        return None;
++    }
++    let handle = u32::from_ne_bytes(buf[8..12].try_into().ok()?);
++    let flags = u32::from_ne_bytes(buf[12..16].try_into().ok()?);
++    let point = u64::from_ne_bytes(buf[16..24].try_into().ok()?);
++    Some((handle, flags, point))
++}
++
++pub fn encode_sync_merge_call(name: &[c_char; 32], flags: u32, pad: u32) -> [u8; 40] {
++    let mut buf = [0u8; 40];
++    for (i, &c) in name.iter().enumerate() {
++        buf[i] = c as u8;
++    }
++    buf[32..36].copy_from_slice(&flags.to_ne_bytes());
++    buf[36..40].copy_from_slice(&pad.to_ne_bytes());
++    buf
++}
++
++pub fn decode_sync_merge_call(buf: &[u8]) -> Option<([u8; 32], u32, u32)> {
++    if buf.len() != 40 {
++        return None;
++    }
++    let mut name = [0u8; 32];
++    name.copy_from_slice(&buf[0..32]);
++    let flags = u32::from_ne_bytes(buf[32..36].try_into().ok()?);
++    let pad = u32::from_ne_bytes(buf[36..40].try_into().ok()?);
++    Some((name, flags, pad))
++}
++
++pub fn encode_sync_merge_dup(token: u64) -> [u8; 16] {
++    let mut buf = [0u8; 16];
++    buf[0..8].copy_from_slice(&SYNC_MERGE.to_ne_bytes());
++    buf[8..16].copy_from_slice(&token.to_ne_bytes());
++    buf
++}
++
++pub fn decode_sync_merge_dup(buf: &[u8]) -> Option<u64> {
++    if buf.len() != 16 {
++        return None;
++    }
++    let cmd = u64::from_ne_bytes(buf[0..8].try_into().ok()?);
++    if cmd != SYNC_MERGE {
++        return None;
++    }
++    Some(u64::from_ne_bytes(buf[8..16].try_into().ok()?))
++}
++
++const _: () = {
++    assert!(size_of::<drm_syncobj_create>() == 8);
++    assert!(size_of::<drm_syncobj_destroy>() == 8);
++    assert!(size_of::<drm_syncobj_handle>() == 24);
++    assert!(size_of::<drm_syncobj_transfer>() == 32);
++    assert!(size_of::<drm_syncobj_wait>() == 40);
++    assert!(size_of::<drm_syncobj_timeline_wait>() == 48);
++    assert!(size_of::<drm_syncobj_eventfd>() == 24);
++    assert!(size_of::<drm_syncobj_array>() == 16);
++    assert!(size_of::<drm_syncobj_timeline_array>() == 24);
++    assert!(size_of::<drm_syncobj_query_array>() == 24);
++    assert!(size_of::<sync_merge_data>() == 48);
++    assert!(size_of::<sync_fence_info>() == 80);
++    assert!(size_of::<sync_file_info>() == 56);
++    assert!(size_of::<sync_set_deadline>() == 16);
++
++    assert!(DrmSyncobjWait::LAYOUT.is_packed() && DrmSyncobjWait::LAYOUT.is_aligned());
++    assert!(
++        DrmSyncobjTimelineWait::LAYOUT.is_packed() && DrmSyncobjTimelineWait::LAYOUT.is_aligned()
++    );
++    assert!(DrmSyncobjArray::LAYOUT.is_packed() && DrmSyncobjArray::LAYOUT.is_aligned());
++    assert!(
++        DrmSyncobjTimelineSignal::LAYOUT.is_packed()
++            && DrmSyncobjTimelineSignal::LAYOUT.is_aligned()
++    );
++    assert!(DrmSyncobjQuery::LAYOUT.is_packed() && DrmSyncobjQuery::LAYOUT.is_aligned());
++    assert!(SyncFileInfo::LAYOUT.is_packed() && SyncFileInfo::LAYOUT.is_aligned());
++};
++
++#[cfg(test)]
++mod tests {
++    use alloc::vec;
++
++    use crate::IoctlData;
++
++    use super::*;
++
++    static RO_HANDLES: [u32; 2] = [3, 5];
++    static RO_POINTS: [u64; 2] = [10, 20];
++
++    #[test]
++    fn timeline_wait_and_signal_roundtrip() {
++        let mut wait = drm_syncobj_timeline_wait {
++            handles: RO_HANDLES.as_ptr() as u64,
++            points: RO_POINTS.as_ptr() as u64,
++            timeout_nsec: 300_000_000,
++            count_handles: 2,
++            flags: DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
++            first_signaled: 0,
++            pad: 0,
++            deadline_nsec: 0,
++        };
++        let mut wire = unsafe { wait.write() };
++        assert_eq!(wire.len(), 32 + 16 + 8);
++        DrmSyncobjTimelineWait::with(&mut wire, |mut data| {
++            assert_eq!(data.timeout_nsec(), 300_000_000);
++            assert_eq!(data.points(), &[10, 20]);
++            assert_eq!(data.handles(), &[3, 5]);
++            data.set_first_signaled(1);
++            Ok(0)
++        })
++        .unwrap();
++        unsafe { wait.read_from(&wire) };
++        assert_eq!(wait.first_signaled, 1);
++
++        let sig = drm_syncobj_timeline_array {
++            handles: RO_HANDLES.as_ptr() as u64,
++            points: RO_POINTS.as_ptr() as u64,
++            count_handles: 2,
++            flags: 0,
++        };
++        let mut wire = unsafe { sig.write() };
++        assert_eq!(wire.len(), 8 + 16 + 8);
++        DrmSyncobjTimelineSignal::with(&mut wire, |data| {
++            assert_eq!(data.points(), &[10, 20]);
++            assert_eq!(data.handles(), &[3, 5]);
++            Ok(0)
++        })
++        .unwrap();
++    }
++
++    #[test]
++    fn query_sends_zeros_and_reads_points_back() {
++        let mut out_points = [0xAAu64; 2];
++        let mut req = drm_syncobj_query_array {
++            handles: RO_HANDLES.as_ptr() as u64,
++            points: out_points.as_mut_ptr() as u64,
++            count_handles: 2,
++            flags: 0,
++        };
++        let mut wire = unsafe { req.write() };
++        assert!(wire[8..24].iter().all(|&b| b == 0));
++        DrmSyncobjQuery::with(&mut wire, |mut data| {
++            assert_eq!(data.handles(), &[3, 5]);
++            data.points_mut().copy_from_slice(&[7, 9]);
++            Ok(0)
++        })
++        .unwrap();
++        unsafe { req.read_from(&wire) };
++        assert_eq!(out_points, [7, 9]);
++    }
++
++    #[test]
++    fn sync_file_info_zero_and_array_roundtrip() {
++        let mut info0 = sync_file_info::default();
++        let mut wire0 = unsafe { info0.write() };
++        assert_eq!(wire0.len(), 48);
++        SyncFileInfo::with(&mut wire0, |mut data| {
++            data.set_status(1);
++            data.set_num_fences(2);
++            Ok(0)
++        })
++        .unwrap();
++        unsafe { info0.read_from(&wire0) };
++        assert_eq!(info0.status, 1);
++        assert_eq!(info0.num_fences, 2);
++
++        let mut fences = vec![sync_fence_info::default(); 2];
++        let mut info2 = sync_file_info {
++            num_fences: 2,
++            sync_fence_info: fences.as_mut_ptr() as u64,
++            ..Default::default()
++        };
++        let mut wire2 = unsafe { info2.write() };
++        assert_eq!(wire2.len(), 48 + 160);
++        SyncFileInfo::with(&mut wire2, |mut data| {
++            data.set_status(0);
++            data.sync_fence_info_mut()[0].status = 1;
++            data.sync_fence_info_mut()[1].status = 0;
++            Ok(0)
++        })
++        .unwrap();
++        unsafe { info2.read_from(&wire2) };
++        assert_eq!(fences[0].status, 1);
++        assert_eq!(fences[1].status, 0);
++    }
++
++    #[test]
++    fn dup_and_merge_wire_roundtrip() {
++        let dup = encode_handle_to_fd_dup(42, DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE, 9);
++        assert_eq!(
++            decode_handle_to_fd_dup(&dup),
++            Some((42, DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE, 9))
++        );
++        let mut name = [0 as c_char; 32];
++        name[0] = b'm' as c_char;
++        let call = encode_sync_merge_call(&name, 0, 0);
++        let (dname, dflags, dpad) = decode_sync_merge_call(&call).unwrap();
++        assert_eq!(dname[0], b'm');
++        assert_eq!((dflags, dpad), (0, 0));
++        let mdup = encode_sync_merge_dup(12345);
++        assert_eq!(decode_sync_merge_dup(&mdup), Some(12345));
++    }
++}
+diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
+index eb3e6ab8..f84cabad 100644
+--- a/src/header/sys_ioctl/redox/drm.rs
++++ b/src/header/sys_ioctl/redox/drm.rs
+@@ -313,6 +313,7 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
+             dev.read_write_ioctl::<drm_mode_obj_get_properties>(buf, MODE_OBJ_GET_PROPERTIES)
+         },
+         0xBB => unsafe { dev.write_ioctl::<drm_mode_cursor2>(buf, MODE_CURSOR2) },
++        0xBF..=0xC5 | 0xCA..=0xCD | 0xCF => unsafe { super::sync::drm_syncobj_ioctl(fd, func, buf) },
+         0xCE => unsafe { dev.read_write_ioctl::<drm_mode_fb_cmd2>(buf, MODE_GET_FB2) },
+         0xD0 => unsafe { dev.read_write_ioctl::<drm_mode_closefb>(buf, MODE_CLOSE_FB) },
+         0xD1 => unsafe { dev.write_ioctl::<drm_set_client_name>(buf, SET_CLIENT_NAME) },
+diff --git a/src/header/sys_ioctl/redox/mod.rs b/src/header/sys_ioctl/redox/mod.rs
+index 7cd6b3d6..b6547f53 100644
+--- a/src/header/sys_ioctl/redox/mod.rs
++++ b/src/header/sys_ioctl/redox/mod.rs
+@@ -26,6 +26,7 @@ const REQ_READ: u64 = 0;
+ const REQ_WRITE: u64 = 1;
+ 
+ mod drm;
++mod sync;
+ 
+ // TODO: some of the structs passed as T have padding bytes, so casting to a byte slice is UB
+ 
+@@ -263,19 +264,17 @@ pub unsafe fn ioctl_inner(fd: c_int, request: c_ulong, out: *mut c_void) -> Resu
+             let size = ((request >> 16) & 0x3FFF) as usize;
+             let name = (((request >> 8) & 0xFF) as u8) as char;
+             let func = (request & 0xFF) as u8;
++            let buf = match dir {
++                0b10 => IoctlBuffer::Read(out, size),
++                0b01 => IoctlBuffer::Write(out, size),
++                0b11 => IoctlBuffer::ReadWrite(out, size),
++                _ => IoctlBuffer::None,
++            };
+             match name {
+-                'd' => {
+-                    let buf = match dir {
+-                        0b10 => IoctlBuffer::Read(out, size),
+-                        0b01 => IoctlBuffer::Write(out, size),
+-                        0b11 => IoctlBuffer::ReadWrite(out, size),
+-                        _ => IoctlBuffer::None,
+-                    };
+-                    return unsafe { drm::ioctl(fd, func, buf) };
+-                }
+-                _ => {
+-                    return Err(Errno(EINVAL));
+-                }
++                'd' => return unsafe { drm::ioctl(fd, func, buf) },
++                '>' => return unsafe { sync::sync_file_ioctl(fd, func, buf) },
++                'b' => return unsafe { sync::dmabuf_ioctl(func, buf) },
++                _ => return Err(Errno(ENOTTY)),
+             }
+         }
+     }
+diff --git a/src/header/sys_ioctl/redox/sync.rs b/src/header/sys_ioctl/redox/sync.rs
+new file mode 100644
+index 00000000..99876f59
+--- /dev/null
++++ b/src/header/sys_ioctl/redox/sync.rs
+@@ -0,0 +1,294 @@
++use redox_ioctl::{IoctlData, sync::*};
++use syscall::flag::F_SETFD;
++
++use crate::{
++    error::{Errno, Result},
++    header::{
++        errno::{EFAULT, EINVAL, ENOTTY},
++        fcntl::sys::FD_CLOEXEC,
++    },
++    platform::types::c_int,
++};
++
++use super::IoctlBuffer;
++
++fn monotonic_remaining_ns(abs_timeout_nsec: i64) -> i64 {
++    if abs_timeout_nsec <= 0 {
++        return 0;
++    }
++    if abs_timeout_nsec == i64::MAX {
++        return i64::MAX;
++    }
++    let mut ts = syscall::TimeSpec::default();
++    if syscall::clock_gettime(syscall::flag::CLOCK_MONOTONIC, &mut ts).is_err() {
++        return 0;
++    }
++    let now = i128::from(ts.tv_sec)
++        .saturating_mul(1_000_000_000)
++        .saturating_add(i128::from(ts.tv_nsec));
++    let diff = i128::from(abs_timeout_nsec).saturating_sub(now);
++    if diff <= 0 {
++        0
++    } else if diff > i128::from(i64::MAX) {
++        i64::MAX
++    } else {
++        diff as i64
++    }
++}
++
++fn map_two_fd_err(err: syscall::Error) -> Errno {
++    if err.errno == syscall::EXDEV || err.errno == syscall::EBADF {
++        Errno(EINVAL)
++    } else {
++        Errno::from(err)
++    }
++}
++
++unsafe fn rw_fixed<T: IoctlData>(fd: c_int, mut buf: IoctlBuffer, func: u64) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<T>() }?;
++    let mut wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_rw(
++        fd as usize,
++        &mut wire,
++        syscall::CallFlags::empty(),
++        &[func],
++    )?;
++    unsafe { data.read_from(&wire) };
++    unsafe { buf.write(data) }?;
++    Ok(res as c_int)
++}
++
++unsafe fn wo_fixed<T: IoctlData>(fd: c_int, buf: IoctlBuffer, func: u64) -> Result<c_int> {
++    let data = unsafe { buf.read::<T>() }?;
++    let wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_wo(
++        fd as usize,
++        &wire,
++        syscall::CallFlags::empty(),
++        &[func],
++    )?;
++    Ok(res as c_int)
++}
++
++unsafe fn syncobj_handle_to_fd(fd: c_int, mut buf: IoctlBuffer) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<drm_syncobj_handle>() }?;
++    if data.pad != 0 {
++        return Err(Errno(EINVAL));
++    }
++    let payload = encode_handle_to_fd_dup(data.handle, data.flags, data.point);
++    let new_fd = redox_rt::sys::dup(fd as usize, &payload)?;
++    let _ = redox_rt::sys::fcntl(new_fd, F_SETFD, FD_CLOEXEC as usize);
++    data.fd = new_fd as i32;
++    unsafe { buf.write(data) }?;
++    Ok(0)
++}
++
++unsafe fn syncobj_fd_to_handle(fd: c_int, mut buf: IoctlBuffer) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<drm_syncobj_handle>() }?;
++    if data.pad != 0 || data.fd < 0 {
++        return Err(Errno(EINVAL));
++    }
++    let mut wire = unsafe { data.write() };
++    redox_rt::sys::sys_call_rw(
++        &[fd as usize, data.fd as usize][..],
++        &mut wire,
++        syscall::CallFlags::empty(),
++        &[SYNCOBJ_FD_TO_HANDLE],
++    )
++    .map_err(map_two_fd_err)?;
++    unsafe { data.read_from(&wire) };
++    unsafe { buf.write(data) }?;
++    Ok(0)
++}
++
++unsafe fn syncobj_wait(fd: c_int, mut buf: IoctlBuffer) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<drm_syncobj_wait>() }?;
++    if data.count_handles > SYNCOBJ_MAX_HANDLES {
++        return Err(Errno(EINVAL));
++    }
++    if data.count_handles != 0 && data.handles == 0 {
++        return Err(Errno(EFAULT));
++    }
++    let orig_timeout = data.timeout_nsec;
++    let orig_deadline = data.deadline_nsec;
++    data.timeout_nsec = monotonic_remaining_ns(orig_timeout);
++    if data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE != 0 {
++        data.deadline_nsec =
++            monotonic_remaining_ns(orig_deadline.min(i64::MAX as u64) as i64) as u64;
++    }
++    let mut wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_rw(
++        fd as usize,
++        &mut wire,
++        syscall::CallFlags::empty(),
++        &[SYNCOBJ_WAIT],
++    )?;
++    unsafe { data.read_from(&wire) };
++    data.timeout_nsec = orig_timeout;
++    data.deadline_nsec = orig_deadline;
++    unsafe { buf.write(data) }?;
++    Ok(res as c_int)
++}
++
++unsafe fn syncobj_timeline_wait(fd: c_int, mut buf: IoctlBuffer) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<drm_syncobj_timeline_wait>() }?;
++    if data.count_handles > SYNCOBJ_MAX_HANDLES {
++        return Err(Errno(EINVAL));
++    }
++    if data.count_handles != 0 && (data.handles == 0 || data.points == 0) {
++        return Err(Errno(EFAULT));
++    }
++    let orig_timeout = data.timeout_nsec;
++    let orig_deadline = data.deadline_nsec;
++    data.timeout_nsec = monotonic_remaining_ns(orig_timeout);
++    if data.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE != 0 {
++        data.deadline_nsec =
++            monotonic_remaining_ns(orig_deadline.min(i64::MAX as u64) as i64) as u64;
++    }
++    let mut wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_rw(
++        fd as usize,
++        &mut wire,
++        syscall::CallFlags::empty(),
++        &[SYNCOBJ_TIMELINE_WAIT],
++    )?;
++    unsafe { data.read_from(&wire) };
++    data.timeout_nsec = orig_timeout;
++    data.deadline_nsec = orig_deadline;
++    unsafe { buf.write(data) }?;
++    Ok(res as c_int)
++}
++
++unsafe fn syncobj_array(fd: c_int, buf: IoctlBuffer, func: u64) -> Result<c_int> {
++    let data = unsafe { buf.read::<drm_syncobj_array>() }?;
++    if data.count_handles > SYNCOBJ_MAX_HANDLES {
++        return Err(Errno(EINVAL));
++    }
++    if data.count_handles != 0 && data.handles == 0 {
++        return Err(Errno(EFAULT));
++    }
++    let wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_wo(
++        fd as usize,
++        &wire,
++        syscall::CallFlags::empty(),
++        &[func],
++    )?;
++    Ok(res as c_int)
++}
++
++unsafe fn syncobj_query(fd: c_int, mut buf: IoctlBuffer) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<drm_syncobj_query_array>() }?;
++    if data.count_handles > SYNCOBJ_MAX_HANDLES {
++        return Err(Errno(EINVAL));
++    }
++    if data.count_handles != 0 && (data.handles == 0 || data.points == 0) {
++        return Err(Errno(EFAULT));
++    }
++    let mut wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_rw(
++        fd as usize,
++        &mut wire,
++        syscall::CallFlags::empty(),
++        &[SYNCOBJ_QUERY],
++    )?;
++    unsafe { data.read_from(&wire) };
++    unsafe { buf.write(data) }?;
++    Ok(res as c_int)
++}
++
++unsafe fn syncobj_timeline_signal(fd: c_int, buf: IoctlBuffer) -> Result<c_int> {
++    let data = unsafe { buf.read::<drm_syncobj_timeline_array>() }?;
++    if data.count_handles > SYNCOBJ_MAX_HANDLES {
++        return Err(Errno(EINVAL));
++    }
++    if data.count_handles != 0 && (data.handles == 0 || data.points == 0) {
++        return Err(Errno(EFAULT));
++    }
++    let wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_wo(
++        fd as usize,
++        &wire,
++        syscall::CallFlags::empty(),
++        &[SYNCOBJ_TIMELINE_SIGNAL],
++    )?;
++    Ok(res as c_int)
++}
++
++pub(super) unsafe fn drm_syncobj_ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_int> {
++    match func {
++        0xBF => unsafe { rw_fixed::<drm_syncobj_create>(fd, buf, SYNCOBJ_CREATE) },
++        0xC0 => unsafe { wo_fixed::<drm_syncobj_destroy>(fd, buf, SYNCOBJ_DESTROY) },
++        0xC1 => unsafe { syncobj_handle_to_fd(fd, buf) },
++        0xC2 => unsafe { syncobj_fd_to_handle(fd, buf) },
++        0xC3 => unsafe { syncobj_wait(fd, buf) },
++        0xC4 => unsafe { syncobj_array(fd, buf, SYNCOBJ_RESET) },
++        0xC5 => unsafe { syncobj_array(fd, buf, SYNCOBJ_SIGNAL) },
++        0xCA => unsafe { syncobj_timeline_wait(fd, buf) },
++        0xCB => unsafe { syncobj_query(fd, buf) },
++        0xCC => unsafe { wo_fixed::<drm_syncobj_transfer>(fd, buf, SYNCOBJ_TRANSFER) },
++        0xCD => unsafe { syncobj_timeline_signal(fd, buf) },
++        0xCF => unsafe { wo_fixed::<drm_syncobj_eventfd>(fd, buf, SYNCOBJ_EVENTFD) },
++        _ => Err(Errno(EINVAL)),
++    }
++}
++
++unsafe fn sync_merge(fd: c_int, mut buf: IoctlBuffer) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<sync_merge_data>() }?;
++    if data.flags != 0 || data.pad != 0 || data.fd2 < 0 {
++        return Err(Errno(EINVAL));
++    }
++    let call_wire = encode_sync_merge_call(&data.name, data.flags, data.pad);
++    let token = redox_rt::sys::sys_call_wo(
++        &[fd as usize, data.fd2 as usize][..],
++        &call_wire,
++        syscall::CallFlags::empty(),
++        &[SYNC_MERGE],
++    )
++    .map_err(map_two_fd_err)?;
++    let dup_wire = encode_sync_merge_dup(token as u64);
++    let new_fd = redox_rt::sys::dup(fd as usize, &dup_wire)?;
++    let _ = redox_rt::sys::fcntl(new_fd, F_SETFD, FD_CLOEXEC as usize);
++    data.fence = new_fd as i32;
++    unsafe { buf.write(data) }?;
++    Ok(0)
++}
++
++unsafe fn sync_file_info_ioctl(fd: c_int, mut buf: IoctlBuffer) -> Result<c_int> {
++    let mut data = unsafe { buf.read::<sync_file_info>() }?;
++    if data.flags != 0 || data.pad != 0 || data.num_fences > SYNC_MAX_FENCES {
++        return Err(Errno(EINVAL));
++    }
++    if data.num_fences != 0 && data.sync_fence_info == 0 {
++        return Err(Errno(EFAULT));
++    }
++    let mut wire = unsafe { data.write() };
++    let res = redox_rt::sys::sys_call_rw(
++        fd as usize,
++        &mut wire,
++        syscall::CallFlags::empty(),
++        &[SYNC_FILE_INFO],
++    )?;
++    unsafe { data.read_from(&wire) };
++    unsafe { buf.write(data) }?;
++    Ok(res as c_int)
++}
++
++pub(super) unsafe fn sync_file_ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_int> {
++    match func {
++        0x03 => unsafe { sync_merge(fd, buf) },
++        0x04 => unsafe { sync_file_info_ioctl(fd, buf) },
++        0x05 => unsafe { wo_fixed::<sync_set_deadline>(fd, buf, SYNC_SET_DEADLINE) },
++        _ => Err(Errno(ENOTTY)),
++    }
++}
++
++pub(super) unsafe fn dmabuf_ioctl(func: u8, buf: IoctlBuffer) -> Result<c_int> {
++    match func {
++        0x00 => {
++            let _ = unsafe { buf.read::<u64>() }?;
++            Ok(0)
++        }
++        _ => Err(Errno(ENOTTY)),
++    }
++}
