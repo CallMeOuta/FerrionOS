@@ -13,11 +13,11 @@ Default Linux features preserve the original integrations. Target cooks
 and four fixture layouts run; the ten-boot acceptance series follows.
 Use the ferrion-wm name for the executable and visible interface.
 ---
- Cargo.lock                                  | 414 +++++++++---
+ Cargo.lock                                  | 414 +++++++++--
  Cargo.toml                                  |  47 +-
  niri-config/Cargo.toml                      |   7 +-
  niri-config/src/input.rs                    |   6 +
- src/backend/ferrion.rs                      | 669 ++++++++++++++++++++
+ src/backend/ferrion.rs                      | 743 ++++++++++++++++++++
  src/backend/headless.rs                     |   3 +-
  src/backend/mod.rs                          | 102 ++-
  src/backend/select.rs                       |  86 +++
@@ -29,7 +29,7 @@ Use the ferrion-wm name for the executable and visible interface.
  src/ipc/client.rs                           |  28 +-
  src/ipc/server.rs                           |   5 +-
  src/main.rs                                 |  22 +-
- src/niri.rs                                 |  76 +--
+ src/niri.rs                                 |  76 +-
  src/render_helpers/border.rs                |   3 +
  src/render_helpers/clipped_surface.rs       |   3 +
  src/render_helpers/framebuffer_effect.rs    |   3 +
@@ -46,7 +46,7 @@ Use the ferrion-wm name for the executable and visible interface.
  src/ui/exit_confirm_dialog.rs               |   7 +-
  src/ui/hotkey_overlay.rs                    |   5 +-
  src/utils/mod.rs                            |   3 +-
- 33 files changed, 1391 insertions(+), 190 deletions(-)
+ 33 files changed, 1465 insertions(+), 190 deletions(-)
  create mode 100644 src/backend/ferrion.rs
  create mode 100644 src/backend/select.rs
 
@@ -1218,10 +1218,10 @@ index fd049b21..f2eb749f 100644
          match value {
 diff --git a/src/backend/ferrion.rs b/src/backend/ferrion.rs
 new file mode 100644
-index 00000000..94ccccfd
+index 00000000..70852e2c
 --- /dev/null
 +++ b/src/backend/ferrion.rs
-@@ -0,0 +1,669 @@
+@@ -0,0 +1,743 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Added for FerrionOS on 2026-11-21 to niri's backend interface.
 +// Input adapter follows FerrionOS's MIT ferrion-wm-backend; its notices are
@@ -1247,10 +1247,11 @@ index 00000000..94ccccfd
 +use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Texture};
 +use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 +use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
-+use smithay::utils::{Rectangle, Scale, Transform};
++use smithay::utils::{Rectangle, Scale, Size, Transform};
 +use smithay::wayland::presentation::Refresh;
 +
 +use super::{IpcOutputMap, OutputId, RenderResult};
++use crate::frame_clock::FrameClock;
 +use crate::input::backend_ext::NiriInputDevice;
 +use crate::niri::{Niri, RedrawState, State};
 +use crate::render_helpers::{
@@ -1263,6 +1264,36 @@ index 00000000..94ccccfd
 +const DEFAULT_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
 +const FRAME_MARGIN: Duration = Duration::from_micros(500);
 +const DISPLAY_CHANGE_PENDING_ERR: &str = "display change pending";
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct DisplayMode {
++    width: u32,
++    height: u32,
++    refresh_interval: Option<Duration>,
++}
++
++impl DisplayMode {
++    fn from_native(native: &native::Backend) -> Self {
++        let (width, height) = native.dimensions();
++        Self {
++            width,
++            height,
++            refresh_interval: native.refresh_period(),
++        }
++    }
++
++    fn scheduler_period(self) -> Duration {
++        self.refresh_interval.unwrap_or(DEFAULT_FRAME_PERIOD)
++    }
++
++    fn output_mode(self) -> Mode {
++        let period_us = self.scheduler_period().as_micros().max(1);
++        Mode {
++            size: (self.width as i32, self.height as i32).into(),
++            refresh: (1_000_000_000_u128 / period_us) as i32,
++        }
++    }
++}
 +
 +#[derive(PartialEq, Eq)]
 +enum CursorPlane {
@@ -1303,6 +1334,7 @@ index 00000000..94ccccfd
 +    native: native::Backend,
 +    renderer: GlesRenderer,
 +    display: Display,
++    mode: DisplayMode,
 +    output: Output,
 +    scheduler: FrameScheduler,
 +    timer_token: Option<RegistrationToken>,
@@ -1319,16 +1351,13 @@ index 00000000..94ccccfd
 +        let wakeup = ping.clone();
 +        let native = native::Backend::open_with_wakeup(move || wakeup.ping())?;
 +        let input_epoch = get_monotonic_time().as_micros() as u64 - native.now_us();
-+        let (width, height) = native.dimensions();
-+        let period = native.refresh_period().unwrap_or(DEFAULT_FRAME_PERIOD);
-+        let mut renderer = unsafe {
++        let initial_mode = DisplayMode::from_native(&native);
++        let renderer = unsafe {
 +            let display =
 +                EGLDisplay::new(EGLSurfacelessDisplay).context("surfaceless EGL display")?;
 +            let context = EGLContext::new(&display).context("surfaceless EGL context")?;
 +            GlesRenderer::new(context).context("GLES renderer")?
 +        };
-+        let texture =
-+            renderer.create_buffer(Fourcc::Argb8888, (width as i32, height as i32).into())?;
 +        let output = Output::new(
 +            "ferrion-1".into(),
 +            PhysicalProperties {
@@ -1339,12 +1368,6 @@ index 00000000..94ccccfd
 +                serial_number: String::new(),
 +            },
 +        );
-+        let mode = Mode {
-+            size: (width as i32, height as i32).into(),
-+            refresh: (1_000_000_000_u128 / period.as_micros().max(1)) as i32,
-+        };
-+        output.change_current_state(Some(mode), Some(Transform::Normal), None, None);
-+        output.set_preferred(mode);
 +        output.user_data().insert_if_missing(|| OutputName {
 +            connector: output.name(),
 +            make: Some("FerrionOS".into()),
@@ -1360,20 +1383,36 @@ index 00000000..94ccccfd
 +                serial: None,
 +                physical_size: None,
 +                modes: vec![niri_ipc::Mode {
-+                    width: width.try_into()?,
-+                    height: height.try_into()?,
-+                    refresh_rate: mode.refresh as u32,
++                    width: initial_mode.width.try_into()?,
++                    height: initial_mode.height.try_into()?,
++                    refresh_rate: initial_mode.output_mode().refresh as u32,
 +                    is_preferred: true,
 +                }],
 +                current_mode: Some(0),
 +                is_custom_mode: true,
 +                vrr_supported: false,
 +                vrr_enabled: false,
-+                logical: Some(logical_output(&output)),
++                logical: None,
 +                max_bpc: None,
 +            },
 +        )])));
-+        let damage = OutputDamageTracker::from_output(&output);
++        let mut backend = Self {
++            native,
++            renderer,
++            display: Display::ChangePending,
++            mode: initial_mode,
++            output,
++            scheduler: FrameScheduler::new(initial_mode.scheduler_period(), FRAME_MARGIN),
++            timer_token: None,
++            render_due: false,
++            ipc_outputs,
++            input_epoch,
++            pending_inputs: VecDeque::new(),
++            frame: 0,
++        };
++        let active = backend.apply_mode(None, initial_mode)?;
++        backend.transition_display(DisplayEvent::Reconfigured(active));
++
 +        let reping = ping;
 +        event_loop.insert_source(source, move |_, _, state| {
 +            let mut drained = false;
@@ -1438,33 +1477,26 @@ index 00000000..94ccccfd
 +            }
 +        })?;
 +        info!(
-+            "FERRION_READY width={width} height={height} vt={}",
-+            native.vt()
++            "FERRION_READY width={} height={} vt={}",
++            initial_mode.width,
++            initial_mode.height,
++            backend.native.vt()
 +        );
-+        Ok(Self {
-+            native,
-+            renderer,
-+            display: Display::Active(ActiveDisplay {
-+                texture,
-+                damage,
-+                buffer_valid: false,
-+                cursor: CursorPlane::Unknown,
-+            }),
-+            output,
-+            scheduler: FrameScheduler::new(period, FRAME_MARGIN),
-+            timer_token: None,
-+            render_due: false,
-+            ipc_outputs,
-+            input_epoch,
-+            pending_inputs: VecDeque::new(),
-+            frame: 0,
-+        })
++        Ok(backend)
 +    }
 +
 +    pub fn init(&mut self, niri: &mut Niri) {
 +        resources::init(&mut self.renderer);
 +        shaders::init(&mut self.renderer);
-+        niri.add_output(self.output.clone(), self.native.refresh_period(), false);
++        niri.add_output(self.output.clone(), self.mode.refresh_interval, false);
++        assert_eq!(
++            niri.output_state
++                .get(&self.output)
++                .unwrap()
++                .frame_clock
++                .refresh_interval(),
++            self.mode.refresh_interval
++        );
 +        niri.update_shaders();
 +    }
 +
@@ -1494,6 +1526,63 @@ index 00000000..94ccccfd
 +                self.display = Display::Active(active);
 +            }
 +        }
++    }
++
++    fn apply_mode(
++        &mut self,
++        niri: Option<&mut Niri>,
++        mode: DisplayMode,
++    ) -> anyhow::Result<ActiveDisplay> {
++        assert_eq!(self.native.dimensions(), (mode.width, mode.height));
++        let expected_size: Size<i32, _> = (mode.width as i32, mode.height as i32).into();
++        let texture: GlesTexture = self.renderer.create_buffer(Fourcc::Argb8888, expected_size)?;
++        assert_eq!(texture.size(), expected_size);
++        let output_mode = mode.output_mode();
++        self.output
++            .change_current_state(Some(output_mode), Some(Transform::Normal), None, None);
++        self.output.set_preferred(output_mode);
++        let damage = OutputDamageTracker::from_output(&self.output);
++        let ipc_width: u16 = mode.width.try_into()?;
++        let ipc_height: u16 = mode.height.try_into()?;
++        let ipc_refresh = output_mode.refresh as u32;
++        let logical = logical_output(&self.output);
++        {
++            let mut ipc_outputs = self.ipc_outputs.lock().unwrap();
++            let entry = ipc_outputs.values_mut().next().unwrap();
++            entry.modes[0] = niri_ipc::Mode {
++                width: ipc_width,
++                height: ipc_height,
++                refresh_rate: ipc_refresh,
++                is_preferred: true,
++            };
++            entry.current_mode = Some(0);
++            entry.logical = Some(logical);
++            assert_eq!(entry.modes[0].width, ipc_width);
++            assert_eq!(entry.modes[0].height, ipc_height);
++            assert_eq!(entry.modes[0].refresh_rate, ipc_refresh);
++        }
++        self.scheduler = FrameScheduler::new(mode.scheduler_period(), FRAME_MARGIN);
++        self.mode = mode;
++        assert_eq!(self.output.current_mode(), Some(output_mode));
++        assert_eq!(self.mode, mode);
++        if let Some(niri) = niri {
++            niri.ipc_outputs_changed = true;
++            if let Some(output_state) = niri.output_state.get_mut(&self.output) {
++                let vrr = output_state.frame_clock.vrr();
++                output_state.frame_clock = FrameClock::new(mode.refresh_interval, vrr);
++                assert_eq!(
++                    output_state.frame_clock.refresh_interval(),
++                    mode.refresh_interval
++                );
++            }
++            niri.output_resized(&self.output);
++        }
++        Ok(ActiveDisplay {
++            texture,
++            damage,
++            buffer_valid: false,
++            cursor: CursorPlane::Unknown,
++        })
 +    }
 +
 +    pub fn defer_redraw(&mut self, niri: &Niri) -> bool {
@@ -1528,26 +1617,11 @@ index 00000000..94ccccfd
 +        }
 +        self.render_due = false;
 +        self.native.reconfigure()?;
++        let mode = DisplayMode::from_native(&self.native);
++        let active = self.apply_mode(Some(niri), mode)?;
 +        let (width, height) = self.native.dimensions();
-+        let texture: GlesTexture = self
-+            .renderer
-+            .create_buffer(Fourcc::Argb8888, (width as i32, height as i32).into())?;
-+        assert_eq!(texture.size(), (width as i32, height as i32).into());
-+        let mode = Mode {
-+            size: (width as i32, height as i32).into(),
-+            refresh: 60_000,
-+        };
-+        self.output
-+            .change_current_state(Some(mode), None, None, None);
-+        self.output.set_preferred(mode);
-+        let damage = OutputDamageTracker::from_output(&self.output);
-+        self.transition_display(DisplayEvent::Reconfigured(ActiveDisplay {
-+            texture,
-+            damage,
-+            buffer_valid: false,
-+            cursor: CursorPlane::Unknown,
-+        }));
-+        niri.output_resized(&self.output);
++        assert_eq!(active.texture.size(), (width as i32, height as i32).into());
++        self.transition_display(DisplayEvent::Reconfigured(active));
 +        Ok(())
 +    }
 +
