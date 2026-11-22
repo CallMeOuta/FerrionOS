@@ -58,6 +58,7 @@ Component sources cited here are the checkouts a fetch puts in `recipes/core/<na
 - When the installer reports "No space left on device", raise `filesystem_size` in the config first.
 - Advisory file locks are real on RedoxFS through the relibc and RedoxFS patches `ferrion-file-locks.patch`: fcntl `F_SETLK`, `F_SETLKW` (blocking, with deadlock detection) and `F_GETLK`, open-file-description locks and `flock`, released when the owner closes the file or exits. A conflict answers `EAGAIN`, and `flock` answers `EWOULDBLOCK`. `scripts/vm-test.py file-locks` runs `lock-probe` (25 checks) and two SQLite writers in WAL and rollback-journal mode; it passed on 2026-11-21.
 - Inside a `ferrion-run` session, locks on files in `--files` and `--clone` folders are answered by the session's proxy: a conflicting lock fails at once instead of waiting, and a lock does not exclude programs outside the session (`.scratch/agent-scope/issues/01-waiting-locks.md`).
+- Shared file mappings on RedoxFS agree with `read` and `write` through the RedoxFS patch `ferrion-map-coherence.patch`: a new mapping shows ordinary writes, `read` returns bytes written through a live shared mapping, unmapping leaves the file's size alone, and a file's pages are freed when its last handle and mapping are gone. `scripts/vm-test.py shm-reuse` and `shm-read-back` passed on 2026-11-21.
 
 ### Debugging and virtual machines
 

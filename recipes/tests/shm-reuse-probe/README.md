@@ -6,4 +6,4 @@
 
 Run `scripts/vm-test.py shm-reuse shm-read-back --config shm-reuse` on the corresponding image, or install this package in another test image. The probe uses the caller's temporary directory and creates no service or account.
 
-FerrionOS passes the four mapped-write cases and fails the four file-write cases and the four read-back cases; Linux passes all twelve. This reproduces wrong or stale bytes before any Wayland or OpenGL operation.
+Before RedoxFS's `ferrion-map-coherence.patch`, FerrionOS passed the four mapped-write cases and failed the four file-write cases and the four read-back cases. With it all twelve pass, as they do on Linux.

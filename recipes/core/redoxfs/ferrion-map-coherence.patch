@@ -1,0 +1,1210 @@
+FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc after the existing recipe patches. Checked by the deterministic simulation in sim/redoxfs (sim/redoxfs/run.sh maps SEEDS OPS, which also fails disk writes during commits) and by scripts/vm-test.py shm-reuse and shm-read-back.
+
+A shared mapping of a file gets the pages of a buffer RedoxFS keeps for the file's node: the kernel lends the client those pages. The buffer is a page cache in src/page_cache.rs, built for every target so the simulation drives it. A range is read from the disk when it is first mapped, with zeros after the end of the file.
+
+write() copies into every cached page it overlaps and a size change zeroes the cached bytes between the old and the new end, both only once the transaction has committed (PageCache::apply after FileSystem::tx returns), so a failed commit leaves the cache as the disk is; read() takes the bytes of pages a shared writable mapping may have changed from the cache, munmap and fsync write cached pages up to the end of the file and no further, and a node's cache is unmapped and dropped when its last handle and mapping are gone. One node's mappings are bounded by MAX_MAPPED_BYTES and MAX_MAPPED_RANGES (ENOMEM), its handles by MAX_NODE_HANDLES (EMFILE), and a map or unmap of no bytes or at an offset that is not a page boundary answers EINVAL: an empty unmap inside a mapped range made the range tree loop for good.
+
+diff --git a/src/lib.rs b/src/lib.rs
+index 9961e7e..38325c9 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -41,6 +41,10 @@ pub mod key_tool;
+ #[cfg(feature = "std")]
+ pub use self::mount::mount;
+ pub use self::node::{Node, NodeFlags, NodeLevel, NodeLevelData};
++#[cfg(feature = "std")]
++pub use self::page_cache::{
++    CacheUpdate, MAX_MAPPED_BYTES, MAX_MAPPED_RANGES, MAX_NODE_HANDLES, PageCache, PageMemory,
++};
+ pub use self::record::RecordRaw;
+ pub use self::transaction::Transaction;
+ pub use self::tree::{Tree, TreeData, TreeList, TreePtr};
+@@ -64,6 +68,8 @@ mod mount;
+ #[cfg(all(feature = "std", fuzzing))]
+ pub mod mount;
+ mod node;
++#[cfg(feature = "std")]
++mod page_cache;
+ mod record;
+ mod transaction;
+ mod tree;
+diff --git a/src/mount/redox/resource.rs b/src/mount/redox/resource.rs
+index a69100c..34c232e 100644
+--- a/src/mount/redox/resource.rs
++++ b/src/mount/redox/resource.rs
+@@ -1,10 +1,9 @@
+ use std::slice;
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+-use alloc::collections::BTreeMap;
+ use libredox::call::MmapArgs;
+-use range_tree::RangeTree;
+ 
++use syscall::ENOENT;
+ use syscall::data::{Stat, TimeSpec};
+ use syscall::dirent::{DirEntry, DirentBuf, DirentKind};
+ use syscall::error::{EBADF, EINVAL, EISDIR, ENOTDIR, EPERM, Error, Result};
+@@ -12,11 +11,65 @@ use syscall::flag::{
+     F_GETFL, F_SETFL, MODE_PERM, MapFlags, O_ACCMODE, O_APPEND, O_RDONLY, O_RDWR, O_WRONLY,
+     PROT_READ, PROT_WRITE,
+ };
+-use syscall::{EBADFD, ENOENT, PAGE_SIZE};
+ 
+-use crate::{BLOCK_SIZE, Disk, Node, Transaction, TreePtr};
++use crate::page_cache::Time;
++use crate::{BLOCK_SIZE, CacheUpdate, Disk, Node, PageCache, PageMemory, Transaction, TreePtr};
+ 
+-pub type Fmaps = BTreeMap<u32, FileMmapInfo>;
++pub type Fmaps = PageCache<MappedPages>;
++
++pub fn now() -> Time {
++    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
++    (now.as_secs(), now.subsec_nanos())
++}
++
++pub struct MappedPages {
++    base: *mut u8,
++    len: usize,
++}
++
++impl PageMemory for MappedPages {
++    fn allocate(len: usize) -> Result<Self> {
++        let base = unsafe {
++            libredox::call::mmap(MmapArgs {
++                length: len,
++                prot: libredox::flag::PROT_READ | libredox::flag::PROT_WRITE,
++                flags: libredox::flag::MAP_PRIVATE,
++                offset: 0,
++                fd: !0,
++                addr: core::ptr::null_mut(),
++            })? as *mut u8
++        };
++        Ok(Self { base, len })
++    }
++
++    fn grow(&mut self, len: usize) -> Result<()> {
++        let base = unsafe {
++            syscall::syscall5(
++                syscall::SYS_MREMAP,
++                self.base as usize,
++                self.len,
++                0,
++                len,
++                syscall::MremapFlags::empty().bits() | (PROT_READ | PROT_WRITE).bits(),
++            )? as *mut u8
++        };
++        self.base = base;
++        self.len = len;
++        Ok(())
++    }
++
++    fn bytes(&mut self) -> &mut [u8] {
++        unsafe { slice::from_raw_parts_mut(self.base, self.len) }
++    }
++}
++
++impl Drop for MappedPages {
++    fn drop(&mut self) {
++        if let Err(err) = unsafe { libredox::call::munmap(self.base.cast(), self.len) } {
++            log::error!("munmap of mapped file pages failed: {err}");
++        }
++    }
++}
+ 
+ pub trait Resource<D: Disk> {
+     fn parent_ptr_opt(&self) -> Option<TreePtr<Node>>;
+@@ -41,7 +94,7 @@ pub trait Resource<D: Disk> {
+         buf: &[u8],
+         offset: u64,
+         tx: &mut Transaction<D>,
+-    ) -> Result<usize>;
++    ) -> Result<(usize, CacheUpdate)>;
+ 
+     fn fsize(&mut self, tx: &mut Transaction<D>) -> Result<u64>;
+ 
+@@ -150,7 +203,12 @@ pub trait Resource<D: Disk> {
+ 
+     fn sync(&mut self, fmaps: &mut Fmaps, tx: &mut Transaction<D>) -> Result<()>;
+ 
+-    fn truncate(&mut self, len: u64, tx: &mut Transaction<D>) -> Result<()>;
++    fn truncate(
++        &mut self,
++        fmaps: &mut Fmaps,
++        len: u64,
++        tx: &mut Transaction<D>,
++    ) -> Result<CacheUpdate>;
+ 
+     fn utimens(&mut self, times: &[TimeSpec], tx: &mut Transaction<D>) -> Result<()>;
+ 
+@@ -226,7 +284,7 @@ impl<D: Disk> Resource<D> for DirResource {
+         _buf: &[u8],
+         _offset: u64,
+         _tx: &mut Transaction<D>,
+-    ) -> Result<usize> {
++    ) -> Result<(usize, CacheUpdate)> {
+         Err(Error::new(EBADF))
+     }
+ 
+@@ -266,7 +324,12 @@ impl<D: Disk> Resource<D> for DirResource {
+         tx.sync(false).map(|_| ())
+     }
+ 
+-    fn truncate(&mut self, _len: u64, _tx: &mut Transaction<D>) -> Result<()> {
++    fn truncate(
++        &mut self,
++        _fmaps: &mut Fmaps,
++        _len: u64,
++        _tx: &mut Transaction<D>,
++    ) -> Result<CacheUpdate> {
+         Err(Error::new(EBADF))
+     }
+ 
+@@ -344,76 +407,6 @@ impl<D: Disk> Resource<D> for DirResource {
+     }
+ }
+ 
+-#[derive(Debug)]
+-pub struct Fmap {
+-    rc: usize,
+-    flags: MapFlags,
+-    last_page_tail: u16,
+-    version: u64,
+-}
+-
+-impl Fmap {
+-    pub unsafe fn new<D: Disk>(
+-        node_ptr: TreePtr<Node>,
+-        flags: MapFlags,
+-        unaligned_size: usize,
+-        offset: u64,
+-        base: *mut u8,
+-        tx: &mut Transaction<D>,
+-    ) -> Result<Self> {
+-        // Memory provided to fmap must be page aligned and sized
+-        let aligned_size = unaligned_size.next_multiple_of(syscall::PAGE_SIZE);
+-
+-        let address = unsafe { base.add(offset as usize) };
+-        //println!("ADDR {:p} {:p}", base, address);
+-
+-        // Read buffer from disk
+-        let atime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+-
+-        let buf = unsafe { slice::from_raw_parts_mut(address, unaligned_size) };
+-
+-        let count = match tx.read_node(node_ptr, offset, buf, atime.as_secs(), atime.subsec_nanos())
+-        {
+-            Ok(ok) => ok,
+-            Err(err) => {
+-                let _ = unsafe { libredox::call::munmap(address.cast(), aligned_size) };
+-                return Err(err);
+-            }
+-        };
+-
+-        // Make sure remaining data is zeroed
+-        buf[count..].fill(0_u8);
+-
+-        Ok(Self {
+-            rc: 1,
+-            flags,
+-            last_page_tail: (unaligned_size % PAGE_SIZE) as u16,
+-            version: 0,
+-        })
+-    }
+-
+-    pub unsafe fn sync<D: Disk>(
+-        &mut self,
+-        node_ptr: TreePtr<Node>,
+-        base: *mut u8,
+-        offset: u64,
+-        size: usize,
+-        tx: &mut Transaction<D>,
+-    ) -> Result<()> {
+-        if self.flags & PROT_WRITE == PROT_WRITE {
+-            let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+-            tx.write_node(
+-                node_ptr,
+-                offset,
+-                unsafe { core::slice::from_raw_parts(base.add(offset as usize), size) },
+-                mtime.as_secs(),
+-                mtime.subsec_nanos(),
+-            )?;
+-        }
+-        Ok(())
+-    }
+-}
+-
+ pub struct FileResource {
+     path: String,
+     parent_ptr_opt: Option<TreePtr<Node>>,
+@@ -422,47 +415,6 @@ pub struct FileResource {
+     uid: u32,
+ }
+ 
+-#[derive(Debug)]
+-pub struct FileMmapInfo {
+-    base: *mut u8,
+-    size: usize,
+-    pub ranges: RangeTree<Fmap>,
+-    pub open_fds: usize,
+-    pub version: u64,
+-}
+-
+-impl FileMmapInfo {
+-    pub fn new() -> Self {
+-        Self {
+-            base: core::ptr::null_mut(),
+-            size: 0,
+-            ranges: RangeTree::new(),
+-            open_fds: 0,
+-            version: 0,
+-        }
+-    }
+-
+-    pub fn in_use(&self) -> bool {
+-        self.open_fds > 0 || self.ranges.iter().any(|(_, fmap)| fmap.rc > 0)
+-    }
+-
+-    pub fn stale(&self) -> bool {
+-        // TODO: should this be any?
+-        // TODO: stale by duration/memory pressure
+-        self.ranges
+-            .iter()
+-            .all(|(_, fmap)| fmap.version != self.version)
+-    }
+-}
+-
+-impl Drop for FileMmapInfo {
+-    fn drop(&mut self) {
+-        if self.in_use() {
+-            log::error!("FileMmapInfo dropped while in use");
+-        }
+-    }
+-}
+-
+ impl FileResource {
+     pub fn new(
+         path: String,
+@@ -508,42 +460,7 @@ impl<D: Disk> Resource<D> for FileResource {
+         if self.flags & O_ACCMODE != O_RDWR && self.flags & O_ACCMODE != O_RDONLY {
+             return Err(Error::new(EBADF));
+         }
+-        if let Some(fmap_info) = fmaps.get_mut(&self.node_ptr.id()) {
+-            if !fmap_info.base.is_null() {
+-                let requested_end = offset + buf.len() as u64;
+-                let mut next_offset = offset;
+-                let mut cacheable = true;
+-
+-                for (range, fmap) in fmap_info.ranges.conflicts(offset..requested_end) {
+-                    if range.start > next_offset || fmap.version != fmap_info.version {
+-                        // there's a hole
+-                        cacheable = false;
+-                        break;
+-                    }
+-                    next_offset = next_offset.max(range.end);
+-                }
+-
+-                if cacheable && next_offset >= requested_end {
+-                    unsafe {
+-                        core::ptr::copy_nonoverlapping(
+-                            fmap_info.base.add(offset as usize),
+-                            buf.as_mut_ptr(),
+-                            buf.len(),
+-                        );
+-                    }
+-                    return Ok(buf.len());
+-                }
+-            }
+-        }
+-
+-        let atime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+-        tx.read_node(
+-            self.node_ptr,
+-            offset,
+-            buf,
+-            atime.as_secs(),
+-            atime.subsec_nanos(),
+-        )
++        fmaps.read(self.node_ptr, offset, buf, now(), tx)
+     }
+ 
+     fn write(
+@@ -552,7 +469,7 @@ impl<D: Disk> Resource<D> for FileResource {
+         buf: &[u8],
+         offset: u64,
+         tx: &mut Transaction<D>,
+-    ) -> Result<usize> {
++    ) -> Result<(usize, CacheUpdate)> {
+         if self.flags & O_ACCMODE != O_RDWR && self.flags & O_ACCMODE != O_WRONLY {
+             return Err(Error::new(EBADF));
+         }
+@@ -562,17 +479,7 @@ impl<D: Disk> Resource<D> for FileResource {
+         } else {
+             offset
+         };
+-        if let Some(fmap_info) = fmaps.get_mut(&self.node_ptr.id()) {
+-            fmap_info.version += 1;
+-        }
+-        let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+-        tx.write_node(
+-            self.node_ptr,
+-            effective_offset,
+-            buf,
+-            mtime.as_secs(),
+-            mtime.subsec_nanos(),
+-        )
++        fmaps.write(self.node_ptr, effective_offset, buf, now(), tx)
+     }
+ 
+     fn fsize(&mut self, tx: &mut Transaction<D>) -> Result<u64> {
+@@ -588,7 +495,6 @@ impl<D: Disk> Resource<D> for FileResource {
+         offset: u64,
+         tx: &mut Transaction<D>,
+     ) -> Result<usize> {
+-        //dbg!(&self.fmaps);
+         let accmode = self.flags & O_ACCMODE;
+         if flags.contains(PROT_READ) && !(accmode == O_RDWR || accmode == O_RDONLY) {
+             return Err(Error::new(EBADF));
+@@ -596,87 +502,7 @@ impl<D: Disk> Resource<D> for FileResource {
+         if flags.contains(PROT_WRITE) && !(accmode == O_RDWR || accmode == O_WRONLY) {
+             return Err(Error::new(EBADF));
+         }
+-
+-        let aligned_size = unaligned_size.next_multiple_of(PAGE_SIZE);
+-
+-        // TODO: PROT_EXEC? It is however unenforcable without restricting anonymous mmap, since a
+-        // program can always map anonymous RW-, read from a file, then remap as R-E. But it might
+-        // be usable as a hint, prohibiting direct executable mmaps at least.
+-
+-        // TODO: Pass entry directory to Resource trait functions, since the node_ptr can be
+-        // obtained by the caller.
+-        let fmap_info = fmaps
+-            .get_mut(&self.node_ptr.id())
+-            .ok_or(Error::new(EBADFD))?;
+-
+-        if !fmap_info.in_use() {
+-            // Notify filesystem of open
+-            tx.on_open_node(self.node_ptr)?;
+-        }
+-
+-        let new_size = (offset as usize + aligned_size).next_multiple_of(PAGE_SIZE);
+-        if new_size > fmap_info.size {
+-            fmap_info.base = if fmap_info.base.is_null() {
+-                unsafe {
+-                    libredox::call::mmap(MmapArgs {
+-                        length: new_size,
+-                        // PRIVATE/SHARED doesn't matter once the pages are passed in the fmap
+-                        // handler.
+-                        prot: libredox::flag::PROT_READ | libredox::flag::PROT_WRITE,
+-                        flags: libredox::flag::MAP_PRIVATE,
+-
+-                        offset: 0,
+-                        fd: !0,
+-                        addr: core::ptr::null_mut(),
+-                    })? as *mut u8
+-                }
+-            } else {
+-                unsafe {
+-                    syscall::syscall5(
+-                        syscall::SYS_MREMAP,
+-                        fmap_info.base as usize,
+-                        fmap_info.size,
+-                        0,
+-                        new_size,
+-                        syscall::MremapFlags::empty().bits() | (PROT_READ | PROT_WRITE).bits(),
+-                    )? as *mut u8
+-                }
+-            };
+-            fmap_info.size = new_size;
+-        }
+-
+-        let affected_fmaps = fmap_info
+-            .ranges
+-            .remove_and_unused(offset..offset + aligned_size as u64);
+-
+-        for (range, v_opt) in affected_fmaps {
+-            //dbg!(&range);
+-            let range_size = range.end - range.start;
+-            if let Some(mut fmap) = v_opt {
+-                fmap.rc += 1;
+-                fmap.flags |= flags;
+-                fmap.version = fmap_info.version;
+-                //FIXME: Use result?
+-                let _ = fmap_info.ranges.insert(range.start, range_size, fmap);
+-            } else {
+-                let map = unsafe {
+-                    Fmap::new(
+-                        self.node_ptr,
+-                        flags,
+-                        range_size as usize,
+-                        range.start,
+-                        fmap_info.base,
+-                        tx,
+-                    )?
+-                };
+-                //FIXME: Use result?
+-                //TODO: Save aligned size for unmap
+-                let _ = fmap_info.ranges.insert(range.start, range_size, map);
+-            }
+-        }
+-        //dbg!(&self.fmaps);
+-
+-        Ok(fmap_info.base as usize + offset as usize)
++        fmaps.map(self.node_ptr, flags, unaligned_size, offset, now(), tx)
+     }
+ 
+     fn funmap(
+@@ -686,54 +512,7 @@ impl<D: Disk> Resource<D> for FileResource {
+         size: usize,
+         tx: &mut Transaction<D>,
+     ) -> Result<()> {
+-        let fmap_info = fmaps
+-            .get_mut(&self.node_ptr.id())
+-            .ok_or(Error::new(EBADFD))?;
+-
+-        //dbg!(&self.fmaps);
+-        //dbg!(self.fmaps.conflicts(offset..offset + size as u64).collect::<Vec<_>>());
+-        #[allow(unused_mut)]
+-        let mut affected_fmaps = fmap_info.ranges.remove(offset..offset + size as u64);
+-
+-        for (range, mut fmap) in affected_fmaps {
+-            fmap.rc = fmap.rc.checked_sub(1).unwrap();
+-
+-            //log::info!("SYNCING {}..{}", range.start, range.end);
+-            unsafe {
+-                fmap.sync(
+-                    self.node_ptr,
+-                    fmap_info.base,
+-                    range.start,
+-                    (range.end - range.start) as usize,
+-                    tx,
+-                )?;
+-            }
+-
+-            //FIXME: Use result?
+-            let _ = fmap_info
+-                .ranges
+-                .insert(range.start, range.end - range.start, fmap);
+-        }
+-        //dbg!(&self.fmaps);
+-
+-        // Allow release of node if not in use anymore
+-        if !fmap_info.in_use() {
+-            // Notify filesystem of close
+-            tx.on_close_node(self.node_ptr)?;
+-
+-            // if this fmap version is outdated it's no use
+-            if fmap_info.stale() {
+-                let fmap = fmaps
+-                    .remove(&self.node_ptr.id())
+-                    .expect("fmap_info must exist");
+-
+-                if let Err(e) = unsafe { libredox::call::munmap(fmap.base as *mut _, fmap.size) } {
+-                    log::error!("Munmap error {e}");
+-                }
+-            }
+-        }
+-
+-        Ok(())
++        fmaps.unmap(self.node_ptr, offset, size, now(), tx)
+     }
+ 
+     fn fcntl(&mut self, cmd: usize, arg: usize) -> Result<usize> {
+@@ -752,28 +531,17 @@ impl<D: Disk> Resource<D> for FileResource {
+     }
+ 
+     fn sync(&mut self, fmaps: &mut Fmaps, tx: &mut Transaction<D>) -> Result<()> {
+-        if let Some(fmap_info) = fmaps.get_mut(&self.node_ptr.id()) {
+-            for (range, fmap) in fmap_info.ranges.iter_mut() {
+-                unsafe {
+-                    fmap.sync(
+-                        self.node_ptr,
+-                        fmap_info.base,
+-                        range.start,
+-                        (range.end - range.start) as usize,
+-                        tx,
+-                    )?;
+-                }
+-            }
+-        }
+-
+-        Ok(())
++        fmaps.sync(self.node_ptr, now(), tx)
+     }
+ 
+-    fn truncate(&mut self, len: u64, tx: &mut Transaction<D>) -> Result<()> {
++    fn truncate(
++        &mut self,
++        fmaps: &mut Fmaps,
++        len: u64,
++        tx: &mut Transaction<D>,
++    ) -> Result<CacheUpdate> {
+         if self.flags & O_ACCMODE == O_RDWR || self.flags & O_ACCMODE == O_WRONLY {
+-            let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+-            tx.truncate_node(self.node_ptr, len, mtime.as_secs(), mtime.subsec_nanos())?;
+-            Ok(())
++            fmaps.truncate(self.node_ptr, len, now(), tx)
+         } else {
+             Err(Error::new(EBADF))
+         }
+@@ -819,68 +587,3 @@ impl<D: Disk> Resource<D> for FileResource {
+         Err(Error::new(ENOTDIR))
+     }
+ }
+-
+-impl Drop for FileResource {
+-    fn drop(&mut self) {
+-        /*
+-        if !self.fmaps.is_empty() {
+-            eprintln!(
+-                "redoxfs: file {} still has {} fmaps!",
+-                self.path,
+-                self.fmaps.len()
+-            );
+-        }
+-        */
+-    }
+-}
+-
+-impl range_tree::Value for Fmap {
+-    type K = u64;
+-
+-    fn try_merge_forward(self, other: &Self) -> core::result::Result<Self, Self> {
+-        if self.rc == other.rc && self.flags == other.flags && self.last_page_tail == 0 {
+-            Ok(self)
+-        } else {
+-            Err(self)
+-        }
+-    }
+-    fn try_merge_backwards(self, other: &Self) -> core::result::Result<Self, Self> {
+-        if self.rc == other.rc && self.flags == other.flags && other.last_page_tail == 0 {
+-            Ok(self)
+-        } else {
+-            Err(self)
+-        }
+-    }
+-    #[allow(unused_variables)]
+-    fn split(
+-        self,
+-        prev_range: Option<core::ops::Range<Self::K>>,
+-        range: core::ops::Range<Self::K>,
+-        next_range: Option<core::ops::Range<Self::K>>,
+-    ) -> (Option<Self>, Self, Option<Self>) {
+-        (
+-            prev_range.map(|_range| Fmap {
+-                rc: self.rc,
+-                flags: self.flags,
+-                last_page_tail: 0,
+-                version: self.version,
+-            }),
+-            Fmap {
+-                rc: self.rc,
+-                flags: self.flags,
+-                last_page_tail: if next_range.is_none() {
+-                    self.last_page_tail
+-                } else {
+-                    0
+-                },
+-                version: self.version,
+-            },
+-            next_range.map(|_range| Fmap {
+-                rc: self.rc,
+-                flags: self.flags,
+-                last_page_tail: self.last_page_tail,
+-                version: self.version,
+-            }),
+-        )
+-    }
+-}
+diff --git a/src/mount/redox/scheme.rs b/src/mount/redox/scheme.rs
+index c9c2d92..4d289ce 100644
+--- a/src/mount/redox/scheme.rs
++++ b/src/mount/redox/scheme.rs
+@@ -30,7 +30,7 @@ use redox_path::RedoxPath;
+ 
+ use crate::{BLOCK_SIZE, Disk, FileSystem, Node, Transaction, TreeData, TreePtr};
+ 
+-use super::resource::{DirResource, Entry, FileMmapInfo, FileResource, Resource};
++use super::resource::{DirResource, Entry, FileResource, Resource};
+ 
+ enum Handle<D: Disk> {
+     ResourceDir((DirResource, PhantomData<D>)),
+@@ -119,7 +119,7 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
+             socket,
+             next_id: AtomicUsize::new(1),
+             handles: BTreeMap::new(),
+-            fmap: BTreeMap::new(),
++            fmap: super::resource::Fmaps::new(),
+             other_scheme_fd_map: BTreeMap::new(),
+             proc_creds_capability: {
+                 libredox::Fd::open(
+@@ -371,10 +371,11 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
+                             return Err(Error::new(EACCES));
+                         }
+ 
+-                        let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+-                        self.fs.tx(|tx| {
+-                            tx.truncate_node(node_ptr, 0, mtime.as_secs(), mtime.subsec_nanos())
+-                        })?;
++                        let fmap = &mut self.fmap;
++                        let resized = self
++                            .fs
++                            .tx(|tx| fmap.truncate(node_ptr, 0, super::resource::now(), tx))?;
++                        fmap.apply(resized, &[]);
+                     }
+ 
+                     if flags & O_STAT != O_STAT
+@@ -453,17 +454,8 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
+         };
+ 
+         let node_ptr = handle.resource().unwrap().node_ptr();
+-        {
+-            let fmap_info = self
+-                .fmap
+-                .entry(node_ptr.id())
+-                .or_insert_with(FileMmapInfo::new);
+-            if !fmap_info.in_use() {
+-                // Notify filesystem of open
+-                self.fs.tx(|tx| tx.on_open_node(node_ptr))?;
+-            }
+-            fmap_info.open_fds += 1;
+-        }
++        let fmap = &mut self.fmap;
++        self.fs.tx(|tx| fmap.open(node_ptr, tx))?;
+ 
+         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+         self.handles.insert(id, handle);
+@@ -982,7 +974,10 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
+         // println!("Write {}, {:X} {}", id, buf.as_ptr() as usize, buf.len());
+         self.writable()?;
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+-        self.fs.tx(|tx| file.write(&mut self.fmap, buf, offset, tx))
++        let fmap = &mut self.fmap;
++        let (count, update) = self.fs.tx(|tx| file.write(fmap, buf, offset, tx))?;
++        fmap.apply(update, buf);
++        Ok(count)
+     }
+ 
+     fn fsize(&mut self, id: usize, _ctx: &CallerCtx) -> Result<u64> {
+@@ -1143,7 +1138,10 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
+         // println!("Ftruncate {}, {}", id, len);
+         self.writable()?;
+         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
+-        self.fs.tx(|tx| file.truncate(len, tx))
++        let fmaps = &mut self.fmap;
++        let resized = self.fs.tx(|tx| file.truncate(fmaps, len, tx))?;
++        fmaps.apply(resized, &[]);
++        Ok(())
+     }
+ 
+     fn futimens(&mut self, id: usize, times: &[TimeSpec], _ctx: &CallerCtx) -> Result<()> {
+@@ -1202,26 +1200,9 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
+             return;
+         };
+         let node_ptr = resource.node_ptr();
+-        let Some(file_info) = self.fmap.get_mut(&node_ptr.id()) else {
+-            return;
+-        };
+-
+-        file_info.open_fds = file_info
+-            .open_fds
+-            .checked_sub(1)
+-            .expect("open_fds not tracked correctly");
+-
+-        // Check if node no longer in use
+-        if !file_info.in_use() {
+-            // Notify filesystem of close
+-            if let Err(err) = self.fs.tx(|tx| tx.on_close_node(node_ptr)) {
+-                log::error!("failed to close node {}: {}", node_ptr.id(), err);
+-            }
+-
+-            /*TODO: leaks memory, but why?
+-            // Remove from fmap list
+-            self.fmap.remove(&node_ptr.id());
+-            */
++        let fmap = &mut self.fmap;
++        if let Err(err) = self.fs.tx(|tx| fmap.close(node_ptr, tx)) {
++            log::error!("failed to close node {}: {}", node_ptr.id(), err);
+         }
+     }
+ 
+diff --git a/src/page_cache.rs b/src/page_cache.rs
+new file mode 100644
+index 0000000..906e938
+--- /dev/null
++++ b/src/page_cache.rs
+@@ -0,0 +1,475 @@
++use alloc::collections::BTreeMap;
++use alloc::vec::Vec;
++use core::ops::Range;
++
++use range_tree::RangeTree;
++use syscall::PAGE_SIZE;
++use syscall::error::{EBADFD, EINVAL, EIO, EMFILE, ENOMEM, Error, Result};
++use syscall::flag::MapFlags;
++
++use crate::{Disk, Node, Transaction, TreePtr};
++
++pub const MAX_MAPPED_BYTES: u64 = 1 << 36;
++pub const MAX_MAPPED_RANGES: usize = 4096;
++pub const MAX_NODE_HANDLES: usize = 1 << 20;
++
++pub type Time = (u64, u32);
++
++pub trait PageMemory: Sized {
++    fn allocate(len: usize) -> Result<Self>;
++
++    fn grow(&mut self, len: usize) -> Result<()>;
++
++    fn bytes(&mut self) -> &mut [u8];
++}
++
++#[must_use]
++#[derive(Debug)]
++pub struct CacheUpdate {
++    node: u32,
++    zero: Range<u64>,
++    store_at: u64,
++    store_len: usize,
++}
++
++impl CacheUpdate {
++    fn none(node: u32) -> Self {
++        Self {
++            node,
++            zero: 0..0,
++            store_at: 0,
++            store_len: 0,
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug)]
++struct Mapped {
++    rc: usize,
++    dirty: bool,
++}
++
++impl range_tree::Value for Mapped {
++    type K = u64;
++
++    fn try_merge_forward(self, other: &Self) -> core::result::Result<Self, Self> {
++        if self.rc == other.rc && self.dirty == other.dirty {
++            Ok(self)
++        } else {
++            Err(self)
++        }
++    }
++
++    fn try_merge_backwards(self, other: &Self) -> core::result::Result<Self, Self> {
++        self.try_merge_forward(other)
++    }
++
++    fn split(
++        self,
++        prev_range: Option<Range<u64>>,
++        _range: Range<u64>,
++        next_range: Option<Range<u64>>,
++    ) -> (Option<Self>, Self, Option<Self>) {
++        (prev_range.map(|_| self), self, next_range.map(|_| self))
++    }
++}
++
++struct CachedNode<M> {
++    memory: Option<M>,
++    ranges: RangeTree<Mapped>,
++    handles: usize,
++}
++
++impl<M: PageMemory> CachedNode<M> {
++    fn new() -> Self {
++        Self {
++            memory: None,
++            ranges: RangeTree::new(),
++            handles: 0,
++        }
++    }
++
++    fn in_use(&self) -> bool {
++        self.handles > 0 || self.ranges.iter().any(|(_, mapped)| mapped.rc > 0)
++    }
++
++    fn each_cached(&mut self, span: Range<u64>, mut apply: impl FnMut(Range<u64>, &mut [u8])) {
++        if span.start >= span.end {
++            return;
++        }
++        let Some(memory) = self.memory.as_mut() else {
++            return;
++        };
++        let bytes = memory.bytes();
++        for (range, _) in self.ranges.conflicts(span.clone()) {
++            assert!(range.end <= bytes.len() as u64);
++            let from = range.start.max(span.start);
++            let to = range.end.min(span.end);
++            if from < to {
++                apply(from..to, &mut bytes[from as usize..to as usize]);
++            }
++        }
++    }
++
++    fn store(&mut self, offset: u64, data: &[u8]) {
++        let end = offset + data.len() as u64;
++        self.each_cached(offset..end, |range, target| {
++            let start = (range.start - offset) as usize;
++            target.copy_from_slice(&data[start..start + target.len()]);
++        });
++    }
++
++    fn zero(&mut self, span: Range<u64>) {
++        self.each_cached(span, |_, target| target.fill(0));
++    }
++
++    fn flush<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        ranges: &[Range<u64>],
++        mtime: Time,
++        tx: &mut Transaction<D>,
++    ) -> Result<()> {
++        if ranges.is_empty() {
++            return Ok(());
++        }
++        let size = tx.read_tree(node_ptr)?.data().size();
++        let Some(memory) = self.memory.as_mut() else {
++            return Err(Error::new(EIO));
++        };
++        let bytes = memory.bytes();
++        for range in ranges {
++            assert!(range.end <= bytes.len() as u64);
++            let stop = range.end.min(size);
++            if range.start < stop {
++                tx.write_node(
++                    node_ptr,
++                    range.start,
++                    &bytes[range.start as usize..stop as usize],
++                    mtime.0,
++                    mtime.1,
++                )?;
++            }
++        }
++        Ok(())
++    }
++
++    fn dirty_ranges(&self) -> Vec<Range<u64>> {
++        self.ranges
++            .iter()
++            .filter(|(_, mapped)| mapped.dirty)
++            .map(|(range, _)| range)
++            .collect()
++    }
++}
++
++pub struct PageCache<M: PageMemory> {
++    nodes: BTreeMap<u32, CachedNode<M>>,
++}
++
++impl<M: PageMemory> Default for PageCache<M> {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl<M: PageMemory> PageCache<M> {
++    pub fn new() -> Self {
++        Self {
++            nodes: BTreeMap::new(),
++        }
++    }
++
++    pub fn cached_nodes(&self) -> usize {
++        self.nodes.len()
++    }
++
++    pub fn open<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        tx: &mut Transaction<D>,
++    ) -> Result<()> {
++        let id = node_ptr.id();
++        let in_use = match self.nodes.get(&id) {
++            Some(cached) if cached.handles >= MAX_NODE_HANDLES => return Err(Error::new(EMFILE)),
++            Some(cached) => cached.in_use(),
++            None => false,
++        };
++        if !in_use {
++            tx.on_open_node(node_ptr)?;
++        }
++        self.nodes.entry(id).or_insert_with(CachedNode::new).handles += 1;
++        Ok(())
++    }
++
++    pub fn close<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        tx: &mut Transaction<D>,
++    ) -> Result<()> {
++        let cached = self
++            .nodes
++            .get_mut(&node_ptr.id())
++            .ok_or(Error::new(EBADFD))?;
++        cached.handles = cached.handles.checked_sub(1).ok_or(Error::new(EBADFD))?;
++        self.release_unused(node_ptr, tx)
++    }
++
++    fn release_unused<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        tx: &mut Transaction<D>,
++    ) -> Result<()> {
++        if self
++            .nodes
++            .get(&node_ptr.id())
++            .is_some_and(|cached| !cached.in_use())
++        {
++            self.nodes.remove(&node_ptr.id());
++            tx.on_close_node(node_ptr)?;
++        }
++        Ok(())
++    }
++
++    pub fn map<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        flags: MapFlags,
++        len: usize,
++        offset: u64,
++        atime: Time,
++        tx: &mut Transaction<D>,
++    ) -> Result<usize> {
++        let page = PAGE_SIZE as u64;
++        if len == 0 || offset % page != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        let aligned = (len as u64)
++            .checked_next_multiple_of(page)
++            .ok_or(Error::new(ENOMEM))?;
++        let end = offset
++            .checked_add(aligned)
++            .filter(|end| *end <= MAX_MAPPED_BYTES)
++            .ok_or(Error::new(ENOMEM))?;
++        let end_bytes = usize::try_from(end).map_err(|_| Error::new(ENOMEM))?;
++        let cached = self
++            .nodes
++            .get_mut(&node_ptr.id())
++            .filter(|cached| cached.handles > 0)
++            .ok_or(Error::new(EBADFD))?;
++        if cached.ranges.len() >= MAX_MAPPED_RANGES {
++            return Err(Error::new(ENOMEM));
++        }
++        if cached.memory.is_none() {
++            cached.memory = Some(M::allocate(end_bytes)?);
++        }
++        let Some(memory) = cached.memory.as_mut() else {
++            return Err(Error::new(EIO));
++        };
++        if memory.bytes().len() < end_bytes {
++            memory.grow(end_bytes)?;
++        }
++        let bytes = memory.bytes();
++        assert!(bytes.len() >= end_bytes);
++
++        let mut holes = Vec::new();
++        let mut cursor = offset;
++        for (range, _) in cached.ranges.conflicts(offset..end) {
++            if range.start > cursor {
++                holes.push(cursor..range.start);
++            }
++            cursor = cursor.max(range.end);
++        }
++        if cursor < end {
++            holes.push(cursor..end);
++        }
++        for hole in holes {
++            let target = &mut bytes[hole.start as usize..hole.end as usize];
++            let count = tx.read_node(node_ptr, hole.start, target, atime.0, atime.1)?;
++            target[count..].fill(0);
++        }
++        let address = bytes.as_mut_ptr() as usize + offset as usize;
++
++        let dirty = flags.contains(MapFlags::MAP_SHARED) && flags.contains(MapFlags::PROT_WRITE);
++        for (range, existing) in cached.ranges.remove_and_unused(offset..end) {
++            let mapped = match existing {
++                Some(mapped) => Mapped {
++                    rc: mapped.rc + 1,
++                    dirty: mapped.dirty || dirty,
++                },
++                None => Mapped { rc: 1, dirty },
++            };
++            if cached
++                .ranges
++                .insert(range.start, range.end - range.start, mapped)
++                .is_err()
++            {
++                return Err(Error::new(EIO));
++            }
++        }
++        Ok(address)
++    }
++
++    pub fn unmap<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        offset: u64,
++        len: usize,
++        mtime: Time,
++        tx: &mut Transaction<D>,
++    ) -> Result<()> {
++        let page = PAGE_SIZE as u64;
++        if len == 0 || offset % page != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        let aligned = (len as u64)
++            .checked_next_multiple_of(page)
++            .ok_or(Error::new(EINVAL))?;
++        let end = offset.checked_add(aligned).ok_or(Error::new(EINVAL))?;
++        let cached = self
++            .nodes
++            .get_mut(&node_ptr.id())
++            .ok_or(Error::new(EBADFD))?;
++        let mut mapped_before = true;
++        let mut dirty = Vec::new();
++        for (range, mut mapped) in cached.ranges.remove(offset..end) {
++            match mapped.rc.checked_sub(1) {
++                Some(rc) => mapped.rc = rc,
++                None => mapped_before = false,
++            }
++            if mapped.dirty {
++                dirty.push(range.clone());
++            }
++            if cached
++                .ranges
++                .insert(range.start, range.end - range.start, mapped)
++                .is_err()
++            {
++                return Err(Error::new(EIO));
++            }
++        }
++        cached.flush(node_ptr, &dirty, mtime, tx)?;
++        self.release_unused(node_ptr, tx)?;
++        if mapped_before {
++            Ok(())
++        } else {
++            Err(Error::new(EINVAL))
++        }
++    }
++
++    pub fn read<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        offset: u64,
++        buf: &mut [u8],
++        atime: Time,
++        tx: &mut Transaction<D>,
++    ) -> Result<usize> {
++        let count = tx.read_node(node_ptr, offset, buf, atime.0, atime.1)?;
++        if count == 0 {
++            return Ok(0);
++        }
++        let end = offset + count as u64;
++        let Some(cached) = self.nodes.get_mut(&node_ptr.id()) else {
++            return Ok(count);
++        };
++        let Some(memory) = cached.memory.as_mut() else {
++            return Ok(count);
++        };
++        let bytes = memory.bytes();
++        for (range, mapped) in cached.ranges.conflicts(offset..end) {
++            if !mapped.dirty {
++                continue;
++            }
++            assert!(range.end <= bytes.len() as u64);
++            let from = range.start.max(offset);
++            let to = range.end.min(end);
++            if from < to {
++                buf[(from - offset) as usize..(to - offset) as usize]
++                    .copy_from_slice(&bytes[from as usize..to as usize]);
++            }
++        }
++        Ok(count)
++    }
++
++    pub fn apply(&mut self, update: CacheUpdate, data: &[u8]) {
++        assert!(update.store_len <= data.len());
++        let Some(cached) = self.nodes.get_mut(&update.node) else {
++            return;
++        };
++        cached.zero(update.zero);
++        cached.store(update.store_at, &data[..update.store_len]);
++    }
++
++    pub fn write<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        offset: u64,
++        data: &[u8],
++        mtime: Time,
++        tx: &mut Transaction<D>,
++    ) -> Result<(usize, CacheUpdate)> {
++        let node = node_ptr.id();
++        let cached = self
++            .nodes
++            .get(&node)
++            .is_some_and(|cached| cached.memory.is_some());
++        if !cached {
++            let count = tx.write_node(node_ptr, offset, data, mtime.0, mtime.1)?;
++            return Ok((count, CacheUpdate::none(node)));
++        }
++        let size = tx.read_tree(node_ptr)?.data().size();
++        let count = tx.write_node(node_ptr, offset, data, mtime.0, mtime.1)?;
++        assert!(count <= data.len());
++        let update = CacheUpdate {
++            node,
++            zero: size..offset,
++            store_at: offset,
++            store_len: count,
++        };
++        Ok((count, update))
++    }
++
++    pub fn truncate<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        len: u64,
++        mtime: Time,
++        tx: &mut Transaction<D>,
++    ) -> Result<CacheUpdate> {
++        let node = node_ptr.id();
++        let cached = self
++            .nodes
++            .get(&node)
++            .is_some_and(|cached| cached.memory.is_some());
++        let size = if cached {
++            Some(tx.read_tree(node_ptr)?.data().size())
++        } else {
++            None
++        };
++        tx.truncate_node(node_ptr, len, mtime.0, mtime.1)?;
++        let Some(size) = size else {
++            return Ok(CacheUpdate::none(node));
++        };
++        let resized = CacheUpdate {
++            node,
++            zero: size.min(len)..size.max(len),
++            store_at: 0,
++            store_len: 0,
++        };
++        Ok(resized)
++    }
++
++    pub fn sync<D: Disk>(
++        &mut self,
++        node_ptr: TreePtr<Node>,
++        mtime: Time,
++        tx: &mut Transaction<D>,
++    ) -> Result<()> {
++        let Some(cached) = self.nodes.get_mut(&node_ptr.id()) else {
++            return Ok(());
++        };
++        let dirty = cached.dirty_ranges();
++        cached.flush(node_ptr, &dirty, mtime, tx)
++    }
++}

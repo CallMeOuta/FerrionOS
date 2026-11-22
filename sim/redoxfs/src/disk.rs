@@ -143,6 +143,8 @@ pub struct SimDisk {
     pub crashed: bool,
     read_error_at: Option<u64>,
     pub read_errors: u64,
+    write_error_at: Option<u64>,
+    pub write_errors: u64,
     pub guard: Option<Guard>,
     pub violations: Vec<String>,
     pub recording: Option<Recording>,
@@ -164,6 +166,8 @@ impl SimDisk {
             crashed: false,
             read_error_at: None,
             read_errors: 0,
+            write_error_at: None,
+            write_errors: 0,
             guard: None,
             violations: Vec::new(),
             recording: None,
@@ -193,6 +197,15 @@ impl SimDisk {
 
     pub fn disarm_read_error(&mut self) {
         self.read_error_at = None;
+    }
+
+    pub fn arm_write_error(&mut self, writes_from_now: u64) {
+        assert!(writes_from_now > 0);
+        self.write_error_at = Some(self.writes + writes_from_now - 1);
+    }
+
+    pub fn disarm_write_error(&mut self) {
+        self.write_error_at = None;
     }
 
     pub fn start_recording(&mut self) {
@@ -265,6 +278,11 @@ impl SimDisk {
         if (block as usize + 1) * BLOCK > self.media.len() {
             self.violations
                 .push(format!("write past the end of the disk at block {block}"));
+            return Err(Error::new(EIO));
+        }
+        if self.write_error_at == Some(self.writes) {
+            self.write_error_at = None;
+            self.write_errors += 1;
             return Err(Error::new(EIO));
         }
         if let Some(limit) = self.crash_after {
