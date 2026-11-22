@@ -23,7 +23,9 @@ use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::screen::IntoAlternateScreen;
 
-const MAX_PENDING_PROMPTS: usize = 2;
+const MAX_INTERACTIVE_PROMPTS: usize = 2;
+const MAX_NONSTOP_PROMPTS: usize = 64;
+const LOG_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -193,7 +195,7 @@ impl TuiApp {
             cook_list_state: ListState::default(),
             fetch_complete: false,
             cook_complete: false,
-            prompts: VecDeque::with_capacity(MAX_PENDING_PROMPTS),
+            prompts: VecDeque::with_capacity(MAX_INTERACTIVE_PROMPTS),
             dump_logs_anyway: false,
             aborted: None,
             is_inspecting: false,
@@ -311,17 +313,33 @@ impl TuiApp {
                 err,
                 reply,
             } => {
-                assert!(self.prompts.len() < MAX_PENDING_PROMPTS);
-                self.log_view_job = job;
+                let interactive = self.prompts.iter().filter(|p| p.reply.is_some()).count();
+                assert!(interactive < MAX_INTERACTIVE_PROMPTS);
                 self.prompts
                     .push_back(PendingPrompt::new(job, recipe.clone(), err.clone(), reply));
+                if let Some(front) = self.prompts.front() {
+                    self.log_view_job = front.job;
+                }
                 (recipe.name.clone(), RecipeStatus::Failed(err))
             }
-            StatusUpdate::FailNonstop {
-                job: _,
-                recipe,
-                err,
-            } => (recipe.name.clone(), RecipeStatus::Skipped(err)),
+            StatusUpdate::FailNonstop { job, recipe, err } => {
+                if self.prompts.len() >= MAX_NONSTOP_PROMPTS {
+                    if let Some(pos) = self.prompts.iter().position(|p| p.reply.is_none()) {
+                        self.prompts.remove(pos);
+                    }
+                }
+                if self.prompts.len() < MAX_NONSTOP_PROMPTS {
+                    self.prompts.push_back(PendingPrompt::new_nonstop(
+                        job,
+                        recipe.clone(),
+                        err.clone(),
+                    ));
+                }
+                if let Some(front) = self.prompts.front() {
+                    self.log_view_job = front.job;
+                }
+                (recipe.name.clone(), RecipeStatus::Skipped(err))
+            }
             StatusUpdate::FetchThreadFinished => {
                 self.fetch_complete = true;
                 self.log_view_job = JobType::Cook;
@@ -374,7 +392,8 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                 if let Err(err_ctx) = &handler {
                     write_to_pty(&session.as_pty_out(), &format!("\n{err_ctx}"));
                 }
-                session.finish();
+                let finish_res = session.finish();
+                let handler = handler.and_then(|cached| finish_res.map(|()| cached));
                 if let Some(log_path) = cooker_config.logs_dir.as_ref()
                     && !matches!(handler, Ok(true))
                 {
@@ -481,7 +500,8 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                 if let Err(err_ctx) = &handler {
                     write_to_pty(&session.as_pty_out(), &format!("\n{err_ctx}"));
                 }
-                session.finish();
+                let finish_res = session.finish();
+                let handler = handler.and_then(|fetch| finish_res.map(|()| fetch));
                 if let Some(log_path) = fetcher_config.logs_dir.as_ref()
                     && !matches!(handler, Ok(FetchResult { cached: true, .. }))
                 {
@@ -734,11 +754,13 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
 
             f.render_widget(log_paragraph, log_area);
             if let Some(prompt) = app.prompts.front_mut() {
-                if config.cook.nonstop && prompt.selected == PromptOption::Retry {
+                if prompt.reply.is_none()
+                    && !matches!(prompt.selected, PromptOption::Skip | PromptOption::Exit)
+                {
                     prompt.selected = PromptOption::Skip;
                 }
                 if !app.is_inspecting {
-                    draw_prompt(f, prompt, config.cook.nonstop);
+                    draw_prompt(f, prompt, prompt.reply.is_none());
                 }
             }
             if !app.auto_scroll && enable_auto_scroll {
@@ -758,14 +780,24 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                 if let Some((prompt, decision)) = handle_prompt_input(&event, &mut app) {
                     match decision {
                         Decision::Retry => {
-                            let _ = prompt.reply.try_send(Decision::Retry);
+                            if let Some(reply) = prompt.reply {
+                                let _ = reply.try_send(Decision::Retry);
+                            }
+                            if let Some(front) = app.prompts.front() {
+                                app.log_view_job = front.job;
+                            }
                         }
                         Decision::Skip => {
-                            app.set_recipe_status(
-                                &prompt.recipe.name,
-                                RecipeStatus::Skipped(prompt.error.clone()),
-                            );
-                            let _ = prompt.reply.try_send(Decision::Skip);
+                            if let Some(reply) = prompt.reply {
+                                app.set_recipe_status(
+                                    &prompt.recipe.name,
+                                    RecipeStatus::Skipped(prompt.error.clone()),
+                                );
+                                let _ = reply.try_send(Decision::Skip);
+                            }
+                            if let Some(front) = app.prompts.front() {
+                                app.log_view_job = front.job;
+                            }
                         }
                         Decision::Exit => {
                             let (log, line) = app.get_recipe_log(&prompt.recipe.name);
@@ -775,9 +807,13 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                             };
                             app.aborted = Some((prompt.recipe.name.clone(), text));
                             set_aborting(&run_state);
-                            let _ = prompt.reply.try_send(Decision::Exit);
+                            if let Some(reply) = prompt.reply {
+                                let _ = reply.try_send(Decision::Exit);
+                            }
                             while let Some(other) = app.prompts.pop_front() {
-                                let _ = other.reply.try_send(Decision::Exit);
+                                if let Some(reply) = other.reply {
+                                    let _ = reply.try_send(Decision::Exit);
+                                }
                             }
                             kill_everything(None);
                             keep_running = false;
@@ -817,7 +853,9 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
     if app.aborted.is_some() {
         set_aborting(&run_state);
         while let Some(other) = app.prompts.pop_front() {
-            let _ = other.reply.try_send(Decision::Exit);
+            if let Some(reply) = other.reply {
+                let _ = reply.try_send(Decision::Exit);
+            }
         }
         kill_everything(None);
     }
@@ -1014,13 +1052,14 @@ fn handle_prompt_input(event: &Event, app: &mut TuiApp) -> Option<(PendingPrompt
                 None
             }
             Key::Char('\n') => match prompt.selected {
-                PromptOption::Inspect => {
+                PromptOption::Inspect if prompt.reply.is_some() => {
                     app.is_inspecting = true;
                     None
                 }
-                PromptOption::Retry => Some(Decision::Retry),
+                PromptOption::Retry if prompt.reply.is_some() => Some(Decision::Retry),
                 PromptOption::Skip => Some(Decision::Skip),
                 PromptOption::Exit => Some(Decision::Exit),
+                _ => None,
             },
             _ => None,
         }
@@ -1105,11 +1144,12 @@ fn spawn_log_reader<R>(
     mut reader: R,
     package_name: PackageName,
     status_tx: mpsc::Sender<StatusUpdate>,
-) -> thread::JoinHandle<()>
+) -> (thread::JoinHandle<()>, mpsc::Receiver<()>)
 where
     R: Read + Send + 'static,
 {
-    thread::spawn(move || {
+    let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
+    let handle = thread::spawn(move || {
         let mut buffer = [0; 1024];
         loop {
             match reader.read(&mut buffer) {
@@ -1134,14 +1174,32 @@ where
                 }
             }
         }
-    })
+        let _ = done_tx.try_send(());
+    });
+    (handle, done_rx)
+}
+
+fn join_log_reader(
+    handle: thread::JoinHandle<()>,
+    done_rx: mpsc::Receiver<()>,
+    label: &str,
+) -> Result<()> {
+    match done_rx.recv_timeout(LOG_JOIN_TIMEOUT) {
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => handle
+            .join()
+            .map_err(|_| Error::Other(format!("{label} reader thread panicked"))),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::Other(format!(
+            "{label} reader thread did not exit within {}s",
+            LOG_JOIN_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 pub struct LogSession {
     slave: Option<UnixSlavePty>,
     log_writer: Option<std::io::PipeWriter>,
-    pty_reader: Option<thread::JoinHandle<()>>,
-    log_reader: Option<thread::JoinHandle<()>>,
+    pty_reader: Option<(thread::JoinHandle<()>, mpsc::Receiver<()>)>,
+    log_reader: Option<(thread::JoinHandle<()>, mpsc::Receiver<()>)>,
 }
 
 impl LogSession {
@@ -1154,28 +1212,43 @@ impl LogSession {
         ))
     }
 
-    pub fn finish(mut self) {
-        self.close_and_join();
+    pub fn finish(mut self) -> Result<()> {
+        self.close_and_join()
     }
 
-    fn close_and_join(&mut self) {
+    fn close_and_join(&mut self) -> Result<()> {
+        let mut first_err: Option<Error> = None;
         if let Some(slave) = self.slave.take() {
-            slave.reap_and_assert_no_descendants();
+            if let Err(err) = slave.reap_and_assert_no_descendants() {
+                first_err = Some(err);
+            }
             drop(slave);
         }
         drop(self.log_writer.take());
-        if let Some(handle) = self.pty_reader.take() {
-            let _ = handle.join();
+        if let Some((handle, done_rx)) = self.pty_reader.take() {
+            if let Err(err) = join_log_reader(handle, done_rx, "pty")
+                && first_err.is_none()
+            {
+                first_err = Some(err);
+            }
         }
-        if let Some(handle) = self.log_reader.take() {
-            let _ = handle.join();
+        if let Some((handle, done_rx)) = self.log_reader.take() {
+            if let Err(err) = join_log_reader(handle, done_rx, "log")
+                && first_err.is_none()
+            {
+                first_err = Some(err);
+            }
+        }
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
         }
     }
 }
 
 impl Drop for LogSession {
     fn drop(&mut self) {
-        self.close_and_join();
+        let _ = self.close_and_join();
     }
 }
 
@@ -1200,11 +1273,11 @@ enum PromptOption {
 }
 
 struct PendingPrompt {
-    _job: JobType,
+    job: JobType,
     recipe: CookRecipe,
     error: String,
     selected: PromptOption,
-    reply: mpsc::SyncSender<Decision>,
+    reply: Option<mpsc::SyncSender<Decision>>,
 }
 
 impl PendingPrompt {
@@ -1215,15 +1288,32 @@ impl PendingPrompt {
         reply: mpsc::SyncSender<Decision>,
     ) -> Self {
         Self {
-            _job: job,
+            job,
             recipe,
             error,
             selected: PromptOption::Exit,
-            reply,
+            reply: Some(reply),
+        }
+    }
+
+    fn new_nonstop(job: JobType, recipe: CookRecipe, error: String) -> Self {
+        Self {
+            job,
+            recipe,
+            error,
+            selected: PromptOption::Skip,
+            reply: None,
         }
     }
 
     fn next(&mut self) {
+        if self.reply.is_none() {
+            self.selected = match self.selected {
+                PromptOption::Skip => PromptOption::Exit,
+                _ => PromptOption::Skip,
+            };
+            return;
+        }
         self.selected = match self.selected {
             PromptOption::Retry => PromptOption::Skip,
             PromptOption::Skip => PromptOption::Inspect,
@@ -1233,6 +1323,13 @@ impl PendingPrompt {
     }
 
     fn prev(&mut self) {
+        if self.reply.is_none() {
+            self.selected = match self.selected {
+                PromptOption::Skip => PromptOption::Exit,
+                _ => PromptOption::Skip,
+            };
+            return;
+        }
         self.selected = match self.selected {
             PromptOption::Retry => PromptOption::Exit,
             PromptOption::Skip => PromptOption::Retry,

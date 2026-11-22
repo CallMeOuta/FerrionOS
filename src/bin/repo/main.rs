@@ -255,7 +255,13 @@ fn main_inner() -> Result<()> {
     }
     if command == CliCommand::Cook && config.cook.tui {
         let outcome = run_tui_cook(config.clone(), recipes.clone())?;
-        return finalize_cook_outcome(&command, outcome, &recipes, &config.repo_dir);
+        return finalize_cook_outcome(
+            &command,
+            outcome,
+            &recipes,
+            &config.repo_dir,
+            config.cook.nonstop,
+        );
     }
     if command.is_tree() {
         return handle_tree(&recipes, command.to_tree(), &config);
@@ -323,6 +329,7 @@ fn finalize_cook_outcome(
     outcome: TuiOutcome,
     recipes: &Vec<CookRecipe>,
     repo_dir: &PathBuf,
+    nonstop: bool,
 ) -> Result<()> {
     match outcome {
         TuiOutcome::Aborted { failed, log } => {
@@ -349,7 +356,7 @@ fn finalize_cook_outcome(
                     }
                 }
             }
-            finalize_cook_results(&statuses, recipes, repo_dir, false)
+            finalize_cook_results(&statuses, recipes, repo_dir, nonstop)
         }
     }
 }
@@ -358,15 +365,15 @@ fn finalize_cook_results(
     statuses: &[(CookRecipe, RecipeStatus)],
     recipes: &Vec<CookRecipe>,
     repo_dir: &PathBuf,
-    publish_on_nonstop: bool,
+    nonstop: bool,
 ) -> Result<()> {
+    if nonstop {
+        return publish_packages(recipes, repo_dir);
+    }
     let had_failure = statuses
         .iter()
         .any(|(_, status)| !matches!(status, RecipeStatus::Cached | RecipeStatus::Done));
     if had_failure {
-        if publish_on_nonstop {
-            let _ = publish_packages(recipes, repo_dir);
-        }
         return Err(Error::from("Execution has failed".to_string()));
     }
     publish_packages(recipes, repo_dir)
@@ -448,7 +455,7 @@ fn repo_inner(config: &CliConfig, command: &CliCommand, recipe: &CookRecipe) -> 
             if let Err(err_ctx) = &result {
                 write_to_pty(&session.as_pty_out(), &format!("\n{err_ctx}"));
             }
-            session.finish();
+            let finish_res = session.finish();
             if !matches!(result, Ok(true)) {
                 let log_path =
                     log_path.join(format!("{}/{}.log", recipe.target, recipe.name.name()));
@@ -465,7 +472,9 @@ fn repo_inner(config: &CliConfig, command: &CliCommand, recipe: &CookRecipe) -> 
                 .send(StatusUpdate::CookThreadFinished)
                 .unwrap_or_default();
             let _ = th.join();
-            result?
+            let cached = result?;
+            finish_res?;
+            cached
         }
         CliCommand::Unfetch | CliCommand::Clean | CliCommand::CleanTarget => {
             handle_clean(recipe, config, command)?
