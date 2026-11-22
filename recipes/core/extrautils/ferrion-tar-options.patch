@@ -1,7 +1,18 @@
-diff --git a/src/bin/tar.rs b/src/bin/tar.rs
+diff -ruN '--exclude=.git' a/src/bin/tar.rs b/src/bin/tar.rs
 --- a/src/bin/tar.rs
 +++ b/src/bin/tar.rs
-@@ -13,34 +13,33 @@
+@@ -4,61 +4,223 @@
+ extern crate lzma;
+ extern crate tar;
+ 
++use std::ffi::OsStr;
+ use std::fs::{self, File};
+ use std::io::{copy, stdin, stdout, BufReader, Error, ErrorKind, Read, Result, Seek, Write};
+ use std::os::unix::fs::{symlink, OpenOptionsExt};
+-use std::path::{Path, PathBuf};
++use std::path::{Component, Path, PathBuf};
+ use std::str::FromStr;
+ use std::{env, process};
  
  use bzip2::read::BzDecoder;
  use filetime::FileTime;
@@ -19,9 +30,171 @@ diff --git a/src/bin/tar.rs b/src/bin/tar.rs
 -            } else {
 -                println!("{}", entry.path().display());
 -                ar.append_path(entry.path())?;
--            }
--        }
++const MAX_MEMBERS: usize = 4096;
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum OpKind {
++    Create,
++    Extract,
++    List,
++}
++
++enum Op {
++    Create {
++        inputs: Vec<(PathBuf, String)>,
++    },
++    Extract {
++        dir: PathBuf,
++        strip: usize,
++        members: Vec<String>,
++    },
++    List {
++        members: Vec<String>,
++    },
++}
++
++struct Cli {
++    op: Op,
++    archive: PathBuf,
++    gzip: bool,
++    verbose: bool,
++}
++
++struct Parser {
++    kind: Option<OpKind>,
++    archive: PathBuf,
++    gzip: bool,
++    verbose: bool,
++    directory: PathBuf,
++    strip: usize,
++    inputs: Vec<(PathBuf, String)>,
++}
++
++impl Parser {
++    fn new(origin: PathBuf) -> Self {
++        Self {
++            kind: None,
++            archive: PathBuf::from("-"),
++            gzip: false,
++            verbose: false,
++            directory: origin,
++            strip: 0,
++            inputs: Vec::new(),
++        }
++    }
++
++    fn set_kind(&mut self, kind: OpKind) -> Result<()> {
++        if self.kind.replace(kind).is_some() {
++            return Err(Error::new(
++                ErrorKind::InvalidInput,
++                "specify exactly one of c, x or t",
++            ));
++        }
++        Ok(())
++    }
++
++    fn push_input(&mut self, arg: String) -> Result<()> {
++        if self.inputs.len() >= MAX_MEMBERS {
++            return Err(Error::new(
++                ErrorKind::InvalidInput,
++                format!("too many operands (limit {MAX_MEMBERS})"),
++            ));
++        }
++        self.inputs.push((self.directory.clone(), arg));
++        Ok(())
++    }
++
++    fn finish(self) -> Result<Cli> {
++        let invalid = |message| Error::new(ErrorKind::InvalidInput, message);
++        let op = match self.kind {
++            None => return Err(invalid("specify one of -c, -x or -t")),
++            Some(OpKind::Create) => {
++                if self.inputs.is_empty() {
++                    return Err(invalid("no input specified"));
++                }
++                let _ = self.strip;
++                Op::Create {
++                    inputs: self.inputs,
++                }
++            }
++            Some(OpKind::Extract) => Op::Extract {
++                dir: self.directory,
++                strip: self.strip,
++                members: self.inputs.into_iter().map(|(_, name)| name).collect(),
++            },
++            Some(OpKind::List) => {
++                let _ = (self.directory, self.strip);
++                Op::List {
++                    members: self.inputs.into_iter().map(|(_, name)| name).collect(),
++                }
+             }
++        };
++        Ok(Cli {
++            op,
++            archive: self.archive,
++            gzip: self.gzip,
++            verbose: self.verbose,
++        })
++    }
++}
++
++fn normalized_components(path: &Path) -> Vec<&OsStr> {
++    path.components()
++        .filter_map(|component| match component {
++            Component::Normal(part) => Some(part),
++            Component::CurDir => None,
++            Component::RootDir => None,
++            Component::ParentDir => Some(OsStr::new("..")),
++            Component::Prefix(prefix) => Some(prefix.as_os_str()),
++        })
++        .collect()
++}
++
++fn member_matches(entry: &Path, member: &str) -> bool {
++    let target = normalized_components(Path::new(member));
++    if target.is_empty() {
++        return true;
++    }
++    let candidate = normalized_components(entry);
++    candidate.len() >= target.len() && candidate[..target.len()] == target[..]
++}
++
++fn match_members(entry: &Path, members: &[String], matched: &mut [bool]) -> bool {
++    assert_eq!(members.len(), matched.len());
++    if members.is_empty() {
++        return true;
++    }
++    let mut hit = false;
++    for (index, member) in members.iter().enumerate() {
++        if member_matches(entry, member) {
++            matched[index] = true;
++            hit = true;
+         }
+-    } else {
+-        println!("{}", input);
+-        ar.append_path(input)?;
+     }
++    hit
++}
+ 
++fn check_matched(members: &[String], matched: &[bool]) -> Result<()> {
++    assert_eq!(members.len(), matched.len());
++    for (member, found) in members.iter().zip(matched.iter()) {
++        if !*found {
++            return Err(Error::new(
++                ErrorKind::NotFound,
++                format!("{member}: Not found in archive"),
++            ));
++        }
++    }
+     Ok(())
+ }
+ 
+-fn create(input: &str, tar: &str) -> Result<()> {
+-    if tar == "-" {
+-        create_inner(input, &mut Builder::new(stdout()))
 +fn create_inner<T: Write>(inputs: &[(PathBuf, String)], ar: &mut Builder<T>, verbose: bool) -> Result<()> {
++    assert!(!inputs.is_empty());
 +    for (directory, input) in inputs {
 +        env::set_current_dir(directory)?;
 +        if verbose {
@@ -43,146 +216,131 @@ diff --git a/src/bin/tar.rs b/src/bin/tar.rs
 +        encoder.finish().into_result()?;
 +        Ok(())
      } else {
--        println!("{}", input);
--        ar.append_path(input)?;
--    }
--
--    Ok(())
--}
--
--fn create(input: &str, tar: &str) -> Result<()> {
--    if tar == "-" {
--        create_inner(input, &mut Builder::new(stdout()))
--    } else {
 -        create_inner(input, &mut Builder::new(File::create(tar)?))
 +        create_inner(inputs, &mut Builder::new(output), verbose)
      }
  }
  
-@@ -54,11 +53,11 @@
-     Ok(())
+-fn list_inner<T: Read>(ar: &mut Archive<T>) -> Result<()> {
++fn list_inner<T: Read>(ar: &mut Archive<T>, members: &[String]) -> Result<()> {
++    let mut matched = vec![false; members.len()];
+     for entry_result in ar.entries()? {
+         let entry = entry_result?;
+         let path = entry.path()?;
++        if !match_members(&path, members, &mut matched) {
++            continue;
++        }
+         println!("{}", path.display());
+     }
+ 
+-    Ok(())
++    check_matched(members, &matched)
  }
  
 -fn list(tar: &str) -> Result<()> {
 -    if tar == "-" {
 -        list_inner(&mut Archive::new(stdin()))
-+fn list<T: Read>(input: T, gzip: bool) -> Result<()> {
++fn list<T: Read>(input: T, gzip: bool, members: &[String]) -> Result<()> {
 +    if gzip {
-+        list_inner(&mut Archive::new(GzipDecoder::new(input)?))
++        list_inner(&mut Archive::new(GzipDecoder::new(input)?), members)
      } else {
 -        list_inner(&mut Archive::new(File::open(tar)?))
-+        list_inner(&mut Archive::new(input))
++        list_inner(&mut Archive::new(input), members)
      }
  }
  
-@@ -133,11 +132,18 @@
-     Ok(())
+@@ -71,13 +233,23 @@
+     symlink(target, link)
+ }
+ 
+-fn extract_inner<T: Read>(ar: &mut Archive<T>, verbose: bool, strip: usize) -> Result<()> {
++fn extract_inner<T: Read>(
++    ar: &mut Archive<T>,
++    verbose: bool,
++    strip: usize,
++    members: &[String],
++) -> Result<()> {
++    let mut matched = vec![false; members.len()];
+     for entry_result in ar.entries()? {
+         let mut entry = entry_result?;
+ 
++        let raw_path = entry.path()?.into_owned();
++        if !match_members(&raw_path, members, &mut matched) {
++            continue;
++        }
++
+         let path = {
+-            let path = entry.path()?;
+-            let mut components = path.components();
++            let mut components = raw_path.components();
+             for _ in 0..strip {
+                 components.next();
+             }
+@@ -126,18 +298,35 @@
+         }
+ 
+         if verbose {
+-            println!("{}", entry.path()?.display());
++            println!("{}", raw_path.display());
+         }
+     }
+ 
+-    Ok(())
++    check_matched(members, &matched)
  }
  
 -fn extract(tar: &Path, verbose: bool, strip: usize) -> Result<()> {
-+fn extract(tar: &Path, gzip: bool, verbose: bool, strip: usize) -> Result<()> {
++fn extract(tar: &Path, gzip: bool, verbose: bool, strip: usize, members: &[String]) -> Result<()> {
      if tar == Path::new("-") {
 -        extract_inner(&mut Archive::new(stdin()), verbose, strip)
 +        if gzip {
-+            extract_inner(&mut Archive::new(GzipDecoder::new(stdin())?), verbose, strip)
++            extract_inner(
++                &mut Archive::new(GzipDecoder::new(stdin())?),
++                verbose,
++                strip,
++                members,
++            )
 +        } else {
-+            extract_inner(&mut Archive::new(stdin()), verbose, strip)
++            extract_inner(&mut Archive::new(stdin()), verbose, strip, members)
 +        }
      } else {
          let mut file = BufReader::new(File::open(tar)?);
 +        if gzip {
-+            return extract_inner(&mut Archive::new(GzipDecoder::new(file)?), verbose, strip);
++            return extract_inner(
++                &mut Archive::new(GzipDecoder::new(file)?),
++                verbose,
++                strip,
++                members,
++            );
 +        }
          let mut magic = [0; 6];
          file.read_exact(&mut magic)?;
          file.rewind()?;
-@@ -166,86 +172,91 @@
+@@ -149,6 +338,7 @@
+                 ),
+                 verbose,
+                 strip,
++                members,
+             )
+         } else if magic[..2] == [0x1F, 0x8B] {
+             extract_inner(
+@@ -157,95 +347,100 @@
+                 ),
+                 verbose,
+                 strip,
++                members,
+             )
+         } else if &magic[..2] == b"BZ" {
+-            extract_inner(&mut Archive::new(BzDecoder::new(file)), verbose, strip)
++            extract_inner(&mut Archive::new(BzDecoder::new(file)), verbose, strip, members)
+         } else {
+-            extract_inner(&mut Archive::new(file), verbose, strip)
++            extract_inner(&mut Archive::new(file), verbose, strip, members)
+         }
      }
  }
  
-+fn run() -> Result<()> {
-+    let invalid = |message| Error::new(ErrorKind::InvalidInput, message);
-+    let origin = env::current_dir()?;
-+    let mut directory = origin.clone();
-+    let mut args = env::args().skip(1).peekable();
-+    let mut operation = None;
-+    let mut archive = PathBuf::from("-");
-+    let mut gzip = false;
-+    let mut verbose = false;
-+    let mut strip = 0;
-+    let mut inputs = Vec::new();
-+    let mut first = true;
-+    let mut operands = false;
-+    while let Some(arg) = args.next() {
-+        if !operands && arg == "--" {
-+            operands = true;
-+        } else if !operands && (arg == "-C" || arg == "--directory") {
-+            directory.push(args.next().ok_or_else(|| invalid("-C requires a directory"))?);
-+        } else if !operands && arg.starts_with("--directory=") {
-+            directory.push(&arg[12..]);
-+        } else if !operands && arg.starts_with("--strip-components=") {
-+            strip = usize::from_str(&arg[19..]).map_err(|_| invalid("invalid strip count"))?;
-+        } else if !operands && arg == "--strip-components" {
-+            strip = args.next().ok_or_else(|| invalid("missing strip count"))?
-+                .parse().map_err(|_| invalid("invalid strip count"))?;
-+        } else if !operands && (arg.starts_with('-') || first) {
-+            let flags = arg.trim_start_matches('-');
-+            let mut flags = flags.chars().peekable();
-+            while let Some(flag) = flags.next() {
-+                match flag {
-+                    'c' | 'x' | 't' => {
-+                        if operation.replace(flag).is_some() {
-+                            return Err(invalid("specify exactly one of c, x or t"));
-+                        }
-+                    }
-+                    'z' => gzip = true,
-+                    'v' => verbose = true,
-+                    'f' => {
-+                        let name: String = if flags.peek().is_some() && arg.starts_with('-') {
-+                            flags.by_ref().collect()
-+                        } else {
-+                            args.next().ok_or_else(|| invalid("-f requires an archive"))?
-+                        };
-+                        archive = if name == "-" { PathBuf::from("-") } else { origin.join(name) };
-+                    }
-+                    _ => return Err(invalid("unknown option; use -c, -x, -t, -z, -v, -f or -C")),
-+                }
-+            }
-+        } else {
-+            inputs.push((directory.clone(), arg));
-+        }
-+        first = false;
-+    }
-+    match operation {
-+        Some('c') => {
-+            if inputs.is_empty() {
-+                return Err(invalid("no input specified"));
-+            }
-+            if archive == Path::new("-") {
-+                create(stdout(), &inputs, gzip, verbose)
-+            } else {
-+                create(File::create(archive)?, &inputs, gzip, verbose)
-+            }
-+        }
-+        Some('x') => {
-+            if !inputs.is_empty() {
-+                return Err(invalid("selective extraction is not supported"));
-+            }
-+            env::set_current_dir(directory)?;
-+            extract(&archive, gzip, verbose, strip)
-+        }
-+        Some('t') => {
-+            if archive == Path::new("-") {
-+                list(stdin(), gzip)
-+            } else {
-+                list(File::open(archive)?, gzip)
-+            }
-+        }
-+        _ => Err(invalid("specify one of -c, -x or -t")),
-+    }
-+}
-+
- fn main() {
+-fn main() {
 -    let mut args = env::args().skip(1);
 -    if let Some(op) = args.next() {
 -        match op.as_str() {
@@ -191,12 +349,58 @@ diff --git a/src/bin/tar.rs b/src/bin/tar.rs
 -                    if let Err(err) = create(&input, "-") {
 -                        eprintln!("tar: create: failed: {}", err);
 -                        process::exit(1);
--                    }
++fn parse_args() -> Result<Cli> {
++    let invalid = |message| Error::new(ErrorKind::InvalidInput, message);
++    let origin = env::current_dir()?;
++    let mut parser = Parser::new(origin.clone());
++    let mut args = env::args().skip(1).peekable();
++    let mut first = true;
++    let mut operands = false;
++    while let Some(arg) = args.next() {
++        if !operands && arg == "--" {
++            operands = true;
++        } else if !operands && (arg == "-C" || arg == "--directory") {
++            parser
++                .directory
++                .push(args.next().ok_or_else(|| invalid("-C requires a directory"))?);
++        } else if !operands && arg.starts_with("--directory=") {
++            parser.directory.push(&arg[12..]);
++        } else if !operands && arg.starts_with("--strip-components=") {
++            parser.strip = usize::from_str(&arg[19..]).map_err(|_| invalid("invalid strip count"))?;
++        } else if !operands && arg == "--strip-components" {
++            parser.strip = args
++                .next()
++                .ok_or_else(|| invalid("missing strip count"))?
++                .parse()
++                .map_err(|_| invalid("invalid strip count"))?;
++        } else if !operands && (arg.starts_with('-') || first) {
++            let flags = arg.trim_start_matches('-');
++            let mut flags = flags.chars().peekable();
++            while let Some(flag) = flags.next() {
++                match flag {
++                    'c' => parser.set_kind(OpKind::Create)?,
++                    'x' => parser.set_kind(OpKind::Extract)?,
++                    't' => parser.set_kind(OpKind::List)?,
++                    'z' => parser.gzip = true,
++                    'v' => parser.verbose = true,
++                    'f' => {
++                        let name: String = if flags.peek().is_some() && arg.starts_with('-') {
++                            flags.by_ref().collect()
++                        } else {
++                            args.next().ok_or_else(|| invalid("-f requires an archive"))?
++                        };
++                        parser.archive = if name == "-" {
++                            PathBuf::from("-")
++                        } else {
++                            origin.join(name)
++                        };
+                     }
 -                } else {
 -                    eprintln!("tar: create: no input specified: {}", op);
 -                    process::exit(1);
--                }
--            }
++                    _ => return Err(invalid("unknown option; use -c, -x, -t, -z, -v, -f or -C")),
+                 }
+             }
 -            "cf" => {
 -                if let Some(tar) = args.next() {
 -                    if let Some(input) = args.next() {
@@ -246,24 +450,54 @@ diff --git a/src/bin/tar.rs b/src/bin/tar.rs
 -                    }
 -                }
 -                let tar = tar.unwrap_or_else(|| PathBuf::from("-"));
--
++        } else {
++            parser.push_input(arg)?;
++        }
++        first = false;
++    }
++    parser.finish()
++}
+ 
 -                let verbose = op.contains('v');
 -                if let Err(err) = extract(&tar, verbose, strip) {
 -                    eprintln!("tar: extract: failed: {}", err);
 -                    process::exit(1);
 -                }
--            }
++fn run() -> Result<()> {
++    let cli = parse_args()?;
++    match cli.op {
++        Op::Create { inputs } => {
++            if cli.archive == Path::new("-") {
++                create(stdout(), &inputs, cli.gzip, cli.verbose)
++            } else {
++                create(File::create(cli.archive)?, &inputs, cli.gzip, cli.verbose)
+             }
 -            _ => {
 -                eprintln!("tar: {}: unknown operation\n", op);
 -                eprintln!("tar: need to specify c[f] (create), t[f] (list), or x[f] (extract)");
 -                process::exit(1);
--            }
--        }
++        }
++        Op::Extract { dir, strip, members } => {
++            env::set_current_dir(dir)?;
++            extract(&cli.archive, cli.gzip, cli.verbose, strip, &members)
++        }
++        Op::List { members } => {
++            if cli.archive == Path::new("-") {
++                list(stdin(), cli.gzip, &members)
++            } else {
++                list(File::open(cli.archive)?, cli.gzip, &members)
+             }
+         }
 -    } else {
 -        eprintln!("tar: no operation");
 -        eprintln!("tar: need to specify cf (create), tf (list), or xf (extract)");
+-        process::exit(1);
++    }
++}
++
++fn main() {
 +    if let Err(err) = run() {
 +        eprintln!("tar: {}", err);
-         process::exit(1);
++        process::exit(2);
      }
  }
