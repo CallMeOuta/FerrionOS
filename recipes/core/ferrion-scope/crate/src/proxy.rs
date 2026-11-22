@@ -178,18 +178,9 @@ fn lstat_inode(real: &str) -> Result<usize> {
 
 enum Handle {
     Control,
-    Ctl {
-        session: u32,
-        spec: Vec<u8>,
-        read: usize,
-    },
-    Root {
-        session: u32,
-    },
-    External {
-        session: u32,
-        path: String,
-    },
+    Ctl { session: u32, read: usize },
+    Root { session: u32 },
+    External { session: u32, path: String },
     Node(Node),
 }
 
@@ -205,16 +196,56 @@ impl Handle {
     }
 }
 
+enum Phase {
+    Configuring {
+        spec: Vec<u8>,
+    },
+    Live {
+        scope: Scope,
+        overlays: Vec<Option<Overlay>>,
+    },
+    Ended {
+        report: Vec<u8>,
+    },
+}
+
 struct Session {
-    scope: Option<Scope>,
-    overlays: Vec<Option<Overlay>>,
+    phase: Phase,
     handles: usize,
-    ended: bool,
     links: BTreeSet<String>,
     links_dropped: usize,
 }
 
 impl Session {
+    fn new() -> Session {
+        Session {
+            phase: Phase::Configuring { spec: Vec::new() },
+            handles: 0,
+            links: BTreeSet::new(),
+            links_dropped: 0,
+        }
+    }
+
+    fn live(&self) -> Result<(&Scope, &[Option<Overlay>])> {
+        match &self.phase {
+            Phase::Live { scope, overlays } => Ok((scope, overlays)),
+            Phase::Configuring { .. } | Phase::Ended { .. } => Err(err(EBADF)),
+        }
+    }
+
+    fn live_mut(&mut self) -> Result<(&Scope, &mut [Option<Overlay>])> {
+        match &mut self.phase {
+            Phase::Live { scope, overlays } => Ok((scope, overlays)),
+            Phase::Configuring { .. } | Phase::Ended { .. } => Err(err(EBADF)),
+        }
+    }
+
+    fn report_bytes(&self) -> Vec<u8> {
+        match &self.phase {
+            Phase::Ended { report } => report.clone(),
+            Phase::Configuring { .. } | Phase::Live { .. } => self.links_report(),
+        }
+    }
     fn record_link(&mut self, real: String) {
         if self.links.len() >= MAX_RECORDED_LINKS && !self.links.contains(&real) {
             self.links_dropped += 1;
@@ -546,11 +577,15 @@ impl Proxy {
         Ok(id)
     }
 
-    fn live(&self, session: u32) -> Result<&Session> {
-        match self.sessions.get(&session) {
-            Some(s) if !s.ended && s.scope.is_some() => Ok(s),
-            _ => Err(err(EBADF)),
-        }
+    fn live(&self, session: u32) -> Result<(&Scope, &[Option<Overlay>])> {
+        self.sessions.get(&session).ok_or(err(EBADF))?.live()
+    }
+
+    fn live_mut(&mut self, session: u32) -> Result<(&Scope, &mut [Option<Overlay>])> {
+        self.sessions
+            .get_mut(&session)
+            .ok_or(err(EBADF))?
+            .live_mut()
     }
 
     fn start_of(&self, dirfd: usize) -> Result<(u32, String)> {
@@ -562,11 +597,10 @@ impl Proxy {
     }
 
     fn walk(&mut self, session: u32, start: &str, path: &str, links: &mut usize) -> Result<Walked> {
-        let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-        let scope = s.scope.as_ref().ok_or(err(EBADF))?;
+        let (scope, overlays) = self.sessions.get(&session).ok_or(err(EBADF))?.live()?;
         let mut view = RealView {
             dirs: &mut self.dirs,
-            overlays: &s.overlays,
+            overlays,
         };
         scope
             .resolve(&mut view, start, path, false, links)
@@ -574,7 +608,13 @@ impl Proxy {
     }
 
     fn scope(&self, session: u32) -> Result<&Scope> {
-        self.live(session)?.scope.as_ref().ok_or(err(EBADF))
+        Ok(self.live(session)?.0)
+    }
+
+    pub fn assert_session_handles(&self) {
+        for s in self.sessions.values() {
+            assert!(s.handles >= 1);
+        }
     }
 
     fn open_in(
@@ -766,12 +806,11 @@ impl Proxy {
         session: u32,
         grant: usize,
     ) -> Result<(&mut Overlay, String, String)> {
-        let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
-        let scope = s.scope.as_ref().ok_or(err(EBADF))?;
+        let (scope, overlays) = self.live_mut(session)?;
         let g = &scope.grants[grant];
         let layer = g.layer.clone().ok_or(err(EINVAL))?;
         let lower = g.real.clone();
-        let ov = s.overlays[grant].as_mut().ok_or(err(EINVAL))?;
+        let ov = overlays[grant].as_mut().ok_or(err(EINVAL))?;
         Ok((ov, lower, layer))
     }
 
@@ -867,16 +906,16 @@ impl Proxy {
         follow: bool,
     ) -> Result<Opened> {
         let located = {
-            let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-            locate(s.scope.as_ref().ok_or(err(EBADF))?, &s.overlays, grant, rel)
+            let (scope, overlays) = self.live(session)?;
+            locate(scope, overlays, grant, rel)
         };
         let wants_write = accmode_writes(flags) || flags & O_TRUNC != 0;
         match located {
             Located::Real(real, true) => {
                 let origin_inode = self
-                    .sessions
-                    .get(&session)
-                    .and_then(|s| s.overlays[grant].as_ref())
+                    .live(session)
+                    .ok()
+                    .and_then(|(_, overlays)| overlays[grant].as_ref())
                     .and_then(|ov| ov.origin_inode(rel));
                 let opened = self.open_real(
                     session,
@@ -975,10 +1014,9 @@ impl Proxy {
         grant: usize,
         rel: &str,
     ) -> Result<Vec<(String, DirentKind, u64)>> {
-        let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-        let scope = s.scope.as_ref().ok_or(err(EBADF))?;
+        let (scope, overlays) = self.live(session)?;
         let g = &scope.grants[grant];
-        let ov = s.overlays[grant].as_ref().ok_or(err(EINVAL))?;
+        let ov = overlays[grant].as_ref().ok_or(err(EINVAL))?;
         let mut names = BTreeMap::new();
         if ov.lower_listed(rel) {
             let lower = join(&g.real, rel);
@@ -1139,13 +1177,8 @@ impl Proxy {
         }
         let (grant, rel) = self.parent_rel_of(session, &vpath)?;
         let located = {
-            let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-            locate(
-                s.scope.as_ref().ok_or(err(EBADF))?,
-                &s.overlays,
-                grant,
-                &rel,
-            )
+            let (scope, overlays) = self.live(session)?;
+            locate(scope, overlays, grant, &rel)
         };
         let Located::Real(real, upper) = located else {
             return Err(err(ESTALE));
@@ -1184,13 +1217,8 @@ impl Proxy {
             return Ok(());
         }
         let located = {
-            let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-            locate(
-                s.scope.as_ref().ok_or(err(EBADF))?,
-                &s.overlays,
-                grant,
-                &rel,
-            )
+            let (scope, overlays) = self.live(session)?;
+            locate(scope, overlays, grant, &rel)
         };
         let Located::Real(real, upper) = located else {
             return Err(err(ENOENT));
@@ -1274,13 +1302,8 @@ impl Proxy {
             return Ok(());
         }
         let located = {
-            let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-            locate(
-                s.scope.as_ref().ok_or(err(EBADF))?,
-                &s.overlays,
-                grant,
-                &old_rel,
-            )
+            let (scope, overlays) = self.live(session)?;
+            locate(scope, overlays, grant, &old_rel)
         };
         let Located::Real(real, old_upper) = located else {
             return Err(err(ENOENT));
@@ -1290,12 +1313,11 @@ impl Proxy {
         }
         let src_kind = lkind(&real)?;
         let (lower_had_old, new_located, new_lower_dir) = {
-            let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-            let scope = s.scope.as_ref().ok_or(err(EBADF))?;
-            let ov = s.overlays[grant].as_ref().ok_or(err(EINVAL))?;
+            let (scope, overlays) = self.live(session)?;
+            let ov = overlays[grant].as_ref().ok_or(err(EINVAL))?;
             let lower = &scope.grants[grant].real;
             let lower_had_old = !ov.lower_hidden(&old_rel) && exists(&join(lower, &old_rel));
-            let new_located = locate(scope, &s.overlays, grant, &new_rel);
+            let new_located = locate(scope, overlays, grant, &new_rel);
             let new_lower = join(lower, &new_rel);
             let new_lower_dir =
                 !ov.lower_hidden(&new_rel) && lkind(&new_lower).is_ok_and(|k| k == Kind::Dir);
@@ -1356,13 +1378,10 @@ impl Proxy {
     }
 
     fn exists_in_view(&mut self, session: u32, grant: usize, rel: &str) -> bool {
-        let Ok(s) = self.live(session) else {
+        let Ok((scope, overlays)) = self.live(session) else {
             return false;
         };
-        let Some(scope) = s.scope.as_ref() else {
-            return false;
-        };
-        match locate(scope, &s.overlays, grant, rel) {
+        match locate(scope, overlays, grant, rel) {
             Located::Real(real, _) => exists(&real),
             Located::Missing => false,
         }
@@ -1432,14 +1451,20 @@ impl Proxy {
     }
 
     fn configure(&mut self, ctl: usize) -> Result<OpenResult> {
-        let (session, spec) = match self.handles.get_mut(&ctl) {
-            Some(Handle::Ctl { session, spec, .. }) => (*session, std::mem::take(spec)),
+        let session = match self.handles.get(&ctl) {
+            Some(Handle::Ctl { session, .. }) => *session,
             _ => return Err(err(EBADF)),
         };
-        let s = self.sessions.get(&session).ok_or(err(EBADF))?;
-        if s.scope.is_some() || s.ended {
-            return Err(err(EBUSY));
+        if self.handles.len() >= MAX_HANDLES {
+            return Err(err(EMFILE));
         }
+        let spec = {
+            let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
+            match &mut s.phase {
+                Phase::Configuring { spec } => std::mem::take(spec),
+                Phase::Live { .. } | Phase::Ended { .. } => return Err(err(EBUSY)),
+            }
+        };
         let scope = Scope::parse(&spec).map_err(|reason| {
             eprintln!("ferrion-scope-proxy: {reason}");
             err(EINVAL)
@@ -1462,10 +1487,9 @@ impl Proxy {
                 None => None,
             });
         }
-        let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
-        s.scope = Some(scope);
-        s.overlays = overlays;
         let id = self.insert(Handle::Root { session })?;
+        let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
+        s.phase = Phase::Live { scope, overlays };
         Ok(OpenResult::ThisScheme {
             number: id,
             flags: NewFdFlags::empty(),
@@ -1476,7 +1500,11 @@ impl Proxy {
         let Some(s) = self.sessions.get_mut(&session) else {
             return;
         };
-        s.ended = true;
+        if !matches!(s.phase, Phase::Ended { .. }) {
+            let report = s.links_report();
+            s.links.clear();
+            s.phase = Phase::Ended { report };
+        }
         let ids: Vec<usize> = self
             .handles
             .iter()
@@ -1516,6 +1544,7 @@ impl Proxy {
         if let Some(session) = handle.session()
             && let Some(s) = self.sessions.get_mut(&session)
         {
+            assert!(s.handles > 0);
             s.handles -= 1;
             if s.handles == 0 {
                 self.sessions.remove(&session);
@@ -1569,27 +1598,13 @@ impl SchemeSync for Proxy {
                 if ctx.uid != self.uid || path != "session" {
                     return Err(err(syscall::error::EACCES));
                 }
-                if self.sessions.len() >= MAX_SESSIONS {
+                if self.sessions.len() >= MAX_SESSIONS || self.handles.len() >= MAX_HANDLES {
                     return Err(err(EMFILE));
                 }
                 let session = self.next_session;
                 self.next_session += 1;
-                self.sessions.insert(
-                    session,
-                    Session {
-                        scope: None,
-                        overlays: Vec::new(),
-                        handles: 0,
-                        ended: false,
-                        links: BTreeSet::new(),
-                        links_dropped: 0,
-                    },
-                );
-                let id = self.insert(Handle::Ctl {
-                    session,
-                    spec: Vec::new(),
-                    read: 0,
-                })?;
+                self.sessions.insert(session, Session::new());
+                let id = self.insert(Handle::Ctl { session, read: 0 })?;
                 Ok(OpenResult::ThisScheme {
                     number: id,
                     flags: NewFdFlags::empty(),
@@ -1637,8 +1652,8 @@ impl SchemeSync for Proxy {
         _fcntl_flags: u32,
         _ctx: &CallerCtx,
     ) -> Result<usize> {
-        if let Some(Handle::Ctl { session, read, .. }) = self.handles.get_mut(&id) {
-            let report = self.sessions.get(session).ok_or(err(EBADF))?.links_report();
+        if let Some(Handle::Ctl { session, read }) = self.handles.get_mut(&id) {
+            let report = self.sessions.get(session).ok_or(err(EBADF))?.report_bytes();
             let start = (*read).min(report.len());
             let n = (report.len() - start).min(buf.len());
             buf[..n].copy_from_slice(&report[start..start + n]);
@@ -1669,29 +1684,32 @@ impl SchemeSync for Proxy {
         _fcntl_flags: u32,
         _ctx: &CallerCtx,
     ) -> Result<usize> {
-        let ctl = match self.handles.get(&id) {
-            Some(Handle::Ctl { session, .. }) => Some(*session),
-            _ => None,
-        };
-        if let Some(session) = ctl
-            && self
-                .sessions
-                .get(&session)
-                .is_some_and(|s| s.scope.is_some())
-        {
-            if buf != END_SESSION {
-                return Err(err(EBUSY));
-            }
-            self.end_session(session);
-            return Ok(buf.len());
-        }
-        match self.handles.get_mut(&id) {
-            Some(Handle::Ctl { spec, .. }) => {
-                if spec.len() + buf.len() > crate::scope::MAX_SPEC {
-                    return Err(err(EINVAL));
+        match self.handles.get(&id) {
+            Some(Handle::Ctl { session, .. }) => {
+                let session = *session;
+                let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
+                match &mut s.phase {
+                    Phase::Configuring { spec } => {
+                        if spec.len() + buf.len() > crate::scope::MAX_SPEC {
+                            return Err(err(EINVAL));
+                        }
+                        spec.extend_from_slice(buf);
+                        return Ok(buf.len());
+                    }
+                    Phase::Live { .. } => {
+                        if buf != END_SESSION {
+                            return Err(err(EBUSY));
+                        }
+                        self.end_session(session);
+                        return Ok(buf.len());
+                    }
+                    Phase::Ended { .. } => {
+                        if buf != END_SESSION {
+                            return Err(err(EBUSY));
+                        }
+                        return Ok(buf.len());
+                    }
                 }
-                spec.extend_from_slice(buf);
-                return Ok(buf.len());
             }
             Some(Handle::Node(_)) => {}
             _ => return Err(err(EBADF)),
@@ -2018,6 +2036,7 @@ pub fn serve(socket: Socket, uid: u32) -> Result<()> {
         match request.kind() {
             RequestKind::Call(call) => {
                 let response = call.handle_sync(&mut proxy, &mut state);
+                proxy.assert_session_handles();
                 socket.write_response(response, SignalBehavior::Restart)?;
             }
             RequestKind::OnClose { id } => {
@@ -2025,11 +2044,13 @@ pub fn serve(socket: Socket, uid: u32) -> Result<()> {
                     state.on_detach(id, inode, usize::MAX);
                 }
                 proxy.close(id);
+                proxy.assert_session_handles();
             }
             RequestKind::OnDetach { id, pid } => {
                 if let Some(inode) = proxy.inode_of(id) {
                     state.on_detach(id, inode, pid);
                 }
+                proxy.assert_session_handles();
             }
             RequestKind::SendFd(request) => {
                 socket
