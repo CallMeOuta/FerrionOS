@@ -5,7 +5,7 @@ include mk/depends.mk
 all: $(BUILD)/harddrive.img
 
 live:
-	-$(FUMOUNT) $(BUILD)/filesystem/ || true
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	-$(FUMOUNT) /tmp/redox_installer/ || true
 	rm -f $(BUILD)/redox-live.iso
 	$(MAKE) $(BUILD)/redox-live.iso
@@ -14,13 +14,13 @@ popsicle: $(BUILD)/redox-live.iso
 	popsicle-gtk $(BUILD)/redox-live.iso
 
 image:
-	-$(FUMOUNT) $(BUILD)/filesystem/ || true
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	-$(FUMOUNT) /tmp/redox_installer/ || true
 	rm -f $(BUILD)/harddrive.img $(BUILD)/redox-live.iso
 	$(MAKE) all
 
 rebuild:
-	-$(FUMOUNT) $(BUILD)/filesystem/ || true
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	-$(FUMOUNT) /tmp/redox_installer/ || true
 	rm -rf $(BUILD)/repo.tag $(BUILD)/harddrive.img $(BUILD)/redox-live.iso
 	$(MAKE) all
@@ -30,6 +30,7 @@ NOT_ON_PODMAN?=0
 clean:
 ifeq ($(PODMAN_BUILD),1)
 ifneq ("$(wildcard $(CONTAINER_TAG))","")
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	$(PODMAN_RUN) make $@
 else
 	$(info will not run cookbook clean as container is not built)
@@ -38,9 +39,9 @@ endif
 else
 ifneq ($(NOT_ON_PODMAN),1)
 	$(MAKE) repo_clean
-	-$(FUMOUNT) $(BUILD)/filesystem/ || true
-	-$(FUMOUNT) /tmp/redox_installer/ || true
 endif
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
+	-$(FUMOUNT) /tmp/redox_installer/ || true
 	rm -rf repo
 	rm -rf $(BUILD) $(PREFIX)
 	$(MAKE) fstools_clean

@@ -9,7 +9,7 @@ ifeq ($(VERIFIED_BOOT)$(FSTOOLS_NO_MOUNT),11)
 	@echo "VERIFIED_BOOT=1 signs the image through a FUSE mount, which FSTOOLS_NO_MOUNT=1 leaves out; build with VERIFIED_BOOT=0 for an image whose bootloader verifies nothing" >&2 && exit 1
 endif
 	mkdir -p $(BUILD)
-	-$(FUMOUNT) $(MOUNT_DIR) || true
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	-$(FUMOUNT) /tmp/redox_installer || true
 	rm -rf $@  $@.partial $(MOUNT_DIR)
 	FILESYSTEM_SIZE=$(FILESYSTEM_SIZE) && \
@@ -30,6 +30,7 @@ verified-boot-sign: $(FSTOOLS) FORCE
 ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
+	scripts/image-mount.sh require-unmounted "$(MOUNT_DIR)" "verified-boot-sign"
 	$(VERIFIED_BOOT_SIGN) $(BUILD)/harddrive.img
 endif
 
@@ -55,7 +56,7 @@ ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
 	mkdir -p $(BUILD)
-	-$(FUMOUNT) $(MOUNT_DIR) || true
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	rm -rf $@  $@.partial $(MOUNT_DIR)
 	-$(FUMOUNT) /tmp/redox_installer || true
 	FILESYSTEM_SIZE=$(FILESYSTEM_SIZE) && \
@@ -64,14 +65,9 @@ else
 	fi && \
 	truncate -s "$$FILESYSTEM_SIZE"m $@.partial
 	$(REDOXFS_MKFS) $(REDOXFS_MKFS_FLAGS) $@.partial
-	mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) --flush-on-unmount $@.partial $(MOUNT_DIR)
-	sleep 1
-	pgrep redoxfs
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh mount "$(REDOXFS)" "$@.partial" "$(MOUNT_DIR)"
 	umask 022 && $(INSTALLER) $(INSTALLER_OPTS) -c $(FILESYSTEM_CONFIG) $(MOUNT_DIR)
-	sync
-	-$(FUMOUNT) $(MOUNT_DIR) || true
-	rm -rf $(MOUNT_DIR)
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount "$(MOUNT_DIR)"
 	mv $@.partial $@
 endif
 
@@ -79,43 +75,27 @@ mount: $(FSTOOLS) FORCE
 ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
-	@mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) --flush-on-unmount $(BUILD)/harddrive.img $(MOUNT_DIR)
-	@sleep 2
-	@echo "\033[1;36;49mharddrive.img mounted ($$(pgrep redoxfs))\033[0m"
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh mount "$(REDOXFS)" "$(BUILD)/harddrive.img" "$(MOUNT_DIR)"
 endif
 
 mount_extra: $(FSTOOLS) FORCE
 ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
-	@mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) --flush-on-unmount $(BUILD)/extra.img $(MOUNT_DIR)
-	@sleep 2
-	@echo "\033[1;36;49mextra.img mounted ($$(pgrep redoxfs))\033[0m"
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh mount "$(REDOXFS)" "$(BUILD)/extra.img" "$(MOUNT_DIR)"
 endif
 
 mount_live: $(FSTOOLS) FORCE
 ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
-	@mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) --flush-on-unmount $(BUILD)/redox-live.iso $(MOUNT_DIR)
-	@sleep 2
-	@echo "\033[1;36;49mredox-live.iso mounted ($$(pgrep redoxfs))\033[0m"
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh mount "$(REDOXFS)" "$(BUILD)/redox-live.iso" "$(MOUNT_DIR)"
 endif
 
 unmount: FORCE
 ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
-	@sync
-ifneq ($(wildcard $(MOUNT_DIR)),)
-	$(FUMOUNT) $(MOUNT_DIR)
-	@rm -rf $(MOUNT_DIR)
-	@echo "\033[1;36;49mFilesystem unmounted\033[0m"
-else
-	@echo "\033[1;36;49mDisk is not mounted\033[0m"
-endif
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount "$(MOUNT_DIR)"
 	@-$(FUMOUNT) /tmp/redox_installer 2>/dev/null || true
 endif

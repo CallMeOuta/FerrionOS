@@ -121,33 +121,20 @@ else
 	$(REPO_BIN) cook-list $(foreach f,$(subst $(comma), ,$*),$(f)) $(COOKBOOK_OPTS)
 endif
 
-MOUNTED_TAG=$(MOUNT_DIR)~
-
 # Push compiled package into existing image
 # DO NOT RUN THIS WHILE QEMU ALIVE, THE DISK MIGHT CORRUPT IN DOING SO
-p.%: $(FSTOOLS_TAG) FORCE
+p.%: $(FSTOOLS_TAG) $(if $(filter 1,$(ALLOW_FSTOOLS)),$(FSTOOLS)) FORCE
 ifeq ($(ALLOW_FSTOOLS),1)
-	@rm -f $(MOUNTED_TAG)
-	@if [ ! -d "$(MOUNT_DIR)" ]; then \
-		$(MAKE) mount; \
-		touch $(MOUNTED_TAG); \
-	fi
+ifeq ($(PODMAN_BUILD),1)
+	FUMOUNT='$(FUMOUNT)' IMAGE_MOUNT_SIGN='$(VERIFIED_BOOT)' IMAGE_MOUNT_MAKE='$(MAKE)' scripts/image-mount.sh with-mount "$(REDOXFS)" "$(BUILD)/harddrive.img" "$(MOUNT_DIR)" -- $(PODMAN_RUN) make $@ ALLOW_FSTOOLS=$(FSTOOLS_IN_PODMAN)
+else
+	FUMOUNT='$(FUMOUNT)' IMAGE_MOUNT_SIGN='$(VERIFIED_BOOT)' IMAGE_MOUNT_MAKE='$(MAKE)' scripts/image-mount.sh with-mount "$(REDOXFS)" "$(BUILD)/harddrive.img" "$(MOUNT_DIR)" -- $(REPO_BIN) push $(foreach f,$(subst $(comma), ,$*),$(f)) "--sysroot=$(MOUNT_DIR)" $(COOKBOOK_OPTS)
 endif
+else
 ifeq ($(PODMAN_BUILD),1)
 	$(PODMAN_RUN) make $@ ALLOW_FSTOOLS=$(FSTOOLS_IN_PODMAN)
 else
 	$(REPO_BIN) push $(foreach f,$(subst $(comma), ,$*),$(f)) "--sysroot=$(MOUNT_DIR)" $(COOKBOOK_OPTS)
-endif
-ifeq ($(ALLOW_FSTOOLS),1)
-	@if [ -f $(MOUNTED_TAG) ]; then \
-		$(MAKE) unmount && rm -f $(MOUNTED_TAG); \
-	else echo "\033[0;33;49mNot unmounting by ourself, don't forget to do it\033[0m"; \
-	fi
-ifeq ($(VERIFIED_BOOT),1)
-	@if [ -d "$(MOUNT_DIR)" ]; then \
-		echo "\033[0;33;49mVerified boot: run make verified-boot-sign after unmounting, or the image refuses a pushed kernel or initfs\033[0m"; \
-	else $(MAKE) verified-boot-sign; \
-	fi
 endif
 endif
 
@@ -160,29 +147,18 @@ else
 endif
 
 # Push all recipes specified by the filesystem config
-push: $(REPO_TAG) $(FSTOOLS_TAG) FORCE
+push: $(REPO_TAG) $(FSTOOLS_TAG) $(if $(filter 1,$(ALLOW_FSTOOLS)),$(FSTOOLS)) FORCE
 ifeq ($(ALLOW_FSTOOLS),1)
-	@rm -f $(MOUNTED_TAG)
-	@if [ ! -d "$(MOUNT_DIR)" ]; then \
-		$(MAKE) mount; \
-		touch $(MOUNTED_TAG); \
-	fi
+ifeq ($(PODMAN_BUILD),1)
+	FUMOUNT='$(FUMOUNT)' IMAGE_MOUNT_SIGN='$(VERIFIED_BOOT)' IMAGE_MOUNT_MAKE='$(MAKE)' scripts/image-mount.sh with-mount "$(REDOXFS)" "$(BUILD)/harddrive.img" "$(MOUNT_DIR)" -- $(PODMAN_RUN) make $@ ALLOW_FSTOOLS=$(FSTOOLS_IN_PODMAN)
+else
+	FUMOUNT='$(FUMOUNT)' IMAGE_MOUNT_SIGN='$(VERIFIED_BOOT)' IMAGE_MOUNT_MAKE='$(MAKE)' scripts/image-mount.sh with-mount "$(REDOXFS)" "$(BUILD)/harddrive.img" "$(MOUNT_DIR)" -- $(REPO_BIN) push $(COOKBOOK_OPTS) --with-package-deps "--sysroot=$(MOUNT_DIR)"
 endif
+else
 ifeq ($(PODMAN_BUILD),1)
 	$(PODMAN_RUN) make $@ ALLOW_FSTOOLS=$(FSTOOLS_IN_PODMAN)
 else
 	$(REPO_BIN) push $(COOKBOOK_OPTS) --with-package-deps "--sysroot=$(MOUNT_DIR)"
-endif
-ifeq ($(ALLOW_FSTOOLS),1)
-	@if [ -f $(MOUNTED_TAG) ]; then \
-		$(MAKE) unmount && rm -f $(MOUNTED_TAG); \
-	else echo "\033[1;33;49mNot unmounting by ourself, don't forget to do it\033[0m"; \
-	fi
-ifeq ($(VERIFIED_BOOT),1)
-	@if [ -d "$(MOUNT_DIR)" ]; then \
-		echo "\033[1;33;49mVerified boot: run make verified-boot-sign after unmounting, or the image refuses a pushed kernel or initfs\033[0m"; \
-	else $(MAKE) verified-boot-sign; \
-	fi
 endif
 endif
 

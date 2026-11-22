@@ -112,10 +112,7 @@ ch-deps: $(DISK) $(EXTRA_DISK) $(CH_DOWNLOADS) $(VIRTIOFS_DEPS)
 ch-fetch: ch-check $(CH_DOWNLOADS)
 
 ch: ch-check ch-deps
-ifneq ($(wildcard $(MOUNT_DIR)),)
-	@echo "Disk is mounted. Unmounting the disk..."
-	$(MAKE) unmount
-endif
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	@if $(CH_REMOTE) --api-socket "$(CH_API_SOCK)" ping >/dev/null 2>&1; then \
 		echo "ch: a VM is already running on $(CH_API_SOCK); stop it with make ch-shutdown" >&2; \
 		exit 1; \

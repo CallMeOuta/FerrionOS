@@ -401,10 +401,5 @@ qemu: export VK_DRIVER_FILES:=$(QEMU_VK_DRIVER_FILES)
 endif
 
 qemu: qemu-deps
-ifeq ($(wildcard $(MOUNT_DIR)),)
+	FUMOUNT='$(FUMOUNT)' scripts/image-mount.sh unmount-if-mounted "$(MOUNT_DIR)"
 	$(VIRTIOFS_RUN) $(QEMU) $(QEMUFLAGS)
-else
-	@echo "\033[1;38;5;196mDisk is mounted. Unmounting the disk...\033[0m";
-	$(MAKE) unmount
-	$(VIRTIOFS_RUN) $(QEMU) $(QEMUFLAGS)
-endif
