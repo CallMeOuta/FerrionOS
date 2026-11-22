@@ -41,6 +41,7 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0035](0035-signed-update-index.md) | Signed update index, verify-before-parse client and release tool |
 | [0036](0036-native-window-compositor.md) | The native window compositor, its dependency gates and layout timing check |
 | [0037](0037-stack-guard-and-exec-entropy.md) | Per-process random stack guard, exec entropy helper and fortify checks in relibc |
+| [0038](0038-relro-and-bind-now.md) | RELRO and immediate binding in relibc and the image audit |
 | [0041](0041-anonymous-page-discard.md) | In-place private anonymous page discard (syscall 219), madvise and POSIX abort |
 | [0042](0042-sparse-page-table-walks.md) | Sparse page-table walks, resident memory accounting and deferred page-table freeing |
 | [0043](0043-pthread-mutex-fastpath.md) | Three-state pthread_mutex WAITING_BIT, constant owner for normal/default mutexes, and private FUTEX_WAKE fast path |
