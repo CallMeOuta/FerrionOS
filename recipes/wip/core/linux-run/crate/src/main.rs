@@ -99,6 +99,7 @@ fn main() {
     if args.is_empty() || (native && network) {
         usage();
     }
+    let mode = session::init_mode(native);
     let program = args.remove(0);
     let shown = String::from_utf8_lossy(&program).into_owned();
     let trace = std::env::var_os("LINUX_RUN_TRACE");
@@ -134,8 +135,7 @@ fn main() {
     }
     drop(heap);
 
-    let new_session = !native && !session::inherited();
-    if new_session {
+    if mode == session::Mode::Launcher {
         if let Err(why) = session::start(network) {
             fatal(&format!("cannot start a Linux session: {why}"));
         }
@@ -193,7 +193,7 @@ fn main() {
 
     let mut argv = vec![argv0.unwrap_or_else(|| program.clone())];
     argv.extend(args);
-    let envp = environment(new_session);
+    let envp = environment(mode == session::Mode::Launcher);
     let sp = match stack::build(&loaded, interp_base, &shown, &argv, &envp) {
         Ok(sp) => sp,
         Err(_) => fatal("no room for the program's stack"),

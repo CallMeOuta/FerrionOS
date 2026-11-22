@@ -76,7 +76,14 @@ pub struct Facts {
     pub network: bool,
 }
 
-static IN_SESSION: OnceLock<bool> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Native,
+    Launcher,
+    Inherited,
+}
+
+static MODE: OnceLock<Mode> = OnceLock::new();
 
 /// The launcher's facts, read once from the memory file system.
 pub static FACTS: LazyLock<Facts> = LazyLock::new(|| {
@@ -99,13 +106,23 @@ pub static FACTS: LazyLock<Facts> = LazyLock::new(|| {
     }
 });
 
-/// Whether this process runs in a session: the launcher says so, and a runtime started by
-/// `execve` finds its own copy in the memory file system.
-pub fn active() -> bool {
-    *IN_SESSION.get_or_init(inherited)
+pub fn init_mode(native: bool) -> Mode {
+    let mode = if native {
+        Mode::Native
+    } else if inherited() {
+        Mode::Inherited
+    } else {
+        Mode::Launcher
+    };
+    assert!(MODE.set(mode).is_ok());
+    mode
 }
 
-pub fn inherited() -> bool {
+pub fn active() -> bool {
+    matches!(MODE.get().copied().expect("session mode not set"), Mode::Launcher | Mode::Inherited)
+}
+
+fn inherited() -> bool {
     let p = CString::new(RUNTIME).unwrap();
     unsafe { libc::access(p.as_ptr(), libc::X_OK) == 0 }
 }
@@ -336,6 +353,7 @@ fn native_hosts() -> String {
 /// session's schemes, its working directory is `/` of the root, and it holds no descriptor past
 /// 2 other than the session handle.
 pub fn start(network: bool) -> Result<(), String> {
+    assert_eq!(MODE.get().copied(), Some(Mode::Launcher));
     // What the session needs from the caller's view, read before leaving it.
     let runtime = std::fs::read(crate::syscall::LINUX_RUN)
         .map_err(|e| format!("cannot read {}: {e}", crate::syscall::LINUX_RUN))?;
@@ -399,7 +417,6 @@ pub fn start(network: bool) -> Result<(), String> {
     if old != usize::MAX {
         unsafe { redox_close_v1(old) };
     }
-    IN_SESSION.set(true).ok();
     // A session starts as a login does, with every signal at its default action: the caller's
     // shell may ignore some (SIGPIPE, SIGINT for a background job), which Linux programs would
     // otherwise inherit across the session's boundary.
