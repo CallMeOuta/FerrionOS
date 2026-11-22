@@ -8,6 +8,15 @@
 
 #define WIDTH 256
 #define HEIGHT 256
+#define FENCE_TIMEOUT_NS UINT64_C(30000000000)
+
+enum vk_phase {
+    VK_INIT,
+    VK_DEVICE,
+    VK_SUBMITTED,
+    VK_FENCE_TIMED_OUT,
+    VK_DONE,
+};
 #define CHECK(call) do { \
     VkResult status = (call); \
     if (status != VK_SUCCESS) { \
@@ -32,6 +41,7 @@ static uint32_t memory_type(VkPhysicalDevice gpu, uint32_t allowed, VkMemoryProp
 int vulkan_cpu(void)
 {
     int result = 1;
+    enum vk_phase phase = VK_INIT;
     VkInstance instance = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkImage image = VK_NULL_HANDLE;
@@ -112,6 +122,7 @@ int vulkan_cpu(void)
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info,
     };
     CHECK(vkCreateDevice(gpu, &device_info, NULL, &device));
+    phase = VK_DEVICE;
     VkQueue queue;
     vkGetDeviceQueue(device, family, 0, &queue);
     VkImageCreateInfo image_info = {
@@ -249,11 +260,27 @@ int vulkan_cpu(void)
     CHECK(vkCreateFence(device, &fence_info, NULL, &fence));
     VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command};
     CHECK(vkQueueSubmit(queue, 1, &submit, fence));
-    CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_C(30000000000)));
+    phase = VK_SUBMITTED;
+    VkResult wait_status = vkWaitForFences(device, 1, &fence, VK_TRUE, FENCE_TIMEOUT_NS);
+    if (wait_status == VK_TIMEOUT) {
+        fprintf(stderr, "GPU_ERROR vkWaitForFences: %d\n", wait_status);
+        phase = VK_FENCE_TIMED_OUT;
+        goto cleanup;
+    }
+    if (wait_status != VK_SUCCESS) {
+        fprintf(stderr, "GPU_ERROR vkWaitForFences: %d\n", wait_status);
+        goto cleanup;
+    }
+    phase = VK_DONE;
     CHECK(vkMapMemory(device, buffer_memory, 0, WIDTH * HEIGHT * 4, 0, &pixels));
     result = compare_pixels("vulkan", pixels) || !version_ok;
 cleanup:
-    if (device) {
+    switch (phase) {
+    case VK_FENCE_TIMED_OUT:
+        break;
+    case VK_DEVICE:
+    case VK_SUBMITTED:
+    case VK_DONE:
         vkDeviceWaitIdle(device);
         if (pixels) vkUnmapMemory(device, buffer_memory);
         vkDestroyFence(device, fence, NULL);
@@ -270,8 +297,12 @@ cleanup:
         vkDestroyBuffer(device, buffer, NULL);
         vkFreeMemory(device, buffer_memory, NULL);
         vkDestroyDevice(device, NULL);
+        if (instance) vkDestroyInstance(instance, NULL);
+        break;
+    case VK_INIT:
+        if (instance) vkDestroyInstance(instance, NULL);
+        break;
     }
-    if (instance) vkDestroyInstance(instance, NULL);
     free(families);
     free(devices);
     return result;
