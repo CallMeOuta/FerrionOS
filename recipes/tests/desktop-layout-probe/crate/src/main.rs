@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+mod key_frames;
 mod shm_storage;
 use std::{error::Error, time::Duration};
 use wayland_client::{
@@ -36,7 +37,7 @@ struct State {
     ready: bool,
     running: bool,
     frame: u64,
-    key: u64,
+    key: key_frames::KeyFrames,
 }
 fn now_ns() -> u64 {
     let mut ts = libc::timespec {
@@ -87,7 +88,8 @@ impl State {
             std::thread::sleep(Duration::from_millis(100));
         }
         let (width, height) = self.size;
-        let bytes = pixels(&self.role, width, height, self.key);
+        let key = self.key.advance_frame();
+        let bytes = pixels(&self.role, width, height, key);
         if bytes.len() > SLOT_BYTES {
             return Err("window exceeds probe buffer capacity".into());
         }
@@ -124,12 +126,12 @@ impl State {
         self.presentation
             .as_ref()
             .ok_or("no presentation feedback")?
-            .feedback(surface, qh, (self.frame, commit_ns, self.key));
+            .feedback(surface, qh, (self.frame, commit_ns, key));
         surface.commit();
         connection.flush()?;
         println!(
             "DD2_CLIENT role={} frame={} key={} commit_ns={} width={} height={}",
-            self.role, self.frame, self.key, commit_ns, width, height
+            self.role, self.frame, key, commit_ns, width, height
         );
         Ok(())
     }
@@ -163,7 +165,7 @@ fn main() -> Result<()> {
         ready: true,
         running: true,
         frame: 0,
-        key: 0,
+        key: key_frames::KeyFrames::default(),
     };
     connection.display().get_registry(&qh, ());
     queue.roundtrip(&mut state)?;
@@ -348,11 +350,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
             if key == 1 {
                 state.running = false;
             } else {
-                state.key += 1;
+                let key = state.key.press();
                 println!(
                     "DD2_KEY role={} key={} received_ns={}",
                     state.role,
-                    state.key,
+                    key,
                     now_ns()
                 );
             }
