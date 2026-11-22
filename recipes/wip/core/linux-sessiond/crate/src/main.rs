@@ -143,12 +143,18 @@ struct Lock {
     write: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Open,
+    Led { leader: usize },
+    Ended,
+}
+
 struct Session {
     uid: u32,
     memory: Option<Child>,
     members: Vec<usize>,
-    leader: Option<usize>,
-    ended: bool,
+    phase: Phase,
     locks: Vec<Lock>,
 }
 
@@ -206,8 +212,11 @@ impl Session {
         Ok(())
     }
 
-    fn end(&mut self) {
-        self.ended = true;
+    fn end(&mut self, leaders: &mut BTreeMap<usize, usize>) {
+        if let Phase::Led { leader } = self.phase {
+            leaders.remove(&leader);
+        }
+        self.phase = Phase::Ended;
         for pid in self.members.drain(..) {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
@@ -220,6 +229,20 @@ struct Sessions {
     sessions: BTreeMap<usize, Session>,
     leaders: BTreeMap<usize, usize>,
     next: usize,
+}
+
+impl Sessions {
+    fn lead(&mut self, dir: usize) -> Result<usize> {
+        let session = self.sessions.get_mut(&dir).ok_or(Error::new(EBADF))?;
+        if session.phase != Phase::Open {
+            return Err(Error::new(EEXIST));
+        }
+        self.next += 1;
+        let leader = self.next;
+        session.phase = Phase::Led { leader };
+        self.leaders.insert(leader, dir);
+        Ok(leader)
+    }
 }
 
 impl SchemeSync for Sessions {
@@ -246,7 +269,7 @@ impl SchemeSync for Sessions {
             self.next += 1;
             self.sessions.insert(
                 self.next,
-                Session { uid: ctx.uid, memory: None, members: Vec::new(), leader: None, ended: false, locks: Vec::new() },
+                Session { uid: ctx.uid, memory: None, members: Vec::new(), phase: Phase::Open, locks: Vec::new() },
             );
             return Ok(OpenResult::ThisScheme { number: self.next, flags: NewFdFlags::empty() });
         }
@@ -259,13 +282,8 @@ impl SchemeSync for Sessions {
             return Ok(OpenResult::OtherScheme { fd });
         }
         if path == "leader" {
-            if session.leader.is_some() || session.ended {
-                return Err(Error::new(EEXIST));
-            }
-            self.next += 1;
-            session.leader = Some(self.next);
-            self.leaders.insert(self.next, dir);
-            return Ok(OpenResult::ThisScheme { number: self.next, flags: NewFdFlags::empty() });
+            let number = self.lead(dir)?;
+            return Ok(OpenResult::ThisScheme { number, flags: NewFdFlags::empty() });
         }
         let mib = match path {
             "memory" => MEMORY_MIB,
@@ -288,7 +306,7 @@ impl SchemeSync for Sessions {
         let pid = ctx.pid;
         match *metadata {
             [JOIN, ..] => {
-                if session.ended {
+                if session.phase == Phase::Ended {
                     return Err(Error::new(ESRCH));
                 }
                 if !session.members.contains(&pid) {
@@ -303,6 +321,9 @@ impl SchemeSync for Sessions {
                 Ok(0)
             }
             [op @ (SET_LOCK | GET_LOCK), a, b, ..] => {
+                if session.phase == Phase::Ended {
+                    return Err(Error::new(ESRCH));
+                }
                 let words = payload.get(..32).ok_or(Error::new(EINVAL))?;
                 let w: [u64; 4] = core::array::from_fn(|i| u64::from_ne_bytes(words[8 * i..8 * i + 8].try_into().unwrap()));
                 let [start, len, kind, whole_file] = w;
@@ -331,6 +352,9 @@ impl SchemeSync for Sessions {
                 Ok(32)
             }
             [RELEASE_LOCKS, a, b, ..] => {
+                if session.phase == Phase::Ended {
+                    return Err(Error::new(ESRCH));
+                }
                 session.locks.retain(|l| l.key != (a, b) || l.whole_file || l.pid != pid);
                 Ok(0)
             }
@@ -339,17 +363,17 @@ impl SchemeSync for Sessions {
     }
 
     fn on_close(&mut self, id: usize) {
-        if let Some(dir) = self.leaders.remove(&id) {
-            if let Some(session) = self.sessions.get_mut(&dir) {
-                session.end();
-            }
+        if let Some(dir) = self.leaders.get(&id).copied() {
+            let session = self.sessions.get_mut(&dir).expect("leader handle without session");
+            assert_eq!(session.phase, Phase::Led { leader: id });
+            session.end(&mut self.leaders);
             return;
         }
         if let Some(mut session) = self.sessions.remove(&id) {
-            if let Some(leader) = session.leader {
-                self.leaders.remove(&leader);
+            if let Phase::Led { leader } = session.phase {
+                assert_eq!(self.leaders.get(&leader), Some(&id));
             }
-            session.end();
+            session.end(&mut self.leaders);
             if let Some(mut child) = session.memory {
                 let _ = child.kill();
                 let _ = child.wait();
