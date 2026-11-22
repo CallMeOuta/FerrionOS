@@ -1,4 +1,4 @@
-From e543d3c9b2a3c64ad0a1ecea44aac83b6b36d6da Mon Sep 17 00:00:00 2001
+From f7396d44c3c21eecbfb5f0b9c9d52ddd2ac5b7aa Mon Sep 17 00:00:00 2001
 From: FerrionOS contributors <contributors@ferrion.invalid>
 Date: Sat, 21 Nov 2026 15:05:40 -0800
 Subject: [PATCH] ipc: Retry interrupted socket connections on FerrionOS
@@ -8,40 +8,39 @@ that transient failure in a separate adapter, preserving other errors.
 Name the public socket environment for ferrion-wm. The VM layout check
 uses this client for every arrangement command.
 ---
- niri-ipc/src/socket.rs         | 34 ++++++++++++++++++++++------------
- niri-ipc/src/socket/ferrion.rs | 14 ++++++++++++++
- 2 files changed, 36 insertions(+), 12 deletions(-)
+ niri-ipc/src/socket.rs             | 22 ++++----
+ niri-ipc/src/socket/ferrion.rs     | 14 +++++
+ src/backend/ferrion.rs             | 82 +++++++++++++++---------------
+ src/backend/headless.rs            |  3 +-
+ src/cli.rs                         | 22 +++++---
+ src/handlers/image_copy_capture.rs | 12 +----
+ 6 files changed, 82 insertions(+), 73 deletions(-)
  create mode 100644 niri-ipc/src/socket/ferrion.rs
 
 diff --git a/niri-ipc/src/socket.rs b/niri-ipc/src/socket.rs
-index 790097cb..19fe8c2d 100644
+index 790097cb..0e64ff99 100644
 --- a/niri-ipc/src/socket.rs
 +++ b/niri-ipc/src/socket.rs
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,4 @@
 -//! Helper for blocking communication over the niri socket.
 +// Modified for FerrionOS on 2026-11-21; GPL-3.0-or-later (niri).
-+//! Helper for blocking communication over the ferrion-wm socket.
  
  use std::env;
  use std::io::{self, BufRead, BufReader, Write};
-@@ -8,19 +9,23 @@ use std::path::Path;
+@@ -8,19 +8,18 @@ use std::path::Path;
  
  use crate::{Event, Reply, Request};
  
 -/// Name of the environment variable containing the niri IPC socket path.
 -pub const SOCKET_PATH_ENV: &str = "NIRI_SOCKET";
-+// FerrionOS 2026-11-21: native blocking connect may be interrupted by a signal.
 +#[cfg(target_os = "redox")]
 +mod ferrion;
++
++pub const SOCKET_PATH_ENV: &str = "FERRION_WM_SOCKET";
  
 -/// Helper for blocking communication over the niri socket.
-+/// Name of the environment variable containing the ferrion-wm IPC socket path.
-+pub const SOCKET_PATH_ENV: &str = "FERRION_WM_SOCKET";
-+
-+/// Helper for blocking communication over the ferrion-wm socket.
  ///
 -/// This struct is used to communicate with the niri IPC server. It handles the socket connection
-+/// This struct is used to communicate with the ferrion-wm IPC server. It handles the socket connection
  /// and serialization/deserialization of messages.
  pub struct Socket {
      stream: BufReader<UnixStream>,
@@ -49,11 +48,10 @@ index 790097cb..19fe8c2d 100644
  
  impl Socket {
 -    /// Connects to the default niri IPC socket.
-+    /// Connects to the default ferrion-wm IPC socket.
      ///
      /// This is equivalent to calling [`Self::connect_to`] with the path taken from the
      /// [`SOCKET_PATH_ENV`] environment variable.
-@@ -28,26 +33,31 @@ impl Socket {
+@@ -28,26 +27,23 @@ impl Socket {
          let socket_path = env::var_os(SOCKET_PATH_ENV).ok_or_else(|| {
              io::Error::new(
                  io::ErrorKind::NotFound,
@@ -65,9 +63,7 @@ index 790097cb..19fe8c2d 100644
      }
  
 -    /// Connects to the niri IPC socket at the given path.
-+    /// Connects to the ferrion-wm IPC socket at the given path.
      pub fn connect_to(path: impl AsRef<Path>) -> io::Result<Self> {
-+        // FerrionOS 2026-11-21: retry interrupted native connections.
 +        #[cfg(target_os = "redox")]
 +        let stream = ferrion::connect(path.as_ref())?;
 +        #[cfg(not(target_os = "redox"))]
@@ -77,17 +73,12 @@ index 790097cb..19fe8c2d 100644
      }
  
 -    /// Sends a request to niri and returns the response.
-+    /// Sends a request to ferrion-wm and returns the response.
      ///
      /// Return values:
-     ///
+-    ///
 -    /// * `Ok(Ok(response))`: successful [`Response`](crate::Response) from niri
 -    /// * `Ok(Err(message))`: error message from niri
 -    /// * `Err(error)`: error communicating with niri
-+    // FerrionOS 2026-11-21: adapt the native backend and fork identity.
-+    /// * `Ok(Ok(response))`: successful [`Response`](crate::Response) from ferrion-wm
-+    /// * `Ok(Err(message))`: error message from ferrion-wm
-+    /// * `Err(error)`: error communicating with ferrion-wm
      pub fn send(&mut self, request: Request) -> io::Result<Reply> {
          let mut buf = serde_json::to_string(&request).unwrap();
          buf.push('\n');
@@ -111,6 +102,204 @@ index 00000000..68b85956
 +        }
 +    }
 +}
+diff --git a/src/backend/ferrion.rs b/src/backend/ferrion.rs
+index cd2b22b0..9bcbcaf7 100644
+--- a/src/backend/ferrion.rs
++++ b/src/backend/ferrion.rs
+@@ -111,54 +111,52 @@ impl Ferrion {
+                 max_bpc: None,
+             },
+         )])));
+-        event_loop.insert_source(source, |_, _, state| {
+-            loop {
+-                let event = state.backend.ferrion().native.try_event();
+-                match event {
+-                    Ok(Some(BackendEvent::Input(input))) => {
+-                        let backend = state.backend.ferrion();
+-                        let time_us = match input {
+-                            Input::Key(e) => e.time_us,
+-                            Input::Motion(e) => e.time_us,
+-                            Input::Button(e) => e.time_us,
+-                            Input::Axis(e) => e.time_us,
+-                        };
+-                        if backend.pending_inputs.len() == 512 {
+-                            backend.pending_inputs.pop_front();
+-                            warn!("input timing sample dropped: output stalled");
+-                        }
+-                        backend.pending_inputs.push_back(time_us);
+-                        if let Input::Key(event) = &input {
+-                            if event.pressed {
+-                                info!(
+-                                    "FERRION_KEY code={} read_ns={}",
+-                                    event.code,
+-                                    (backend.input_epoch + time_us) * 1000
+-                                );
+-                            }
+-                        }
+-                        let time = InputTime::from_micros(backend.input_epoch + time_us);
+-                        state.process_input_event(into_smithay(input, time));
+-                    }
+-                    Ok(Some(BackendEvent::CursorTiming(t))) => {
+-                        info!(
+-                            "FERRION_CURSOR read_us={} completed_us={} x={} y={}",
+-                            t.read_us, t.completed_us, t.x, t.y
+-                        );
++        event_loop.insert_source(source, |_, _, state| loop {
++            let event = state.backend.ferrion().native.try_event();
++            match event {
++                Ok(Some(BackendEvent::Input(input))) => {
++                    let backend = state.backend.ferrion();
++                    let time_us = match input {
++                        Input::Key(e) => e.time_us,
++                        Input::Motion(e) => e.time_us,
++                        Input::Button(e) => e.time_us,
++                        Input::Axis(e) => e.time_us,
++                    };
++                    if backend.pending_inputs.len() == 512 {
++                        backend.pending_inputs.pop_front();
++                        warn!("input timing sample dropped: output stalled");
+                     }
+-                    Ok(Some(BackendEvent::DisplayChanged)) => {
+-                        if let Err(err) = state.backend.ferrion().reconfigure(&mut state.niri) {
+-                            error!("display handoff failed: {err:#}");
+-                            state.niri.stop_signal.stop();
++                    backend.pending_inputs.push_back(time_us);
++                    if let Input::Key(event) = &input {
++                        if event.pressed {
++                            info!(
++                                "FERRION_KEY code={} read_ns={}",
++                                event.code,
++                                (backend.input_epoch + time_us) * 1000
++                            );
+                         }
+                     }
+-                    Ok(None) => break,
+-                    Err(err) => {
+-                        error!("input reader failed: {err}");
++                    let time = InputTime::from_micros(backend.input_epoch + time_us);
++                    state.process_input_event(into_smithay(input, time));
++                }
++                Ok(Some(BackendEvent::CursorTiming(t))) => {
++                    info!(
++                        "FERRION_CURSOR read_us={} completed_us={} x={} y={}",
++                        t.read_us, t.completed_us, t.x, t.y
++                    );
++                }
++                Ok(Some(BackendEvent::DisplayChanged)) => {
++                    if let Err(err) = state.backend.ferrion().reconfigure(&mut state.niri) {
++                        error!("display handoff failed: {err:#}");
+                         state.niri.stop_signal.stop();
+-                        break;
+                     }
+                 }
++                Ok(None) => break,
++                Err(err) => {
++                    error!("input reader failed: {err}");
++                    state.niri.stop_signal.stop();
++                    break;
++                }
+             }
+         })?;
+         info!(
+diff --git a/src/backend/headless.rs b/src/backend/headless.rs
+index 064c09f1..d30ec9e8 100644
+--- a/src/backend/headless.rs
++++ b/src/backend/headless.rs
+@@ -19,8 +19,7 @@ use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_pre
+ use smithay::utils::Size;
+ use smithay::wayland::presentation::Refresh;
+ 
+-use super::DrmNode;
+-use super::{IpcOutputMap, OutputId, RenderResult};
++use super::{DrmNode, IpcOutputMap, OutputId, RenderResult};
+ use crate::niri::{Niri, RedrawState};
+ use crate::render_helpers::{resources, shaders};
+ use crate::utils::{get_monotonic_time, logical_output};
+diff --git a/src/cli.rs b/src/cli.rs
+index 6fc27623..4435cb5c 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -14,8 +14,12 @@ use crate::utils::version;
+ #[command(subcommand_value_name = "SUBCOMMAND")]
+ #[command(subcommand_help_heading = "Subcommands")]
+ pub struct Cli {
+-    ///
+-    #[arg(short, long)]
++    #[arg(
++        short,
++        long,
++        help = "Config path (default: $XDG_CONFIG_HOME/ferrion-wm/config.kdl)",
++        long_help = "Config path (default: $XDG_CONFIG_HOME/ferrion-wm/config.kdl). The command line overrides FERRION_WM_CONFIG."
++    )]
+     pub config: Option<PathBuf>,
+     /// Import environment globally to systemd and D-Bus, run D-Bus services.
+     ///
+@@ -34,6 +38,7 @@ pub struct Cli {
+ 
+ #[derive(Subcommand)]
+ pub enum Sub {
++    #[command(about = "Communicate with the running ferrion-wm instance.")]
+     Msg {
+         #[command(subcommand)]
+         msg: Msg,
+@@ -46,8 +51,12 @@ pub enum Sub {
+     },
+     /// Validate the config file.
+     Validate {
+-        ///
+-        #[arg(short, long)]
++        #[arg(
++            short,
++            long,
++            help = "Config path (default: $XDG_CONFIG_HOME/ferrion-wm/config.kdl)",
++            long_help = "Config path (default: $XDG_CONFIG_HOME/ferrion-wm/config.kdl). The command line overrides FERRION_WM_CONFIG."
++        )]
+         config: Option<PathBuf>,
+     },
+     /// Cause a panic to check if the backtraces are good.
+@@ -87,8 +96,7 @@ pub enum Msg {
+     /// configuration subsequently changes in the config file, these temporary changes will be
+     /// forgotten.
+     Output {
+-        /// Output name.
+-        #[arg()]
++        #[arg(help = "Output name; use ferrion-wm msg outputs to list outputs.")]
+         output: String,
+         /// Configuration to apply.
+         #[command(subcommand)]
+@@ -96,7 +104,9 @@ pub enum Msg {
+     },
+     /// Start continuously receiving events from the compositor.
+     EventStream,
++    #[command(about = "Print the running ferrion-wm version.")]
+     Version,
++    #[command(about = "Request an error from the running ferrion-wm instance.")]
+     RequestError,
+     /// Print the overview state.
+     OverviewState,
+diff --git a/src/handlers/image_copy_capture.rs b/src/handlers/image_copy_capture.rs
+index 72e13c39..340247fb 100644
+--- a/src/handlers/image_copy_capture.rs
++++ b/src/handlers/image_copy_capture.rs
+@@ -21,16 +21,8 @@ use smithay::wayland::image_capture_source::{
+ #[cfg(any(feature = "tty", feature = "winit"))]
+ use smithay::wayland::image_copy_capture::DmabufConstraints;
+ use smithay::wayland::image_copy_capture::{
+-    BufferConstraints,
+-    CaptureFailureReason,
+-    CursorSession,
+-    CursorSessionRef,
+-    Frame,
+-    FrameRef,
+-    ImageCopyCaptureHandler,
+-    ImageCopyCaptureState,
+-    Session,
+-    SessionRef,
++    BufferConstraints, CaptureFailureReason, CursorSession, CursorSessionRef, Frame, FrameRef,
++    ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
+ };
+ use smithay::wayland::shm;
+ use wayland_backend::server::Credentials;
 -- 
 2.56.1
 

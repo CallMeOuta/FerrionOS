@@ -1,6 +1,6 @@
 [package]
 description = "ferrion-wm, FerrionOS's window manager: a fork of niri (GPL-3.0-or-later, as are these patches) with a free mode beside its columns, carried as niri's commits exported with git format-patch"
-dependencies = ["xkeyboard-config", "mesa"]
+dependencies = ["xkeyboard-config", "mesa", "libglvnd"]
 
 [source]
 git = "https://github.com/niri-wm/niri"
