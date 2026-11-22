@@ -7532,6 +7532,129 @@ def test_fortify_chk_aborts(vm, args):
         summary.append(f"{label}({len(sigs)}/{len(FORTIFY_CASES)} aborted)")
     return True, "; ".join(summary)
 
+IOMMU_TRACE = ["vtd_reg_dmar_root", "vtd_dmar_enable", "vtd_reg_write_gcmd", "vtd_ir_enable",
+               "vtd_dmar_translate", "vtd_dmar_fault"]
+IOMMU_NVME = "1b36:0010"
+IOMMU_TRANSLATE = re.compile(r"vtd_dmar_translate dev ([0-9a-f]{2}):([0-9a-f]{2})\.([0-9a-f]{2}) "
+                             r"iova 0x([0-9a-f]+) -> gpa 0x([0-9a-f]+)")
+IOMMU_STATUS_LINE = re.compile(r"^(?:backend|translation|mode|interrupt-remapping|unit|faults|fault-overflows): .*$",
+                               re.M)
+
+
+def iommu_mode(args):
+    values = [assignment.split("=", 1)[1] for assignment in args.make if assignment.startswith("iommu=")]
+    return values[-1] if values else "yes"
+
+
+def pci_functions(vm):
+    """Maps vendor:device to the bus:device.function QEMU's monitor lists it at."""
+    found = {}
+    reply = vm.command("info pci")
+    for bus, device, function, ids in re.findall(
+            r"Bus\s+(\d+), device\s+(\d+), function (\d+):\s*\n\s*.*?PCI device ([0-9a-f]{4}:[0-9a-f]{4})", reply):
+        found.setdefault(ids, (int(bus), int(device), int(function)))
+    return found
+
+
+def pcap_udp(raw):
+    """Returns (source port, destination port, payload) for each IPv4 UDP frame of an Ethernet pcap, or None."""
+    order = {b"\xd4\xc3\xb2\xa1": "little", b"\xa1\xb2\xc3\xd4": "big"}.get(raw[:4])
+    if order is None or len(raw) < 24 or int.from_bytes(raw[20:24], order) != 1:
+        return None
+    packets, pos = [], 24
+    while pos + 16 <= len(raw):
+        size = int.from_bytes(raw[pos + 8:pos + 12], order)
+        frame = raw[pos + 16:pos + 16 + size]
+        pos += 16 + size
+        if len(frame) < 42 or frame[12:14] != b"\x08\x00":
+            continue
+        ip = frame[14:]
+        ihl = (ip[0] & 15) * 4
+        if ip[0] >> 4 != 4 or ihl < 20 or ip[9] != 17 or len(ip) < ihl + 8:
+            continue
+        udp = ip[ihl:]
+        packets.append((int.from_bytes(udp[:2], "big"), int.from_bytes(udp[2:4], "big"), udp[8:]))
+    return packets
+
+
+def iommu_status_text(vm):
+    status, output = run_status(vm, "cat /scheme/sys/iommu", 60)
+    (vm.out / "iommu-status.txt").write_text(output)
+    return status, output
+
+
+def test_iommu(vm, args):
+    """Slice 1 of S18: with iommu=yes the trace shows the root table set and translation turned on once, the boot disk's DMA translated one-to-one, no fault, and the guest reports translation on in identity mode and gets a DHCP lease; with --make iommu=no the guest reports backend none and the unit stays untouched."""
+    mode = iommu_mode(args)
+    capture = vm.out / "iommu.pcap"
+    reply = vm.command(f"object_add filter-dump,id=ferrion-iommu,netdev=net0,maxlen=512,file={capture.resolve()}")
+    if "error" in reply.lower():
+        return False, f"could not capture net0: {reply}"
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, f"no root shell on the serial console within {args.timeout}s"
+        status, text = iommu_status_text(vm)
+        run_status(vm, "bash -c 'deadline=$((SECONDS+60)); "
+                       "until [[ -s /etc/net/dns && \"$(cat /etc/net/dns)\" != 9.9.9.9 ]] || (( SECONDS >= deadline )); "
+                       "do sleep 1; done'", 90)
+        devices = pci_functions(vm)
+    finally:
+        vm.command("object_del ferrion-iommu")
+    lines = [match.group(0).strip() for match in IOMMU_STATUS_LINE.finditer(text)]
+    problems = []
+    if status != 0:
+        problems.append(f"cat /scheme/sys/iommu exited {status}")
+    if mode == "no":
+        if "backend: none" not in lines or "translation: off" not in lines:
+            problems.append(f"status file says {lines[:3]}, expected backend none and translation off")
+        if vm.trace("vtd_dmar_enable") or vm.trace("vtd_reg_dmar_root"):
+            problems.append("the trace shows a VT-d unit without iommu=yes")
+    else:
+        for want in ("backend: vt-d", "translation: on", "mode: identity"):
+            if want not in lines:
+                problems.append(f"status file lacks {want!r}")
+        events = vm.trace()
+        roots = [i for i, line in enumerate(events) if "vtd_reg_dmar_root" in line]
+        enables = [i for i, line in enumerate(events) if re.search(r"vtd_dmar_enable enable 1\b", line)]
+        if len(enables) != 1:
+            problems.append(f"{len(enables)} 'vtd_dmar_enable enable 1' lines, expected one")
+        elif not roots or roots[0] > enables[0]:
+            problems.append("no vtd_reg_dmar_root line before translation was turned on")
+        nvme = devices.get(IOMMU_NVME)
+        translated = []
+        if nvme is None:
+            problems.append(f"QEMU lists no NVMe function ({IOMMU_NVME})")
+        else:
+            for line in events:
+                match = IOMMU_TRANSLATE.search(line)
+                if match and tuple(int(match.group(i), 16) for i in (1, 2, 3)) == nvme:
+                    translated.append((int(match.group(4), 16), int(match.group(5), 16)))
+            moved = [(iova, gpa) for iova, gpa in translated if iova != gpa]
+            if not translated:
+                problems.append(f"no vtd_dmar_translate line for the boot disk at {nvme[0]:02x}:{nvme[1]:02x}.{nvme[2]}")
+            elif moved:
+                problems.append(f"{len(moved)} boot-disk translations moved an address, first {moved[0][0]:#x} -> {moved[0][1]:#x}")
+        faults = vm.trace("vtd_dmar_fault")
+        if faults:
+            problems.append(f"{len(faults)} vtd_dmar_fault lines, first {faults[0].strip()}")
+        (vm.out / "iommu-trace-summary.txt").write_text(
+            f"root lines: {len(roots)}\nenable lines: {len(enables)}\nnvme: {nvme}\n"
+            f"nvme translations: {len(translated)}\nfaults: {len(faults)}\n")
+    packets = pcap_udp(capture.read_bytes()) if capture.exists() else None
+    if packets is None:
+        problems.append("the net0 capture is not an Ethernet pcap")
+    else:
+        dhcp = [(src, dst) for src, dst, payload in packets
+                if {src, dst} == {67, 68} and len(payload) >= 240 and payload[236:240] == b"\x63\x82\x53\x63"]
+        if (68, 67) not in dhcp or (67, 68) not in dhcp:
+            problems.append(f"no DHCP exchange on net0 (saw {len(dhcp)} DHCP packets)")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    summary = [line for line in lines if line.startswith(("backend", "translation", "mode"))]
+    extra = "" if mode == "no" else f", {len(translated)} one-to-one boot-disk translations, no fault"
+    return True, f"{', '.join(summary)}{extra}, DHCP exchange captured"
+
+
 
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
@@ -7597,6 +7720,7 @@ TESTS["hardened-malloc-discard"] = test_hardened_malloc_discard
 TESTS["canary-random"] = test_canary_random
 TESTS["stack-smash-aborts"] = test_stack_smash_aborts
 TESTS["fortify-chk-aborts"] = test_fortify_chk_aborts
+TESTS["iommu"] = test_iommu
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -7701,6 +7825,10 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *VK_EXACT_TRACE]})
+            elif name == "iommu":
+                if not any(assignment.startswith("iommu=") for assignment in args.make):
+                    make = ("iommu=yes",)
+                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *IOMMU_TRACE]})
             elif name == "gl-exact" and args.venus:
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)

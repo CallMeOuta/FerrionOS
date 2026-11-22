@@ -199,7 +199,7 @@ QEMUFLAGS?=<extra-qemu-flags>
 - `live=yes` boots `redox-live.iso` instead of `harddrive.img`.
 - `usb=no` leaves out the xHCI USB controller.
 - `serial=no` leaves out the serial port and connects the debug console (I/O port 0x402) to the terminal instead.
-- `iommu=yes` attaches an emulated Intel IOMMU (VT-d) with interrupt remapping to the virtual machine. It also splits the interrupt controller between KVM and QEMU, because interrupt remapping does not work with the controller that KVM emulates by default. It works on x86-64 only, where the machine is `q35`. FerrionOS does not use the IOMMU yet.
+- `iommu=yes` attaches an emulated Intel IOMMU (VT-d) with interrupt remapping to the virtual machine. It also splits the interrupt controller between KVM and QEMU, because interrupt remapping does not work with the controller that KVM emulates by default. It works on x86-64 only, where the machine is `q35`. The kernel turns DMA remapping on with a one-to-one map, which `/scheme/sys/iommu` reports as `translation: on` and `mode: identity`; every device still reaches all of the virtual machine's memory, so this protects nothing yet (DMA protection is planned, security roadmap item S18).
 - `gdb=yes` starts the GDB server of QEMU and halts the virtual machine until a debugger connects, and `gdb=nonblock` does not halt it.
 - `qemu_serial_logfile` names a file that also receives the serial console.
 - `QEMUFLAGS` holds extra QEMU flags. Set it in `.config` or in the environment: your value replaces the default value, and the makefile appends its own flags to it. On the `make` command line, `QEMUFLAGS=` replaces every flag that the makefile adds.
