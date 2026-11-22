@@ -1212,6 +1212,12 @@ impl<'a, D: Disk> Transaction<'a, D> {
         }
     }
 
+    pub fn touch_dir(&mut self, node_ptr: TreePtr<Node>, mtime: u64, mtime_nsec: u32) -> Result<()> {
+        let mut node = self.read_tree(node_ptr)?;
+        node.data_mut().set_mtime(mtime, mtime_nsec);
+        self.sync_tree(node)
+    }
+
     /// Notify of node open, for tracking node usage
     pub fn on_open_node(&mut self, node_ptr: TreePtr<Node>) -> Result<()> {
         let entry = self.fs.node_usages.entry(node_ptr.id()).or_insert(0);
