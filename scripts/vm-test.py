@@ -6725,13 +6725,17 @@ def test_hardened_malloc_sparse(vm, args):
 
 
 def test_hardened_malloc_pt_order(vm, args):
-    """Checks that emptied user page-table frames are freed only after the TLB shootdown completes (0 early-table-free log entries) and runs the multi-threaded remap/unmap smoke test."""
+    """Runs hardened-malloc-probe discard first, then checks that emptied user page-table frames are freed only after the TLB shootdown completes (0 early-table-free log entries since boot) and runs the multi-threaded remap/unmap smoke test."""
     if not vm.wait_serial(r"login: ", args.timeout):
         return False, f"no serial login prompt within {args.timeout}s"
     vm.type("user\n")
     time.sleep(3)
     sections = []
     problems = []
+    st_disc, out_disc = guest_run(vm, "hmptd", "hardened-malloc-probe discard", 90)
+    sections.append(f"=== discard (exit {st_disc}) ===\n{out_disc}\n")
+    if st_disc != 0:
+        problems.append(f"discard exit {st_disc}")
     st_pt, out_pt = guest_run(vm, "hmpto", "hardened-malloc-probe pt-order", 120)
     sections.append(f"=== pt-order (exit {st_pt}) ===\n{out_pt}\n")
     if st_pt != 0:
@@ -6757,7 +6761,7 @@ def test_hardened_malloc_pt_order(vm, args):
             "after": aft,
             "delta": delta,
         }
-        if l0 != 0 or l1 != 0 or b0 == 0 or b1 == 0 or urc != 0 or aft != 0 or delta != 0:
+        if l0 != 0 or l1 != 0 or b0 == 0 or b1 == 0 or urc != 0 or bef != 0 or aft != 0 or delta != 0:
             problems.append(
                 f"pt-order log={l0}/{l1} bytes={b0}/{b1} unmap_rc={urc} before={bef} after={aft} delta={delta}"
             )
@@ -6779,14 +6783,152 @@ def test_hardened_malloc_pt_order(vm, args):
             problems.append(f"mt-smoke ok={ok} ch={ch} tch={tch} urc={urc}")
     (vm.out / "hardened-malloc-pt-order.txt").write_text("".join(sections))
     (vm.out / "hardened-malloc-pt-order.json").write_text(
-        json.dumps({"pt_order": pt_metrics, "mt_smoke": mt_metrics}, indent=2) + "\n"
+        json.dumps({"discard_exit": st_disc, "pt_order": pt_metrics, "mt_smoke": mt_metrics}, indent=2) + "\n"
     )
     if problems:
         return False, "; ".join(problems) + f"; see {vm.out / 'hardened-malloc-pt-order.txt'}"
     return True, (
-        f"early-table-free delta={pt_metrics['delta']}, unmap={pt_metrics['unmap_us']}us, "
-        f"mt-smoke churn={mt_metrics['churn_iters']} touches={mt_metrics['total_touches']}; "
+        f"discard ok, early-table-free before={pt_metrics['before']} after={pt_metrics['after']} delta={pt_metrics['delta']}, "
+        f"unmap={pt_metrics['unmap_us']}us, mt-smoke churn={mt_metrics['churn_iters']} touches={mt_metrics['total_touches']}; "
         f"see {vm.out / 'hardened-malloc-pt-order.txt'}"
+    )
+
+
+def test_hardened_malloc_discard(vm, args):
+    """Logs in as `user` on the serial console, verifies in-place anonymous page discard via madvise (MADV_DONTNEED, MADV_DONTNEED_LOCKED, MADV_FREE), posix_madvise non-destruction, MAP_SHARED refusal, POSIX abort() SIGABRT with empty stderr, 58/58 strict test_smc.py on 32 MiB default, and 5-run median retained memory within 2x Linux."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("test -x /usr/bin/hardened-malloc-probe && echo HM_READY || echo HM_MISSING\n")
+    ready = vm.wait_serial(r"\r?\n(HM_READY|HM_MISSING)\r?\n", 20, since)
+    if not ready or ready.group(1) != "HM_READY":
+        return False, f"hardened-malloc-probe missing on image; see {vm.out / 'serial.log'}"
+    sections = []
+    problems = []
+    metrics = {"loadavg_start": list(os.getloadavg())}
+    steps = [
+        ("syscalls", "hardened-malloc-probe syscalls 2>/tmp/hm_sys_err; rc=$?; echo STDERR_BYTES=$(wc -c < /tmp/hm_sys_err); (exit $rc)", 60),
+        ("discard", "hardened-malloc-probe discard", 90),
+        ("suite-default", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/small hardened-malloc-probe run-suite /usr/libexec/hardened-malloc/test", 360),
+    ]
+    for r in range(1, 6):
+        steps.append((f"bench-dlmalloc-{r}", "hardened-malloc-bench-dlmalloc dlmalloc 2>/tmp/hm_err; rc=$?; echo STDERR_BYTES=$(wc -c < /tmp/hm_err); (exit $rc)", 120))
+        steps.append((f"bench-default-{r}", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/small hardened-malloc-bench-hm hm-default 2>/tmp/hm_err; rc=$?; echo STDERR_BYTES=$(wc -c < /tmp/hm_err); (exit $rc)", 120))
+        steps.append((f"bench-light-{r}", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/light-small hardened-malloc-bench-hm hm-light 2>/tmp/hm_err; rc=$?; echo STDERR_BYTES=$(wc -c < /tmp/hm_err); (exit $rc)", 120))
+    outputs = {}
+    for tag, cmd, step_timeout in steps:
+        status, out = guest_run(vm, f"hmd{tag.replace('-', '')}", cmd, step_timeout)
+        outputs[tag] = (status, out)
+        sections.append(f"=== {tag} (exit {status}) ===\n{out}\n")
+        if status != 0:
+            problems.append(f"{tag} exit {status}")
+    metrics["loadavg_end"] = list(os.getloadavg())
+    (vm.out / "hardened-malloc-discard.txt").write_text("".join(sections))
+
+    dout = outputs["discard"][1]
+    for adv in ("MADV_DONTNEED", "MADV_DONTNEED_LOCKED", "MADV_FREE"):
+        m = re.search(rf"discard-advice name={adv} rc=(-?\d+) errno=(\d+) stderr_bytes=(\d+) frames_delta=(-?\d+) all_zero=(\d+) rewritable=(\d+)", dout)
+        if not m:
+            problems.append(f"missing {adv}")
+        else:
+            rc, _, sb, fd, az, rw = map(int, m.groups())
+            if rc != 0 or sb != 0 or fd > -32 or az != 1 or rw != 1:
+                problems.append(f"{adv} rc={rc} stderr={sb} frames_delta={fd} zero={az} rw={rw}")
+    m = re.search(r"discard-subrange rc=(-?\d+) errno=(\d+) stderr_bytes=(\d+) outer_kept=(\d+) inner_zero=(\d+)", dout)
+    if not m or tuple(map(int, m.groups())) != (0, 0, 0, 1, 1):
+        problems.append("subrange failed")
+    m = re.search(r"discard-prot-none rc=(-?\d+) errno=(\d+) stderr_bytes=(\d+) frames_delta=(-?\d+) read_status=(-?\d+) all_zero=(\d+)", dout)
+    if not m:
+        problems.append("missing prot-none")
+    else:
+        rc, _, sb, fd, rs, az = map(int, m.groups())
+        if rc != 0 or sb != 0 or fd > -32 or rs != -11 or az != 1:
+            problems.append(f"prot-none rc={rc} sb={sb} fd={fd} rs={rs} az={az}")
+    m = re.search(r"discard-posix-madvise rc=(-?\d+) data_kept=(\d+)", dout)
+    if not m or tuple(map(int, m.groups())) != (0, 1):
+        problems.append("posix_madvise altered data")
+    m = re.search(r"discard-shared rc=(-?\d+) errno=(\d+) stderr_bytes=(\d+) data_kept=(\d+)", dout)
+    if not m or tuple(map(int, m.groups())) != (0, 0, 0, 1):
+        problems.append("MAP_SHARED discard must succeed without zeroing")
+    m = re.search(r"discard-errors unalign=(-?\d+):(\d+) zero=(-?\d+):(\d+) bad=(-?\d+):(\d+) wipe=(-?\d+):(\d+) hole=(-?\d+):(\d+) hole_zero=(\d+)", dout)
+    if not m or tuple(map(int, m.groups())) != (-1, 22, 0, 0, -1, 22, -1, 22, -1, 12, 1):
+        problems.append("discard error cases mismatch")
+    m = re.search(r"discard-sparse rc=(-?\d+) errno=(\d+) elapsed_us=(\d+) zero=(\d+)", dout)
+    if not m:
+        problems.append("missing sparse discard")
+    else:
+        rc, _, us, z = map(int, m.groups())
+        metrics["sparse_discard_1g_us"] = us
+        if rc != 0 or z != 1 or us > 10000:
+            problems.append(f"sparse 1G discard rc={rc} us={us} zero={z}")
+    for cname, exp_out in (("default", ""), ("blocked", ""), ("ignored", ""), ("caught", "caught\\n")):
+        m = re.search(rf'discard-abort case={cname} status=(-?\d+) timed_out=(\d+) stdout_bytes=(\d+) stderr_bytes=(\d+) stdout="([^"]*)" stderr="([^"]*)"', dout)
+        if not m:
+            problems.append(f"missing abort {cname}")
+        else:
+            st, to, _, sb = map(int, m.groups()[:4])
+            so = m.group(5)
+            if st != -6 or to != 0 or sb != 0 or so != exp_out:
+                problems.append(f"abort {cname} st={st} to={to} sb={sb} so={so!r}")
+
+    def_sum = re.search(r"suite-summary passed=(\d+) failed=(\d+) total=(\d+)", outputs["suite-default"][1])
+    if not def_sum or int(def_sum.group(3)) != 58 or int(def_sum.group(1)) != 58:
+        problems.append(f"default suite not 58/58 strict ({def_sum.groups() if def_sum else 'missing'})")
+
+    LINUX_RETAINED_KIB_DEFAULT = 14868
+    LINUX_RETAINED_KIB_LIGHT = 2608
+    bench_retained = {}
+    bench_timings = {}
+    for variant, label, max_kib in (
+        ("default", "hm-default", 2 * LINUX_RETAINED_KIB_DEFAULT),
+        ("light", "hm-light", 2 * LINUX_RETAINED_KIB_LIGHT),
+        ("dlmalloc", "dlmalloc", 4096),
+    ):
+        vals = []
+        smalls = []
+        meds = []
+        larges = []
+        reallocs = []
+        for r in range(1, 6):
+            bout = outputs[f"bench-{variant}-{r}"][1]
+            bm = re.search(rf"bench label={label} small_ms=(\d+) med_ms=(\d+) large_ms=(\d+) realloc_ms=(\d+) small_peak_kib=(-?\d+) med_peak_kib=(-?\d+) large_peak_kib=(-?\d+) retained_kib=(-?\d+)", bout)
+            em = re.search(r"STDERR_BYTES=\s*(\d+)", bout)
+            if not bm:
+                problems.append(f"missing bench-{variant}-{r}")
+            else:
+                smalls.append(int(bm.group(1)))
+                meds.append(int(bm.group(2)))
+                larges.append(int(bm.group(3)))
+                reallocs.append(int(bm.group(4)))
+                vals.append(int(bm.group(8)))
+            if not em or int(em.group(1)) != 0:
+                problems.append(f"bench-{variant}-{r} stderr_bytes={em.group(1) if em else 'missing'}")
+        if len(vals) == 5:
+            med_ret = sorted(vals)[2]
+            bench_retained[variant] = {"runs": vals, "median": med_ret}
+            bench_timings[variant] = {
+                "small_ms": {"runs": smalls, "median": sorted(smalls)[2]},
+                "med_ms": {"runs": meds, "median": sorted(meds)[2]},
+                "large_ms": {"runs": larges, "median": sorted(larges)[2]},
+                "realloc_ms": {"runs": reallocs, "median": sorted(reallocs)[2]},
+            }
+            if med_ret > max_kib:
+                problems.append(f"{variant} retained_kib median {med_ret} > {max_kib}")
+    sys_em = re.search(r"STDERR_BYTES=\s*(\d+)", outputs["syscalls"][1])
+    if not sys_em or int(sys_em.group(1)) != 0:
+        problems.append(f"syscalls stderr_bytes={sys_em.group(1) if sys_em else 'missing'}")
+    metrics["suite_default"] = dict(zip(("passed", "failed", "total"), map(int, def_sum.groups()))) if def_sum else None
+    metrics["retained_kib"] = bench_retained
+    metrics["timings_ms"] = bench_timings
+    (vm.out / "hardened-malloc-discard.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'hardened-malloc-discard.txt'}"
+    return True, (
+        f"default suite 58/58 strict, retained_kib median default={bench_retained['default']['median']} "
+        f"light={bench_retained['light']['median']} dlmalloc={bench_retained['dlmalloc']['median']}, "
+        f"sparse 1G discard={metrics.get('sparse_discard_1g_us')}us; see {vm.out / 'hardened-malloc-discard.txt'}"
     )
 
 
@@ -6848,6 +6990,7 @@ TESTS["hardened-malloc"] = test_hardened_malloc
 TESTS["hardened-malloc-hotpath"] = test_hardened_malloc_hotpath
 TESTS["hardened-malloc-sparse"] = test_hardened_malloc_sparse
 TESTS["hardened-malloc-pt-order"] = test_hardened_malloc_pt_order
+TESTS["hardened-malloc-discard"] = test_hardened_malloc_discard
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password

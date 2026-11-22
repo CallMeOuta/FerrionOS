@@ -19,10 +19,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifndef MADV_DONTNEED_LOCKED
-#define MADV_DONTNEED_LOCKED 24
-#endif
-
 enum {
     PAGE_BYTES = 4096,
     MAX_SPARSE_SIZES = 5,
@@ -55,6 +51,8 @@ enum {
     MT_WORKERS = 4,
     MT_DURATION_MS = 2500,
     MT_MAX_ITERS = 200000,
+    DISCARD_PAGES = 64,
+    SPARSE_DISCARD_BYTES = 1024 * 1024 * 1024,
 };
 
 struct mem_frames {
@@ -1617,9 +1615,246 @@ static int run_mt_smoke(void) {
     return urc == 0 ? 0 : 1;
 }
 
+static void abort_catching_handler(int sig) {
+    (void)sig;
+    static const char msg[] = "caught\n";
+    ssize_t unused = write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    (void)unused;
+}
+
+static int run_madvise_capture_stderr(void *addr, size_t len, int advice, int *out_errno, size_t *out_stderr_bytes) {
+    int err_pipe[2];
+    assert(pipe(err_pipe) == 0);
+    int saved_stderr = dup(STDERR_FILENO);
+    assert(saved_stderr >= 0);
+    assert(dup2(err_pipe[1], STDERR_FILENO) >= 0);
+    close(err_pipe[1]);
+    fcntl(err_pipe[0], F_SETFL, O_NONBLOCK);
+
+    errno = 0;
+    int rc = madvise(addr, len, advice);
+    *out_errno = errno;
+
+    assert(dup2(saved_stderr, STDERR_FILENO) >= 0);
+    close(saved_stderr);
+
+    char cap[MAX_CAPTURE_BYTES];
+    size_t cap_len = 0;
+    drain_nonblock(err_pipe[0], cap, &cap_len, sizeof(cap));
+    close(err_pipe[0]);
+    *out_stderr_bytes = cap_len;
+    return rc;
+}
+
+static void probe_discard_advice(const char *name, int advice) {
+    size_t sz = (size_t)DISCARD_PAGES * PAGE_BYTES;
+    unsigned char *p = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(p != MAP_FAILED);
+    memset(p, 0x5A, sz);
+
+    struct mem_frames f0 = read_mem_frames();
+    int err = 0;
+    size_t stderr_bytes = 0;
+    int rc = run_madvise_capture_stderr(p, sz, advice, &err, &stderr_bytes);
+    struct mem_frames f1 = read_mem_frames();
+
+    int all_zero = 1;
+    for (size_t pg = 0; pg < DISCARD_PAGES; pg++) {
+        if (p[pg * PAGE_BYTES] != 0 || p[pg * PAGE_BYTES + PAGE_BYTES - 1] != 0) {
+            all_zero = 0;
+            break;
+        }
+    }
+    p[0] = 0x33;
+    p[sz - 1] = 0x44;
+    int rewritable = (p[0] == 0x33 && p[sz - 1] == 0x44) ? 1 : 0;
+    assert(munmap(p, sz) == 0);
+
+    printf("discard-advice name=%s rc=%d errno=%d stderr_bytes=%zu frames_delta=%lld all_zero=%d rewritable=%d\n",
+           name, rc, err, stderr_bytes, (long long)((int64_t)f1.used - (int64_t)f0.used), all_zero, rewritable);
+    fflush(stdout);
+}
+
+static void probe_abort_case(const char *label, int mode) {
+    int out_pipe[2];
+    int err_pipe[2];
+    assert(pipe(out_pipe) == 0);
+    assert(pipe(err_pipe) == 0);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        dup2(out_pipe[1], STDOUT_FILENO);
+        dup2(err_pipe[1], STDERR_FILENO);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        close(err_pipe[0]);
+        close(err_pipe[1]);
+        if (mode == 1) {
+            sigset_t mask;
+            sigemptyset(&mask);
+            sigaddset(&mask, SIGABRT);
+            sigprocmask(SIG_BLOCK, &mask, NULL);
+        } else if (mode == 2) {
+            signal(SIGABRT, SIG_IGN);
+        } else if (mode == 3) {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = abort_catching_handler;
+            sigemptyset(&sa.sa_mask);
+            sigaction(SIGABRT, &sa, NULL);
+        }
+        abort();
+    }
+
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+    fcntl(out_pipe[0], F_SETFL, O_NONBLOCK);
+    fcntl(err_pipe[0], F_SETFL, O_NONBLOCK);
+
+    bool timed_out = false;
+    int status = wait_child_status(pid, 5000, &timed_out);
+    char out_buf[MAX_CAPTURE_BYTES + 1];
+    char err_buf[MAX_CAPTURE_BYTES + 1];
+    size_t out_len = 0;
+    size_t err_len = 0;
+    drain_nonblock(out_pipe[0], out_buf, &out_len, MAX_CAPTURE_BYTES);
+    drain_nonblock(err_pipe[0], err_buf, &err_len, MAX_CAPTURE_BYTES);
+    out_buf[out_len] = '\0';
+    err_buf[err_len] = '\0';
+    close(out_pipe[0]);
+    close(err_pipe[0]);
+
+    char esc_out[MAX_ESCAPED_BYTES];
+    char esc_err[MAX_ESCAPED_BYTES];
+    escape_text(out_buf, out_len, esc_out, sizeof(esc_out));
+    escape_text(err_buf, err_len, esc_err, sizeof(esc_err));
+    printf("discard-abort case=%s status=%d timed_out=%d stdout_bytes=%zu stderr_bytes=%zu stdout=\"%s\" stderr=\"%s\"\n",
+           label, status, timed_out ? 1 : 0, out_len, err_len, esc_out, esc_err);
+    fflush(stdout);
+}
+
+static int run_discard(void) {
+    probe_discard_advice("MADV_DONTNEED", MADV_DONTNEED);
+    probe_discard_advice("MADV_DONTNEED_LOCKED", MADV_DONTNEED_LOCKED);
+    probe_discard_advice("MADV_FREE", MADV_FREE);
+
+    size_t sz = (size_t)DISCARD_PAGES * PAGE_BYTES;
+    unsigned char *sub = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(sub != MAP_FAILED);
+    memset(sub, 0x77, sz);
+    int sub_err = 0;
+    size_t sub_stderr = 0;
+    int sub_rc = run_madvise_capture_stderr(sub + 16 * PAGE_BYTES, 32 * PAGE_BYTES, MADV_DONTNEED, &sub_err, &sub_stderr);
+    int outer_kept = 1;
+    int inner_zero = 1;
+    for (size_t pg = 0; pg < DISCARD_PAGES; pg++) {
+        unsigned char expected = (pg >= 16 && pg < 48) ? 0x00 : 0x77;
+        if (sub[pg * PAGE_BYTES] != expected || sub[pg * PAGE_BYTES + PAGE_BYTES - 1] != expected) {
+            if (pg >= 16 && pg < 48) {
+                inner_zero = 0;
+            } else {
+                outer_kept = 0;
+            }
+        }
+    }
+    assert(munmap(sub, sz) == 0);
+    printf("discard-subrange rc=%d errno=%d stderr_bytes=%zu outer_kept=%d inner_zero=%d\n",
+           sub_rc, sub_err, sub_stderr, outer_kept, inner_zero);
+
+    unsigned char *pn = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(pn != MAP_FAILED);
+    memset(pn, 0x99, sz);
+    assert(mprotect(pn, sz, PROT_NONE) == 0);
+    struct mem_frames pnf0 = read_mem_frames();
+    int pn_err = 0;
+    size_t pn_stderr = 0;
+    int pn_rc = run_madvise_capture_stderr(pn, sz, MADV_DONTNEED_LOCKED, &pn_err, &pn_stderr);
+    struct mem_frames pnf1 = read_mem_frames();
+    pid_t pn_pid = fork();
+    assert(pn_pid >= 0);
+    if (pn_pid == 0) {
+        volatile unsigned char v = pn[0];
+        _exit((int)(10 + (v != 0 ? 1 : 0)));
+    }
+    bool pn_to = false;
+    int pn_read_status = wait_child_status(pn_pid, 5000, &pn_to);
+    assert(mprotect(pn, sz, PROT_READ | PROT_WRITE) == 0);
+    int pn_zero = 1;
+    for (size_t pg = 0; pg < DISCARD_PAGES; pg++) {
+        if (pn[pg * PAGE_BYTES] != 0) {
+            pn_zero = 0;
+            break;
+        }
+    }
+    assert(munmap(pn, sz) == 0);
+    printf("discard-prot-none rc=%d errno=%d stderr_bytes=%zu frames_delta=%lld read_status=%d all_zero=%d\n",
+           pn_rc, pn_err, pn_stderr, (long long)((int64_t)pnf1.used - (int64_t)pnf0.used), pn_read_status, pn_zero);
+
+    unsigned char *pm = mmap(NULL, 4 * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(pm != MAP_FAILED);
+    memset(pm, 0x42, 4 * PAGE_BYTES);
+    int pm_rc = posix_madvise(pm, 4 * PAGE_BYTES, POSIX_MADV_DONTNEED);
+    int pm_kept = (pm[0] == 0x42 && pm[4 * PAGE_BYTES - 1] == 0x42) ? 1 : 0;
+    assert(munmap(pm, 4 * PAGE_BYTES) == 0);
+    printf("discard-posix-madvise rc=%d data_kept=%d\n", pm_rc, pm_kept);
+
+    unsigned char *sh = mmap(NULL, 4 * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    assert(sh != MAP_FAILED);
+    memset(sh, 0x66, 4 * PAGE_BYTES);
+    int sh_err = 0;
+    size_t sh_stderr = 0;
+    int sh_rc = run_madvise_capture_stderr(sh, 4 * PAGE_BYTES, MADV_DONTNEED, &sh_err, &sh_stderr);
+    int sh_kept = (sh[0] == 0x66 && sh[4 * PAGE_BYTES - 1] == 0x66) ? 1 : 0;
+    assert(munmap(sh, 4 * PAGE_BYTES) == 0);
+    printf("discard-shared rc=%d errno=%d stderr_bytes=%zu data_kept=%d\n", sh_rc, sh_err, sh_stderr, sh_kept);
+
+    unsigned char *eb = mmap(NULL, 8 * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(eb != MAP_FAILED);
+    memset(eb, 0x88, 8 * PAGE_BYTES);
+    int e_unalign = 0;
+    int e_zero = 0;
+    int e_bad = 0;
+    int e_wipe = 0;
+    int e_hole = 0;
+    size_t e_sb = 0;
+    int r_unalign = run_madvise_capture_stderr(eb + 1, PAGE_BYTES, MADV_DONTNEED, &e_unalign, &e_sb);
+    int r_zero = run_madvise_capture_stderr(eb, 0, MADV_DONTNEED, &e_zero, &e_sb);
+    int r_bad = run_madvise_capture_stderr(eb, PAGE_BYTES, 999, &e_bad, &e_sb);
+    int r_wipe = run_madvise_capture_stderr(eb, PAGE_BYTES, 18, &e_wipe, &e_sb);
+    assert(munmap(eb + 3 * PAGE_BYTES, 2 * PAGE_BYTES) == 0);
+    int r_hole = run_madvise_capture_stderr(eb, 8 * PAGE_BYTES, MADV_DONTNEED, &e_hole, &e_sb);
+    int hole_zero = (eb[0] == 0 && eb[2 * PAGE_BYTES] == 0 && eb[5 * PAGE_BYTES] == 0 && eb[7 * PAGE_BYTES] == 0) ? 1 : 0;
+    assert(munmap(eb, 3 * PAGE_BYTES) == 0);
+    assert(munmap(eb + 5 * PAGE_BYTES, 3 * PAGE_BYTES) == 0);
+    printf("discard-errors unalign=%d:%d zero=%d:%d bad=%d:%d wipe=%d:%d hole=%d:%d hole_zero=%d\n",
+           r_unalign, e_unalign, r_zero, e_zero, r_bad, e_bad, r_wipe, e_wipe, r_hole, e_hole, hole_zero);
+
+    unsigned char *sp = mmap(NULL, (size_t)SPARSE_DISCARD_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(sp != MAP_FAILED);
+    unsigned char *sp_mid = sp + (size_t)SPARSE_DISCARD_BYTES / 2;
+    assert(mprotect(sp_mid, PAGE_BYTES, PROT_READ | PROT_WRITE) == 0);
+    sp_mid[0] = 0xAB;
+    uint64_t sp_t0 = now_us();
+    int sp_err = 0;
+    size_t sp_stderr = 0;
+    int sp_rc = run_madvise_capture_stderr(sp, (size_t)SPARSE_DISCARD_BYTES, MADV_DONTNEED, &sp_err, &sp_stderr);
+    uint64_t sp_t1 = now_us();
+    int sp_zero = (sp_mid[0] == 0x00) ? 1 : 0;
+    assert(munmap(sp, (size_t)SPARSE_DISCARD_BYTES) == 0);
+    printf("discard-sparse rc=%d errno=%d elapsed_us=%llu zero=%d\n",
+           sp_rc, sp_err, (unsigned long long)(sp_t1 - sp_t0), sp_zero);
+
+    probe_abort_case("default", 0);
+    probe_abort_case("blocked", 1);
+    probe_abort_case("ignored", 2);
+    probe_abort_case("caught", 3);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: hardened-malloc-probe <sparse|sparse-ops|pt-order|mt-smoke|prot-none|syscalls|mutex-stress|mutex-bench|micro|run-suite DIR|timed-exec MS CMD...>\n");
+        fprintf(stderr, "usage: hardened-malloc-probe <sparse|sparse-ops|pt-order|mt-smoke|prot-none|syscalls|mutex-stress|mutex-bench|micro|discard|run-suite DIR|timed-exec MS CMD...>\n");
         return 2;
     }
     if (strcmp(argv[1], "sparse") == 0) {
@@ -1648,6 +1883,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "micro") == 0) {
         return run_micro();
+    }
+    if (strcmp(argv[1], "discard") == 0) {
+        return run_discard();
     }
     if (strcmp(argv[1], "run-suite") == 0 && argc == 3) {
         return run_suite(argv[2]);
