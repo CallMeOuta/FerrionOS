@@ -1,0 +1,11 @@
+[package]
+description = "Checks DRM sync objects, timelines and sync files on a GPU render handle"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -pthread -o "${COOKBOOK_STAGE}/usr/bin/gpu-probe-syncobj" \
+    "${COOKBOOK_RECIPE}/main.c" "${COOKBOOK_RECIPE}/syncobj.c" ${LDFLAGS} -lpthread
+"""

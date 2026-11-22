@@ -47,6 +47,7 @@ graphics-bounds-probe = {}
 gpu-probe-context = {}
 gpu-probe-blob = {}
 gpu-probe-submit = {}
+gpu-probe-syncobj = {}
 # Run as root (a `user` login may not create a scheme), it checks that a short read from a
 # user-space scheme leaves the rest of the caller's buffer untouched; scripts/vm-test.py
 # scheme-short-read runs it.

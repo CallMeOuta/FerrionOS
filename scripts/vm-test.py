@@ -4857,6 +4857,38 @@ def test_gpu_submit(vm, args):
                   f"{output.count(f'{tag}: pass ')} probe checks passed")
 
 
+def test_gpu_syncobj(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-syncobj on a 3D device (gpu=venus unless --make names another): checks timeline waits, 300 ms deadline timing, sync-file export/merge/poll/import, and per-handle syncobj isolation."""
+    tag = "gpu-probe-syncobj"
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    status, output = guest_run(vm, "gs", tag, 120)
+    _, schemes = guest_run(vm, "gl", "ls /scheme", 30)
+    log = vm.out / "gpu-syncobj.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    reasons = []
+    render = re.search(rf"(?m)^{tag}: render (\S+)", output)
+    timeout_ms = re.search(rf"(?m)^{tag}: timeout-ms (-?\d+)", output)
+    wake_ms = re.search(rf"(?m)^{tag}: wake-delay-ms (-?\d+)", output)
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):", output)
+    if not render:
+        reasons.append("the probe found no render name")
+    elif status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed checks: {', '.join(failed) or 'no result line'}")
+    if render:
+        listed = schemes.split()
+        if render.group(1) not in listed or "display.virtio-gpu" not in listed:
+            reasons.append("/scheme no longer lists the render and display names after the probe")
+    if not timeout_ms or not (270 <= int(timeout_ms.group(1)) <= 400):
+        reasons.append(f"300 ms deadline took {timeout_ms.group(1) if timeout_ms else 'missing'} ms")
+    if not wake_ms or not (0 <= int(wake_ms.group(1)) <= 50):
+        reasons.append(f"point-3 wake delay was {wake_ms.group(1) if wake_ms else 'missing'} ms")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, (f"{render.group(1)}: timeout {timeout_ms.group(1)} ms, point-3 wake {wake_ms.group(1)} ms, "
+                  f"{output.count(f'{tag}: pass ')} probe checks passed")
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -4897,6 +4929,7 @@ TESTS["directory-fsync"] = test_directory_fsync
 TESTS["gpu-context"] = test_gpu_context
 TESTS["gpu-blob"] = test_gpu_blob
 TESTS["gpu-submit"] = test_gpu_submit
+TESTS["gpu-syncobj"] = test_gpu_syncobj
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -4977,6 +5010,9 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_BLOB_TRACE]})
+            elif name == "gpu-syncobj":
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=venus",)
             try:
                 qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
                 host = host_versions(qemu)
