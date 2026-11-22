@@ -41,6 +41,10 @@ pub mod key_tool;
 #[cfg(feature = "std")]
 pub use self::mount::mount;
 pub use self::node::{Node, NodeFlags, NodeLevel, NodeLevelData};
+#[cfg(feature = "std")]
+pub use self::page_cache::{
+    CacheUpdate, MAX_MAPPED_BYTES, MAX_MAPPED_RANGES, MAX_NODE_HANDLES, PageCache, PageMemory,
+};
 pub use self::record::RecordRaw;
 pub use self::transaction::Transaction;
 pub use self::tree::{Tree, TreeData, TreeList, TreePtr};
@@ -64,6 +68,8 @@ mod mount;
 #[cfg(all(feature = "std", fuzzing))]
 pub mod mount;
 mod node;
+#[cfg(feature = "std")]
+mod page_cache;
 mod record;
 mod transaction;
 mod tree;

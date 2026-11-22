@@ -30,7 +30,7 @@ use redox_path::RedoxPath;
 
 use crate::{BLOCK_SIZE, Disk, FileSystem, Node, Transaction, TreeData, TreePtr};
 
-use super::resource::{DirResource, Entry, FileMmapInfo, FileResource, Resource};
+use super::resource::{DirResource, Entry, FileResource, Resource};
 
 enum Handle<D: Disk> {
     ResourceDir((DirResource, PhantomData<D>)),
@@ -119,7 +119,7 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
             socket,
             next_id: AtomicUsize::new(1),
             handles: BTreeMap::new(),
-            fmap: BTreeMap::new(),
+            fmap: super::resource::Fmaps::new(),
             other_scheme_fd_map: BTreeMap::new(),
             proc_creds_capability: {
                 libredox::Fd::open(
@@ -371,10 +371,11 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
                             return Err(Error::new(EACCES));
                         }
 
-                        let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                        self.fs.tx(|tx| {
-                            tx.truncate_node(node_ptr, 0, mtime.as_secs(), mtime.subsec_nanos())
-                        })?;
+                        let fmap = &mut self.fmap;
+                        let resized = self
+                            .fs
+                            .tx(|tx| fmap.truncate(node_ptr, 0, super::resource::now(), tx))?;
+                        fmap.apply(resized, &[]);
                     }
 
                     if flags & O_STAT != O_STAT
@@ -453,17 +454,8 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
         };
 
         let node_ptr = handle.resource().unwrap().node_ptr();
-        {
-            let fmap_info = self
-                .fmap
-                .entry(node_ptr.id())
-                .or_insert_with(FileMmapInfo::new);
-            if !fmap_info.in_use() {
-                // Notify filesystem of open
-                self.fs.tx(|tx| tx.on_open_node(node_ptr))?;
-            }
-            fmap_info.open_fds += 1;
-        }
+        let fmap = &mut self.fmap;
+        self.fs.tx(|tx| fmap.open(node_ptr, tx))?;
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.handles.insert(id, handle);
@@ -982,7 +974,10 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         // println!("Write {}, {:X} {}", id, buf.as_ptr() as usize, buf.len());
         self.writable()?;
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
-        self.fs.tx(|tx| file.write(&mut self.fmap, buf, offset, tx))
+        let fmap = &mut self.fmap;
+        let (count, update) = self.fs.tx(|tx| file.write(fmap, buf, offset, tx))?;
+        fmap.apply(update, buf);
+        Ok(count)
     }
 
     fn fsize(&mut self, id: usize, _ctx: &CallerCtx) -> Result<u64> {
@@ -1143,7 +1138,10 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
         // println!("Ftruncate {}, {}", id, len);
         self.writable()?;
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
-        self.fs.tx(|tx| file.truncate(len, tx))
+        let fmaps = &mut self.fmap;
+        let resized = self.fs.tx(|tx| file.truncate(fmaps, len, tx))?;
+        fmaps.apply(resized, &[]);
+        Ok(())
     }
 
     fn futimens(&mut self, id: usize, times: &[TimeSpec], _ctx: &CallerCtx) -> Result<()> {
@@ -1202,26 +1200,9 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
             return;
         };
         let node_ptr = resource.node_ptr();
-        let Some(file_info) = self.fmap.get_mut(&node_ptr.id()) else {
-            return;
-        };
-
-        file_info.open_fds = file_info
-            .open_fds
-            .checked_sub(1)
-            .expect("open_fds not tracked correctly");
-
-        // Check if node no longer in use
-        if !file_info.in_use() {
-            // Notify filesystem of close
-            if let Err(err) = self.fs.tx(|tx| tx.on_close_node(node_ptr)) {
-                log::error!("failed to close node {}: {}", node_ptr.id(), err);
-            }
-
-            /*TODO: leaks memory, but why?
-            // Remove from fmap list
-            self.fmap.remove(&node_ptr.id());
-            */
+        let fmap = &mut self.fmap;
+        if let Err(err) = self.fs.tx(|tx| fmap.close(node_ptr, tx)) {
+            log::error!("failed to close node {}: {}", node_ptr.id(), err);
         }
     }
 
