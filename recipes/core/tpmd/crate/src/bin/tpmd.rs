@@ -272,7 +272,6 @@ impl SchemeSync for TpmScheme {
         if !matches!(self.channel, Channel::Idle) {
             return Err(Error::new(EBUSY));
         }
-        assert!(matches!(self.channel, Channel::Idle));
         if tpm2::declared_size(buf) != Some(buf.len()) || buf.len() < tpm2::HEADER_LEN {
             return Err(Error::new(EINVAL));
         }
@@ -304,7 +303,6 @@ impl SchemeSync for TpmScheme {
             return Err(Error::new(EINVAL));
         };
         if buf.len() < response.len() {
-            self.channel = Channel::Pending(response);
             return Err(Error::new(EINVAL));
         }
         buf[..response.len()].copy_from_slice(&response);
