@@ -1,0 +1,317 @@
+FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1 (fec8830e9c94b1d67f3d8469467d5529fb2978cd): Enable the Venus Vulkan driver on FerrionOS with a process-local thread identifier for vn_gettid and direct render-scheme discovery without udev or sysfs while preserving Venus's DRM version and 3D parameter checks.
+
+diff --git a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+index 1288dad..d74587f 100644
+--- a/src/virtio/vulkan/vn_common.c
++++ b/src/virtio/vulkan/vn_common.c
+@@ -434,3 +434,21 @@ vn_tls_get(void)
+ 
+    return tls;
+ }
++
++#if DETECT_OS_REDOX
++pid_t
++vn_gettid_redox(void)
++{
++   static atomic_int next_tid = 1;
++   static _Thread_local pid_t tid = 0;
++
++   if (unlikely(!tid)) {
++      int id = atomic_fetch_add_explicit(&next_tid, 1, memory_order_relaxed);
++      if (id <= 0)
++         id = 1;
++      tid = (pid_t)id;
++   }
++
++   return tid;
++}
++#endif
+diff --git a/src/virtio/vulkan/vn_common.h b/src/virtio/vulkan/vn_common.h
+index 86235f6..d9fbda0 100644
+--- a/src/virtio/vulkan/vn_common.h
++++ b/src/virtio/vulkan/vn_common.h
+@@ -52,7 +52,9 @@
+ #if DETECT_OS_WINDOWS
+ #include <processthreadsapi.h>
+ #else
++#if !DETECT_OS_REDOX
+ #include <sys/syscall.h>
++#endif
+ 
+ #include "drm-uapi/drm_fourcc.h"
+ #include "util/libsync.h"
+@@ -639,6 +641,11 @@ vn_object_get_id(const void *obj, VkObjectType type)
+    }
+ }
+ 
++#if DETECT_OS_REDOX
++pid_t
++vn_gettid_redox(void);
++#endif
++
+ static inline pid_t
+ vn_gettid(void)
+ {
+@@ -648,6 +655,8 @@ vn_gettid(void)
+    return syscall(SYS_thr_self);
+ #elif DETECT_OS_WINDOWS
+    return GetCurrentThreadId();
++#elif DETECT_OS_REDOX
++   return vn_gettid_redox();
+ #else
+    return syscall(SYS_gettid);
+ #endif
+diff --git a/src/virtio/vulkan/vn_renderer_virtgpu.c b/src/virtio/vulkan/vn_renderer_virtgpu.c
+index e2739dc..589b563 100644
+--- a/src/virtio/vulkan/vn_renderer_virtgpu.c
++++ b/src/virtio/vulkan/vn_renderer_virtgpu.c
+@@ -17,6 +17,14 @@
+ #include <sys/sysmacros.h>
+ #endif
+ 
++#ifdef __redox__
++#include <dirent.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#endif
++
+ #include "virtio/virtio-gpu/venus_hw.h"
+ 
+ #include "drm-uapi/virtgpu_drm.h"
+@@ -1098,47 +1106,13 @@ virtgpu_init_params(struct virtgpu *gpu)
+ }
+ 
+ static VkResult
+-virtgpu_open_device(struct virtgpu *gpu, const drmDevicePtr dev)
++virtgpu_open_fd(struct virtgpu *gpu,
++                int fd,
++                const char *node_path,
++                const char *primary_path,
++                int bustype,
++                const drmPciBusInfo *pci_bus_info)
+ {
+-   bool supported_bus = false;
+-
+-   switch (dev->bustype) {
+-   case DRM_BUS_PCI:
+-      if (dev->deviceinfo.pci->vendor_id == VIRTGPU_PCI_VENDOR_ID &&
+-          dev->deviceinfo.pci->device_id == VIRTGPU_PCI_DEVICE_ID)
+-         supported_bus = true;
+-      break;
+-   case DRM_BUS_PLATFORM:
+-      supported_bus = true;
+-      break;
+-   default:
+-      break;
+-   }
+-
+-   if (!supported_bus || !(dev->available_nodes & (1 << DRM_NODE_RENDER))) {
+-      if (VN_DEBUG(INIT)) {
+-         const char *name = "unknown";
+-         for (uint32_t i = 0; i < DRM_NODE_MAX; i++) {
+-            if (dev->available_nodes & (1 << i)) {
+-               name = dev->nodes[i];
+-               break;
+-            }
+-         }
+-         vn_log(gpu->instance, "skipping DRM device %s", name);
+-      }
+-      return VK_ERROR_INITIALIZATION_FAILED;
+-   }
+-
+-   const char *primary_path = dev->nodes[DRM_NODE_PRIMARY];
+-   const char *node_path = dev->nodes[DRM_NODE_RENDER];
+-
+-   int fd = open(node_path, O_RDWR | O_CLOEXEC);
+-   if (fd < 0) {
+-      if (VN_DEBUG(INIT))
+-         vn_log(gpu->instance, "failed to open %s", node_path);
+-      return VK_ERROR_INITIALIZATION_FAILED;
+-   }
+-
+    drmVersionPtr version = drmGetVersion(fd);
+    if (!version || strcmp(version->name, "virtio_gpu") ||
+        version->version_major != 0) {
+@@ -1170,8 +1144,8 @@ virtgpu_open_device(struct virtgpu *gpu, const drmDevicePtr dev)
+       return VK_ERROR_INITIALIZATION_FAILED;
+    }
+ 
+-   struct stat st;
+-   if (stat(primary_path, &st) == 0) {
++   struct stat st = { 0 };
++   if (primary_path && primary_path[0] && stat(primary_path, &st) == 0) {
+       gpu->has_primary = true;
+       gpu->primary_major = major(st.st_rdev);
+       gpu->primary_minor = minor(st.st_rdev);
+@@ -1180,13 +1154,18 @@ virtgpu_open_device(struct virtgpu *gpu, const drmDevicePtr dev)
+       gpu->primary_major = 0;
+       gpu->primary_minor = 0;
+    }
+-   stat(node_path, &st);
+-   gpu->render_major = major(st.st_rdev);
+-   gpu->render_minor = minor(st.st_rdev);
++   st = (struct stat){ 0 };
++   if (fstat(fd, &st) == 0 || (node_path && stat(node_path, &st) == 0)) {
++      gpu->render_major = major(st.st_rdev);
++      gpu->render_minor = minor(st.st_rdev);
++   } else {
++      gpu->render_major = 0;
++      gpu->render_minor = 0;
++   }
+ 
+-   gpu->bustype = dev->bustype;
+-   if (dev->bustype == DRM_BUS_PCI)
+-      gpu->pci_bus_info = *dev->businfo.pci;
++   gpu->bustype = bustype;
++   if (bustype == DRM_BUS_PCI && pci_bus_info)
++      gpu->pci_bus_info = *pci_bus_info;
+ 
+    drmFreeVersion(version);
+ 
+@@ -1196,9 +1175,136 @@ virtgpu_open_device(struct virtgpu *gpu, const drmDevicePtr dev)
+    return VK_SUCCESS;
+ }
+ 
++#ifdef __redox__
++static VkResult
++virtgpu_open_redox_path(struct virtgpu *gpu, const char *path)
++{
++   int fd = open(path, O_RDWR | O_CLOEXEC);
++   if (fd < 0) {
++      if (VN_DEBUG(INIT))
++         vn_log(gpu->instance, "failed to open %s: %s", path, strerror(errno));
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
++
++   return virtgpu_open_fd(gpu, fd, path, NULL, DRM_BUS_PLATFORM, NULL);
++}
++
++static VkResult
++virtgpu_open_redox(struct virtgpu *gpu)
++{
++   const char *env_fd = getenv("FERRION_GPU_RENDER_FD");
++   if (env_fd && env_fd[0]) {
++      char *end = NULL;
++      errno = 0;
++      long parsed = strtol(env_fd, &end, 10);
++      if (errno != 0 || !end || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
++         if (VN_DEBUG(INIT))
++            vn_log(gpu->instance, "invalid FERRION_GPU_RENDER_FD=%s", env_fd);
++         return VK_ERROR_INITIALIZATION_FAILED;
++      }
++
++      int fd = fcntl((int)parsed, F_DUPFD_CLOEXEC, 0);
++      if (fd < 0) {
++         if (VN_DEBUG(INIT))
++            vn_log(gpu->instance, "failed to dup FERRION_GPU_RENDER_FD=%ld: %s",
++                   parsed, strerror(errno));
++         return VK_ERROR_INITIALIZATION_FAILED;
++      }
++
++      return virtgpu_open_fd(gpu, fd, "FERRION_GPU_RENDER_FD", NULL,
++                             DRM_BUS_PLATFORM, NULL);
++   }
++
++   const char *env_path = getenv("FERRION_GPU_RENDER_PATH");
++   if (env_path && env_path[0])
++      return virtgpu_open_redox_path(gpu, env_path);
++
++   static const char default_scheme[] = "/scheme/gpu.virtio-gpu";
++   if (virtgpu_open_redox_path(gpu, default_scheme) == VK_SUCCESS)
++      return VK_SUCCESS;
++
++   DIR *dir = opendir("/scheme");
++   if (!dir) {
++      if (VN_DEBUG(INIT))
++         vn_log(gpu->instance, "failed to open /scheme: %s", strerror(errno));
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
++
++   VkResult result = VK_ERROR_INITIALIZATION_FAILED;
++   struct dirent *entry;
++   while ((entry = readdir(dir)) != NULL) {
++      const char *name = entry->d_name;
++      if (strncmp(name, "gpu.", 4) != 0 || name[4] == '\0' ||
++          strcmp(name, "gpu.virtio-gpu") == 0 || strchr(name, '/'))
++         continue;
++
++      char path[256];
++      int written = snprintf(path, sizeof(path), "/scheme/%s", name);
++      if (written < 0 || (size_t)written >= sizeof(path))
++         continue;
++
++      result = virtgpu_open_redox_path(gpu, path);
++      if (result == VK_SUCCESS)
++         break;
++   }
++
++   closedir(dir);
++   return result;
++}
++#else
++static VkResult
++virtgpu_open_device(struct virtgpu *gpu, const drmDevicePtr dev)
++{
++   bool supported_bus = false;
++
++   switch (dev->bustype) {
++   case DRM_BUS_PCI:
++      if (dev->deviceinfo.pci->vendor_id == VIRTGPU_PCI_VENDOR_ID &&
++          dev->deviceinfo.pci->device_id == VIRTGPU_PCI_DEVICE_ID)
++         supported_bus = true;
++      break;
++   case DRM_BUS_PLATFORM:
++      supported_bus = true;
++      break;
++   default:
++      break;
++   }
++
++   if (!supported_bus || !(dev->available_nodes & (1 << DRM_NODE_RENDER))) {
++      if (VN_DEBUG(INIT)) {
++         const char *name = "unknown";
++         for (uint32_t i = 0; i < DRM_NODE_MAX; i++) {
++            if (dev->available_nodes & (1 << i)) {
++               name = dev->nodes[i];
++               break;
++            }
++         }
++         vn_log(gpu->instance, "skipping DRM device %s", name);
++      }
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
++
++   const char *primary_path = dev->nodes[DRM_NODE_PRIMARY];
++   const char *node_path = dev->nodes[DRM_NODE_RENDER];
++
++   int fd = open(node_path, O_RDWR | O_CLOEXEC);
++   if (fd < 0) {
++      if (VN_DEBUG(INIT))
++         vn_log(gpu->instance, "failed to open %s", node_path);
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
++
++   return virtgpu_open_fd(gpu, fd, node_path, primary_path, dev->bustype,
++                          dev->bustype == DRM_BUS_PCI ? dev->businfo.pci : NULL);
++}
++#endif
++
+ static VkResult
+ virtgpu_open(struct virtgpu *gpu)
+ {
++#ifdef __redox__
++   return virtgpu_open_redox(gpu);
++#else
+    drmDevicePtr devs[8];
+    int count = drmGetDevices2(0, devs, ARRAY_SIZE(devs));
+    if (count < 0) {
+@@ -1217,6 +1323,7 @@ virtgpu_open(struct virtgpu *gpu)
+    drmFreeDevices(devs, count);
+ 
+    return result;
++#endif
+ }
+ 
+ static VkResult

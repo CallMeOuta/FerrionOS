@@ -12,6 +12,7 @@ patches = [
     "ferrion-orbital.patch",
     "ferrion-jit-diagnostic.patch",
     "ferrion-libsync-wait.patch",
+    "ferrion-venus.patch",
 ]
 
 [build]
@@ -27,6 +28,7 @@ dependencies = [
 dev-dependencies = [
     "host:glslang",
     "llvm21.dev",
+    "venus-protocol",
 ]
 script = """
 DYNAMIC_INIT
@@ -40,7 +42,7 @@ export CFLAGS+=" -DHAVE_PTHREAD=1 -I${COOKBOOK_SYSROOT}/include/libdrm"
 export LLVM_CONFIG="${TARGET}-llvm-config"
 export LDFLAGS+=" -lorbital"
 
-COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast -Dglvnd=enabled)
+COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast,virtio -Dglvnd=enabled)
 
 cookbook_meson \
     -Ddri-drivers-path=/usr/lib/dri \
