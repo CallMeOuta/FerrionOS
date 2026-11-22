@@ -179,8 +179,8 @@ impl SchemeSync for InputScheme<'_> {
         &mut self,
         dirfd: usize,
         path: &str,
-        _flags: usize,
-        _fcntl_flags: u32,
+        flags: usize,
+        fcntl_flags: u32,
         _ctx: &CallerCtx,
     ) -> syscall::Result<OpenResult> {
         match self.handles.get(dirfd)? {
@@ -205,12 +205,15 @@ impl SchemeSync for InputScheme<'_> {
                             return Err(SysError::new(EINVAL));
                         };
                         // The display holds no synchronous request back to inputd after registration.
+                        let nonblock = ((flags | fcntl_flags as usize)
+                            & libredox::flag::O_NONBLOCK as usize)
+                            as i32;
                         return Ok(OpenResult::OtherScheme {
                             fd: control
                                 .openat(
                                     &vt.to_string(),
-                                    libredox::flag::O_RDONLY | libredox::flag::O_CLOEXEC,
-                                    0,
+                                    libredox::flag::O_RDONLY | libredox::flag::O_CLOEXEC | nonblock,
+                                    nonblock as u32,
                                 )?
                                 .into_raw(),
                         });
