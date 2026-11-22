@@ -5,16 +5,17 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use syscall::schemev2::NewFdFlags;
 use syscall::{
-    Error, Result, Stat, EACCES, EBADF, EBUSY, EINVAL, ENOENT, EOVERFLOW, EWOULDBLOCK, MODE_CHR,
-    MODE_DIR, MODE_FILE,
+    Error, Result, Stat, EACCES, EBADF, EBUSY, EINVAL, EMFILE, ENOENT, EOVERFLOW, EWOULDBLOCK,
+    MODE_CHR, MODE_DIR, MODE_FILE,
 };
 
 const PERIOD: usize = 512;
 const CAPACITY: usize = 2048;
-/// Frames a record stream keeps for a reader that is late; older frames are dropped.
 const RECORD_CAPACITY: usize = 8192;
-/// Present only on test images (config/audio-snoop.toml): enables the loopback input and grants
-/// that hold for the server's lifetime. Read before the server enters its namespace.
+const MAX_HANDLES: usize = 1024;
+const MAX_DRAINING: usize = 64;
+const MAX_GRANTS: usize = 256;
+const MAX_GAIN_ENTRIES: usize = 1024;
 pub const TEST_CONFIG: &str = "/etc/ferrion-audiod/test.conf";
 
 #[derive(Clone, Copy)]
@@ -156,12 +157,10 @@ struct Stream {
     gain: Gain,
     samples: VecDeque<[f32; 2]>,
     float: bool,
-    closed: bool,
 }
-#[derive(Clone)]
 enum Handle {
-    Stream(usize),
-    Record(usize),
+    Stream(Stream),
+    Record(Record),
     Loopback,
     Grants,
     StreamGain(usize),
@@ -175,14 +174,9 @@ enum Handle {
 }
 pub struct State {
     handles: BTreeMap<usize, Handle>,
-    streams: BTreeMap<usize, Stream>,
-    records: BTreeMap<usize, Record>,
-    /// The input of test images: what root writes to `loopback`. None on every other image.
+    draining: Vec<(usize, Stream)>,
     loopback: Option<VecDeque<[f32; 2]>>,
-    /// Grants with the handle that leased them; None for the test configuration's.
     grants: Vec<(Grant, Option<usize>)>,
-    /// The capture service's handle, the one that issues grants.
-    capture: Option<usize>,
     programs: BTreeMap<String, Gain>,
     sessions: BTreeMap<String, Gain>,
     next: usize,
@@ -202,11 +196,9 @@ impl State {
         };
         Self {
             handles: BTreeMap::new(),
-            streams: BTreeMap::new(),
-            records: BTreeMap::new(),
+            draining: Vec::new(),
             loopback,
             grants,
-            capture: None,
             programs: BTreeMap::new(),
             sessions: BTreeMap::new(),
             next: 1,
@@ -219,7 +211,33 @@ impl State {
             limited: 0,
         }
     }
+    fn has_capture(&self) -> bool {
+        self.handles
+            .values()
+            .any(|handle| matches!(handle, Handle::Grants))
+    }
+    fn stream_by_id(&self, id: usize) -> Option<&Stream> {
+        if let Some(Handle::Stream(stream)) = self.handles.get(&id) {
+            return Some(stream);
+        }
+        self.draining
+            .iter()
+            .find(|(stream_id, _)| *stream_id == id)
+            .map(|(_, stream)| stream)
+    }
+    fn stream_by_id_mut(&mut self, id: usize) -> Option<&mut Stream> {
+        if let Some(Handle::Stream(stream)) = self.handles.get_mut(&id) {
+            return Some(stream);
+        }
+        self.draining
+            .iter_mut()
+            .find(|(stream_id, _)| *stream_id == id)
+            .map(|(_, stream)| stream)
+    }
     fn insert(&mut self, handle: Handle) -> Result<OpenResult> {
+        if self.handles.len() >= MAX_HANDLES {
+            return Err(Error::new(EMFILE));
+        }
         let id = self.next;
         self.next = id.checked_add(1).ok_or(Error::new(EOVERFLOW))?;
         let flags = if matches!(
@@ -230,52 +248,44 @@ impl State {
         } else {
             NewFdFlags::POSITIONED
         };
-        self.handles.insert(id, handle);
+        let prev = self.handles.insert(id, handle);
+        assert!(prev.is_none());
         Ok(OpenResult::ThisScheme { number: id, flags })
     }
     fn stream(&mut self, program: String, session: String, float: bool) -> Result<OpenResult> {
-        let id = self.next;
-        let result = self.insert(Handle::Stream(id))?;
-        self.streams.insert(
-            id,
-            Stream {
-                program,
-                session,
-                gain: Gain::UNITY,
-                samples: VecDeque::with_capacity(CAPACITY),
-                float,
-                closed: false,
-            },
-        );
-        Ok(result)
+        self.insert(Handle::Stream(Stream {
+            program,
+            session,
+            gain: Gain::UNITY,
+            samples: VecDeque::with_capacity(CAPACITY),
+            float,
+        }))
     }
-    /// Opens a record stream. It always opens: without a grant it delivers zeros.
     fn record(&mut self, program: String, session: String, hearing: Hearing) -> Result<OpenResult> {
-        let id = self.next;
-        let result = self.insert(Handle::Record(id))?;
-        self.records.insert(
-            id,
-            Record {
-                program,
-                session,
-                hearing,
-                allowed: false,
-                cycle: Box::new([[0.0; 2]; PERIOD]),
-                samples: VecDeque::with_capacity(RECORD_CAPACITY),
-                dropped: 0,
-            },
-        );
-        Ok(result)
+        self.insert(Handle::Record(Record {
+            program,
+            session,
+            hearing,
+            allowed: false,
+            cycle: Box::new([[0.0; 2]; PERIOD]),
+            samples: VecDeque::with_capacity(RECORD_CAPACITY),
+            dropped: 0,
+        }))
     }
     pub fn mix(&mut self) -> [[i16; 2]; PERIOD] {
-        for record in self.records.values_mut() {
-            record.allowed = self
-                .grants
-                .iter()
-                .any(|(grant, _)| grant.allows(&record.program, &record.session, &record.hearing));
+        for handle in self.handles.values_mut() {
+            if let Handle::Record(record) = handle {
+                record.allowed = self.grants.iter().any(|(grant, _)| {
+                    grant.allows(&record.program, &record.session, &record.hearing)
+                });
+            }
         }
         let mut sum = [[0.0f32; 2]; PERIOD];
-        for stream in self.streams.values_mut() {
+        let mut tapped_cycles: Vec<(String, f32, [[f32; 2]; PERIOD], usize)> = Vec::new();
+        for handle in self.handles.values_mut() {
+            let Handle::Stream(stream) = handle else {
+                continue;
+            };
             let tapped = stream.gain.factor
                 * self
                     .programs
@@ -301,14 +311,51 @@ impl State {
                 frame[0] += sample[0] * gain;
                 frame[1] += sample[1] * gain;
             }
-            // A tap hears the program as it plays, before the device's volume.
-            for record in self.records.values_mut().filter(|record| {
-                record.allowed
-                    && matches!(&record.hearing, Hearing::Tap(target) if *target == stream.program)
-            }) {
-                for (frame, sample) in record.cycle.iter_mut().zip(&frames[..count]) {
-                    frame[0] += sample[0] * tapped;
-                    frame[1] += sample[1] * tapped;
+            if count > 0 {
+                tapped_cycles.push((stream.program.clone(), tapped, frames, count));
+            }
+        }
+        for (_, stream) in &mut self.draining {
+            let tapped = stream.gain.factor
+                * self
+                    .programs
+                    .get(&stream.program)
+                    .unwrap_or(&Gain::UNITY)
+                    .factor
+                * self
+                    .sessions
+                    .get(&stream.session)
+                    .unwrap_or(&Gain::UNITY)
+                    .factor;
+            let gain = tapped * self.device.factor;
+            let mut frames = [[0.0f32; 2]; PERIOD];
+            let mut count = 0;
+            while count < PERIOD {
+                let Some(sample) = stream.samples.pop_front() else {
+                    break;
+                };
+                frames[count] = sample;
+                count += 1;
+            }
+            for (frame, sample) in sum.iter_mut().zip(&frames[..count]) {
+                frame[0] += sample[0] * gain;
+                frame[1] += sample[1] * gain;
+            }
+            if count > 0 {
+                tapped_cycles.push((stream.program.clone(), tapped, frames, count));
+            }
+        }
+        for (program, tapped, frames, count) in tapped_cycles {
+            for handle in self.handles.values_mut() {
+                if let Handle::Record(record) = handle {
+                    if record.allowed
+                        && matches!(&record.hearing, Hearing::Tap(target) if *target == program)
+                    {
+                        for (frame, sample) in record.cycle.iter_mut().zip(&frames[..count]) {
+                            frame[0] += sample[0] * tapped;
+                            frame[1] += sample[1] * tapped;
+                        }
+                    }
                 }
             }
         }
@@ -321,19 +368,21 @@ impl State {
                 *frame = sample;
             }
         }
-        for record in self.records.values_mut() {
+        for handle in self.handles.values_mut() {
+            let Handle::Record(record) = handle else {
+                continue;
+            };
             if record.hearing == Hearing::Microphone && record.allowed {
                 *record.cycle = input;
             }
             let overflow = (record.samples.len() + PERIOD).saturating_sub(RECORD_CAPACITY);
             record.samples.drain(..overflow);
             record.dropped += overflow as u64;
-            // Without a grant the cycle stays zeros: silence, not an error.
             record.samples.extend(record.cycle.iter().copied());
             *record.cycle = [[0.0; 2]; PERIOD];
         }
-        self.streams
-            .retain(|_, stream| !stream.closed || !stream.samples.is_empty());
+        self.draining
+            .retain(|(_, stream)| !stream.samples.is_empty());
         let mut output = [[0i16; 2]; PERIOD];
         for (frame, dest) in sum.iter().zip(&mut output) {
             let mut peak = 1.0f32;
@@ -353,17 +402,58 @@ impl State {
         self.cycles += 1;
         output
     }
+    fn stream_count(&self) -> usize {
+        let open = self
+            .handles
+            .values()
+            .filter(|h| matches!(h, Handle::Stream(_)))
+            .count();
+        open + self.draining.len()
+    }
+    fn queued_frames(&self) -> usize {
+        let open: usize = self
+            .handles
+            .values()
+            .filter_map(|h| match h {
+                Handle::Stream(s) => Some(s.samples.len()),
+                _ => None,
+            })
+            .sum();
+        let draining: usize = self.draining.iter().map(|(_, s)| s.samples.len()).sum();
+        open + draining
+    }
+    fn record_stats(&self) -> (usize, u64) {
+        let mut count = 0usize;
+        let mut dropped = 0u64;
+        for handle in self.handles.values() {
+            if let Handle::Record(record) = handle {
+                count += 1;
+                dropped += record.dropped;
+            }
+        }
+        (count, dropped)
+    }
     fn text(&self, handle: &Handle) -> Result<String> {
         Ok(match handle {
             Handle::Volume => format!("{}\n", self.volume),
-            Handle::StreamGain(id) => self.streams.get(id).ok_or(Error::new(EBADF))?.gain.text(),
+            Handle::StreamGain(id) => self.stream_by_id(*id).ok_or(Error::new(EBADF))?.gain.text(),
             Handle::ProgramGain(id) => self.programs.get(id).unwrap_or(&Gain::UNITY).text(),
             Handle::SessionGain(id) => self.sessions.get(id).unwrap_or(&Gain::UNITY).text(),
-            Handle::Status => json!({"rate":44100,"format":"s16le","channels":2,"volume":self.volume,"bit_perfect":false,"reason":"format","limiter_frames":self.limited,"streams":self.streams.len()}).to_string(),
-            Handle::Stats => json!({"records":self.records.len(),"record_dropped_frames":self.records.values().map(|r| r.dropped).sum::<u64>(),"grants":self.grants.len(),"streams":self.streams.len(),"handles":self.handles.len(),"queued_frames":self.streams.values().map(|s| s.samples.len()).sum::<usize>(),"cycles":self.cycles,"limiter_frames":self.limited}).to_string(),
+            Handle::Status => json!({"rate":44100,"format":"s16le","channels":2,"volume":self.volume,"bit_perfect":false,"reason":"format","limiter_frames":self.limited,"streams":self.stream_count()}).to_string(),
+            Handle::Stats => {
+                let (records, record_dropped_frames) = self.record_stats();
+                json!({"records":records,"record_dropped_frames":record_dropped_frames,"grants":self.grants.len(),"streams":self.stream_count(),"handles":self.handles.len(),"queued_frames":self.queued_frames(),"cycles":self.cycles,"limiter_frames":self.limited}).to_string()
+            }
             Handle::Apps => {
                 let mut apps: BTreeMap<&str, usize> = self.programs.keys().map(|key| (key.as_str(), 0)).collect();
-                for stream in self.streams.values() { *apps.entry(&stream.program).or_default() += 1; }
+                for handle in self.handles.values() {
+                    if let Handle::Stream(stream) = handle {
+                        *apps.entry(&stream.program).or_default() += 1;
+                    }
+                }
+                for (_, stream) in &self.draining {
+                    *apps.entry(&stream.program).or_default() += 1;
+                }
                 let rows: Vec<_> = apps.into_iter().map(|(identity, streams)| { let gain = self.programs.get(identity).unwrap_or(&Gain::UNITY); json!({"identity":identity,"gain_db":if gain.db.is_finite() {Some(gain.db)} else {None},"streams":streams}) }).collect();
                 json!({"apps":rows}).to_string()
             }
@@ -454,17 +544,22 @@ impl SchemeSync for AudioScheme {
         let mut state = self.0.lock().unwrap();
         let path = path.trim_matches('/');
         if dir != 0 {
-            return match state.handles.get(&dir).cloned().ok_or(Error::new(EBADF))? {
-                Handle::Stream(id) if path == "gain" => state.insert(Handle::StreamGain(id)),
-                Handle::Factory(program, session) if path == "stream" || path.is_empty() => {
-                    state.stream(program, session, path == "stream")
+            let parent = match state.handles.get(&dir).ok_or(Error::new(EBADF))? {
+                Handle::Stream(_) if path == "gain" => {
+                    return state.insert(Handle::StreamGain(dir))
                 }
-                Handle::Factory(program, session) => match hearing(path) {
+                Handle::Factory(program, session) => Some((program.clone(), session.clone())),
+                _ => return Err(Error::new(ENOENT)),
+            };
+            if let Some((program, session)) = parent {
+                if path == "stream" || path.is_empty() {
+                    return state.stream(program, session, path == "stream");
+                }
+                return match hearing(path) {
                     Some(hearing) => state.record(program, session, hearing),
                     None => Err(Error::new(ENOENT)),
-                },
-                _ => Err(Error::new(ENOENT)),
-            };
+                };
+            }
         }
         match path {
             "" | "stream" => {
@@ -489,14 +584,8 @@ impl SchemeSync for AudioScheme {
         }
         let handle = match path {
             "loopback" => Handle::Loopback,
-            "grants" if state.capture.is_some() => return Err(Error::new(EBUSY)),
-            "grants" => {
-                let result = state.insert(Handle::Grants)?;
-                if let OpenResult::ThisScheme { number, .. } = result {
-                    state.capture = Some(number);
-                }
-                return Ok(result);
-            }
+            "grants" if state.has_capture() => return Err(Error::new(EBUSY)),
+            "grants" => Handle::Grants,
             "status" => Handle::Status,
             "stats" => Handle::Stats,
             "apps" => Handle::Apps,
@@ -523,12 +612,7 @@ impl SchemeSync for AudioScheme {
         _ctx: &CallerCtx,
     ) -> Result<usize> {
         let mut state = self.0.lock().unwrap();
-        let record = match state.handles.get(&id).ok_or(Error::new(EBADF))? {
-            Handle::Record(record) => Some(*record),
-            _ => None,
-        };
-        if let Some(record) = record {
-            let record = state.records.get_mut(&record).ok_or(Error::new(EBADF))?;
+        if let Handle::Record(record) = state.handles.get_mut(&id).ok_or(Error::new(EBADF))? {
             if buf.len() % 8 != 0 {
                 return Err(Error::new(EINVAL));
             }
@@ -563,12 +647,10 @@ impl SchemeSync for AudioScheme {
         _ctx: &CallerCtx,
     ) -> Result<usize> {
         let mut state = self.0.lock().unwrap();
-        let handle = state.handles.get(&id).cloned().ok_or(Error::new(EBADF))?;
-        match handle {
-            Handle::Stream(stream_id) => {
-                let stream = state.streams.get_mut(&stream_id).ok_or(Error::new(EBADF))?;
-                return push_frames(&mut stream.samples, buf, stream.float);
-            }
+        if let Handle::Stream(stream) = state.handles.get_mut(&id).ok_or(Error::new(EBADF))? {
+            return push_frames(&mut stream.samples, buf, stream.float);
+        }
+        match state.handles.get(&id).ok_or(Error::new(EBADF))? {
             Handle::Loopback => {
                 let loopback = state.loopback.as_mut().ok_or(Error::new(EBADF))?;
                 return push_frames(loopback, buf, true);
@@ -588,6 +670,9 @@ impl SchemeSync for AudioScheme {
                             .grants
                             .retain(|(held, lease)| !(*held == grant && *lease == Some(id)));
                     } else if !state.grants.contains(&(grant.clone(), Some(id))) {
+                        if state.grants.len() >= MAX_GRANTS {
+                            return Err(Error::new(EOVERFLOW));
+                        }
                         state.grants.push((grant, Some(id)));
                     }
                 }
@@ -598,8 +683,21 @@ impl SchemeSync for AudioScheme {
         if offset != 0 {
             return Err(Error::new(EINVAL));
         }
-        match handle {
-            Handle::Volume => {
+        enum WriteTarget {
+            Volume,
+            StreamGain(usize),
+            ProgramGain(String),
+            SessionGain(String),
+        }
+        let target = match state.handles.get(&id).ok_or(Error::new(EBADF))? {
+            Handle::Volume => WriteTarget::Volume,
+            Handle::StreamGain(stream) => WriteTarget::StreamGain(*stream),
+            Handle::ProgramGain(program) => WriteTarget::ProgramGain(program.clone()),
+            Handle::SessionGain(session) => WriteTarget::SessionGain(session.clone()),
+            _ => return Err(Error::new(EBADF)),
+        };
+        match target {
+            WriteTarget::Volume => {
                 let volume = std::str::from_utf8(buf)
                     .map_err(|_| Error::new(EINVAL))?
                     .trim()
@@ -615,30 +713,38 @@ impl SchemeSync for AudioScheme {
                     factor,
                 };
             }
-            Handle::StreamGain(stream) => {
+            WriteTarget::StreamGain(stream) => {
                 state
-                    .streams
-                    .get_mut(&stream)
+                    .stream_by_id_mut(stream)
                     .ok_or(Error::new(EBADF))?
-                    .gain = Gain::parse(buf)?
+                    .gain = Gain::parse(buf)?;
             }
-            Handle::ProgramGain(program) => {
+            WriteTarget::ProgramGain(program) => {
                 let gain = Gain::parse(buf)?;
                 if gain.db == 0.0 {
                     state.programs.remove(&program);
                 } else {
+                    if !state.programs.contains_key(&program)
+                        && state.programs.len() >= MAX_GAIN_ENTRIES
+                    {
+                        return Err(Error::new(EOVERFLOW));
+                    }
                     state.programs.insert(program, gain);
                 }
             }
-            Handle::SessionGain(session) => {
+            WriteTarget::SessionGain(session) => {
                 let gain = Gain::parse(buf)?;
                 if gain.db == 0.0 {
                     state.sessions.remove(&session);
                 } else {
+                    if !state.sessions.contains_key(&session)
+                        && state.sessions.len() >= MAX_GAIN_ENTRIES
+                    {
+                        return Err(Error::new(EOVERFLOW));
+                    }
                     state.sessions.insert(session, gain);
                 }
             }
-            _ => return Err(Error::new(EBADF)),
         }
         Ok(buf.len())
     }
@@ -664,25 +770,17 @@ impl SchemeSync for AudioScheme {
     fn on_close(&mut self, id: usize) {
         let mut state = self.0.lock().unwrap();
         let handle = state.handles.remove(&id);
-        if let Some(Handle::Record(record)) = handle {
-            state.records.remove(&record);
-        }
-        if let Some(Handle::Grants) = handle {
-            // The capture service's grants end with its handle: no holder, no samples.
-            state.capture = None;
-            state.grants.retain(|(_, lease)| *lease != Some(id));
-        }
-        if let Some(Handle::Stream(stream)) = handle {
-            if let Some(node) = state.streams.get_mut(&stream) {
-                node.closed = true;
+        match handle {
+            Some(Handle::Grants) => {
+                state.grants.retain(|(_, lease)| *lease != Some(id));
             }
-            if state
-                .streams
-                .get(&stream)
-                .is_some_and(|node| node.samples.is_empty())
-            {
-                state.streams.remove(&stream);
+            Some(Handle::Stream(stream)) if !stream.samples.is_empty() => {
+                if state.draining.len() >= MAX_DRAINING {
+                    state.draining.remove(0);
+                }
+                state.draining.push((id, stream));
             }
+            _ => {}
         }
     }
 }
