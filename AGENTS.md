@@ -78,7 +78,7 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
 
 # Display
 
-FerrionOS has no X11: no X server, no Xwayland, no X11 client library or protocol headers in any image. Ports build with X11 disabled (meson `-Dx11=disabled`, cmake `-DWITH_X11=OFF`, configure `--without-x`, cargo features without `x11`) and use Wayland or Orbital, and a recipe never depends on an X11 library: `python3 scripts/no-x11-check.py` fails when one does. The display stack today is in [`docs/platform-state.md`](docs/platform-state.md).
+FerrionOS has no X11 support except one: Xwayland inside a game session's own compositor (the gamescope route in `plans/gamescope.md`, not built yet). Nothing else has an X server, Xwayland, an X11 client library, X11 protocol headers or X11 code compiled in, including the desktop's compositors. Ports build with X11 disabled (meson `-Dx11=disabled`, cmake `-DWITH_X11=OFF`, configure `--without-x`, cargo features without `x11` or `xwayland`) and use Wayland or Orbital, and a recipe never depends on an X11 library: `python3 scripts/no-x11-check.py` fails when one does, and the game session's recipes are the only ones it will allow. The display stack today is in [`docs/platform-state.md`](docs/platform-state.md).
 
 # Running builds
 
