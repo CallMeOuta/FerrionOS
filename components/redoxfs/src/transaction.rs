@@ -1864,10 +1864,25 @@ impl<'a, D: Disk> Transaction<'a, D> {
             assert_eq!(offset, size);
         } else if !node.data().has_inline_data() {
             // Deallocate records
-            for record in
-                (size.div_ceil(record_level.bytes())..old_size / record_level.bytes()).rev()
+            for record in (size.div_ceil(record_level.bytes())
+                ..old_size.div_ceil(record_level.bytes()))
+                .rev()
             {
                 self.remove_node_record_ptr(node, record)?;
+            }
+            let tail = size % record_level.bytes();
+            if tail != 0 {
+                let end = min(old_size, size - tail + record_level.bytes());
+                assert!(end > size);
+                let zeroes = RecordRaw::empty(record_level).unwrap();
+                let mut offset = size;
+                self.write_node_inner_records(node, &mut offset, &zeroes[..(end - size) as usize])?;
+                assert_eq!(offset, end);
+            }
+        } else if let Some(inline_data) = node.data_mut().inline_data_mut() {
+            let end = min(old_size, inline_data.len() as u64);
+            if size < end {
+                inline_data[size as usize..end as usize].fill(0);
             }
         }
 
