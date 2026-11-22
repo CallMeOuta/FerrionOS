@@ -1,7 +1,7 @@
-From 607c0eef554606a6e80e477ec59340c5683468d8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: FerrionOS <noreply@ferrionos.invalid>
 Date: Sat, 21 Nov 2026 21:07:26 +0000
-Subject: [PATCH 2/4] layout: Cascade new windows of a free workspace (F5)
+Subject: [PATCH] layout: Cascade new windows of a free workspace (F5)
 
 The first window of a free workspace opens centered, as niri already
 places a floating window. Each next window without a place of its own
@@ -15,22 +15,21 @@ window on a columns workspace.
 The placement is made where F4 already sends a free workspace's new
 windows to the floating layout, so floating.rs is not changed.
 
-
 Agent-written tests and their test-only helpers were removed under ADR 0025.
 The source commit in the header records the original patch provenance;
 this patch is regenerated against the preceding test-free stage. Upstream
 tests remain, with the config snapshots adapted to the production fields.
 ---
- src/layout/free.rs | 6
- src/layout/workspace.rs | 6
- src/layout/workspace/free.rs | 41
- 3 files changed, 47 insertions(+), 6 deletions(-)
+ src/layout/free.rs           |  6 +++++-
+ src/layout/workspace.rs      |  6 +++---
+ src/layout/workspace/free.rs | 42 ++++++++++++++++++++++++++++++++++--
+ 3 files changed, 48 insertions(+), 6 deletions(-)
 
 diff --git a/src/layout/free.rs b/src/layout/free.rs
 index 9040c22c..bb4db532 100644
 --- a/src/layout/free.rs
 +++ b/src/layout/free.rs
-@@ -1,10 +1,14 @@
+@@ -1,11 +1,15 @@
  //! The actions of the free mode on the layout as a whole.
 -// Part of ferrion-wm, a fork of niri. Written on 2026-11-21.
 +// Part of ferrion-wm, a fork of niri. Written on 2026-11-21 (F4, F5).
@@ -39,15 +38,16 @@ index 9040c22c..bb4db532 100644
  use niri_ipc::WorkspaceMode;
  
  use super::{Layout, LayoutElement};
-+
+ 
 +/// How far each new window of a free workspace opens below and to the right of the one in use:
 +/// the height of a title strip.
 +pub const CASCADE_STEP: f64 = 32.;
- 
++
  impl<W: LayoutElement> Layout<W> {
      /// Switches the focused workspace between arranging its windows freely and in columns.
+     pub fn toggle_workspace_mode(&mut self) {
 diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
-index 9436d1ce..a2c28f49 100644
+index 233f842d..d16a498c 100644
 --- a/src/layout/workspace.rs
 +++ b/src/layout/workspace.rs
 @@ -1,4 +1,4 @@
@@ -56,7 +56,7 @@ index 9436d1ce..a2c28f49 100644
  use std::cmp::max;
  use std::rc::Rc;
  use std::time::Duration;
-@@ -658,8 +658,8 @@
+@@ -658,8 +658,8 @@ impl<W: LayoutElement> Workspace<W> {
          is_floating: bool,
          anim: Option<niri_config::Animation>,
      ) {
@@ -68,7 +68,7 @@ index 9436d1ce..a2c28f49 100644
          self.enter_output_for_window(tile.window());
          tile.restore_to_floating = is_floating;
 diff --git a/src/layout/workspace/free.rs b/src/layout/workspace/free.rs
-index 03e7837b..efb6b1de 100644
+index 13bc14ae..a80613cb 100644
 --- a/src/layout/workspace/free.rs
 +++ b/src/layout/workspace/free.rs
 @@ -14,13 +14,19 @@
@@ -92,7 +92,7 @@ index 03e7837b..efb6b1de 100644
  use crate::layout::{LayoutElement, Options};
  use crate::utils::transaction::Transaction;
  
-@@ -127,11 +133,13 @@
+@@ -189,11 +195,13 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      /// Where a window added to a free workspace goes: always to the floating layout, which niri's
@@ -107,7 +107,7 @@ index 03e7837b..efb6b1de 100644
      ) -> (WorkspaceAddWindowTarget<'a, W>, bool) {
          if !self.is_free() {
              return (target, is_floating);
-@@ -141,7 +149,36 @@
+@@ -203,9 +211,39 @@ impl<W: LayoutElement> Workspace<W> {
              WorkspaceAddWindowTarget::NewColumnAt(_) => WorkspaceAddWindowTarget::Auto,
              target => target,
          };
@@ -116,8 +116,8 @@ index 03e7837b..efb6b1de 100644
 +            self.place_new_floating_tile(tile);
 +        }
          (target, true)
-+    }
-+
+     }
+ 
 +    /// Cascades a window that has no place of its own: a title strip lower and to the right of the
 +    /// window on top, or at the top left of the working area when it would leave it there. The
 +    /// first window is left to niri, which centers it.
@@ -141,6 +141,12 @@ index 03e7837b..efb6b1de 100644
 +            pos = area.loc;
 +        }
 +        tile.floating_pos = Some(self.floating.logical_to_size_frac(pos));
-     }
- 
-     /// Floats the windows that arrived in the columns of a free workspace as a column.
++    }
++
++    /// Floats the windows that arrived in the columns of a free workspace as a column.
+     pub(super) fn free_after_adding_to_columns(&mut self) {
+         if self.is_free() {
+             for tile in self.scrolling.tiles_mut() {
+-- 
+2.56.1
+

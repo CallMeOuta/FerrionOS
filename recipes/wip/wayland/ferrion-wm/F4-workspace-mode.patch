@@ -1,7 +1,7 @@
-From 3adf3650df24198aafded8b94402a3fcabbfc446 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: FerrionOS <noreply@ferrionos.invalid>
 Date: Sat, 21 Nov 2026 20:59:48 +0000
-Subject: [PATCH 1/4] layout: Arrange each workspace freely or in columns (F4)
+Subject: [PATCH] layout: Arrange each workspace freely or in columns (F4)
 
 A workspace now has a mode, free or columns. In a free workspace every
 window floats; only a fullscreen or maximized window sits in the
@@ -27,26 +27,27 @@ A columns workspace is niri's own.
 - The IPC workspace record carries the mode. The default config makes
   new workspaces free and binds Mod+Shift+Space.
 
-
 Agent-written tests and their test-only helpers were removed under ADR 0025.
 The source commit in the header records the original patch provenance;
 this patch is regenerated against the preceding test-free stage. Upstream
 tests remain, with the config snapshots adapted to the production fields.
 ---
- niri-config/src/binds.rs | 11
- niri-config/src/layout.rs | 12
- niri-config/src/lib.rs | 5
- niri-ipc/src/lib.rs | 39
- resources/default-config.kdl | 14
- src/handlers/xdg_shell.rs | 10
- src/input/mod.rs | 10
- src/ipc/server.rs | 5
- src/layout/free.rs | 23
- src/layout/mod.rs | 7
- src/layout/monitor.rs | 9
- src/layout/workspace.rs | 74
- src/layout/workspace/free.rs | 300
- 13 files changed, 510 insertions(+), 9 deletions(-)
+ niri-config/src/binds.rs     |  11 +-
+ niri-config/src/layout.rs    |  12 +-
+ niri-config/src/lib.rs       |   5 +
+ niri-ipc/src/lib.rs          |  39 ++++
+ resources/default-config.kdl |  14 +-
+ src/handlers/xdg_shell.rs    |  10 +-
+ src/input/mod.rs             |  10 +
+ src/ipc/server.rs            |   5 +
+ src/layout/free.rs           |  23 +++
+ src/layout/mod.rs            |   7 +
+ src/layout/monitor.rs        |   9 +-
+ src/layout/workspace.rs      |  99 ++++++++-
+ src/layout/workspace/free.rs | 379 +++++++++++++++++++++++++++++++++++
+ 13 files changed, 610 insertions(+), 13 deletions(-)
+ create mode 100644 src/layout/free.rs
+ create mode 100644 src/layout/workspace/free.rs
 
 diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
 index 8cef8a8a..51d89602 100644
@@ -68,7 +69,7 @@ index 8cef8a8a..51d89602 100644
  };
  use smithay::input::keyboard::keysyms::KEY_NoSymbol;
  use smithay::input::keyboard::xkb::{keysym_from_name, KEYSYM_CASE_INSENSITIVE, KEYSYM_NO_FLAGS};
-@@ -366,6 +369,9 @@
+@@ -366,6 +369,9 @@ pub enum Action {
      SwapWindowRight(#[knuffel(property(name = "focus"), default = true)] bool),
      ToggleColumnTabbedDisplay,
      SetColumnDisplay(#[knuffel(argument, str)] ColumnDisplay),
@@ -78,7 +79,7 @@ index 8cef8a8a..51d89602 100644
      CenterColumn,
      CenterWindow,
      #[knuffel(skip)]
-@@ -697,6 +703,9 @@
+@@ -697,6 +703,9 @@ impl From<niri_ipc::Action> for Action {
              niri_ipc::Action::SwapWindowLeft { focus } => Self::SwapWindowLeft(focus),
              niri_ipc::Action::ToggleColumnTabbedDisplay {} => Self::ToggleColumnTabbedDisplay,
              niri_ipc::Action::SetColumnDisplay { display } => Self::SetColumnDisplay(display),
@@ -100,7 +101,7 @@ index dad95205..dbb0e34d 100644
  
  use crate::appearance::{
      Border, FocusRing, InsertHint, Shadow, TabIndicator, DEFAULT_BACKGROUND_COLOR,
-@@ -25,6 +26,8 @@
+@@ -25,6 +26,8 @@ pub struct Layout {
      pub struts: Struts,
      pub background_color: Color,
      pub fullscreen_backdrop_color: Color,
@@ -109,7 +110,7 @@ index dad95205..dbb0e34d 100644
  }
  
  impl Default for Layout {
-@@ -54,6 +57,8 @@
+@@ -54,6 +57,8 @@ impl Default for Layout {
              ],
              background_color: DEFAULT_BACKGROUND_COLOR,
              fullscreen_backdrop_color: Color::from_array_unpremul([0., 0., 0., 1.]),
@@ -118,7 +119,7 @@ index dad95205..dbb0e34d 100644
          }
      }
  }
-@@ -81,6 +86,8 @@
+@@ -81,6 +86,8 @@ impl MergeWith<LayoutPart> for Layout {
              struts,
              background_color,
              fullscreen_backdrop_color,
@@ -127,7 +128,7 @@ index dad95205..dbb0e34d 100644
          );
  
          if let Some(x) = part.default_column_width {
-@@ -131,6 +138,9 @@
+@@ -131,6 +138,9 @@ pub struct LayoutPart {
      pub background_color: Option<Color>,
      #[knuffel(child)]
      pub fullscreen_backdrop_color: Option<Color>,
@@ -146,7 +147,7 @@ index 767794dd..b76240e4 100644
  //! niri config parsing.
  //!
  //! The config can be constructed from multiple files (includes). To support this, many types are
-@@ -1998,6 +1999,7 @@
+@@ -1998,6 +1999,7 @@ mod tests {
                      b: 0.0,
                      a: 1.0,
                  },
@@ -154,7 +155,7 @@ index 767794dd..b76240e4 100644
              },
              prefer_no_csd: true,
              cursor: Cursor {
-@@ -3094,6 +3096,9 @@
+@@ -3094,6 +3096,9 @@ mod tests {
  
          -                0.6666666666666666,
          +                0.66667,
@@ -173,7 +174,7 @@ index 27abf711..03bc8a19 100644
  //! Types for communicating with niri via IPC.
  //!
  //! After connecting to the niri socket, you can send [`Request`]s. Niri will process them one by
-@@ -607,6 +608,15 @@
+@@ -607,6 +608,15 @@ pub enum Action {
          #[cfg_attr(feature = "clap", arg())]
          display: ColumnDisplay,
      },
@@ -189,12 +190,10 @@ index 27abf711..03bc8a19 100644
      /// Center the focused column on the screen.
      CenterColumn {},
      /// Center a window on the screen.
-@@ -1168,6 +1178,18 @@
-     Normal,
-     /// Windows are in tabs.
+@@ -1170,6 +1180,18 @@ pub enum ColumnDisplay {
      Tabbed,
-+}
-+
+ }
+ 
 +// ferrion-wm 2026-11-21 (F4): the mode of a workspace.
 +/// How a workspace arranges its windows.
 +#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -205,10 +204,12 @@ index 27abf711..03bc8a19 100644
 +    Columns,
 +    /// Windows are placed by hand and overlap: the floating layout.
 +    Free,
- }
- 
++}
++
  /// Output actions that niri can perform.
-@@ -1639,6 +1661,10 @@
+ // Variants in this enum should match the spelling of the ones in niri-config. Most thigs from
+ // niri-config should be present here.
+@@ -1639,6 +1661,10 @@ pub struct Workspace {
      pub is_focused: bool,
      /// Id of the active window on this workspace, if any.
      pub active_window_id: Option<u64>,
@@ -219,14 +220,10 @@ index 27abf711..03bc8a19 100644
  }
  
  /// Configured keyboard layouts.
-@@ -2067,6 +2093,19 @@
-             "normal" => Ok(Self::Normal),
-             "tabbed" => Ok(Self::Tabbed),
-             _ => Err(r#"invalid column display, can be "normal" or "tabbed""#),
-+        }
-+    }
-+}
-+
+@@ -2071,6 +2097,19 @@ impl FromStr for ColumnDisplay {
+     }
+ }
+ 
 +// ferrion-wm 2026-11-21 (F4): the mode of a workspace as the config and the command line write it.
 +impl FromStr for WorkspaceMode {
 +    type Err = &'static str;
@@ -236,9 +233,13 @@ index 27abf711..03bc8a19 100644
 +            "columns" => Ok(Self::Columns),
 +            "free" => Ok(Self::Free),
 +            _ => Err(r#"invalid workspace mode, can be "free" or "columns""#),
-         }
-     }
- }
++        }
++    }
++}
++
+ impl FromStr for Transform {
+     type Err = &'static str;
+ 
 diff --git a/resources/default-config.kdl b/resources/default-config.kdl
 index 4786355c..b097d088 100644
 --- a/resources/default-config.kdl
@@ -248,7 +249,7 @@ index 4786355c..b097d088 100644
  // This config is in the KDL format: https://kdl.dev
  // "/-" comments out the following node.
  // Check the wiki for a full description of the configuration:
-@@ -111,6 +112,13 @@
+@@ -111,6 +112,13 @@ input {
  // Find more information on the wiki:
  // https://niri-wm.github.io/niri/Configuration:-Layout
  layout {
@@ -262,7 +263,7 @@ index 4786355c..b097d088 100644
      // Set gaps around windows in logical pixels.
      gaps 16
  
-@@ -619,6 +627,9 @@
+@@ -619,6 +627,9 @@ binds {
      Mod+V       { toggle-window-floating; }
      Mod+Shift+V { switch-focus-between-floating-and-tiling; }
  
@@ -272,7 +273,7 @@ index 4786355c..b097d088 100644
      // Toggle tabbed column display mode.
      // Windows in this column will appear as vertical tabs,
      // rather than stacked on top of each other.
-@@ -629,8 +640,9 @@
+@@ -629,8 +640,9 @@ binds {
      // a matching layout switch hotkey configured in xkb options above.
      // Having both at once on the same hotkey will break the switching,
      // since it will switch twice upon pressing the hotkey (once by xkb, once by niri).
@@ -292,7 +293,7 @@ index 4e6c4891..71889194 100644
  use std::cell::Cell;
  
  use calloop::Interest;
-@@ -639,7 +640,8 @@
+@@ -639,7 +640,8 @@ impl XdgShellHandler for State {
                              state.states.unset(xdg_toplevel::State::Maximized);
                          });
  
@@ -302,7 +303,7 @@ index 4e6c4891..71889194 100644
                          let configure_width = if is_floating {
                              *floating_width
                          } else if *is_full_width {
-@@ -849,7 +851,8 @@
+@@ -849,7 +851,8 @@ impl XdgShellHandler for State {
                              }
                          });
  
@@ -312,7 +313,7 @@ index 4e6c4891..71889194 100644
                          let configure_width = if is_floating {
                              *floating_width
                          } else if *is_full_width {
-@@ -1182,6 +1185,9 @@
+@@ -1182,6 +1185,9 @@ impl State {
  
          let mut is_pending_maximized = false;
          if let Some(ws) = ws {
@@ -323,7 +324,7 @@ index 4e6c4891..71889194 100644
              is_pending_maximized = (*wants_maximized && rules.open_maximized_to_edges.is_none())
                  || rules.open_maximized_to_edges == Some(true);
 diff --git a/src/input/mod.rs b/src/input/mod.rs
-index ce29160a..c82af914 100644
+index 7a816e3d..e34d4d8e 100644
 --- a/src/input/mod.rs
 +++ b/src/input/mod.rs
 @@ -1,3 +1,4 @@
@@ -331,12 +332,10 @@ index ce29160a..c82af914 100644
  use std::any::Any;
  use std::collections::hash_map::Entry;
  use std::collections::{HashMap, HashSet};
-@@ -1943,6 +1944,15 @@
-                 self.niri.layout.set_column_display(display);
-                 self.maybe_warp_cursor_to_focus();
+@@ -1952,6 +1953,15 @@ impl State {
                  // FIXME: granular
-+                self.niri.queue_redraw_all();
-+            }
+                 self.niri.queue_redraw_all();
+             }
 +            // ferrion-wm 2026-11-21 (F4): switch how the focused workspace arranges its windows.
 +            Action::ToggleWorkspaceMode => {
 +                self.niri.layout.toggle_workspace_mode();
@@ -344,11 +343,13 @@ index ce29160a..c82af914 100644
 +            }
 +            Action::SetWorkspaceMode(mode) => {
 +                self.niri.layout.set_workspace_mode(mode);
-                 self.niri.queue_redraw_all();
-             }
++                self.niri.queue_redraw_all();
++            }
              Action::SwitchPresetColumnWidth => {
+                 self.niri.layout.toggle_width(true);
+             }
 diff --git a/src/ipc/server.rs b/src/ipc/server.rs
-index f1655554..ee9d3236 100644
+index 4711f50b..5ede232d 100644
 --- a/src/ipc/server.rs
 +++ b/src/ipc/server.rs
 @@ -1,3 +1,4 @@
@@ -356,7 +357,7 @@ index f1655554..ee9d3236 100644
  use std::cell::RefCell;
  use std::collections::HashSet;
  use std::ffi::OsStr;
-@@ -619,9 +620,11 @@
+@@ -618,9 +619,11 @@ impl State {
  
              // Check for any changes that we can't signal as individual events.
              let output_name = mon.map(|mon| mon.output_name());
@@ -368,7 +369,7 @@ index f1655554..ee9d3236 100644
              {
                  need_workspaces_changed = true;
                  break;
-@@ -676,6 +679,8 @@
+@@ -675,6 +678,8 @@ impl State {
                          is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
                          is_focused: Some(id) == focused_ws_id,
                          active_window_id: ws.active_window().map(|win| win.id().get()),
@@ -415,7 +416,7 @@ index f21367c4..816351ae 100644
  //! Window layout logic.
  //!
  //! Niri implements scrollable tiling with dynamic workspaces. The scrollable tiling is mostly
-@@ -78,6 +79,8 @@
+@@ -78,6 +79,8 @@ use crate::window::ResolvedWindowRules;
  pub mod closing_window;
  pub mod floating;
  pub mod focus_ring;
@@ -424,7 +425,7 @@ index f21367c4..816351ae 100644
  pub mod insert_hint_element;
  pub mod monitor;
  pub mod opening_window;
-@@ -3235,6 +3238,10 @@
+@@ -3235,6 +3238,10 @@ impl<W: LayoutElement> Layout<W> {
          let Some(workspace) = workspace else {
              return;
          };
@@ -444,7 +445,7 @@ index 979b13ea..acc2d77e 100644
  use std::cmp::min;
  use std::iter::zip;
  use std::rc::Rc;
-@@ -962,11 +963,15 @@
+@@ -962,11 +963,15 @@ impl<W: LayoutElement> Monitor<W> {
          self.add_column(new_idx, column, activate, Some(config));
  
          let new_idx = self.idx_of_ws(new_id).unwrap();
@@ -463,7 +464,7 @@ index 979b13ea..acc2d77e 100644
          column.set_anim_y_between_workspaces();
      }
 diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
-index 9520cfe3..9436d1ce 100644
+index 9520cfe3..233f842d 100644
 --- a/src/layout/workspace.rs
 +++ b/src/layout/workspace.rs
 @@ -1,3 +1,4 @@
@@ -471,7 +472,7 @@ index 9520cfe3..9436d1ce 100644
  use std::cmp::max;
  use std::rc::Rc;
  use std::time::Duration;
-@@ -43,6 +44,9 @@
+@@ -43,6 +44,9 @@ use crate::utils::{
  };
  use crate::window::ResolvedWindowRules;
  
@@ -481,7 +482,7 @@ index 9520cfe3..9436d1ce 100644
  #[derive(Debug)]
  pub struct Workspace<W: LayoutElement> {
      /// The scrollable-tiling layout.
-@@ -112,6 +116,9 @@
+@@ -112,6 +116,9 @@ pub struct Workspace<W: LayoutElement> {
  
      /// Unique ID of this workspace.
      id: WorkspaceId,
@@ -491,7 +492,7 @@ index 9520cfe3..9436d1ce 100644
  }
  
  #[derive(Debug, Clone, PartialEq, Eq)]
-@@ -271,6 +278,8 @@
+@@ -271,6 +278,8 @@ impl<W: LayoutElement> Workspace<W> {
              background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
              output: Some(output),
              clock,
@@ -500,7 +501,7 @@ index 9520cfe3..9436d1ce 100644
              base_options,
              options,
              name: config.map(|c| c.name.0),
-@@ -333,6 +342,8 @@
+@@ -333,6 +342,8 @@ impl<W: LayoutElement> Workspace<W> {
              shadow: Shadow::new(shadow_config),
              background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
              clock,
@@ -509,7 +510,7 @@ index 9520cfe3..9436d1ce 100644
              base_options,
              options,
              name: config.map(|c| c.name.0),
-@@ -431,6 +442,10 @@
+@@ -431,6 +442,10 @@ impl<W: LayoutElement> Workspace<W> {
  
          self.base_options = base_options;
          self.options = options;
@@ -520,7 +521,7 @@ index 9520cfe3..9436d1ce 100644
      }
  
      pub fn update_layout_config(&mut self, layout_config: Option<niri_config::LayoutPart>) {
-@@ -643,6 +658,9 @@
+@@ -643,6 +658,9 @@ impl<W: LayoutElement> Workspace<W> {
          is_floating: bool,
          anim: Option<niri_config::Animation>,
      ) {
@@ -530,7 +531,7 @@ index 9520cfe3..9436d1ce 100644
          self.enter_output_for_window(tile.window());
          tile.restore_to_floating = is_floating;
  
-@@ -748,6 +766,9 @@
+@@ -748,6 +766,9 @@ impl<W: LayoutElement> Workspace<W> {
          if activate {
              self.floating_is_active = FloatingActive::No;
          }
@@ -540,7 +541,7 @@ index 9520cfe3..9436d1ce 100644
      }
  
      pub fn add_column(
-@@ -765,6 +786,9 @@
+@@ -765,6 +786,9 @@ impl<W: LayoutElement> Workspace<W> {
          if activate {
              self.floating_is_active = FloatingActive::No;
          }
@@ -550,35 +551,34 @@ index 9520cfe3..9436d1ce 100644
      }
  
      fn update_focus_floating_tiling_after_removing(&mut self, removed_from_floating: bool) {
-@@ -1137,6 +1161,10 @@
+@@ -1137,6 +1161,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace has no columns to consume into.
-+        if self.is_free() {
++        if self.column_op(free::ColumnOp::ConsumeOrExpel(window)).is_err() {
 +            return;
 +        }
          if window.map_or(self.floating_is_active.get(), |id| {
              self.floating.has_window(id)
          }) {
-@@ -1146,6 +1174,10 @@
+@@ -1146,6 +1173,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace has no columns to consume into.
-+        if self.is_free() {
++        if self.column_op(free::ColumnOp::ConsumeOrExpel(window)).is_err() {
 +            return;
 +        }
          if window.map_or(self.floating_is_active.get(), |id| {
              self.floating.has_window(id)
          }) {
-@@ -1155,14 +1187,16 @@
+@@ -1155,35 +1185,45 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn consume_into_column(&mut self) {
 -        if self.floating_is_active.get() {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace has no columns to consume into.
-+        if self.floating_is_active.get() || self.is_free() {
++        if self.floating_is_active.get()
++            || self.column_op(free::ColumnOp::ConsumeOrExpelActive).is_err()
++        {
              return;
          }
          self.scrolling.consume_into_column();
@@ -586,116 +586,181 @@ index 9520cfe3..9436d1ce 100644
  
      pub fn expel_from_column(&mut self) {
 -        if self.floating_is_active.get() {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace has no columns to expel from.
-+        if self.floating_is_active.get() || self.is_free() {
++        if self.floating_is_active.get()
++            || self.column_op(free::ColumnOp::ConsumeOrExpelActive).is_err()
++        {
              return;
          }
          self.scrolling.expel_from_column();
-@@ -1215,6 +1249,10 @@
+     }
+ 
+     pub fn swap_window_in_direction(&mut self, direction: ScrollDirection, focus: bool) {
+-        if self.floating_is_active.get() {
++        if self.floating_is_active.get()
++            || self.column_op(free::ColumnOp::SwapInDirection).is_err()
++        {
+             return;
+         }
+         self.scrolling.swap_window_in_direction(direction, focus);
+     }
+ 
+     pub fn toggle_column_tabbed_display(&mut self) {
+-        if self.floating_is_active.get() {
++        if self.floating_is_active.get()
++            || self.column_op(free::ColumnOp::ColumnDisplay).is_err()
++        {
+             return;
+         }
+         self.scrolling.toggle_column_tabbed_display();
+     }
+ 
+     pub fn set_column_display(&mut self, display: ColumnDisplay) {
+-        if self.floating_is_active.get() {
++        if self.floating_is_active.get()
++            || self.column_op(free::ColumnOp::ColumnDisplay).is_err()
++        {
+             return;
+         }
+         self.scrolling.set_column_display(display);
+@@ -1215,6 +1255,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn toggle_width(&mut self, forwards: bool) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(None) {
++        if self.column_op(free::ColumnOp::SizeChange(None)).is_err() {
 +            return;
 +        }
          if self.floating_is_active.get() {
              self.floating.toggle_window_width(None, forwards);
          } else {
-@@ -1223,6 +1261,10 @@
+@@ -1223,6 +1266,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn toggle_full_width(&mut self) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(None) {
++        if self.column_op(free::ColumnOp::SizeChange(None)).is_err() {
 +            return;
 +        }
          if self.floating_is_active.get() {
              // Leave this unimplemented for now. For good UX, this probably needs moving the tile
              // to be against the left edge of the working area while it is full-width.
-@@ -1232,6 +1274,10 @@
+@@ -1232,6 +1278,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn set_column_width(&mut self, change: SizeChange) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(None) {
++        if self.column_op(free::ColumnOp::SizeChange(None)).is_err() {
 +            return;
 +        }
          if self.floating_is_active.get() {
              self.floating.set_window_width(None, change, true);
          } else {
-@@ -1240,6 +1286,10 @@
+@@ -1240,6 +1289,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(window) {
++        if self.column_op(free::ColumnOp::SizeChange(window)).is_err() {
 +            return;
 +        }
          if window.map_or(self.floating_is_active.get(), |id| {
              self.floating.has_window(id)
          }) {
-@@ -1250,6 +1300,10 @@
+@@ -1250,6 +1302,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(window) {
++        if self.column_op(free::ColumnOp::SizeChange(window)).is_err() {
 +            return;
 +        }
          if window.map_or(self.floating_is_active.get(), |id| {
              self.floating.has_window(id)
          }) {
-@@ -1269,6 +1323,10 @@
+@@ -1260,6 +1315,9 @@ impl<W: LayoutElement> Workspace<W> {
+     }
+ 
+     pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
++        if self.column_op(free::ColumnOp::SizeChange(window)).is_err() {
++            return;
++        }
+         if window.map_or(self.floating_is_active.get(), |id| {
+             self.floating.has_window(id)
+         }) {
+@@ -1269,6 +1327,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(window) {
++        if self.column_op(free::ColumnOp::SizeChange(window)).is_err() {
 +            return;
 +        }
          if window.map_or(self.floating_is_active.get(), |id| {
              self.floating.has_window(id)
          }) {
-@@ -1279,6 +1337,10 @@
+@@ -1279,6 +1340,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(window) {
++        if self.column_op(free::ColumnOp::SizeChange(window)).is_err() {
 +            return;
 +        }
          if window.map_or(self.floating_is_active.get(), |id| {
              self.floating.has_window(id)
          }) {
-@@ -1486,6 +1548,10 @@
+@@ -1289,7 +1353,11 @@ impl<W: LayoutElement> Workspace<W> {
+     }
+ 
+     pub fn expand_column_to_available_width(&mut self) {
+-        if self.floating_is_active.get() {
++        if self.floating_is_active.get()
++            || self
++                .column_op(free::ColumnOp::ExpandColumnToAvailableWidth)
++                .is_err()
++        {
+             return;
+         }
+         self.scrolling.expand_column_to_available_width();
+@@ -1486,6 +1554,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn set_window_floating(&mut self, id: Option<&W::Id>, floating: bool) {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its windows floating.
-+        if !floating && self.refuses_columns_for(id) {
++        if !floating && self.column_op(free::ColumnOp::MoveToColumns(id)).is_err() {
 +            return;
 +        }
          if id.map_or(self.floating_is_active.get(), |id| {
              self.floating.has_window(id)
          }) == floating
-@@ -1976,6 +2042,10 @@
+@@ -1976,6 +2047,9 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
-+        // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
-+        if self.free_refuses_column_op(Some(&window)) {
++        if self.column_op(free::ColumnOp::SizeChange(Some(&window))).is_err() {
 +            return false;
 +        }
          if self.floating.has_window(&window) {
              self.floating.interactive_resize_begin(window, edges)
          } else {
+@@ -2076,6 +2150,19 @@ impl<W: LayoutElement> Workspace<W> {
+         assert!(Rc::ptr_eq(&self.options, self.floating.options()));
+         self.floating.verify_invariants();
+ 
++        if self.is_free() {
++            for tile in self.scrolling.tiles() {
++                assert!(
++                    !tile.window().pending_sizing_mode().is_normal(),
++                    "free workspace scrolling holds only fullscreen or maximized tiles"
++                );
++                assert!(
++                    tile.restore_to_floating,
++                    "free workspace scrolling tiles must have Floating home"
++                );
++            }
++        }
++
+         if self.floating.is_empty() {
+             assert!(
+                 !self.floating_is_active.get(),
 diff --git a/src/layout/workspace/free.rs b/src/layout/workspace/free.rs
 new file mode 100644
-index 00000000..03e7837b
+index 00000000..13bc14ae
 --- /dev/null
 +++ b/src/layout/workspace/free.rs
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,379 @@
 +//! The free mode of a workspace.
 +//!
 +//! A workspace arranges its windows in columns, niri's scrolling layout, or freely, in the
@@ -723,6 +788,25 @@ index 00000000..03e7837b
 +use crate::utils::transaction::Transaction;
 +
 +/// The free-mode state of a workspace.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(super) enum Home {
++    Columns,
++    Floating,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(super) struct Refused;
++
++pub(super) enum ColumnOp<'a, Id> {
++    ConsumeOrExpel(Option<&'a Id>),
++    ConsumeOrExpelActive,
++    ColumnDisplay,
++    SwapInDirection,
++    ExpandColumnToAvailableWidth,
++    SizeChange(Option<&'a Id>),
++    MoveToColumns(Option<&'a Id>),
++}
++
 +#[derive(Debug)]
 +pub(super) struct FreeState {
 +    /// How the windows are arranged now.
@@ -801,20 +885,63 @@ index 00000000..03e7837b
 +
 +    /// Arranges the windows in the wanted mode, after the choice or the options changed. A
 +    /// workspace without windows takes the current default.
++    fn set_tile_home(tile: &mut crate::layout::tile::Tile<W>, home: Home) {
++        tile.restore_to_floating = matches!(home, Home::Floating);
++    }
++
 +    pub(super) fn apply_mode(&mut self) {
 +        if !self.has_windows() {
 +            self.free.default = self.base_options.layout.workspace_mode;
 +        }
 +
-+        let mode = self.wanted_mode();
-+        if self.free.mode == mode {
++        let old = self.free.mode;
++        let new = self.wanted_mode();
++        if old == new {
 +            return;
 +        }
 +
-+        self.free.mode = mode;
-+        match mode {
-+            WorkspaceMode::Free => self.float_columns(),
-+            WorkspaceMode::Columns => self.tile_floating_into_columns(),
++        self.free.mode = new;
++        match (old, new) {
++            (WorkspaceMode::Columns, WorkspaceMode::Free) => {
++                for tile in self.scrolling.tiles_mut() {
++                    Self::set_tile_home(tile, Home::Floating);
++                }
++                self.float_columns();
++                for tile in self.scrolling.tiles() {
++                    assert!(!tile.window().pending_sizing_mode().is_normal());
++                    assert!(tile.restore_to_floating);
++                }
++            }
++            (WorkspaceMode::Free, WorkspaceMode::Columns) => {
++                let homes: Vec<(W::Id, Home)> = self
++                    .scrolling
++                    .tiles()
++                    .map(|tile| {
++                        let others = self.floating.tiles().chain(self.scrolling.tiles());
++                        let home = if floats_by_itself(tile.window(), others.map(|t| t.window())) {
++                            Home::Floating
++                        } else {
++                            Home::Columns
++                        };
++                        (tile.window().id().clone(), home)
++                    })
++                    .collect();
++                for tile in self.scrolling.tiles_mut() {
++                    let home = homes
++                        .iter()
++                        .find(|(id, _)| id == tile.window().id())
++                        .map(|(_, home)| *home)
++                        .unwrap();
++                    Self::set_tile_home(tile, home);
++                }
++                self.tile_floating_into_columns();
++                for tile in self.scrolling.tiles() {
++                    let others = self.floating.tiles().chain(self.scrolling.tiles());
++                    let expected = floats_by_itself(tile.window(), others.map(|t| t.window()));
++                    assert_eq!(tile.restore_to_floating, expected);
++                }
++            }
++            _ => unreachable!(),
 +        }
 +    }
 +
@@ -842,37 +969,53 @@ index 00000000..03e7837b
 +        (target, true)
 +    }
 +
-+    /// Floats the windows that arrived in the columns of a free workspace as a column.
 +    pub(super) fn free_after_adding_to_columns(&mut self) {
 +        if self.is_free() {
++            for tile in self.scrolling.tiles_mut() {
++                Self::set_tile_home(tile, Home::Floating);
++            }
 +            self.float_columns();
 +        }
 +    }
 +
-+    /// Whether moving a window from the floating layout to the columns is refused: on a free
-+    /// workspace, where only fullscreen and maximized windows live in columns.
-+    pub fn refuses_columns_for(&self, id: Option<&W::Id>) -> bool {
-+        self.is_free()
-+            && id.map_or(self.floating_is_active.get(), |id| {
-+                self.floating.has_window(id)
-+            })
++    fn target_is_floating(&self, window: Option<&W::Id>) -> bool {
++        window.map_or(self.floating_is_active.get(), |id| {
++            self.floating.has_window(id)
++        })
 +    }
 +
-+    /// Whether an operation on a column is refused: on a free workspace, whose columns hold only
-+    /// fullscreen and maximized windows, which a change of the column's size would make normal.
-+    pub(super) fn free_refuses_column_op(&self, window: Option<&W::Id>) -> bool {
-+        self.is_free()
-+            && !window.map_or(self.floating_is_active.get(), |id| {
-+                self.floating.has_window(id)
-+            })
-+    }
-+
-+    /// Moves every window of normal size from the columns to the floating layout, and makes the
-+    /// fullscreen and maximized ones return there when they leave that state.
-+    fn float_columns(&mut self) {
-+        for tile in self.scrolling.tiles_mut() {
-+            tile.restore_to_floating = true;
++    pub(super) fn column_op(&self, op: ColumnOp<'_, W::Id>) -> Result<(), Refused> {
++        if !self.is_free() {
++            return Ok(());
 +        }
++        match op {
++            ColumnOp::ConsumeOrExpel(_)
++            | ColumnOp::ConsumeOrExpelActive
++            | ColumnOp::ColumnDisplay
++            | ColumnOp::SwapInDirection
++            | ColumnOp::ExpandColumnToAvailableWidth => Err(Refused),
++            ColumnOp::SizeChange(window) => {
++                if !self.target_is_floating(window) {
++                    Err(Refused)
++                } else {
++                    Ok(())
++                }
++            }
++            ColumnOp::MoveToColumns(window) => {
++                if self.target_is_floating(window) {
++                    Err(Refused)
++                } else {
++                    Ok(())
++                }
++            }
++        }
++    }
++
++    pub fn refuses_columns_for(&self, id: Option<&W::Id>) -> bool {
++        self.column_op(ColumnOp::MoveToColumns(id)).is_err()
++    }
++
++    fn float_columns(&mut self) {
 +
 +        let mut ids: Vec<W::Id> = self
 +            .scrolling
@@ -960,6 +1103,7 @@ index 00000000..03e7837b
 +
 +            let mut removed = self.floating.remove_tile(id);
 +            removed.tile.stop_move_animations();
++            Self::set_tile_home(&mut removed.tile, Home::Columns);
 +
 +            let col_idx = self.scrolling.columns().count();
 +            self.scrolling.add_tile(
@@ -996,3 +1140,6 @@ index 00000000..03e7837b
 +        }
 +    }
 +}
+-- 
+2.56.1
+
