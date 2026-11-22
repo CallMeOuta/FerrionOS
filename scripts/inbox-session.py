@@ -146,6 +146,25 @@ def main():
                           "remaining": len(remaining), "stale_write_refused": True,
                           "failed_write_refused": True, "non_answers_unchanged": True}, indent=2))
         assert latency < FIRST_DECISION_TARGET, f"First decision took {latency:.6f}s"
+    with tempfile.TemporaryDirectory(prefix="agent-inbox-skip-") as skip_dir:
+        skip_root = Path(skip_dir)
+        (skip_root / "build").mkdir()
+        (skip_root / "build/LANES.md").write_text(
+            "# Lanes\n\n## Notes\n\n"
+            "- question to the maintainer: Question A?\n"
+            "  Created: 2026-11-21\n"
+            "  Context: Context A.\n"
+            "  1. Opt A1. [recommended]\n"
+            "  2. Opt A2.\n"
+            "- question to the maintainer: Question B?\n"
+            "  Created: 2026-11-20\n"
+            "  Context: Context B.\n"
+            "  1. Opt B1. [recommended]\n"
+            "  2. Opt B2.\n")
+        skipped_run = invoke(skip_root, "s\n\nq\n")
+        assert skipped_run.returncode == 0, skipped_run.stderr
+        assert skipped_run.stdout.count("Question B?") == 1, skipped_run.stdout
+        assert "1 remaining (skipped this session)." in skipped_run.stdout, skipped_run.stdout
 
 
 if __name__ == "__main__":

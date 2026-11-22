@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+from dataclasses import dataclass
 import datetime
+import enum
 import fcntl
 import json
 import os
@@ -21,10 +23,88 @@ MAX_DECISIONS = 1000
 MAX_ACTIONS = 10000
 MAX_OPTIONS = 9
 EDITOR_TIMEOUT = 3600
-PENDING = {"ready-for-human", "needs-info"}
 STATUS = re.compile(r"^Status: ([a-z-]+)[ \t]*$", re.MULTILINE)
 HEADING = re.compile(r"^## .+$", re.MULTILINE)
 NOTE = re.compile(r"^(?:- )?question to the maintainer: (.+)$")
+
+
+class IssueStatus(str, enum.Enum):
+    READY_FOR_AGENT = "ready-for-agent"
+    READY_FOR_HUMAN = "ready-for-human"
+    NEEDS_INFO = "needs-info"
+    WONTFIX = "wontfix"
+
+
+class DecisionKind(str, enum.Enum):
+    ISSUE = "issue"
+    NOTE = "note"
+
+
+PENDING = {IssueStatus.READY_FOR_HUMAN.value, IssueStatus.NEEDS_INFO.value}
+
+
+@dataclass(frozen=True)
+class Option:
+    number: int
+    text: str
+    recommended: bool
+    status: IssueStatus
+
+    def to_dict(self):
+        return {
+            "number": self.number,
+            "text": self.text,
+            "recommended": self.recommended,
+            "status": self.status.value,
+        }
+
+
+@dataclass(frozen=True)
+class Answerable:
+    options: tuple[Option, ...]
+    recommended: int
+
+
+@dataclass(frozen=True)
+class Malformed:
+    error: str
+
+
+@dataclass(frozen=True)
+class Decision:
+    path: str
+    line: int
+    kind: DecisionKind
+    created: str
+    question: str
+    context: str
+    body: Answerable | Malformed
+    source_text: str
+
+    @property
+    def key(self):
+        return (self.path, self.kind, self.question, self.created)
+
+    def to_dict(self):
+        if isinstance(self.body, Answerable):
+            options = [option.to_dict() for option in self.body.options]
+            recommended = self.body.recommended
+            error = None
+        else:
+            options = []
+            recommended = None
+            error = self.body.error
+        return {
+            "path": self.path,
+            "line": self.line,
+            "kind": self.kind.value,
+            "created": self.created,
+            "question": self.question,
+            "context": self.context,
+            "options": options,
+            "recommended": recommended,
+            "error": error,
+        }
 
 
 def section(text, name):
@@ -79,13 +159,12 @@ def decision_fields(body):
     for index, (number, text) in enumerate(rows, 1):
         if int(number) != index:
             raise ValueError("Number options consecutively from 1")
-        options.append({"number": index, "text": text,
-                        "recommended": "[recommended]" in text.lower(),
-                        "status": "wontfix" if re.search(r"\bwontfix\b", text, re.I) else "ready-for-agent"})
-    recommended = [option["number"] for option in options if option["recommended"]]
+        status = IssueStatus.WONTFIX if re.search(r"\bwontfix\b", text, re.I) else IssueStatus.READY_FOR_AGENT
+        options.append(Option(number=index, text=text, recommended="[recommended]" in text.lower(), status=status))
+    recommended = [option.number for option in options if option.recommended]
     if len(recommended) != 1:
         raise ValueError("Mark exactly one option [recommended]")
-    return question[0], context[0], options, recommended[0]
+    return question[0], context[0], Answerable(options=tuple(options), recommended=recommended[0])
 
 
 def make_item(root, path, text, body, kind, line, created_body):
@@ -94,15 +173,23 @@ def make_item(root, path, text, body, kind, line, created_body):
     if created:
         value = datetime.datetime.fromisoformat(created[1].strip().replace("Z", "+00:00"))
         timestamp = value.replace(tzinfo=value.tzinfo or datetime.timezone.utc).timestamp()
-    item = {"path": str(path.relative_to(root)), "line": line, "kind": kind,
-            "created": datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).isoformat(),
-            "question": "Decision needs options", "context": body.strip(),
-            "options": [], "recommended": None, "error": None, "_text": text}
+    created_iso = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).isoformat()
     try:
-        item["question"], item["context"], item["options"], item["recommended"] = decision_fields(body)
+        question, context, parsed = decision_fields(body)
     except ValueError as error:
-        item["error"] = str(error)
-    return item
+        question = "Decision needs options"
+        context = body.strip()
+        parsed = Malformed(error=str(error))
+    return Decision(
+        path=str(path.relative_to(root)),
+        line=line,
+        kind=kind,
+        created=created_iso,
+        question=question,
+        context=context,
+        body=parsed,
+        source_text=text,
+    )
 
 
 def gather(root):
@@ -118,7 +205,7 @@ def gather(root):
             continue
         if len(statuses) != 1:
             raise ValueError(f"{path}: expected one Status: in the header")
-        queue.append(make_item(root, path, text, text[slice(*span)], "issue", 1, header))
+        queue.append(make_item(root, path, text, text[slice(*span)], DecisionKind.ISSUE, 1, header))
         if len(queue) > MAX_DECISIONS:
             raise ValueError(f"Queue exceeds {MAX_DECISIONS} decisions")
     path = root / "build/LANES.md"
@@ -141,10 +228,10 @@ def gather(root):
                         break
                     continuation.append(following[2:])
                 body = "Question: " + match[1] + "\n" + "".join(continuation)
-                queue.append(make_item(root, path, text, body, "note", index + 1, body))
+                queue.append(make_item(root, path, text, body, DecisionKind.NOTE, index + 1, body))
                 if len(queue) > MAX_DECISIONS:
                     raise ValueError(f"Queue exceeds {MAX_DECISIONS} decisions")
-    queue.sort(key=lambda item: (item["created"], item["path"], item["line"]))
+    queue.sort(key=lambda item: (item.created, item.path, item.line))
     return queue
 
 
@@ -157,23 +244,23 @@ def append_comment(text, comment):
 
 
 def save_answer(root, item, option):
-    assert option in item["options"] and item["error"] is None
-    path = root / item["path"]
-    text = item["_text"]
-    if item["kind"] == "issue":
+    assert isinstance(item.body, Answerable) and option in item.body.options
+    path = root / item.path
+    text = item.source_text
+    if item.kind is DecisionKind.ISSUE:
         header, separator, rest = text.partition("\n## ")
-        header, count = STATUS.subn("Status: " + option["status"], header)
+        header, count = STATUS.subn("Status: " + option.status.value, header)
         assert count == 1
         updated = header + separator + rest
     else:
         lines = text.splitlines(keepends=True)
-        index = item["line"] - 1
+        index = item.line - 1
         assert NOTE.fullmatch(lines[index].rstrip("\r\n"))
         lines[index] = lines[index].replace("question to the maintainer:", "answered by the maintainer:", 1)
-        lines.insert(index + 1, "  Status: " + option["status"] + "\n")
+        lines.insert(index + 1, "  Status: " + option.status.value + "\n")
         updated = "".join(lines)
     date = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-    comment = f"- {date}, maintainer: {item['question']} Answer: {option['number']}. {option['text']} Status: {option['status']}."
+    comment = f"- {date}, maintainer: {item.question} Answer: {option.number}. {option.text} Status: {option.status.value}."
     updated = append_comment(updated, comment)
     encoded = updated.encode("utf-8")
     if len(encoded) > MAX_BYTES:
@@ -207,14 +294,15 @@ def safe_display(text):
 
 
 def show(item, remaining):
-    print(f"\n{remaining} remaining · {item['path']}:{item['line']}")
-    print(safe_display(item["question"]) + "\n")
-    print(safe_display(item["context"]) + "\n")
-    for option in item["options"]:
-        marker = ">" if option["recommended"] else " "
-        print(safe_display(f"{marker} {option['number']}. {option['text']}"))
-    if item["error"]:
-        print("Cannot answer: " + item["error"])
+    print(f"\n{remaining} remaining · {item.path}:{item.line}")
+    print(safe_display(item.question) + "\n")
+    print(safe_display(item.context) + "\n")
+    if isinstance(item.body, Answerable):
+        for option in item.body.options:
+            marker = ">" if option.recommended else " "
+            print(safe_display(f"{marker} {option.number}. {option.text}"))
+    else:
+        print("Cannot answer: " + item.body.error)
     print("Enter: recommendation · number: choose · s: skip · o: open · q: quit", flush=True)
 
 
@@ -234,37 +322,63 @@ def read_key():
         termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
 
 
-def run(root):
-    queue = gather(root)
-    skipped = set()
-    for _ in range(MAX_ACTIONS):
-        available = [item for item in queue if (item["path"], item["line"]) not in skipped]
-        if not available:
-            print(f"{len(queue)} remaining" + (" (skipped this session)." if queue else ". Inbox clear."))
-            return
-        item = available[0]
-        show(item, len(queue))
-        key = read_key()
+class Session:
+    def __init__(self, root):
+        self.root = root
+        self.queue = gather(root)
+        self.skipped = set()
+
+    def refresh(self, clear_skips=False):
+        self.queue = gather(self.root)
+        if clear_skips:
+            self.skipped.clear()
+        else:
+            present = {item.key for item in self.queue}
+            self.skipped &= present
+        assert self.skipped.issubset({item.key for item in self.queue})
+
+    def next_decision(self):
+        for item in self.queue:
+            if item.key not in self.skipped:
+                return item
+        return None
+
+    def apply(self, item, key):
         if key in {"q", "\x04"}:
-            print(f"{len(queue)} remaining.")
-            return
+            print(f"{len(self.queue)} remaining.")
+            return False
         if key == "s":
-            skipped.add((item["path"], item["line"]))
-            continue
+            self.skipped.add(item.key)
+            return True
         if key == "o":
             editor = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi")
-            subprocess.run(editor + [str(root / item["path"])], check=True, timeout=EDITOR_TIMEOUT)
-            queue = gather(root)
-            skipped.clear()
-            continue
-        number = item["recommended"] if key == "" else int(key) if re.fullmatch("[1-9]", key) else None
-        option = next((value for value in item["options"] if value["number"] == number), None)
+            subprocess.run(editor + [str(self.root / item.path)], check=True, timeout=EDITOR_TIMEOUT)
+            self.refresh(clear_skips=True)
+            return True
+        option = None
+        if isinstance(item.body, Answerable):
+            number = item.body.recommended if key == "" else int(key) if re.fullmatch("[1-9]", key) else None
+            option = next((value for value in item.body.options if value.number == number), None)
         if option is None:
             print("Choose an option, skip, open or quit.")
-            continue
-        save_answer(root, item, option)
-        print(f"Saved. {len(queue) - 1} remaining.", flush=True)
-        queue = gather(root)
+            return True
+        save_answer(self.root, item, option)
+        print(f"Saved. {len(self.queue) - 1} remaining.", flush=True)
+        self.skipped.discard(item.key)
+        self.refresh()
+        return True
+
+
+def run(root):
+    session = Session(root)
+    for _ in range(MAX_ACTIONS):
+        item = session.next_decision()
+        if item is None:
+            print(f"{len(session.queue)} remaining" + (" (skipped this session)." if session.queue else ". Inbox clear."))
+            return
+        show(item, len(session.queue))
+        if not session.apply(item, read_key()):
+            return
     raise ValueError(f"Session exceeds {MAX_ACTIONS} actions; reopen the inbox")
 
 
@@ -281,12 +395,15 @@ def main():
         if args.json or args.list:
             queue = gather(root)
             if args.json:
-                print(json.dumps([{key: value for key, value in item.items() if not key.startswith("_")}
-                                  for item in queue], indent=2))
+                print(json.dumps([item.to_dict() for item in queue], indent=2))
             else:
                 for item in queue:
-                    suffix = " [needs options]" if item["error"] else f" [recommended: {item['recommended']}]"
-                    print(safe_display(f"{item['created']} {item['path']}:{item['line']} {item['question']}{suffix}"))
+                    suffix = (
+                        f" [recommended: {item.body.recommended}]"
+                        if isinstance(item.body, Answerable)
+                        else " [needs options]"
+                    )
+                    print(safe_display(f"{item.created} {item.path}:{item.line} {item.question}{suffix}"))
                 print(f"{len(queue)} remaining.")
         else:
             run(root)
