@@ -3697,9 +3697,13 @@ def ferrion_run_checks(vm, args, port, seen):
     status, output = run("stdin", f"ferrion-run-probe hold-socket {address} --stdin -- ferrion-run --no-network true")
     if status != 125 or "is a socket" not in output:
         problems.append(f"a socket as standard input was not refused (exit {status})")
+    _, state_before = run("files-before", "ls -A /home/user/.local/state/ferrion-run 2>/dev/null | wc -l")
     status, output = run("files", "ferrion-run --files /home/user/no-such-folder ls")
     if status != 125 or "no-such-folder" not in output:
         problems.append(f"--files with a missing folder was not refused (exit {status})")
+    _, state_after = run("files-after", "ls -A /home/user/.local/state/ferrion-run 2>/dev/null | wc -l")
+    if state_before.split()[-1:] != state_after.split()[-1:]:
+        problems.append(f"refused --files launch left a session entry ({state_before.split()[-1:]} -> {state_after.split()[-1:]})")
 
     (vm.out / "ferrion-run.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
     if controls:

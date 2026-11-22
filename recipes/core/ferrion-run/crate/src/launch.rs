@@ -13,7 +13,7 @@ use ferrion_scope::scope::{Access, Grant, Scope, within};
 use libredox::call;
 use libredox::flag::{O_CLOEXEC, O_RDWR};
 
-use crate::sessions::{CLONE_PREFIX, PID, state_root};
+use crate::sessions::{CLONE_PREFIX, PID, clone_dirs, state_root};
 use crate::{
     GrantKind, Options, PASSED_VARIABLES, SYSTEM_PATHS, check_stdio, child_schemes, new_handles,
     parse_snapshot, to_close,
@@ -148,8 +148,60 @@ fn private_dir(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", path.display()))
 }
 
-struct Prepared {
+enum Life {
+    Preparing,
+    Ran { clones: usize },
+}
+
+struct SessionDir {
     dir: PathBuf,
+    life: Life,
+}
+
+impl SessionDir {
+    fn create(dir: PathBuf) -> Result<Self, String> {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        Ok(Self {
+            dir,
+            life: Life::Preparing,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    fn write_pid(&self) -> Result<(), String> {
+        fs::write(self.dir.join(PID), process::id().to_string())
+            .map_err(|e| format!("cannot write {}: {e}", self.dir.display()))
+    }
+
+    fn mark_ran(&mut self, clones: usize) {
+        assert!(matches!(self.life, Life::Preparing));
+        self.life = Life::Ran { clones };
+    }
+}
+
+impl Drop for SessionDir {
+    fn drop(&mut self) {
+        match self.life {
+            Life::Preparing | Life::Ran { clones: 0 } => {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+            Life::Ran { .. } => {
+                let _ = fs::remove_dir_all(self.dir.join("home"));
+                let _ = fs::remove_dir_all(self.dir.join("tmp"));
+                let _ = fs::remove_file(self.dir.join(PID));
+            }
+        }
+    }
+}
+
+struct Prepared {
+    dir: SessionDir,
     home: String,
     scope: Scope,
     clones: usize,
@@ -160,28 +212,8 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
     private_dir(&root)?;
     let root =
         fs::canonicalize(&root).map_err(|e| format!("cannot resolve {}: {e}", root.display()))?;
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let id = format!("{seconds}-{}", process::id());
-    let dir = root.join(&id);
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&dir)
-        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    fs::write(dir.join(PID), process::id().to_string())
-        .map_err(|e| format!("cannot write {}: {e}", dir.display()))?;
-    let home = dir.join("home");
-    let tmp = dir.join("tmp");
-    private_dir(&home)?;
-    private_dir(&tmp)?;
     let root_text = text(&root)?;
-    let mut scope = Scope {
-        grants: Vec::new(),
-        hidden: vec![root_text.clone()],
-    };
-    let mut clones = 0;
+    let mut validated: Vec<(GrantKind, String, u32)> = Vec::with_capacity(options.grants.len());
     for (kind, path) in &options.grants {
         let real = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let real_text = text(&real)?;
@@ -192,21 +224,36 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
         if *kind != GrantKind::ReadOnly && !meta.is_dir() {
             return Err(format!("{real_text} is not a folder"));
         }
-        if scope.grants.iter().any(|g| g.virt == real_text) {
+        if validated.iter().any(|(_, v, _)| v == &real_text) {
             return Err(format!("{real_text} is given twice"));
         }
+        validated.push((*kind, real_text, meta.permissions().mode() & 0o7777));
+    }
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let id = format!("{seconds}-{}", process::id());
+    let dir = SessionDir::create(root.join(&id))?;
+    let home = dir.path().join("home");
+    let tmp = dir.path().join("tmp");
+    private_dir(&home)?;
+    private_dir(&tmp)?;
+    let mut scope = Scope {
+        grants: Vec::new(),
+        hidden: vec![root_text],
+    };
+    let mut clones = 0;
+    for (kind, real_text, mode) in validated {
         let (access, layer) = match kind {
             GrantKind::Files => (Access::ReadWrite, None),
             GrantKind::ReadOnly => (Access::ReadOnly, None),
             GrantKind::Clone => {
-                let clone = dir.join(format!("{CLONE_PREFIX}{clones}"));
+                let clone = dir.path().join(format!("{CLONE_PREFIX}{clones}"));
                 clones += 1;
                 private_dir(&clone.join(LAYER))?;
-                fs::set_permissions(
-                    clone.join(LAYER),
-                    fs::Permissions::from_mode(meta.permissions().mode() & 0o7777),
-                )
-                .map_err(|e| format!("cannot set the layer's mode: {e}"))?;
+                fs::set_permissions(clone.join(LAYER), fs::Permissions::from_mode(mode))
+                    .map_err(|e| format!("cannot set the layer's mode: {e}"))?;
                 fs::write(clone.join(LOWER), &real_text)
                     .map_err(|e| format!("cannot write {}: {e}", clone.display()))?;
                 (Access::Clone, Some(text(&clone.join(LAYER))?))
@@ -244,6 +291,7 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
             layer: None,
         });
     }
+    dir.write_pid()?;
     Ok(Prepared {
         dir,
         home,
@@ -252,21 +300,62 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
     })
 }
 
-fn open_session(scope: &Scope) -> Result<(usize, usize), String> {
-    let ctl = call::open(SCOPE_SERVICE, O_RDWR | O_CLOEXEC, 0)
-        .map_err(|e| format!("cannot reach ferrion-scoped at {SCOPE_SERVICE}: {e}"))?;
-    let session = call::openat(ctl, "session", O_RDWR | O_CLOEXEC, 0);
-    let _ = call::close(ctl);
-    let session = session.map_err(|e| format!("ferrion-scoped refused a session: {e}"))?;
-    let spec = scope.encode();
-    let written = call::write(session, &spec)
-        .map_err(|e| format!("cannot hand the scope to the proxy: {e}"))?;
-    if written != spec.len() {
-        return Err("the proxy took part of the scope".into());
+struct ProxySession {
+    session: Option<usize>,
+    root: Option<usize>,
+}
+
+impl ProxySession {
+    fn open(scope: &Scope) -> Result<Self, String> {
+        let ctl = call::open(SCOPE_SERVICE, O_RDWR | O_CLOEXEC, 0)
+            .map_err(|e| format!("cannot reach ferrion-scoped at {SCOPE_SERVICE}: {e}"))?;
+        let session = call::openat(ctl, "session", O_RDWR | O_CLOEXEC, 0);
+        let _ = call::close(ctl);
+        let session = session.map_err(|e| format!("ferrion-scoped refused a session: {e}"))?;
+        let mut guard = Self {
+            session: Some(session),
+            root: None,
+        };
+        let spec = scope.encode();
+        let written = call::write(session, &spec)
+            .map_err(|e| format!("cannot hand the scope to the proxy: {e}"))?;
+        if written != spec.len() {
+            return Err("the proxy took part of the scope".into());
+        }
+        let root = call::openat(session, "root", O_CLOEXEC, 0)
+            .map_err(|e| format!("the proxy refused the scope: {e}"))?;
+        guard.root = Some(root);
+        Ok(guard)
     }
-    let root = call::openat(session, "root", O_CLOEXEC, 0)
-        .map_err(|e| format!("the proxy refused the scope: {e}"))?;
-    Ok((session, root))
+
+    fn root(&self) -> usize {
+        self.root.expect("proxy session root is open")
+    }
+
+    fn close_root(&mut self) {
+        if let Some(root) = self.root.take() {
+            let _ = call::close(root);
+        }
+    }
+
+    fn end(mut self) -> (Result<(), libredox::error::Error>, Vec<u8>) {
+        self.close_root();
+        let session = self.session.take().expect("proxy session is open");
+        let ended = call::write(session, END_SESSION).map(|_| ());
+        let report = read_report(session);
+        let _ = call::close(session);
+        (ended, report)
+    }
+}
+
+impl Drop for ProxySession {
+    fn drop(&mut self) {
+        self.close_root();
+        if let Some(session) = self.session.take() {
+            let _ = call::write(session, END_SESSION);
+            let _ = call::close(session);
+        }
+    }
 }
 
 fn child_env(options: &Options, home: &str) -> Vec<(OsString, OsString)> {
@@ -349,7 +438,7 @@ fn read_report(session: usize) -> Vec<u8> {
 }
 
 fn report_links(report: &[u8], prepared: &Prepared) {
-    let own = prepared.dir.to_string_lossy();
+    let own = prepared.dir.path().to_string_lossy();
     for line in String::from_utf8_lossy(report).lines() {
         if let Some(more) = line.strip_prefix('+') {
             eprintln!(
@@ -398,30 +487,25 @@ fn report_layer_links(dir: &Path, clones: usize) {
 
 fn wait(pid: libc::pid_t) -> Result<i32, String> {
     let mut status = 0;
-    let mut exited = false;
     for _ in 0..MAX_WAIT_INTERRUPTS {
         let r = unsafe { libc::waitpid(pid, &mut status, 0) };
         if r == pid {
-            exited = true;
-            break;
+            return Ok(if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                128 + libc::WTERMSIG(status)
+            } else {
+                EXIT_UNKNOWN
+            });
         }
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() != Some(libc::EINTR) {
             return Err(format!("cannot wait for the program: {e}"));
         }
     }
-    if !exited {
-        return Err(format!(
-            "waiting for the program was interrupted {MAX_WAIT_INTERRUPTS} times"
-        ));
-    }
-    if libc::WIFEXITED(status) {
-        Ok(libc::WEXITSTATUS(status))
-    } else if libc::WIFSIGNALED(status) {
-        Ok(128 + libc::WTERMSIG(status))
-    } else {
-        Ok(EXIT_UNKNOWN)
-    }
+    Err(format!(
+        "waiting for the program was interrupted {MAX_WAIT_INTERRUPTS} times"
+    ))
 }
 
 const EXIT_UNKNOWN: i32 = 126;
@@ -447,22 +531,29 @@ pub fn run(options: &Options, withhold_network: bool, allow_sudo: bool) -> Outco
         Ok(cwd) => cwd,
         Err(e) => return Outcome::Refused(format!("cannot read the working directory: {e}")),
     };
-    let prepared = match prepare_session(options) {
+    let mut prepared = match prepare_session(options) {
         Ok(prepared) => prepared,
         Err(reason) => return Outcome::Refused(reason),
     };
+    assert!(prepared.dir.path().join(PID).is_file());
     let outcome = launch(options, withhold_network, allow_sudo, &cwd, &prepared);
-    let _ = fs::remove_dir_all(prepared.dir.join("home"));
-    let _ = fs::remove_dir_all(prepared.dir.join("tmp"));
-    let _ = fs::remove_file(prepared.dir.join(PID));
-    if prepared.clones == 0 {
-        let _ = fs::remove_dir_all(&prepared.dir);
-    } else if let Some(id) = prepared.dir.file_name() {
-        report_layer_links(&prepared.dir, prepared.clones);
-        let id = id.to_string_lossy();
-        eprintln!(
-            "ferrion-run: session {id} keeps its changes in its layer; see `ferrion-run diff {id}`, then `ferrion-run apply {id}` or `ferrion-run discard {id}`"
+    if matches!(outcome, Outcome::Exited(_)) {
+        prepared.dir.mark_ran(prepared.clones);
+        assert_eq!(
+            prepared.clones,
+            clone_dirs(prepared.dir.path())
+                .map(|v| v.len())
+                .unwrap_or(0)
         );
+        if prepared.clones > 0
+            && let Some(id) = prepared.dir.path().file_name()
+        {
+            report_layer_links(prepared.dir.path(), prepared.clones);
+            let id = id.to_string_lossy();
+            eprintln!(
+                "ferrion-run: session {id} keeps its changes in its layer; see `ferrion-run diff {id}`, then `ferrion-run apply {id}` or `ferrion-run discard {id}`"
+            );
+        }
     }
     outcome
 }
@@ -478,8 +569,8 @@ fn launch(
         Ok(caller) => child_schemes(&caller, withhold_network, allow_sudo, options.pty),
         Err(reason) => return Outcome::Refused(reason),
     };
-    let (session, root) = match open_session(&prepared.scope) {
-        Ok(handles) => handles,
+    let mut proxy = match ProxySession::open(&prepared.scope) {
+        Ok(proxy) => proxy,
         Err(reason) => return Outcome::Refused(reason),
     };
     let names: Vec<ioslice::IoSlice> = schemes
@@ -490,7 +581,8 @@ fn launch(
         Ok(ns) => ns,
         Err(e) => return Outcome::Refused(format!("cannot create the namespace: {e}")),
     };
-    if let Err(e) = call::register_scheme_to_ns(namespace, "file", root) {
+    if let Err(e) = call::register_scheme_to_ns(namespace, "file", proxy.root()) {
+        let _ = call::close(namespace);
         return Outcome::Refused(format!("cannot give the session its file scheme: {e}"));
     }
     let start = match cwd.to_str() {
@@ -508,6 +600,7 @@ fn launch(
     let env = child_env(options, &prepared.home);
     let pid = unsafe { libc::fork() };
     if pid < 0 {
+        let _ = call::close(namespace);
         return Outcome::Refused(format!(
             "cannot start the program: {}",
             std::io::Error::last_os_error()
@@ -523,11 +616,9 @@ fn launch(
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
     }
     let _ = call::close(namespace);
-    let _ = call::close(root);
+    proxy.close_root();
     let status = wait(pid);
-    let ended = call::write(session, END_SESSION);
-    let report = read_report(session);
-    let _ = call::close(session);
+    let (ended, report) = proxy.end();
     if let Err(e) = ended {
         eprintln!("ferrion-run: the proxy did not end the session: {e}");
     }
