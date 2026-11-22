@@ -26,6 +26,7 @@ const REQ_READ: u64 = 0;
 const REQ_WRITE: u64 = 1;
 
 mod drm;
+mod sync;
 
 // TODO: some of the structs passed as T have padding bytes, so casting to a byte slice is UB
 
@@ -263,19 +264,17 @@ pub unsafe fn ioctl_inner(fd: c_int, request: c_ulong, out: *mut c_void) -> Resu
             let size = ((request >> 16) & 0x3FFF) as usize;
             let name = (((request >> 8) & 0xFF) as u8) as char;
             let func = (request & 0xFF) as u8;
+            let buf = match dir {
+                0b10 => IoctlBuffer::Read(out, size),
+                0b01 => IoctlBuffer::Write(out, size),
+                0b11 => IoctlBuffer::ReadWrite(out, size),
+                _ => IoctlBuffer::None,
+            };
             match name {
-                'd' => {
-                    let buf = match dir {
-                        0b10 => IoctlBuffer::Read(out, size),
-                        0b01 => IoctlBuffer::Write(out, size),
-                        0b11 => IoctlBuffer::ReadWrite(out, size),
-                        _ => IoctlBuffer::None,
-                    };
-                    return unsafe { drm::ioctl(fd, func, buf) };
-                }
-                _ => {
-                    return Err(Errno(EINVAL));
-                }
+                'd' => return unsafe { drm::ioctl(fd, func, buf) },
+                '>' => return unsafe { sync::sync_file_ioctl(fd, func, buf) },
+                'b' => return unsafe { sync::dmabuf_ioctl(func, buf) },
+                _ => return Err(Errno(ENOTTY)),
             }
         }
     }

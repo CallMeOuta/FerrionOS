@@ -9,4 +9,5 @@ mod ioctl_data;
 pub use ioctl_data::{IoctlData, WireArray, WireDirection, WireField, WireLayout};
 
 pub mod drm;
+pub mod sync;
 pub mod virtgpu;
