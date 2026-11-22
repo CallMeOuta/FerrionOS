@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import contextlib
+import enum
 import gzip
 import hashlib
 import io
@@ -186,11 +187,57 @@ NATIVE_EVIDENCE = {'26.2.7': {'build_log_url': 'https://kojipkgs.fedoraproject.o
             'option_url': 'https://gitlab.freedesktop.org/mesa/mesa/-/raw/mesa-26.3.1/meson.options',
             'option_default': 'false'}}
 SCENE_HASH = "47972063c7a47bfb"
+MAX_FETCH_ATTEMPTS = 3
 DEVICES = {
     "virgl": "virtio-vga-gl",
     "venus": "virtio-vga-gl,hostmem=4G,blob=true,venus=true",
     "native": "virtio-vga-gl,hostmem=4G,blob=true,venus=true,drm_native_context=on",
 }
+
+
+class Verdict(str, enum.Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    BLOCKED = "BLOCKED"
+    NOT_RUN = "NOT_RUN"
+    FETCHED = "FETCHED"
+
+
+def _parse_verdict(item):
+    if isinstance(item, Verdict):
+        return item
+    try:
+        return Verdict(item)
+    except ValueError as error:
+        raise AssertionError(f"Unknown verdict: {item!r}") from error
+
+
+def combine_verdicts(statuses, *, fetch_only=False, allow_not_run=()):
+    parsed = [_parse_verdict(item) for item in statuses]
+    optional = [_parse_verdict(item) for item in allow_not_run]
+    combined = parsed + optional
+    if Verdict.FAIL in combined:
+        return Verdict.FAIL
+    if Verdict.BLOCKED in combined:
+        return Verdict.BLOCKED
+    if fetch_only:
+        assert parsed and all(v is Verdict.FETCHED for v in parsed)
+        return Verdict.FETCHED
+    if not parsed or Verdict.NOT_RUN in parsed:
+        return Verdict.NOT_RUN
+    assert all(v is Verdict.PASS for v in parsed)
+    assert all(v in (Verdict.PASS, Verdict.NOT_RUN) for v in optional)
+    return Verdict.PASS
+
+
+@contextlib.contextmanager
+def atomic_write(target):
+    partial = target.with_name(target.name + f".{os.getpid()}.partial")
+    try:
+        yield partial
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 class Blocked(Exception):
@@ -283,22 +330,20 @@ def fetch(cache, digest, archive_path):
         if sha256(target) != digest:
             raise RuntimeError(f"Cached file fails SHA-256: {target}")
         return target
-    partial = target.with_name(target.name + f".{os.getpid()}.partial")
     url = KOJI + archive_path
     failures = []
-    for attempt in range(3):
+    for attempt in range(MAX_FETCH_ATTEMPTS):
         try:
-            with urllib.request.urlopen(url, timeout=90) as response, partial.open("wb") as out:
-                shutil.copyfileobj(response, out)
-            if sha256(partial) != digest:
-                raise RuntimeError(f"Download fails pinned SHA-256: {url}")
-            partial.replace(target)
+            with atomic_write(target) as partial:
+                with urllib.request.urlopen(url, timeout=90) as response, partial.open("wb") as out:
+                    shutil.copyfileobj(response, out)
+                if sha256(partial) != digest:
+                    raise RuntimeError(f"Download fails pinned SHA-256: {url}")
             return target
         except (OSError, urllib.error.URLError) as error:
             failures.append(str(error))
-            time.sleep(attempt + 1)
-        finally:
-            partial.unlink(missing_ok=True)
+            if attempt + 1 < MAX_FETCH_ATTEMPTS:
+                time.sleep(attempt + 1)
     raise RuntimeError(f"Cannot download {archive_path}: {'; '.join(failures)}")
 
 
@@ -376,9 +421,8 @@ def assemble(cache, packages):
                 if name.split("/", 1)[0] in ("bin", "sbin", "lib", "lib64"):
                     name = "usr/" + name
                 if name.startswith("boot/vmlinuz-") or name.endswith("/vmlinuz"):
-                    partial_kernel = kernel.with_suffix(f".{os.getpid()}.partial")
-                    partial_kernel.write_bytes(read(member))
-                    partial_kernel.replace(kernel)
+                    with atomic_write(kernel) as partial_kernel:
+                        partial_kernel.write_bytes(read(member))
                     continue
                 if "/modules/" in name:
                     if re.search(r"\.ko(?:\.(?:xz|zst))?$", name):
@@ -437,19 +481,17 @@ def assemble(cache, packages):
         for parent in PurePosixPath(name).parents:
             if str(parent) != ".":
                 files.setdefault(str(parent), (stat.S_IFDIR | 0o755, b""))
-    partial = initrd.with_suffix(f".{os.getpid()}.partial")
-    with partial.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0, compresslevel=1) as out:
-        for number, name in enumerate(sorted(files, key=lambda p: (p.count("/"), p)), 2):
-            mode, data = files[name]
-            cpio_entry(out, number, name, mode, data)
-        cpio_entry(out, len(files) + 2, "dev/console", stat.S_IFCHR | 0o600, rdev=(5, 1))
-        cpio_entry(out, len(files) + 3, "TRAILER!!!", 0)
-    partial.replace(initrd)
+    with atomic_write(initrd) as partial:
+        with partial.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0, compresslevel=1) as out:
+            for number, name in enumerate(sorted(files, key=lambda p: (p.count("/"), p)), 2):
+                mode, data = files[name]
+                cpio_entry(out, number, name, mode, data)
+            cpio_entry(out, len(files) + 2, "dev/console", stat.S_IFCHR | 0o600, rdev=(5, 1))
+            cpio_entry(out, len(files) + 3, "TRAILER!!!", 0)
     if not kernel.exists():
         raise RuntimeError("Pinned kernel archive has no vmlinuz")
-    partial_manifest = manifest.with_suffix(f".{os.getpid()}.partial")
-    partial_manifest.write_text(json.dumps({kernel.name: sha256(kernel), initrd.name: sha256(initrd)}) + "\n")
-    partial_manifest.replace(manifest)
+    with atomic_write(manifest) as partial_manifest:
+        partial_manifest.write_text(json.dumps({kernel.name: sha256(kernel), initrd.name: sha256(initrd)}) + "\n")
     return kernel, initrd
 
 
@@ -546,20 +588,20 @@ def repeatability(runs):
             (run.get("status"), {"capset": guest.get("venus_capset"), "scenes": scenes}))
     summary = {}
     for device, values in groups.items():
-        statuses = {status for status, _ in values}
+        statuses = {_parse_verdict(status) for status, _ in values}
         prints = [fingerprint for _, fingerprint in values]
-        if statuses == {"BLOCKED"}:
-            status = "BLOCKED"
-        elif statuses != {"PASS"}:
-            status = "FAIL"
+        if statuses == {Verdict.BLOCKED}:
+            status = Verdict.BLOCKED
+        elif statuses != {Verdict.PASS}:
+            status = Verdict.FAIL
         elif not all(p["scenes"] and all(s == "UNAVAILABLE" or scene_exact(s) for s in p["scenes"].values())
                      for p in prints):
-            status = "FAIL"
+            status = Verdict.FAIL
         elif len(prints) == 1:
-            status = "NOT_RUN"
+            status = Verdict.NOT_RUN
         else:
-            status = "PASS" if all(p == prints[0] for p in prints) else "FAIL"
-        summary[device] = {"runs": len(values), "status": status}
+            status = Verdict.PASS if all(p == prints[0] for p in prints) else Verdict.FAIL
+        summary[device] = {"runs": len(values), "status": status.value}
     return summary
 
 
@@ -591,13 +633,14 @@ def main():
                               "kind": "Fedora 45 release and updates"}),
                 ("mesa263", {"mesa": CURRENT_MESA, "glibc": "2.44.9000-7.fc46", "llvm": "23.1.5-2.fc45",
                              "kind": "Fedora 45 with rawhide Mesa and its minimal runtime overlay"})]
-    record = {"schema_version": 3, "status": "FAIL", "started_utc": stamp,
+    record = {"schema_version": 3, "status": Verdict.NOT_RUN.value, "started_utc": stamp,
               "base_pin": {"distribution": "Fedora 45", "kernel": KERNEL},
               "trust": {"method": "RPM header signatures and signed payload digests verified when pins were established",
                         "key_fingerprints": FEDORA_KEYS, "archive": KOJI},
               "expected_scene_hash": SCENE_HASH,
-              "variants": [{"name": name, "pin": pin, "runs": [], "status": "NOT_RUN"}
+              "variants": [{"name": name, "pin": pin, "runs": [], "status": Verdict.NOT_RUN.value}
                            for name, pin in variants if args.variant in ("all", name)]}
+    destination = run_dir / "result.json"
     try:
         record["host"] = host_info(args)
         if not args.fetch_only:
@@ -611,7 +654,7 @@ def main():
         record["base_inputs"] = [{"filename": p.name, "sha256": digest} for p, (digest, _) in zip(packages, pins)]
         for variant in record["variants"]:
             variant_name = variant["name"]
-            variant["status"] = "FAIL"
+            variant["status"] = Verdict.FAIL.value
             variant_packages = packages
             if variant_name == "mesa263":
                 overlay_pins = [line.split() for line in CURRENT_PINS.splitlines() if line.strip()]
@@ -623,7 +666,7 @@ def main():
                 variant["overlay_inputs"] = [{"filename": p.name, "sha256": digest} for p, (digest, _) in zip(overlay, overlay_pins)]
                 variant_packages = packages + overlay
             if args.fetch_only:
-                variant["status"] = "FETCHED"
+                variant["status"] = Verdict.FETCHED.value
                 continue
             print(f"Assembling the offline {variant_name} guest", flush=True)
             kernel, initrd = assemble(args.cache, variant_packages)
@@ -642,25 +685,37 @@ def main():
                     "evidence": NATIVE_EVIDENCE[variant["pin"]["mesa"].split("-", 1)[0]],
                 }
             variant["repeatability"] = repeatability(variant["runs"])
-            statuses = [r["status"] for r in variant["runs"]] + [r["status"] for r in variant["repeatability"].values()]
-            variant["status"] = "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "PASS"
+            run_statuses = [r["status"] for r in variant["runs"]]
+            rep_statuses = [r["status"] for r in variant["repeatability"].values()]
+            if args.repeat == 1:
+                variant["status"] = combine_verdicts(run_statuses, allow_not_run=rep_statuses).value
+            else:
+                variant["status"] = combine_verdicts(run_statuses + rep_statuses).value
         statuses = [variant["status"] for variant in record["variants"]]
-        record["status"] = "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "FETCHED" if args.fetch_only else "PASS"
+        record["status"] = combine_verdicts(statuses, fetch_only=args.fetch_only).value
     except Blocked as error:
-        record.update(status="BLOCKED", error=str(error))
+        record.update(status=Verdict.BLOCKED.value, error=str(error))
         for variant in record["variants"]:
-            if variant["status"] == "NOT_RUN":
-                variant.update(status="BLOCKED", error=str(error))
+            if variant["status"] == Verdict.NOT_RUN.value:
+                variant.update(status=Verdict.BLOCKED.value, error=str(error))
     except (OSError, ValueError, RuntimeError, tarfile.TarError, subprocess.SubprocessError) as error:
+        record["status"] = Verdict.FAIL.value
         record["error"] = str(error)
     except KeyboardInterrupt:
+        record["status"] = Verdict.FAIL.value
         record["error"] = "Interrupted; the guest process group was stopped."
-    destination = run_dir / "result.json"
-    destination.write_text(json.dumps(record, indent=2) + "\n")
+    except BaseException as error:
+        record["status"] = Verdict.FAIL.value
+        record["error"] = str(error)
+        raise
+    finally:
+        if record["status"] == Verdict.NOT_RUN.value:
+            record["status"] = Verdict.FAIL.value
+        destination.write_text(json.dumps(record, indent=2) + "\n")
     print(f"{record['status']}: {destination}")
     if "error" in record:
         print(record["error"], file=sys.stderr)
-    return {"PASS": 0, "FETCHED": 0, "BLOCKED": 2}.get(record["status"], 1)
+    return {Verdict.PASS.value: 0, Verdict.FETCHED.value: 0, Verdict.BLOCKED.value: 2}.get(record["status"], 1)
 
 
 if __name__ == "__main__":
