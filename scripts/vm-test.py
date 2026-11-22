@@ -153,11 +153,11 @@ class Frame:
 
     @classmethod
     def from_ppm(cls, data):
-        parts = data.split(maxsplit=4)
-        if parts[0] != b"P6" or parts[3] != b"255":
+        match = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", data)
+        if not match:
             raise ValueError("not an 8-bit P6 image")
-        width, height = int(parts[1]), int(parts[2])
-        rgb = parts[4]
+        width, height = int(match.group(1)), int(match.group(2))
+        rgb = data[match.end():]
         if len(rgb) != width * height * 3:
             raise ValueError("truncated image")
         return cls(width, height, rgb)
