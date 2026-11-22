@@ -194,6 +194,15 @@ impl BuildResult {
     }
 }
 
+fn all_stage_packages_committed(recipe: &Recipe, target_dir: &Path) -> bool {
+    let public_path = Path::new("build/id_ed25519.pub.toml");
+    recipe.get_packages_list().into_iter().all(|package| {
+        let (_, package_file, package_meta) =
+            crate::cook::package::package_stage_paths(package, target_dir);
+        crate::cook::package::is_stage_package_committed(&package_file, &package_meta, public_path)
+    })
+}
+
 pub fn build(
     recipe_dir: &Path,
     source_dir: &Path,
@@ -252,7 +261,7 @@ pub fn build(
     }
 
     if !check_source {
-        let stage_present = stage_pkgars.iter().all(|file| file.is_file());
+        let stage_present = all_stage_packages_committed(recipe, target_dir);
         if stage_present && auto_deps_file.is_file() {
             log_to_pty!(logger, "DEBUG: using cached build, not checking source");
             let auto_deps = make_auto_deps!(true)?;
@@ -277,15 +286,17 @@ pub fn build(
         true
     };
 
-    if !sysroot_tags_ok || !toolchain_tags_ok || {
-        build_is_source_newer(
+    if !sysroot_tags_ok
+        || !toolchain_tags_ok
+        || !all_stage_packages_committed(recipe, target_dir)
+        || build_is_source_newer(
             logger,
             recipe_dir,
             source_dir,
             &auto_deps_file,
             stage_pkgars,
         )
-    } {
+    {
         if auto_deps_file.is_file() {
             fs::remove_all(&auto_deps_file)?;
         }
