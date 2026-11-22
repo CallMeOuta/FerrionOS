@@ -1,0 +1,11 @@
+[package]
+description = "FerrionOS desktop layout and frame timing probe"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+mkdir -p "${COOKBOOK_STAGE}/usr/share/licenses/desktop-layout-probe"
+cp "${COOKBOOK_RECIPE}/crate/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/desktop-layout-probe/LICENSE"
+"""

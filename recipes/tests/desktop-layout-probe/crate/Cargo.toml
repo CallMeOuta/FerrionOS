@@ -1,0 +1,14 @@
+[package]
+name = "desktop-layout-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+libc = "=0.2.191"
+tempfile = { version = "=3.27.0", default-features = false }
+wayland-client = { git = "https://github.com/jackpot51/wayland-rs", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2", default-features = false }
+wayland-protocols = { git = "https://github.com/jackpot51/wayland-rs", rev = "eb316399a4d8747ba27b5dce221a3bd04bf666e2", default-features = false, features = ["client"] }
+
+[workspace]
