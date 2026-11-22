@@ -21,6 +21,7 @@ typedef long i64;
 #define SYS_read 0
 #define SYS_close 3
 #define SYS_nanosleep 35
+#define SYS_alarm 37
 #define SYS_dup2 33
 #define SYS_fork 57
 #define SYS_vfork 58
@@ -61,6 +62,9 @@ struct ksigaction { void *handler; u64 flags; void *restorer; u64 mask; };
 #define SA_RESTORER 0x04000000
 #define SIGUSR1 10
 #define SIGUSR2 12
+#define SIGALRM 14
+#define WAIT_LIMIT_S 3
+#define SPIN_READY_LIMIT 500
 
 extern char restore_rt[];
 __asm__(".text\n restore_rt:\n mov $15, %eax\n syscall\n hlt\n");
@@ -243,6 +247,9 @@ static i64 clone_spin(void) {
     return r;
 }
 
+static volatile int alrm_fired;
+static void on_alrm(int sig) { (void)sig; alrm_fired = 1; }
+
 static void lc2(char *self) {
     puts1("linux-probe lc2\n");
     i64 me = sc(SYS_getpid, 0, 0, 0);
@@ -259,14 +266,23 @@ static void lc2(char *self) {
 
     int p[2];
     report(sc(SYS_pipe2, p, 0, 0) == 0, "pipe2");
+    struct ksigaction alrm_act = {on_alrm, SA_RESTORER, restore_rt, 0};
+    sc6(SYS_rt_sigaction, SIGALRM, (i64)&alrm_act, 0, 8, 0, 0);
     struct ksigaction a2 = {set_flag2, SA_RESTORER, restore_rt, 0};
     sc6(SYS_rt_sigaction, SIGUSR2, (i64)&a2, 0, 8, 0, 0);
     flag2 = 0;
     c = sc(SYS_fork, 0, 0, 0);
     if (c == 0) { sleep_ms(100); sc(SYS_kill, me, SIGUSR2, 0); sleep_ms(200); sc(SYS_exit_group, 0, 0, 0); }
     char b = 0;
+    alrm_fired = 0;
+    sc(SYS_alarm, WAIT_LIMIT_S, 0, 0);
     i64 r = sc(SYS_read, p[0], &b, 1);
-    report(r == -4 && flag2 == 1, "async-blocked-eintr");
+    sc(SYS_alarm, 0, 0, 0);
+    if (alrm_fired) {
+        report(0, "async-blocked-eintr timed out");
+    } else {
+        report(r == -4 && flag2 == 1, "async-blocked-eintr");
+    }
     waitchild(c, &st);
 
     struct ksigaction a3 = {set_flag2, SA_RESTORER | SA_RESTART, restore_rt, 0};
@@ -283,14 +299,27 @@ static void lc2(char *self) {
 
     flag1 = 0;
     i64 tid = clone_spin();
-    while (!spin_ready) __asm__ volatile("" ::: "memory");
-    sleep_ms(20);
-    sc(SYS_tgkill, me, tid, SIGUSR1);
-    for (int i = 0; i < 500 && spin_tid_word != 0; i++) {
-        i64 ts[2] = {0, 10000000};
-        sc6(SYS_futex, (i64)&spin_tid_word, 0, spin_tid_word, (i64)ts, 0, 0);
+    int ready_timed_out = 0;
+    if (tid > 0) {
+        for (int i = 0; i < SPIN_READY_LIMIT && !spin_ready; i++) {
+            sleep_ms(10);
+        }
+        if (!spin_ready) {
+            ready_timed_out = 1;
+        } else {
+            sleep_ms(20);
+            sc(SYS_tgkill, me, tid, SIGUSR1);
+            for (int i = 0; i < 500 && spin_tid_word != 0; i++) {
+                i64 ts[2] = {0, 10000000};
+                sc6(SYS_futex, (i64)&spin_tid_word, 0, spin_tid_word, (i64)ts, 0, 0);
+            }
+        }
     }
-    report(tid > 0 && spin_flag == 1 && spin_tid_word == 0, "tgkill-spinning-thread");
+    if (ready_timed_out) {
+        report(0, "tgkill-spinning-thread timed out");
+    } else {
+        report(tid > 0 && spin_flag == 1 && spin_tid_word == 0, "tgkill-spinning-thread");
+    }
 
     struct ksigaction a4 = {segv_handler, SA_SIGINFO | SA_RESTORER, restore_rt, 0};
     sc6(SYS_rt_sigaction, SIGSEGV, (i64)&a4, 0, 8, 0, 0);
