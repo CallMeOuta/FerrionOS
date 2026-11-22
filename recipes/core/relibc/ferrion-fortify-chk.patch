@@ -1,0 +1,604 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the patches before it in the recipe's list applied (meant for upstream):
+- Add `src/fortify.rs` implementing `__chk_fail` and the `__*_chk` bounds-checking entry points for string/memory (`__memcpy_chk`, `__memmove_chk`, `__memset_chk`, `__strcpy_chk`, `__stpcpy_chk`, `__strncpy_chk`, `__stpncpy_chk`, `__strcat_chk`, `__strncat_chk`), stdio (`__vsnprintf_chk`, `__snprintf_chk`, `__vsprintf_chk`, `__sprintf_chk`, `__fgets_chk`), and unistd (`__read_chk`, `__pread_chk`, `__readlink_chk`, `__readlinkat_chk`, `__getcwd_chk`).
+- Add `_FORTIFY_SOURCE` (levels 1, 2, and 3 when `__builtin_dynamic_object_size` is available) detection in `include/features.h` and fortified inline wrappers in `include/bits/fortify-{string,stdio,unistd}.h`, included from `<string.h>`, `<stdio.h>`, and `<unistd.h>` when optimizing with `_FORTIFY_SOURCE > 0`.
+
+diff --git a/include/bits/fortify-stdio.h b/include/bits/fortify-stdio.h
+new file mode 100644
+index 00000000..b212ed34
+--- /dev/null
++++ b/include/bits/fortify-stdio.h
+@@ -0,0 +1,52 @@
++#ifndef _RELIBC_BITS_FORTIFY_STDIO_H
++#define _RELIBC_BITS_FORTIFY_STDIO_H
++
++#if defined(__USE_FORTIFY_LEVEL) && __USE_FORTIFY_LEVEL > 0
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int __vsnprintf_chk(char *s, size_t maxlen, int flag, size_t slen, const char *format, va_list ap);
++int __snprintf_chk(char *s, size_t maxlen, int flag, size_t slen, const char *format, ...);
++int __vsprintf_chk(char *s, int flag, size_t slen, const char *format, va_list ap);
++int __sprintf_chk(char *s, int flag, size_t slen, const char *format, ...);
++char *__fgets_chk(char *s, size_t buflen, int n, FILE *stream);
++char *__ferrion_fgets_alias(char *original, int max, FILE *stream) __asm__("fgets");
++
++__ferrion_fortify_inline int vsnprintf(char *s, size_t n, const char *format, va_list ap) {
++    return __builtin___vsnprintf_chk(s, n, __USE_FORTIFY_LEVEL - 1, __ferrion_bos(s), format, ap);
++}
++
++__ferrion_fortify_inline int vsprintf(char *s, const char *format, va_list ap) {
++    return __builtin___vsprintf_chk(s, __USE_FORTIFY_LEVEL - 1, __ferrion_bos(s), format, ap);
++}
++
++#if defined(__GNUC__) && !defined(__clang__)
++__ferrion_fortify_inline int snprintf(char *s, size_t n, const char *format, ...) {
++    return __builtin___snprintf_chk(s, n, __USE_FORTIFY_LEVEL - 1, __ferrion_bos(s), format, __builtin_va_arg_pack());
++}
++
++__ferrion_fortify_inline int sprintf(char *s, const char *format, ...) {
++    return __builtin___sprintf_chk(s, __USE_FORTIFY_LEVEL - 1, __ferrion_bos(s), format, __builtin_va_arg_pack());
++}
++#else
++#define snprintf(s, n, ...) __builtin___snprintf_chk((s), (n), __USE_FORTIFY_LEVEL - 1, __ferrion_bos(s), __VA_ARGS__)
++#define sprintf(s, ...) __builtin___sprintf_chk((s), __USE_FORTIFY_LEVEL - 1, __ferrion_bos(s), __VA_ARGS__)
++#endif
++
++__ferrion_fortify_inline char *fgets(char *original, int max, FILE *stream) {
++    size_t __sz = __ferrion_bos(original);
++    if (__sz != (size_t)-1) {
++        return __fgets_chk(original, __sz, max, stream);
++    }
++    return __ferrion_fgets_alias(original, max, stream);
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
++
++#endif
+diff --git a/include/bits/fortify-string.h b/include/bits/fortify-string.h
+new file mode 100644
+index 00000000..ed037850
+--- /dev/null
++++ b/include/bits/fortify-string.h
+@@ -0,0 +1,62 @@
++#ifndef _RELIBC_BITS_FORTIFY_STRING_H
++#define _RELIBC_BITS_FORTIFY_STRING_H
++
++#if defined(__USE_FORTIFY_LEVEL) && __USE_FORTIFY_LEVEL > 0
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void *__memcpy_chk(void *dest, const void *src, size_t len, size_t destlen);
++void *__memmove_chk(void *dest, const void *src, size_t len, size_t destlen);
++void *__memset_chk(void *dest, int c, size_t len, size_t destlen);
++char *__strcpy_chk(char *dest, const char *src, size_t destlen);
++char *__stpcpy_chk(char *dest, const char *src, size_t destlen);
++char *__strncpy_chk(char *dest, const char *src, size_t len, size_t destlen);
++char *__stpncpy_chk(char *dest, const char *src, size_t len, size_t destlen);
++char *__strcat_chk(char *dest, const char *src, size_t destlen);
++char *__strncat_chk(char *dest, const char *src, size_t n, size_t destlen);
++
++__ferrion_fortify_inline void *memcpy(void *s1, const void *s2, size_t n) {
++    return __builtin___memcpy_chk(s1, s2, n, __ferrion_bos0(s1));
++}
++
++__ferrion_fortify_inline void *memmove(void *s1, const void *s2, size_t n) {
++    return __builtin___memmove_chk(s1, s2, n, __ferrion_bos0(s1));
++}
++
++__ferrion_fortify_inline void *memset(void *s, int c, size_t n) {
++    return __builtin___memset_chk(s, c, n, __ferrion_bos0(s));
++}
++
++__ferrion_fortify_inline char *strcpy(char *dst, const char *src) {
++    return __builtin___strcpy_chk(dst, src, __ferrion_bos(dst));
++}
++
++__ferrion_fortify_inline char *stpcpy(char *s1, const char *s2) {
++    return __builtin___stpcpy_chk(s1, s2, __ferrion_bos(s1));
++}
++
++__ferrion_fortify_inline char *strncpy(char *s1, const char *s2, size_t n) {
++    return __builtin___strncpy_chk(s1, s2, n, __ferrion_bos(s1));
++}
++
++__ferrion_fortify_inline char *stpncpy(char *s1, const char *s2, size_t n) {
++    return __builtin___stpncpy_chk(s1, s2, n, __ferrion_bos(s1));
++}
++
++__ferrion_fortify_inline char *strcat(char *s1, const char *s2) {
++    return __builtin___strcat_chk(s1, s2, __ferrion_bos(s1));
++}
++
++__ferrion_fortify_inline char *strncat(char *s1, const char *s2, size_t n) {
++    return __builtin___strncat_chk(s1, s2, n, __ferrion_bos(s1));
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
++
++#endif
+diff --git a/include/bits/fortify-unistd.h b/include/bits/fortify-unistd.h
+new file mode 100644
+index 00000000..f9f5ee81
+--- /dev/null
++++ b/include/bits/fortify-unistd.h
+@@ -0,0 +1,68 @@
++#ifndef _RELIBC_BITS_FORTIFY_UNISTD_H
++#define _RELIBC_BITS_FORTIFY_UNISTD_H
++
++#if defined(__USE_FORTIFY_LEVEL) && __USE_FORTIFY_LEVEL > 0
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen);
++ssize_t __pread_chk(int fd, void *buf, size_t nbytes, off_t offset, size_t buflen);
++ssize_t __readlink_chk(const char *path, char *buf, size_t len, size_t buflen);
++ssize_t __readlinkat_chk(int dirfd, const char *path, char *buf, size_t len, size_t buflen);
++char *__getcwd_chk(char *buf, size_t len, size_t buflen);
++
++ssize_t __ferrion_read_alias(int fildes, void *buf, size_t nbyte) __asm__("read");
++ssize_t __ferrion_pread_alias(int fildes, void *buf, size_t nbyte, off_t offset) __asm__("pread");
++ssize_t __ferrion_readlink_alias(const char *path, char *buf, size_t bufsize) __asm__("readlink");
++ssize_t __ferrion_readlinkat_alias(int dirfd, const char *pathname, char *buf, size_t len) __asm__("readlinkat");
++char *__ferrion_getcwd_alias(char *buf, size_t size) __asm__("getcwd");
++
++__ferrion_fortify_inline ssize_t read(int fildes, void *buf, size_t nbyte) {
++    size_t __sz = __ferrion_bos0(buf);
++    if (__sz != (size_t)-1) {
++        return __read_chk(fildes, buf, nbyte, __sz);
++    }
++    return __ferrion_read_alias(fildes, buf, nbyte);
++}
++
++__ferrion_fortify_inline ssize_t pread(int fildes, void *buf, size_t nbyte, off_t offset) {
++    size_t __sz = __ferrion_bos0(buf);
++    if (__sz != (size_t)-1) {
++        return __pread_chk(fildes, buf, nbyte, offset, __sz);
++    }
++    return __ferrion_pread_alias(fildes, buf, nbyte, offset);
++}
++
++__ferrion_fortify_inline ssize_t readlink(const char *path, char *buf, size_t bufsize) {
++    size_t __sz = __ferrion_bos(buf);
++    if (__sz != (size_t)-1) {
++        return __readlink_chk(path, buf, bufsize, __sz);
++    }
++    return __ferrion_readlink_alias(path, buf, bufsize);
++}
++
++__ferrion_fortify_inline ssize_t readlinkat(int dirfd, const char *pathname, char *buf, size_t len) {
++    size_t __sz = __ferrion_bos(buf);
++    if (__sz != (size_t)-1) {
++        return __readlinkat_chk(dirfd, pathname, buf, len, __sz);
++    }
++    return __ferrion_readlinkat_alias(dirfd, pathname, buf, len);
++}
++
++__ferrion_fortify_inline char *getcwd(char *buf, size_t size) {
++    size_t __sz = __ferrion_bos(buf);
++    if (__sz != (size_t)-1) {
++        return __getcwd_chk(buf, size, __sz);
++    }
++    return __ferrion_getcwd_alias(buf, size);
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
++
++#endif
+diff --git a/include/features.h b/include/features.h
+index cd3aced4..d1806c7b 100644
+--- a/include/features.h
++++ b/include/features.h
+@@ -109,4 +109,29 @@
+     #define __deprecatedNote(x)
+ #endif
+ 
++#if defined(_FORTIFY_SOURCE) && _FORTIFY_SOURCE > 0 && defined(__OPTIMIZE__) && __OPTIMIZE__ > 0 && !defined(__NO_FORTIFY)
++    #if _FORTIFY_SOURCE >= 3 && ((defined(__has_builtin) && __has_builtin(__builtin_dynamic_object_size)) || (defined(__GNUC__) && __GNUC__ >= 12))
++        #define __USE_FORTIFY_LEVEL 3
++        #define __ferrion_bos(ptr) __builtin_dynamic_object_size((ptr), 1)
++        #define __ferrion_bos0(ptr) __builtin_dynamic_object_size((ptr), 0)
++    #elif _FORTIFY_SOURCE >= 2
++        #define __USE_FORTIFY_LEVEL 2
++        #define __ferrion_bos(ptr) __builtin_object_size((ptr), 1)
++        #define __ferrion_bos0(ptr) __builtin_object_size((ptr), 0)
++    #else
++        #define __USE_FORTIFY_LEVEL 1
++        #define __ferrion_bos(ptr) __builtin_object_size((ptr), 0)
++        #define __ferrion_bos0(ptr) __builtin_object_size((ptr), 0)
++    #endif
++    #if defined(__GNUC__) && !defined(__clang__)
++        #define __ferrion_fortify_inline extern __inline__ __attribute__((__always_inline__, __gnu_inline__, __artificial__))
++    #elif defined(__clang__)
++        #define __ferrion_fortify_inline static __inline__ __attribute__((__always_inline__))
++    #else
++        #define __ferrion_fortify_inline static __inline__
++    #endif
++#else
++    #define __USE_FORTIFY_LEVEL 0
++#endif
++
+ #endif
+diff --git a/src/fortify.rs b/src/fortify.rs
+new file mode 100644
+index 00000000..9e646c39
+--- /dev/null
++++ b/src/fortify.rs
+@@ -0,0 +1,289 @@
++use core::ffi::VaList;
++
++use crate::{
++    header::{
++        stdio::{FILE, fgets, vsnprintf},
++        stdlib::abort,
++        string::{memcpy, memmove, memset, stpcpy, stpncpy, strcpy, strlen, strncpy, strnlen},
++        unistd::{getcwd, pread, read, readlink, readlinkat},
++    },
++    platform::types::{c_char, c_int, c_void, off_t, size_t, ssize_t},
++};
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __chk_fail() -> ! {
++    log::error!("Buffer overflow detected");
++    unsafe { abort() }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __memcpy_chk(
++    dest: *mut c_void,
++    src: *const c_void,
++    len: size_t,
++    destlen: size_t,
++) -> *mut c_void {
++    if len > destlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { memcpy(dest, src, len) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __memmove_chk(
++    dest: *mut c_void,
++    src: *const c_void,
++    len: size_t,
++    destlen: size_t,
++) -> *mut c_void {
++    if len > destlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { memmove(dest, src, len) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __memset_chk(
++    dest: *mut c_void,
++    c: c_int,
++    len: size_t,
++    destlen: size_t,
++) -> *mut c_void {
++    if len > destlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { memset(dest, c, len) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __strcpy_chk(
++    dest: *mut c_char,
++    src: *const c_char,
++    destlen: size_t,
++) -> *mut c_char {
++    let slen = unsafe { strlen(src) };
++    if slen >= destlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { strcpy(dest, src) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __stpcpy_chk(
++    dest: *mut c_char,
++    src: *const c_char,
++    destlen: size_t,
++) -> *mut c_char {
++    let slen = unsafe { strlen(src) };
++    if slen >= destlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { stpcpy(dest, src) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __strncpy_chk(
++    dest: *mut c_char,
++    src: *const c_char,
++    len: size_t,
++    destlen: size_t,
++) -> *mut c_char {
++    if len > destlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { strncpy(dest, src, len) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __stpncpy_chk(
++    dest: *mut c_char,
++    src: *const c_char,
++    len: size_t,
++    destlen: size_t,
++) -> *mut c_char {
++    if len > destlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { stpncpy(dest, src, len) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __strcat_chk(
++    dest: *mut c_char,
++    src: *const c_char,
++    destlen: size_t,
++) -> *mut c_char {
++    let dlen = unsafe { strnlen(dest, destlen) };
++    if dlen == destlen {
++        unsafe { __chk_fail() };
++    }
++    let slen = unsafe { strlen(src) };
++    if slen >= destlen - dlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe {
++        memcpy(
++            dest.add(dlen).cast::<c_void>(),
++            src.cast::<c_void>(),
++            slen + 1,
++        );
++    }
++    dest
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __strncat_chk(
++    dest: *mut c_char,
++    src: *const c_char,
++    n: size_t,
++    destlen: size_t,
++) -> *mut c_char {
++    let dlen = unsafe { strnlen(dest, destlen) };
++    if dlen == destlen {
++        unsafe { __chk_fail() };
++    }
++    let slen = unsafe { strnlen(src, n) };
++    if slen >= destlen - dlen {
++        unsafe { __chk_fail() };
++    }
++    unsafe {
++        memcpy(dest.add(dlen).cast::<c_void>(), src.cast::<c_void>(), slen);
++        *dest.add(dlen + slen) = 0;
++    }
++    dest
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __vsnprintf_chk(
++    s: *mut c_char,
++    maxlen: size_t,
++    _flag: c_int,
++    slen: size_t,
++    format: *const c_char,
++    ap: VaList,
++) -> c_int {
++    if maxlen > slen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { vsnprintf(s, maxlen, format, ap) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __snprintf_chk(
++    s: *mut c_char,
++    maxlen: size_t,
++    flag: c_int,
++    slen: size_t,
++    format: *const c_char,
++    __valist: ...
++) -> c_int {
++    unsafe { __vsnprintf_chk(s, maxlen, flag, slen, format, __valist) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __vsprintf_chk(
++    s: *mut c_char,
++    _flag: c_int,
++    slen: size_t,
++    format: *const c_char,
++    ap: VaList,
++) -> c_int {
++    if slen == 0 {
++        unsafe { __chk_fail() };
++    }
++    let written = unsafe { vsnprintf(s, slen, format, ap) };
++    if written >= 0 && (written as size_t) >= slen {
++        unsafe { __chk_fail() };
++    }
++    written
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __sprintf_chk(
++    s: *mut c_char,
++    flag: c_int,
++    slen: size_t,
++    format: *const c_char,
++    __valist: ...
++) -> c_int {
++    unsafe { __vsprintf_chk(s, flag, slen, format, __valist) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __fgets_chk(
++    s: *mut c_char,
++    buflen: size_t,
++    n: c_int,
++    stream: *mut FILE,
++) -> *mut c_char {
++    if n < 0 || (n as size_t) > buflen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { fgets(s, n, stream) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __read_chk(
++    fd: c_int,
++    buf: *mut c_void,
++    nbytes: size_t,
++    buflen: size_t,
++) -> ssize_t {
++    if nbytes > buflen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { read(fd, buf, nbytes) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __pread_chk(
++    fd: c_int,
++    buf: *mut c_void,
++    nbytes: size_t,
++    offset: off_t,
++    buflen: size_t,
++) -> ssize_t {
++    if nbytes > buflen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { pread(fd, buf, nbytes, offset) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __readlink_chk(
++    path: *const c_char,
++    buf: *mut c_char,
++    len: size_t,
++    buflen: size_t,
++) -> ssize_t {
++    if len > buflen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { readlink(path, buf, len) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __readlinkat_chk(
++    dirfd: c_int,
++    path: *const c_char,
++    buf: *mut c_char,
++    len: size_t,
++    buflen: size_t,
++) -> ssize_t {
++    if len > buflen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { readlinkat(dirfd, path, buf, len) }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __getcwd_chk(
++    buf: *mut c_char,
++    len: size_t,
++    buflen: size_t,
++) -> *mut c_char {
++    if len > buflen {
++        unsafe { __chk_fail() };
++    }
++    unsafe { getcwd(buf, len) }
++}
+diff --git a/src/header/stdio/cbindgen.toml b/src/header/stdio/cbindgen.toml
+index b74e8639..d60c9a73 100644
+--- a/src/header/stdio/cbindgen.toml
++++ b/src/header/stdio/cbindgen.toml
+@@ -36,6 +36,8 @@ typedef struct FILE FILE;
+ #define stdout stdout
+ #define stderr stderr
+ 
++#include <bits/fortify-stdio.h>
++
+ #endif // _RELIBC_BITS_STDIO_H
+ """
+ language = "C"
+diff --git a/src/header/string/cbindgen.toml b/src/header/string/cbindgen.toml
+index f5b8a9ad..30dbf104 100644
+--- a/src/header/string/cbindgen.toml
++++ b/src/header/string/cbindgen.toml
+@@ -4,7 +4,7 @@
+ # - "The <string.h> header shall define NULL and size_t as described in <stddef.h>."
+ # - "The <string.h> header shall define the locale_t type as described in <locale.h>."
+ # - "Inclusion of the <string.h> header may also make visible all symbols from <stddef.h>."
+-sys_includes = ["stddef.h"]
++sys_includes = ["stddef.h", "features.h"]
+ include_guard = "_RELIBC_STRING_H"
+ after_includes = """
+ #include <bits/locale-t.h> // for locale_t from locale.h
+@@ -14,6 +14,9 @@ after_includes = """
+ #include <strings.h>
+ #endif
+ """
++trailer = """
++#include <bits/fortify-string.h>
++"""
+ language = "C"
+ style = "Tag"
+ no_includes = true
+diff --git a/src/header/unistd/cbindgen.toml b/src/header/unistd/cbindgen.toml
+index a998d91c..9bee6740 100644
+--- a/src/header/unistd/cbindgen.toml
++++ b/src/header/unistd/cbindgen.toml
+@@ -16,7 +16,7 @@
+ # fcntl.h brings in sys/stat.h bringing in off_t, gid_t and uid_t
+ # fcntl.h brings in pid_t
+ # bits/useconds-t.h brings in features.h (for deprecated annotations)
+-sys_includes = ["stddef.h", "stdint.h", "fcntl.h"]
++sys_includes = ["stddef.h", "stdint.h", "fcntl.h", "features.h"]
+ include_guard = "_RELIBC_UNISTD_H"
+ after_includes = """
+ #include <bits/ssize-t.h>    // for ssize_t from sys/types.h
+@@ -38,6 +38,9 @@ after_includes = """
+ #define _XOPEN_SHM 1
+ #define _XOPEN_VERSION 700L
+ """
++trailer = """
++#include <bits/fortify-unistd.h>
++"""
+ language = "C"
+ style = "Tag"
+ no_includes = true
+diff --git a/src/lib.rs b/src/lib.rs
+index 4d9415a2..7b2acfb7 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -46,6 +46,7 @@ pub mod casting;
+ pub mod cxa;
+ pub mod db;
+ pub mod error;
++pub mod fortify;
+ pub mod fs;
+ pub mod header;
+ pub mod io;
