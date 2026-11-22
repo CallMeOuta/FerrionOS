@@ -164,6 +164,68 @@ spec = importlib.util.spec_from_file_location("vm_test", Path("scripts/vm-test.p
 vm_test = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vm_test)
 
+MONITOR_TIMEOUT_S = 30.0
+MONITOR_CONNECT_TRIES = 200
+CHILD_TERM_WAIT_S = 20.0
+CHILD_KILL_WAIT_S = 10.0
+
+children = []
+monitor = None
+
+
+def spawn(command, **kwargs):
+    child = subprocess.Popen(command, **kwargs)
+    children.append(child)
+    return child
+
+
+def cleanup_children():
+    global monitor
+    if monitor is not None:
+        try:
+            monitor.close()
+        except OSError:
+            pass
+        monitor = None
+    for child in reversed(children):
+        if child.poll() is not None:
+            continue
+        try:
+            child.terminate()
+            child.wait(timeout=CHILD_TERM_WAIT_S)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=CHILD_KILL_WAIT_S)
+        except OSError:
+            pass
+
+
+def reply(sock):
+    data = b""
+    while not data.endswith(b"(qemu) "):
+        chunk = sock.recv(65536)
+        if not chunk:
+            raise RuntimeError("QEMU closed its monitor")
+        data += chunk
+    return data
+
+
+def screen():
+    path = work / "frame.ppm"
+    monitor.sendall(f"screendump {path}\n".encode())
+    reply(monitor)
+    return vm_test.Frame.from_ppm(path.read_bytes())
+
+
+def serial():
+    return serial_path.read_bytes().decode(errors="replace") if serial_path.exists() else ""
+
+
+def monitor_command(text):
+    monitor.sendall(text.encode() + b"\n")
+    reply(monitor)
+
+
 monitor_path = work / "monitor.sock"
 serial_path = out / "serial.log"
 command = [
@@ -180,91 +242,71 @@ command = [
     "-vga", "std", "-display", "none", "-nic", "none",
     "-serial", f"file:{serial_path}", "-monitor", f"unix:{monitor_path},server=on,wait=off",
 ]
-proc = subprocess.Popen(command, stdin=subprocess.DEVNULL)
-start = time.monotonic()
-
-
-def reply(sock):
-    data = b""
-    while not data.endswith(b"(qemu) "):
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise RuntimeError("QEMU closed its monitor")
-        data += chunk
-    return data
-
-
-while True:
-    if proc.poll() is not None:
-        print(f"FAIL {name}: QEMU exited with {proc.returncode}")
-        sys.exit(1)
-    try:
-        monitor = socket.socket(socket.AF_UNIX)
-        monitor.connect(str(monitor_path))
-        reply(monitor)
-        break
-    except (FileNotFoundError, ConnectionRefusedError):
-        monitor.close()
-        time.sleep(0.05)
-
-
-def screen():
-    path = work / "frame.ppm"
-    monitor.sendall(f"screendump {path}\n".encode())
-    reply(monitor)
-    return vm_test.Frame.from_ppm(path.read_bytes())
-
-
-def serial():
-    return serial_path.read_bytes().decode(errors="replace") if serial_path.exists() else ""
-
-
-REFUSED = re.compile(r"BdsDxe: failed to load .*Access Denied.*")
-VERIFIED_REFUSED = re.compile(r"FerrionOS verified boot refused to start: .*")
-KERNEL = re.compile(r"^kernel::", re.M)  # the kernel prefixes its log lines with its module path
-
-
-def monitor_command(text):
-    monitor.sendall(text.encode() + b"\n")
-    reply(monitor)
-
-
-# An encrypted image (REDOXFS_KEY_FILE, as for the tamper copies) gets its passphrase typed at
-# the bootloader's first prompt, so that the bootloader goes on to check the kernel.
-key_path = os.environ.get("REDOXFS_KEY_FILE")
-passphrase = Path(key_path).read_text() if key_path else None
-ok, note, frame = False, f"neither the login nor a refusal within {timeout:.0f}s", None
-while time.monotonic() - start < timeout:
-    frame = screen()
-    log = serial()
-    if passphrase is not None and re.search(r"(?:RedoxFS p|P)assword \(1/", log):
-        vm_test.sendkeys(monitor_command, passphrase + "\n")
-        passphrase = None
-    refused = REFUSED.search(log) or VERIFIED_REFUSED.search(log)
-    if expect == "boot" and frame.kind() == "login":
-        ok = not refused and KERNEL.search(log) is not None
-        note = f"graphical login at {time.monotonic() - start:.1f}s" if ok else "login seen, but the serial log disagrees"
-        break
-    if refused:
-        time.sleep(3)  # long enough for a bootloader that ran anyway to reach the kernel
-        frame, log = screen(), serial()
-        started = KERNEL.search(log) is not None
-        by_firmware = refused.re is REFUSED
-        ok = expect == ("refuse" if by_firmware else "verified-refuse") and not started
-        note = f"{'firmware' if by_firmware else 'bootloader'}: {refused.group(0).strip()}" + ("; but the kernel started" if started else "")
-        break
-    time.sleep(0.5)
-if frame is not None:
-    frame.save_png(out / "screen.png")
-monitor.sendall(b"quit\n")
 try:
-    proc.wait(timeout=20)
-except subprocess.TimeoutExpired:
-    proc.kill()
-    proc.wait()
-monitor.close()
-print(f"{'PASS' if ok else 'FAIL'} {name} (expect {expect}): {note}")
-sys.exit(0 if ok else 1)
+    proc = spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    start = time.monotonic()
+
+    for _ in range(MONITOR_CONNECT_TRIES):
+        if proc.poll() is not None:
+            print(f"FAIL {name}: QEMU exited with {proc.returncode}")
+            sys.exit(1)
+        try:
+            monitor = socket.socket(socket.AF_UNIX)
+            monitor.settimeout(MONITOR_TIMEOUT_S)
+            monitor.connect(str(monitor_path))
+            reply(monitor)
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            monitor.close()
+            monitor = None
+            time.sleep(0.05)
+    else:
+        print(f"FAIL {name}: QEMU monitor did not appear within {MONITOR_CONNECT_TRIES * 0.05:.1f}s")
+        sys.exit(1)
+
+    REFUSED = re.compile(r"BdsDxe: failed to load .*Access Denied.*")
+    VERIFIED_REFUSED = re.compile(r"FerrionOS verified boot refused to start: .*")
+    KERNEL = re.compile(r"^kernel::", re.M)  # the kernel prefixes its log lines with its module path
+
+    # An encrypted image (REDOXFS_KEY_FILE, as for the tamper copies) gets its passphrase typed at
+    # the bootloader's first prompt, so that the bootloader goes on to check the kernel.
+    key_path = os.environ.get("REDOXFS_KEY_FILE")
+    passphrase = Path(key_path).read_text() if key_path else None
+    ok, note, frame = False, f"neither the login nor a refusal within {timeout:.0f}s", None
+    while time.monotonic() - start < timeout:
+        frame = screen()
+        log = serial()
+        if passphrase is not None and re.search(r"(?:RedoxFS p|P)assword \(1/", log):
+            vm_test.sendkeys(monitor_command, passphrase + "\n")
+            passphrase = None
+        refused = REFUSED.search(log) or VERIFIED_REFUSED.search(log)
+        if expect == "boot" and frame.kind() == "login":
+            ok = not refused and KERNEL.search(log) is not None
+            note = f"graphical login at {time.monotonic() - start:.1f}s" if ok else "login seen, but the serial log disagrees"
+            break
+        if refused:
+            time.sleep(3)  # long enough for a bootloader that ran anyway to reach the kernel
+            frame, log = screen(), serial()
+            started = KERNEL.search(log) is not None
+            by_firmware = refused.re is REFUSED
+            ok = expect == ("refuse" if by_firmware else "verified-refuse") and not started
+            note = f"{'firmware' if by_firmware else 'bootloader'}: {refused.group(0).strip()}" + ("; but the kernel started" if started else "")
+            break
+        time.sleep(0.5)
+    if frame is not None:
+        frame.save_png(out / "screen.png")
+    monitor.sendall(b"quit\n")
+    try:
+        proc.wait(timeout=CHILD_TERM_WAIT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=CHILD_KILL_WAIT_S)
+    monitor.close()
+    monitor = None
+    print(f"{'PASS' if ok else 'FAIL'} {name} (expect {expect}): {note}")
+    sys.exit(0 if ok else 1)
+finally:
+    cleanup_children()
 EOF
 }
 

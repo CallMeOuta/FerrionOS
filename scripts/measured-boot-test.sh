@@ -151,18 +151,53 @@ MEMORY = 2048 * 1024 * 1024
 EV_NO_ACTION, EV_SEPARATOR, EV_IPL, EV_EFI_VARIABLE_AUTHORITY = 0x3, 0x4, 0xD, 0x800000E0
 SEPARATOR = sha256(bytes(4))
 FERRION_GUID = bytes.fromhex("f1c169e593793b458b3a2109d5d9da22")  # e569c1f1-7993-453b-8b3a-2109d5d9da22
+MONITOR_TIMEOUT_S = 30.0
+MONITOR_CONNECT_TRIES = 200
+CHILD_TERM_WAIT_S = 5.0
+CHILD_KILL_WAIT_S = 10.0
+PORT_ATTEMPTS = 256
+SWTPM_START_TRIES = 100
+SWTPM_SHUTDOWN_WAIT_S = 20.0
+
+children = []
+monitor = None
+
+
+def spawn(command, **kwargs):
+    child = subprocess.Popen(command, **kwargs)
+    children.append(child)
+    return child
+
+
+def cleanup_children():
+    global monitor
+    if monitor is not None:
+        try:
+            monitor.close()
+        except OSError:
+            pass
+        monitor = None
+    for child in reversed(children):
+        if child.poll() is not None:
+            continue
+        try:
+            child.terminate()
+            child.wait(timeout=CHILD_TERM_WAIT_S)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=CHILD_KILL_WAIT_S)
+        except OSError:
+            pass
 
 
 def fail(note):
-    if "swtpm" in globals() and swtpm.poll() is None:
-        swtpm.kill()
     print(f"FAIL {name}: {note}")
     sys.exit(1)
 
 
 def free_ports():
     """Two free TCP ports in a row: the swtpm TCTI finds the control port after the data port."""
-    while True:
+    for _ in range(PORT_ATTEMPTS):
         with socket.socket() as data, socket.socket() as control:
             data.bind(("127.0.0.1", 0))
             port = data.getsockname()[1]
@@ -171,6 +206,7 @@ def free_ports():
             except OSError:
                 continue
             return port, port + 1
+    fail(f"no consecutive free TCP ports found in {PORT_ATTEMPTS} attempts")
 
 
 def run(*command):
@@ -178,40 +214,6 @@ def run(*command):
     if result.returncode != 0:
         fail(f"{' '.join(command)} failed: {result.stderr.strip()}")
     return result.stdout
-
-
-tpm = files != ""
-state = work / "tpm-state"
-ctrl = work / "swtpm-ctrl.sock"
-if tpm:
-    shutil.rmtree(state, ignore_errors=True)
-    state.mkdir()
-    swtpm = subprocess.Popen(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={state}",
-                              "--ctrl", f"type=unixio,path={ctrl}",
-                              "--log", f"file={out / 'swtpm.log'}"])
-    for _ in range(100):
-        if ctrl.exists():
-            break
-        time.sleep(0.05)
-
-monitor_path = work / "monitor.sock"
-serial_path = out / "serial.log"
-command = [
-    "qemu-system-x86_64", "-name", f"FerrionOS measured-boot-test {name}",
-    "-machine", "q35",
-    *(["-enable-kvm", "-cpu", "host"] if kvm == "1" else ["-cpu", "max"]),
-    "-smp", "4", "-m", str(MEMORY // (1024 * 1024)),
-    "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
-    "-drive", f"if=pflash,format=raw,unit=1,file={work / 'vars.fd'}",
-    "-drive", f"file={disk},format=raw,if=none,id=drv0,snapshot=on",
-    "-device", "nvme,drive=drv0,serial=NVME_SERIAL", "-device", "qemu-xhci",
-    *(["-chardev", f"socket,id=chrtpm,path={ctrl}", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
-       "-device", "tpm-crb,tpmdev=tpm0"] if tpm else []),
-    "-vga", "std", "-display", "none", "-nic", "none",
-    "-serial", f"file:{serial_path}", "-monitor", f"unix:{monitor_path},server=on,wait=off",
-]
-proc = subprocess.Popen(command, stdin=subprocess.DEVNULL)
-start = time.monotonic()
 
 
 def reply(sock):
@@ -222,19 +224,6 @@ def reply(sock):
             raise RuntimeError("QEMU closed its monitor")
         data += chunk
     return data
-
-
-while True:
-    if proc.poll() is not None:
-        fail(f"QEMU exited with {proc.returncode}")
-    try:
-        monitor = socket.socket(socket.AF_UNIX)
-        monitor.connect(str(monitor_path))
-        reply(monitor)
-        break
-    except (FileNotFoundError, ConnectionRefusedError):
-        monitor.close()
-        time.sleep(0.05)
 
 
 def screen():
@@ -248,164 +237,228 @@ def serial():
     return serial_path.read_bytes().decode(errors="replace") if serial_path.exists() else ""
 
 
-KERNEL = re.compile(r"^kernel::", re.M)  # the kernel prefixes its log lines with its module path
-if name == "tpm-menu":
-    # A key within the bootloader's first second asks for its mode menu, and Enter takes the
-    # default mode: a boot whose environment has no QUIET=1.
-    while time.monotonic() - start < timeout and "BdsDxe: starting" not in serial():
-        # Not a plain sleep: while nothing arrives on QEMU's monitor, OVMF loses its swtpm in
-        # most boots, so this wait keeps asking the monitor, as the screenshot loop below does.
-        monitor.sendall(b"info status\n")
-        reply(monitor)
-        time.sleep(0.05)
-    for _ in range(10):
-        monitor.sendall(b"sendkey spc\n")
-        reply(monitor)
-        time.sleep(0.1)
-    while time.monotonic() - start < timeout and "Arrow keys and enter select mode" not in serial():
-        time.sleep(0.1)
-    monitor.sendall(b"sendkey ret\n")
-    reply(monitor)
-login, frame = None, None
-while time.monotonic() - start < timeout:
-    frame = screen()
-    if frame.kind() == "login" and KERNEL.search(serial()):
-        login = time.monotonic() - start
-        break
-    time.sleep(0.5)
-if frame is not None:
-    frame.save_png(out / "screen.png")
-
-log = None
-if tpm and login is not None:
-    # The bootloader's copy of the event log, found through the environment it handed over.
-    dump = work / "memory.bin"
-    monitor.sendall(f'pmemsave 0 {MEMORY:#x} "{dump}"\n'.encode())
-    reply(monitor)
-    with open(dump, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as memory:
-        found = re.search(rb"TPM_EVENT_LOG_ADDR=([0-9a-f]{16})\nTPM_EVENT_LOG_SIZE=([0-9a-f]{16})\n", memory)
-        if found:
-            addr, size = int(found[1], 16), int(found[2], 16)
-            if addr + size <= len(memory):
-                log = memory[addr:addr + size]
-    dump.unlink()
-# Killed rather than quit: a clean exit would shut the TPM down and drop its volatile state.
-proc.kill()
-proc.wait()
-monitor.close()
-if login is None:
-    if "BdsDxe: starting" not in serial():
-        # The firmware never started the bootloader: the caller retries once.
-        if tpm:
-            swtpm.kill()
-        print(f"STALL {name}: the firmware did not start the bootloader within {timeout:.0f}s")
-        sys.exit(3)
-    fail(f"no graphical login within {timeout:.0f}s")
-if not tpm:
-    print(f"PASS {name}: graphical login at {login:.1f}s without a TPM")
-    sys.exit(0)
-
-# Saves the TPM's volatile state, then resumes it in a second swtpm that tpm2-tools can reach.
-run("swtpm_ioctl", "--unix", str(ctrl), "-v")
-run("swtpm_ioctl", "--unix", str(ctrl), "-s")
-swtpm.wait(timeout=20)
-port, ctrl_port = free_ports()
-swtpm = subprocess.Popen(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={state}",
-                          "--server", f"type=tcp,port={port},bindaddr=127.0.0.1",
-                          "--ctrl", f"type=tcp,port={ctrl_port},bindaddr=127.0.0.1",
-                          "--log", f"file={out / 'swtpm-read.log'}"])
-for _ in range(100):
-    try:
-        socket.create_connection(("127.0.0.1", ctrl_port)).close()
-        break
-    except ConnectionRefusedError:
-        time.sleep(0.05)
+tpm = files != ""
+state = work / "tpm-state"
+ctrl = work / "swtpm-ctrl.sock"
+monitor_path = work / "monitor.sock"
+serial_path = out / "serial.log"
 try:
-    run("swtpm_ioctl", "--tcp", f"127.0.0.1:{ctrl_port}", "-i")
-    text = run("tpm2_pcrread", "-T", f"swtpm:host=127.0.0.1,port={port}", "sha256:0,1,2,3,4,5,6,7,8,9")
+    if tpm:
+        shutil.rmtree(state, ignore_errors=True)
+        state.mkdir()
+        swtpm = spawn(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={state}",
+                       "--ctrl", f"type=unixio,path={ctrl}",
+                       "--log", f"file={out / 'swtpm.log'}"],
+                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(SWTPM_START_TRIES):
+            if swtpm.poll() is not None:
+                fail(f"swtpm exited with {swtpm.returncode}")
+            if ctrl.exists():
+                break
+            time.sleep(0.05)
+        else:
+            fail(f"swtpm did not create {ctrl} within {SWTPM_START_TRIES * 0.05:.1f}s")
+
+    command = [
+        "qemu-system-x86_64", "-name", f"FerrionOS measured-boot-test {name}",
+        "-machine", "q35",
+        *(["-enable-kvm", "-cpu", "host"] if kvm == "1" else ["-cpu", "max"]),
+        "-smp", "4", "-m", str(MEMORY // (1024 * 1024)),
+        "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
+        "-drive", f"if=pflash,format=raw,unit=1,file={work / 'vars.fd'}",
+        "-drive", f"file={disk},format=raw,if=none,id=drv0,snapshot=on",
+        "-device", "nvme,drive=drv0,serial=NVME_SERIAL", "-device", "qemu-xhci",
+        *(["-chardev", f"socket,id=chrtpm,path={ctrl}", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+           "-device", "tpm-crb,tpmdev=tpm0"] if tpm else []),
+        "-vga", "std", "-display", "none", "-nic", "none",
+        "-serial", f"file:{serial_path}", "-monitor", f"unix:{monitor_path},server=on,wait=off",
+    ]
+    proc = spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    start = time.monotonic()
+
+    for _ in range(MONITOR_CONNECT_TRIES):
+        if proc.poll() is not None:
+            fail(f"QEMU exited with {proc.returncode}")
+        try:
+            monitor = socket.socket(socket.AF_UNIX)
+            monitor.settimeout(MONITOR_TIMEOUT_S)
+            monitor.connect(str(monitor_path))
+            reply(monitor)
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            monitor.close()
+            monitor = None
+            time.sleep(0.05)
+    else:
+        fail(f"QEMU monitor did not appear within {MONITOR_CONNECT_TRIES * 0.05:.1f}s")
+
+    KERNEL = re.compile(r"^kernel::", re.M)  # the kernel prefixes its log lines with its module path
+    if name == "tpm-menu":
+        # A key within the bootloader's first second asks for its mode menu, and Enter takes the
+        # default mode: a boot whose environment has no QUIET=1.
+        while time.monotonic() - start < timeout and "BdsDxe: starting" not in serial():
+            # Not a plain sleep: while nothing arrives on QEMU's monitor, OVMF loses its swtpm in
+            # most boots, so this wait keeps asking the monitor, as the screenshot loop below does.
+            monitor.sendall(b"info status\n")
+            reply(monitor)
+            time.sleep(0.05)
+        for _ in range(10):
+            monitor.sendall(b"sendkey spc\n")
+            reply(monitor)
+            time.sleep(0.1)
+        while time.monotonic() - start < timeout and "Arrow keys and enter select mode" not in serial():
+            time.sleep(0.1)
+        monitor.sendall(b"sendkey ret\n")
+        reply(monitor)
+    login, frame = None, None
+    while time.monotonic() - start < timeout:
+        frame = screen()
+        if frame.kind() == "login" and KERNEL.search(serial()):
+            login = time.monotonic() - start
+            break
+        time.sleep(0.5)
+    if frame is not None:
+        frame.save_png(out / "screen.png")
+
+    log = None
+    if tpm and login is not None:
+        # The bootloader's copy of the event log, found through the environment it handed over.
+        dump = work / "memory.bin"
+        monitor.sendall(f'pmemsave 0 {MEMORY:#x} "{dump}"\n'.encode())
+        reply(monitor)
+        with open(dump, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as memory:
+            found = re.search(rb"TPM_EVENT_LOG_ADDR=([0-9a-f]{16})\nTPM_EVENT_LOG_SIZE=([0-9a-f]{16})\n", memory)
+            if found:
+                addr, size = int(found[1], 16), int(found[2], 16)
+                if addr + size <= len(memory):
+                    log = memory[addr:addr + size]
+        dump.unlink()
+    # Killed rather than quit: a clean exit would shut the TPM down and drop its volatile state.
+    proc.kill()
+    proc.wait(timeout=CHILD_KILL_WAIT_S)
+    monitor.close()
+    monitor = None
+    if login is None:
+        if "BdsDxe: starting" not in serial():
+            # The firmware never started the bootloader: the caller retries once.
+            print(f"STALL {name}: the firmware did not start the bootloader within {timeout:.0f}s")
+            sys.exit(3)
+        fail(f"no graphical login within {timeout:.0f}s")
+    if not tpm:
+        print(f"PASS {name}: graphical login at {login:.1f}s without a TPM")
+        sys.exit(0)
+
+    # Saves the TPM's volatile state, then resumes it in a second swtpm that tpm2-tools can reach.
+    run("swtpm_ioctl", "--unix", str(ctrl), "-v")
+    run("swtpm_ioctl", "--unix", str(ctrl), "-s")
+    swtpm.wait(timeout=SWTPM_SHUTDOWN_WAIT_S)
+    port, ctrl_port = free_ports()
+    swtpm = spawn(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={state}",
+                   "--server", f"type=tcp,port={port},bindaddr=127.0.0.1",
+                   "--ctrl", f"type=tcp,port={ctrl_port},bindaddr=127.0.0.1",
+                   "--log", f"file={out / 'swtpm-read.log'}"],
+                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(SWTPM_START_TRIES):
+        if swtpm.poll() is not None:
+            fail(f"swtpm (read) exited with {swtpm.returncode}")
+        try:
+            socket.create_connection(("127.0.0.1", ctrl_port), timeout=1.0).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        fail(f"swtpm (read) did not listen on {ctrl_port} within {SWTPM_START_TRIES * 0.05:.1f}s")
+    try:
+        run("swtpm_ioctl", "--tcp", f"127.0.0.1:{ctrl_port}", "-i")
+        text = run("tpm2_pcrread", "-T", f"swtpm:host=127.0.0.1,port={port}", "sha256:0,1,2,3,4,5,6,7,8,9")
+    finally:
+        subprocess.run(["swtpm_ioctl", "--tcp", f"127.0.0.1:{ctrl_port}", "-s"], capture_output=True)
+        try:
+            swtpm.wait(timeout=SWTPM_SHUTDOWN_WAIT_S)
+        except subprocess.TimeoutExpired:
+            pass
+    (out / "pcrs.txt").write_text(text)
+    pcrs = {int(i): bytes.fromhex(v) for i, v in re.findall(r"^\s*(\d+)\s*:\s*0x([0-9A-Fa-f]{64})", text, re.M)}
+    if pcrs.get(4) == bytes(32):
+        # The firmware measures the boot application into PCR 4 before starting it: its TPM had
+        # stopped answering before the bootloader ran, which the caller retries once like a stall.
+        print(f"STALL {name}: the firmware's TPM failed before the bootloader started (PCR 4 is zero)")
+        sys.exit(3)
+
+    if log is None:
+        fail("no TPM_EVENT_LOG_ADDR and TPM_EVENT_LOG_SIZE in the guest's memory: the bootloader handed over no event log")
+    (out / "eventlog.bin").write_bytes(log)
+    eventlog = subprocess.run(["tpm2_eventlog", str(out / "eventlog.bin")], capture_output=True, text=True).stdout
+    (out / "eventlog.yaml").write_text(eventlog)
+    # tpm2_eventlog's own replay, at the end of its output, as a second reading of the log.
+    bank = re.search(r"^  sha256:\n((?:    \d+\s*: 0x[0-9a-f]+\n)+)", eventlog.split("\npcrs:\n")[-1], re.M)
+    tool_replay = {int(i): bytes.fromhex(v) for i, v in re.findall(r"(\d+)\s*: 0x([0-9a-f]{64})", bank[1])} if bank else {}
+
+    # The log: a SHA-1-format header event whose data is the Spec ID event, then crypto-agile events.
+    header_size = struct.unpack_from("<I", log, 28)[0]
+    spec_event = log[32:32 + header_size]
+    if not spec_event.startswith(b"Spec ID Event03\0"):
+        fail("the event log does not start with a Spec ID event")
+    count = struct.unpack_from("<I", spec_event, 24)[0]
+    sizes = dict(struct.unpack_from("<HH", spec_event, 28 + 4 * i) for i in range(count))
+    events, at = [], 32 + header_size
+    while at < len(log):
+        pcr, kind, count = struct.unpack_from("<III", log, at)
+        at += 12
+        digests = {}
+        for _ in range(count):
+            alg = struct.unpack_from("<H", log, at)[0]
+            digests[alg] = log[at + 2:at + 2 + sizes[alg]]
+            at += 2 + sizes[alg]
+        size = struct.unpack_from("<I", log, at)[0]
+        events.append((pcr, kind, digests.get(0x000B), log[at + 4:at + 4 + size]))
+        at += 4 + size
+
+    replay = {i: bytes(32) for i in range(24)}
+    for pcr, kind, digest, _ in events:
+        if kind != EV_NO_ACTION:
+            replay[pcr] = sha256(replay[pcr] + digest)
+    problems = [f"PCR {i}: the TPM holds {pcrs[i].hex()}, the log replays to {replay[i].hex()}"
+                for i in (7, 8, 9) if pcrs.get(i) != replay[i]]
+    problems += [f"PCR {i}: tpm2_eventlog replays to {tool_replay.get(i, b'').hex()}"
+                 for i in (7, 8, 9) if tool_replay.get(i) != replay[i]]
+
+    # PCR 9 computed from the image's files, in the order the bootloader measures them.
+    names = [n for n in ("manifest", "kernel", "initfs") if (Path(files) / n).exists()]
+    expected = bytes(32)
+    for n in names:
+        expected = sha256(expected + sha256((Path(files) / n).read_bytes()))
+    expected = sha256(expected + SEPARATOR)
+    if pcrs.get(9) != expected:
+        problems.append(f"PCR 9 is {pcrs.get(9, b'').hex()}, the image's {' '.join(names)} give {expected.hex()}")
+    pcr9 = [(kind, data) for pcr, kind, _, data in events if pcr == 9]
+    if pcr9 != [(EV_IPL, f"usr/lib/boot/{n}".encode()) for n in names] + [(EV_SEPARATOR, bytes(4))]:
+        problems.append(f"PCR 9's events are {pcr9}")
+
+    pcr8 = [(kind, digest, data) for pcr, kind, digest, data in events if pcr == 8]
+    if [kind for kind, _, _ in pcr8] != [EV_IPL, EV_IPL, EV_SEPARATOR] or pcr8[0][2] != b"normal" \
+            or any(digest != sha256(data) for _, digest, data in pcr8):
+        problems.append(f"PCR 8's events are {[(k, d.hex(), v) for k, d, v in pcr8]}")
+    else:
+        (out / "environment.txt").write_bytes(pcr8[1][2])
+
+    key_events = [data for pcr, kind, _, data in events if pcr == 7 and kind == EV_EFI_VARIABLE_AUTHORITY
+                  and data.startswith(FERRION_GUID)]
+    name16 = "FerrionBootKey".encode("utf-16-le")
+    want = FERRION_GUID + struct.pack("<QQ", 14, 32) + name16 + bytes.fromhex(slot)
+    if key_events != [want]:
+        problems.append(f"PCR 7 holds {len(key_events)} FerrionOS key events, not the one for slot {slot}")
+
+    (out / "pcr9.hex").write_text(pcrs.get(9, b"").hex() + "\n")
+    (out / "pcr8.hex").write_text(pcrs.get(8, b"").hex() + "\n")
+    if name == "tpm-menu" and len(pcr8) == 3 and b"QUIET=1" in pcr8[1][2]:
+        problems.append("the menu boot's environment still holds QUIET=1")
+    if problems:
+        fail("; ".join(problems))
+    print(f"PASS {name}: login at {login:.1f}s; PCR 9 {pcrs[9].hex()} = {' + '.join(names)} + separator; "
+          f"PCRs 7, 8, 9 replay from the bootloader's event log ({len(events)} events)")
 finally:
-    subprocess.run(["swtpm_ioctl", "--tcp", f"127.0.0.1:{ctrl_port}", "-s"], capture_output=True)
-    swtpm.wait(timeout=20)
-(out / "pcrs.txt").write_text(text)
-pcrs = {int(i): bytes.fromhex(v) for i, v in re.findall(r"^\s*(\d+)\s*:\s*0x([0-9A-Fa-f]{64})", text, re.M)}
-if pcrs.get(4) == bytes(32):
-    # The firmware measures the boot application into PCR 4 before starting it: its TPM had
-    # stopped answering before the bootloader ran, which the caller retries once like a stall.
-    print(f"STALL {name}: the firmware's TPM failed before the bootloader started (PCR 4 is zero)")
-    sys.exit(3)
-
-if log is None:
-    fail("no TPM_EVENT_LOG_ADDR and TPM_EVENT_LOG_SIZE in the guest's memory: the bootloader handed over no event log")
-(out / "eventlog.bin").write_bytes(log)
-eventlog = subprocess.run(["tpm2_eventlog", str(out / "eventlog.bin")], capture_output=True, text=True).stdout
-(out / "eventlog.yaml").write_text(eventlog)
-# tpm2_eventlog's own replay, at the end of its output, as a second reading of the log.
-bank = re.search(r"^  sha256:\n((?:    \d+\s*: 0x[0-9a-f]+\n)+)", eventlog.split("\npcrs:\n")[-1], re.M)
-tool_replay = {int(i): bytes.fromhex(v) for i, v in re.findall(r"(\d+)\s*: 0x([0-9a-f]{64})", bank[1])} if bank else {}
-
-# The log: a SHA-1-format header event whose data is the Spec ID event, then crypto-agile events.
-header_size = struct.unpack_from("<I", log, 28)[0]
-spec_event = log[32:32 + header_size]
-if not spec_event.startswith(b"Spec ID Event03\0"):
-    fail("the event log does not start with a Spec ID event")
-count = struct.unpack_from("<I", spec_event, 24)[0]
-sizes = dict(struct.unpack_from("<HH", spec_event, 28 + 4 * i) for i in range(count))
-events, at = [], 32 + header_size
-while at < len(log):
-    pcr, kind, count = struct.unpack_from("<III", log, at)
-    at += 12
-    digests = {}
-    for _ in range(count):
-        alg = struct.unpack_from("<H", log, at)[0]
-        digests[alg] = log[at + 2:at + 2 + sizes[alg]]
-        at += 2 + sizes[alg]
-    size = struct.unpack_from("<I", log, at)[0]
-    events.append((pcr, kind, digests.get(0x000B), log[at + 4:at + 4 + size]))
-    at += 4 + size
-
-replay = {i: bytes(32) for i in range(24)}
-for pcr, kind, digest, _ in events:
-    if kind != EV_NO_ACTION:
-        replay[pcr] = sha256(replay[pcr] + digest)
-problems = [f"PCR {i}: the TPM holds {pcrs[i].hex()}, the log replays to {replay[i].hex()}"
-            for i in (7, 8, 9) if pcrs.get(i) != replay[i]]
-problems += [f"PCR {i}: tpm2_eventlog replays to {tool_replay.get(i, b'').hex()}"
-             for i in (7, 8, 9) if tool_replay.get(i) != replay[i]]
-
-# PCR 9 computed from the image's files, in the order the bootloader measures them.
-names = [n for n in ("manifest", "kernel", "initfs") if (Path(files) / n).exists()]
-expected = bytes(32)
-for n in names:
-    expected = sha256(expected + sha256((Path(files) / n).read_bytes()))
-expected = sha256(expected + SEPARATOR)
-if pcrs.get(9) != expected:
-    problems.append(f"PCR 9 is {pcrs.get(9, b'').hex()}, the image's {' '.join(names)} give {expected.hex()}")
-pcr9 = [(kind, data) for pcr, kind, _, data in events if pcr == 9]
-if pcr9 != [(EV_IPL, f"usr/lib/boot/{n}".encode()) for n in names] + [(EV_SEPARATOR, bytes(4))]:
-    problems.append(f"PCR 9's events are {pcr9}")
-
-pcr8 = [(kind, digest, data) for pcr, kind, digest, data in events if pcr == 8]
-if [kind for kind, _, _ in pcr8] != [EV_IPL, EV_IPL, EV_SEPARATOR] or pcr8[0][2] != b"normal" \
-        or any(digest != sha256(data) for _, digest, data in pcr8):
-    problems.append(f"PCR 8's events are {[(k, d.hex(), v) for k, d, v in pcr8]}")
-else:
-    (out / "environment.txt").write_bytes(pcr8[1][2])
-
-key_events = [data for pcr, kind, _, data in events if pcr == 7 and kind == EV_EFI_VARIABLE_AUTHORITY
-              and data.startswith(FERRION_GUID)]
-name16 = "FerrionBootKey".encode("utf-16-le")
-want = FERRION_GUID + struct.pack("<QQ", 14, 32) + name16 + bytes.fromhex(slot)
-if key_events != [want]:
-    problems.append(f"PCR 7 holds {len(key_events)} FerrionOS key events, not the one for slot {slot}")
-
-(out / "pcr9.hex").write_text(pcrs.get(9, b"").hex() + "\n")
-(out / "pcr8.hex").write_text(pcrs.get(8, b"").hex() + "\n")
-if name == "tpm-menu" and len(pcr8) == 3 and b"QUIET=1" in pcr8[1][2]:
-    problems.append("the menu boot's environment still holds QUIET=1")
-if problems:
-    fail("; ".join(problems))
-print(f"PASS {name}: login at {login:.1f}s; PCR 9 {pcrs[9].hex()} = {' + '.join(names)} + separator; "
-      f"PCRs 7, 8, 9 replay from the bootloader's event log ({len(events)} events)")
+    cleanup_children()
 EOF
 }
 
