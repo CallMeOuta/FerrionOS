@@ -384,18 +384,18 @@ enum LinkMode {
 
 impl LinkMode {
     fn from_flags(flags: usize) -> Self {
-        let mode = if flags & O_SYMLINK != 0 && flags & O_CREAT != 0 {
-            LinkMode::CreateLink
-        } else if flags & O_SYMLINK != 0 && flags & O_ACCMODE == O_RDONLY {
+        let mode = if flags & O_SYMLINK != 0 && flags & O_ACCMODE == O_RDONLY {
             LinkMode::OpenLinkItself
+        } else if flags & O_SYMLINK != 0 && flags & O_CREAT != 0 {
+            LinkMode::CreateLink
         } else if flags & O_NOFOLLOW != 0 {
             LinkMode::NoFollow
         } else {
             LinkMode::Follow
         };
         match mode {
-            LinkMode::CreateLink => assert!(flags & O_CREAT != 0),
             LinkMode::OpenLinkItself => assert!(flags & O_ACCMODE == O_RDONLY),
+            LinkMode::CreateLink => assert!(flags & O_CREAT != 0),
             LinkMode::Follow | LinkMode::NoFollow => {}
         }
         mode
