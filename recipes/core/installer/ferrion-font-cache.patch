@@ -1,0 +1,49 @@
+--- a/src/installer.rs
++++ b/src/installer.rs
+@@ -291,6 +291,46 @@
+         unlock_slots.create(&output_dir)?;
+     }
+ 
++    if output_dir.join("etc/fonts/fonts.conf").is_file() {
++        println!("Generating the image's fontconfig cache");
++        let cache_command = std::env::var_os("FC_CACHE").unwrap_or_else(|| "fc-cache".into());
++        let status = std::process::Command::new(cache_command)
++            .args(["--system-only", "--force", "--verbose", "--sysroot"])
++            .arg(fs::canonicalize(&output_dir)?)
++            .env("FONTCONFIG_FILE", "/etc/fonts/fonts.conf")
++            .env("FONTCONFIG_PATH", "/etc/fonts")
++            .env_remove("FONTCONFIG_SYSROOT")
++            .env_remove("SOURCE_DATE_EPOCH")
++            .status()
++            .context("Generating font caches requires fc-cache; install the host fontconfig package")?;
++        if !status.success() {
++            bail!("fc-cache failed while generating the image's font cache: {status}");
++        }
++        let header = fs::read_to_string(output_dir.join("usr/include/fontconfig/fontconfig.h"))
++            .context("Reading the image's fontconfig cache format")?;
++        let version = header.lines().find_map(|line| {
++            let mut words = line.split_whitespace();
++            (words.next() == Some("#define") && words.next() == Some("FC_CACHE_VERSION_NUMBER"))
++                .then(|| words.next())
++                .flatten()
++        }).context("The image's fontconfig header does not name its cache format")?;
++        let suffix = format!(".cache-{version}");
++        let mut found = false;
++        for entry in fs::read_dir(output_dir.join("var/cache/fontconfig"))? {
++            let name = entry?.file_name();
++            let name = name.to_string_lossy();
++            if name.contains(".cache-") {
++                if !name.ends_with(&suffix) {
++                    bail!("fc-cache produced {name}, but the image requires cache format {version}; set FC_CACHE to a compatible host fc-cache");
++                }
++                found = true;
++            }
++        }
++        if !found {
++            bail!("fc-cache produced no caches for the image's format {version}");
++        }
++    }
++
+     Ok(())
+ }
+ 

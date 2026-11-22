@@ -1,0 +1,10 @@
+[package]
+description = "Checks directory synchronization after creating and deleting a journal"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/directory-fsync-probe" "${COOKBOOK_RECIPE}/directory-fsync-probe.c" ${LDFLAGS}
+"""

@@ -108,6 +108,7 @@
               doxygen
               file
               flex
+              fontconfig
               gettext
               gnumake
               gnupatch

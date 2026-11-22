@@ -79,3 +79,26 @@ Without load the stream is exact in one piece in 8 of 10 recordings; the other t
 With `ferrion-audiod` and AU1's rebuilt base package, `audio-baseline` kept all 264,600 source frames in one piece at both volume 100 and the default 50 without guest load. With two busy loops per guest CPU, volume 100 kept 264,343 frames in 18 pieces (257 lost, 232 repeated), and volume 50 kept 264,351 in 15 pieces (249 lost, 217 repeated). All four had zero foreign frames. The host's one-minute load averages were 22.03, 19.98, 18.01 and 16.85, respectively. These results are within AU0's observed range; they do not claim glitch-free playback under load. A separate legacy playback boot still showed AU0's known 2,048-frame gap.
 
 `audio-ring` passed: 20 rounds, 21 driver descriptors before and after, and all 264,600 frames exact in one piece. Boot, shells, lockdown and driver-namespaces passed on the same image; the namespace check now names `ferrion-audiod` and still requires only `memory` and `rand`. Evidence: `build/worktrees/au2/build/audio-verified/` and its sibling `audio-verified.log`.
+
+## Firefox startup
+
+`scripts/vm-test.py firefox-start --config firefox --timeout 120 --make QEMU_MEM=4096` measures the first `fc-match sans-serif` in a fresh boot, then three screenshots of a fixed local page, using a new profile for the first and reusing it thereafter. Screenshot times stop at the saved-PNG message, not process exit. Since font matching comes first, cold means a new profile rather than an unscanned font set. Serial polling resolves roughly 0.1 s. Launch waits honor `--timeout`.
+
+The initial copied image produced 0.501 s for font matching, 5.707 s for the cold screenshot and 1.502 s for the second. The third saved no PNG within 600.095 s. This is an incomplete baseline: that image predates the CJK collection and directory-mtime fix, and every launch logged remote-settings IndexedDB errors. Evidence: `build/worktrees/fxstart/build/fxstart-red/`.
+
+The first storage error was `SQLITE_IOERR_DIR_FSYNC` (1290), errno 9: after SQLite unlinks its journal, RedoxFS refused fsync on the parent directory. The scoped filesystem patch fixes that call without changing SQLite's durability settings. The `directory-fsync` regression probe is green for read-only directories with and without O_DIRECTORY, including synchronization after creation and unlink, and still rejects an invalid descriptor.
+
+A freshly rebuilt baseline with the CJK package and directory-mtime patch, but without the cache/policy/fsync changes, measured 1.202 s for font matching, 11.330 s cold and 1.603 s warm. The third launch again timed out without a PNG. Evidence: `build/worktrees/fxstart/build/fxstart-baseline/`.
+
+| Measurement | Rebuilt baseline | Compatible-cache run | Final image |
+|---|---:|---:|---:|
+| First font match | 1.202 s | 0.200 s | 0.503 s |
+| Cold screenshot | 11.330 s | Timed out at 600 s | Timed out at 120 s |
+| Second screenshot | 1.603 s | Not reached | Not reached |
+| Third screenshot | Timed out at 600 s | Not reached | Not reached |
+
+The first match on both cache-enabled runs validates shipped directory timestamps and performs no cache rewrite. The native host's fontconfig 2.18.4 writes format 12, incompatible with the guest's format 9; the successful image uses the existing container's fontconfig 2.15.0. The installer rejects incompatible formats and accepts `FC_CACHE` to select a compatible executable. Evidence: `build/worktrees/fxstart/build/fxstart-cache9/` and `build/worktrees/fxstart/build/fxstart-ready/`.
+
+Final-image checks: directory-fsync, boot and shells pass (`fxstart-final/`); headless local/HTTPS and CJK glyph/reference and regional-family checks pass (`fxstart-accepted/`). The shared shell-prompt helper fixes page-setup races under slow Nushell startup. All directories above are under `build/worktrees/fxstart/build/`.
+
+The complete startup performance goal is **not accepted**: screenshots intermittently stall with either cold or reused profiles (issue `.scratch/firefox/issues/05-startup-stall.md`). Cold remote-settings initialization now executes record inserts and COMMIT, but reopening the database still fails with `SQLITE_IOERR_LOCK` (3850), including in an independent read-only SQLite reader. Issue 02 remains blocked on FileLocks; persistence readback and error-free warm starts are not proven. No locking, process-isolation or SQLite-durability workaround was applied.

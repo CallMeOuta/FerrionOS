@@ -61,5 +61,9 @@ unset AR AS CC CXX LD NM OBJCOPY OBJDUMP RANLIB READELF RUSTFLAGS STRIP
 (cd ${COOKBOOK_SOURCE} && ./mach package)
 mkdir -p ${COOKBOOK_STAGE}/usr/lib/firefox ${COOKBOOK_STAGE}/usr/bin
 rsync -a ./dist/firefox/ ${COOKBOOK_STAGE}/usr/lib/firefox/
+mkdir -p ${COOKBOOK_STAGE}/usr/lib/firefox/distribution
+cp ${COOKBOOK_RECIPE}/policies.json ${COOKBOOK_STAGE}/usr/lib/firefox/distribution/policies.json
+mkdir -p ${COOKBOOK_STAGE}/usr/lib/firefox/defaults/pref
+cp ${COOKBOOK_RECIPE}/ferrion.js ${COOKBOOK_STAGE}/usr/lib/firefox/defaults/pref/ferrion.js
 ln -s ../lib/firefox/firefox ${COOKBOOK_STAGE}/usr/bin/firefox
 """

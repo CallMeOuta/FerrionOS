@@ -4,7 +4,7 @@ description = "Default filesystem of FerrionOS"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/redoxfs.git"
 rev = "5ba45a6887374ab425326656a276bb3b62eba7dc"
-patches = ["ferrion-passphrase-wipe.patch", "ferrion-key-slots.patch", "ferrion-mkfs-clear-ring.patch", "ferrion-read-only-memory.patch", "ferrion-unchanged-transaction.patch", "ferrion-key-change-stdin.patch", "ferrion-dir-mtime.patch"]
+patches = ["ferrion-passphrase-wipe.patch", "ferrion-key-slots.patch", "ferrion-mkfs-clear-ring.patch", "ferrion-read-only-memory.patch", "ferrion-unchanged-transaction.patch", "ferrion-key-change-stdin.patch", "ferrion-dir-mtime.patch", "ferrion-directory-fsync.patch"]
 
 [build]
 template = "custom"

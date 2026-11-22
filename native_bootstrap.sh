@@ -123,6 +123,7 @@ osx_macports()
     install_macports_pkg "gpatch"
     install_macports_pkg "jpeg"
     install_macports_pkg "libpng"
+    install_macports_pkg "fontconfig"
     install_macports_pkg "libsdl12"
     install_macports_pkg "libsdl2_ttf"
     install_macports_pkg "libtool"
@@ -181,6 +182,7 @@ osx_homebrew()
     install_brew_pkg "expat"
     install_brew_pkg "findutils"
     install_brew_pkg "flex"
+    install_brew_pkg "fontconfig"
     install_brew_pkg "gcc@14"
     install_brew_pkg "gdb"
     install_brew_pkg "gettext"
@@ -246,6 +248,7 @@ freebsd()
     install_freebsd_pkg "file"
     install_freebsd_pkg "findutils"
     install_freebsd_pkg "flex"
+    install_freebsd_pkg "fontconfig"
     install_freebsd_pkg "fusefs-libs3"
     install_freebsd_pkg "gcc"
     install_freebsd_pkg "gdb"
@@ -305,6 +308,7 @@ archLinux()
     expat \
     file \
     flex \
+    fontconfig \
     fuse \
     gdb \
     git \
@@ -399,6 +403,7 @@ ubuntu()
     expect \
     file \
     flex \
+    fontconfig \
     fuse3 \
     g++ \
     gdb-multiarch \
@@ -543,6 +548,7 @@ fedora()
     expat-devel \
     file \
     flex \
+    fontconfig \
     fuse-devel \
     fuse3-devel \
     gcc \
@@ -607,6 +613,7 @@ suse()
     "doxygen"
     "file"
     "flex"
+    "fontconfig"
     "fuse-devel"
     "gcc"
     "gcc-c++"
@@ -762,7 +769,7 @@ gentoo()
         echo "Installing cmake..."
         sudo emerge dev-util/cmake
     fi
-    if [ -z "$(ldconfig -p | grep fontconfig)" ]; then
+    if ! command -v fc-cache >/dev/null; then
         sudo emerge media-libs/fontconfig
     fi
 }
@@ -803,6 +810,7 @@ solus()
     bison \
     cmake \
     flex \
+    fontconfig \
     fuse-devel \
     fuse2-devel \
     g++ \
@@ -851,6 +859,7 @@ redox()
     cmake \
     curl \
     expat \
+    fontconfig \
     gcc13 \
     gcc13.cxx \
     git \

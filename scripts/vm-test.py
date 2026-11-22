@@ -779,13 +779,13 @@ def test_shells(vm, args):
     """Logs in as `user` on the serial console and runs every offered shell."""
     if not vm.wait_serial(r"login: ", args.timeout):
         return False, f"no serial login prompt within {args.timeout}s"
-    vm.type("user\n")
-    time.sleep(3)
+    if not enter_shell(vm, "user", r"(?:user:[^\r\n]*\$|bash-[0-9.]+\$|>) ", args.timeout):
+        return False, f"no user shell prompt within {args.timeout}s"
     failed = []
     for line, pattern in SHELL_CHECKS:
         since = vm.mark()
         vm.type(line + "\n")
-        if not vm.wait_serial(pattern, 20, since):
+        if not vm.wait_serial(pattern, args.timeout, since):
             failed.append(line)
     if failed:
         return False, f"no expected output from: {failed}; see {vm.out / 'serial.log'}"
@@ -962,6 +962,12 @@ def test_ipc_fd(vm, args):
     """Firefox's IPC primitives: shm_open with a read-only reopen, posix_fallocate, socketpair, SCM_RIGHTS that copy descriptors, MSG_CMSG_CLOEXEC, epoll, and fork+exec with shared memory mapped (use --config firefox)."""
     ok, note = user_probe(vm, args, "ipc-fd-probe", ())
     return ok, note or "shared memory, descriptor passing, epoll and fork+exec checks passed"
+
+
+def test_directory_fsync(vm, args):
+    """Syncs read-only directory descriptors after journal creation and unlink, including O_DIRECTORY (use --config firefox)."""
+    ok, note = user_probe(vm, args, "directory-fsync-probe", ("read-only", "directory-flag", "invalid"))
+    return ok, note or "directory fsync accepts both open modes and rejects an invalid descriptor"
 
 
 def test_fd_primitives(vm, args):
@@ -2222,14 +2228,24 @@ FIREFOX_PAGES = [
 ]
 
 
+def enter_shell(vm, command, prompt, timeout):
+    since = vm.mark()
+    vm.type(command + "\n")
+    return bool(vm.wait_serial(prompt, timeout, since))
+
+
+def user_bash(vm, timeout):
+    if not vm.wait_serial(r"login: ", timeout):
+        return False
+    if not enter_shell(vm, "user", r"(?:user:[^\r\n]*\$|bash-[0-9.]+\$|>) ", timeout):
+        return False
+    return enter_shell(vm, "bash --norc --noprofile --noediting", r"bash-[0-9.]+\$ ", timeout)
+
+
 def test_firefox_headless(vm, args):
     """Logs in as `user` and has `firefox --headless --screenshot` render a local page and then an HTTPS page to PNG, which travels back over the serial console (use --config firefox)."""
-    if not vm.wait_serial(r"login: ", args.timeout):
-        return False, f"no serial login prompt within {args.timeout}s"
-    vm.type("user\n")
-    time.sleep(3)
-    vm.type("bash --norc --noprofile --noediting\n")
-    time.sleep(1)
+    if not user_bash(vm, args.timeout):
+        return False, "no user Bash prompt after login"
 
     def run(line, timeout):
         """Types `line`; returns (exit status or None on a timeout, output)."""
@@ -2264,6 +2280,10 @@ def test_firefox_headless(vm, args):
         return False, f"could not write the local page (status {status}); see {vm.out / 'serial.log'}"
     _, version = run("firefox --version", 120)
     (vm.out / "version.txt").write_text(version)
+    status, _ = run(f"MOZ_HEADLESS=1 firefox --headless --no-remote --profile {FIREFOX_DIR}/profile "
+                    f"--screenshot {FIREFOX_DIR}/warmup.png about:blank > {FIREFOX_DIR}/warmup.log 2>&1", 600)
+    if status != 0:
+        return False, f"profile warmup failed (status {status}); see {vm.out / 'serial.log'}"
 
     results = []
     for name, url, timeout in FIREFOX_PAGES:
@@ -2302,6 +2322,59 @@ def test_firefox_headless(vm, args):
         if reason:
             return False, f"{name} ({url}): {reason}; see {vm.out / f'{name}.log'}"
     return True, "; ".join(f"{name}: {note}" for name, note in results) + f"; inspect the PNGs in {vm.out}"
+
+
+def test_firefox_start(vm, args):
+    """Times the first font match and three local screenshots, reusing one initially empty profile (use --config firefox)."""
+    if not user_bash(vm, args.timeout):
+        return False, "no user Bash prompt after login"
+    directory = "/tmp/firefox-start"
+    since = vm.mark()
+    vm.type(f"mkdir -p {directory}/profile; printf '%s\\n' "
+            "'<!doctype html><title>FerrionOS</title><body style=\"background:#fff;font:48px sans-serif\">"
+            "<h1>Hello from FerrionOS</h1></body>' "
+            f"> {directory}/page.html; echo FFSREADY-$((40+2))\n")
+    if not vm.wait_serial(r"FFSREADY-42", 30, since):
+        return False, "could not prepare the startup page"
+    measurements = {}
+    since, started = vm.mark(), time.monotonic()
+    vm.type("FC_DEBUG=16 fc-match sans-serif; echo FFSFONT-$((40+2))=$?\n")
+    matched = vm.wait_serial(r"FFSFONT-42=(\d+)", 120, since)
+    measurements["fontconfig_seconds"] = round(time.monotonic() - started, 3)
+    font_log = vm.text(since)
+    (vm.out / "fontconfig.log").write_text(font_log)
+    if not matched or matched.group(1) != "0":
+        return False, "first fc-match failed"
+    problems = []
+    if "FcCacheTimeValid" not in font_log or "FcDirCacheWriteDir" in font_log:
+        problems.append("first font match did not use only prebuilt caches")
+    for label in ("cold", "warm", "third"):
+        since, started = vm.mark(), time.monotonic()
+        vm.type(f"MOZ_HEADLESS=1 firefox --headless --no-remote --profile {directory}/profile "
+                f"--window-size=800,600 --screenshot {directory}/{label}.png "
+                f"file://{directory}/page.html; echo FFSEND-$((40+2))=$?\n")
+        saved = vm.wait_serial(rf"Screenshot saved to: {directory}/{label}\.png", args.timeout, since)
+        if saved:
+            measurements[f"{label}_seconds"] = round(time.monotonic() - started, 3)
+        exited = vm.wait_serial(r"FFSEND-42=(\d+)", args.timeout, since) if saved else None
+        log = vm.text(since)
+        (vm.out / f"{label}.log").write_text(log)
+        if not saved or not exited or exited.group(1) != "0":
+            (vm.out / "timings.json").write_text(json.dumps(measurements, indent=2) + "\n")
+            return False, f"{label}: screenshot or successful exit missing"
+        if "UnknownError" in log or "IndexedDB" in log and "error" in log.lower():
+            problems.append(f"{label}: IndexedDB error")
+        since = vm.mark()
+        vm.type(f"echo FFSPNG-BEGIN; base64 -w 0 {directory}/{label}.png; echo; echo FFSPNG-END\n")
+        found = vm.wait_serial(r"FFSPNG-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)FFSPNG-END", 300, since)
+        image = base64.b64decode("".join(found.group(1).split()), validate=True) if found else b""
+        if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+            problems.append(f"{label}: missing PNG")
+        else:
+            (vm.out / f"{label}.png").write_bytes(image)
+    (vm.out / "timings.json").write_text(json.dumps(measurements, indent=2) + "\n")
+    note = "; ".join(f"{name}={seconds:.3f}s" for name, seconds in measurements.items())
+    return not problems, note + ("; " + "; ".join(problems) if problems else "")
 
 
 FIREFOX_CJK = [
@@ -2343,12 +2416,8 @@ def test_firefox_cjk(vm, args):
         html.append('</script>')
     reference.save(vm.out / "cjk-reference.png")
     encoded = base64.b64encode("".join(html).encode()).decode()
-    if not vm.wait_serial(r"login: ", args.timeout):
-        return False, "no serial login"
-    vm.type("user\n")
-    time.sleep(3)
-    vm.type("bash --norc --noprofile --noediting\n")
-    time.sleep(1)
+    if not user_bash(vm, args.timeout):
+        return False, "no user Bash prompt after login"
 
     def run(line, timeout):
         since = vm.mark()
@@ -4532,6 +4601,8 @@ TESTS["dso-atexit"] = test_dso_atexit
 TESTS["mesa-cpu"] = test_mesa_cpu
 TESTS["gtk-window"] = test_gtk_window
 TESTS["gtk-window-wayland"] = test_gtk_window_wayland
+TESTS["firefox-start"] = test_firefox_start
+TESTS["directory-fsync"] = test_directory_fsync
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password

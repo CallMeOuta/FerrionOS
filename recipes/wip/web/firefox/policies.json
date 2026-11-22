@@ -1,0 +1,13 @@
+{
+    "policies": {
+        "DisableFirefoxStudies": true,
+        "DisableTelemetry": true,
+        "DontCheckDefaultBrowser": true,
+        "OverrideFirstRunPage": "",
+        "OverridePostUpdatePage": "",
+        "Preferences": {
+            "browser.startup.homepage_override.mstone": {"Value": "ignore", "Status": "locked"},
+            "datareporting.policy.firstRunURL": {"Value": "", "Status": "locked"}
+        }
+    }
+}
