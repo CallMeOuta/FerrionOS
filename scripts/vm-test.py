@@ -4576,6 +4576,13 @@ GPU_BLOB_TRACE = (
     "virtio_gpu_cmd_res_unmap_blob",
     "virtio_gpu_cmd_res_unref",
 )
+GPU_SUBMIT_TRACE = (
+    "virtio_gpu_features",
+    "virtio_gpu_cmd_ctx_create",
+    "virtio_gpu_cmd_ctx_submit",
+    "virtio_gpu_fence_resp",
+    "virtio_gpu_cmd_ctx_destroy",
+)
 VENUS_CAPSET_SHA256 = "11069f17d3858d6b725a3b2b2b810fafc6ae6529ccdedf45bab62acdcb342609"
 
 
@@ -4777,6 +4784,79 @@ def test_gpu_blob(vm, args):
                   f"{output.count(f'{tag}: pass ')} probe checks passed")
 
 
+def test_gpu_submit(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-submit on a 3D device (gpu=venus unless --make names another): submits on ring 0 with FENCE_FD_OUT, polls the fence descriptor until signaled, checks a 300 ms poll timeout on an unsignaled fence lands in 270..400 ms, verifies refusal paths, and confirms virtio_gpu_cmd_ctx_submit and virtio_gpu_fence_resp in QEMU's trace."""
+    tag = "gpu-probe-submit"
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    status, output = guest_run(vm, "gs", tag, 120)
+    _, schemes = guest_run(vm, "gsl", "ls /scheme", 30)
+    log = vm.out / "gpu-submit.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    reasons = []
+    fields = dict(re.findall(rf"(?m)^{tag}: (render|context-name) (\S+)", output))
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):", output)
+    signaled = re.search(rf"(?m)^{tag}: submit-ring0 signaled fence_id=(\d+) wait_ms=(\d+)", output)
+    timeout_poll = re.search(rf"(?m)^{tag}: timeout-poll ret=(-?\d+) revents=(0x[0-9a-f]+|0) elapsed_ms=(\d+)", output)
+    if "render" not in fields:
+        reasons.append("the probe found no render name")
+    elif status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed checks: {', '.join(failed) or 'no result line'}")
+    if "render" in fields:
+        listed = schemes.split()
+        if fields["render"] not in listed or "display.virtio-gpu" not in listed:
+            reasons.append("/scheme no longer lists the render and display names after the probe")
+    if not signaled:
+        reasons.append("ring 0 submission fence did not signal")
+    if not timeout_poll:
+        reasons.append("missing 300 ms unsignaled fence poll result")
+    else:
+        t_ret, t_revents, t_ms = int(timeout_poll.group(1)), int(timeout_poll.group(2), 16), int(timeout_poll.group(3))
+        if t_ret != 0 or t_revents != 0 or not (270 <= t_ms <= 400):
+            reasons.append(f"300 ms poll returned ret={t_ret} revents={t_revents:#x} in {t_ms} ms")
+
+    ctx_name = fields.get("context-name")
+    deadline = time.monotonic() + 10
+    while True:
+        trace = vm.trace()
+        if any(re.search(r"\bvirtio_gpu_cmd_ctx_destroy\b", line) for line in trace) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    relevant = [line for line in trace if re.search(
+        r"\bvirtio_gpu_(features|cmd_ctx_create|cmd_ctx_submit|fence_resp|cmd_ctx_destroy)\b", line)]
+    (vm.out / "gpu-submit-trace.txt").write_text("\n".join(relevant) + ("\n" if relevant else ""))
+    if not any(re.search(r"\bvirtio_gpu_features\b.*\bvirgl 1\b", line) for line in relevant):
+        reasons.append("QEMU's trace has no `virtio_gpu_features virgl 1`")
+    created = []
+    for line in relevant:
+        if m := re.search(r"virtio_gpu_cmd_ctx_create\b.*?\bctx (0x[0-9a-f]+), name (.*)$", line):
+            created.append((int(m.group(1), 16), m.group(2).strip()))
+    matching_ctx = [ctx for ctx, name in created if ctx_name and name == ctx_name]
+    if len(matching_ctx) != 1:
+        reasons.append(f"{len(matching_ctx)} contexts named {ctx_name} in QEMU's trace, not 1")
+        ctx_id = None
+    else:
+        ctx_id = matching_ctx[0]
+    submits = [int(m.group(1), 16) for line in relevant
+               if (m := re.search(r"virtio_gpu_cmd_ctx_submit\b.*?\bctx (0x[0-9a-f]+)", line))]
+    fences = [int(m.group(1), 16) for line in relevant
+              if (m := re.search(r"virtio_gpu_fence_resp\b.*?\bfence (0x[0-9a-f]+)", line))]
+    if ctx_id is None or ctx_id not in submits:
+        reasons.append(f"QEMU's trace has no virtio_gpu_cmd_ctx_submit for context {ctx_id}")
+    if not any(fid != 0 for fid in fences):
+        reasons.append("QEMU's trace has no non-zero virtio_gpu_fence_resp")
+    elif signaled:
+        fence_id = int(signaled.group(1))
+        if fence_id not in fences:
+            reasons.append(f"QEMU's trace has no virtio_gpu_fence_resp for fence {fence_id:#x}")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, (f"{fields['render']}: fence {signaled.group(1)} signaled in {signaled.group(2)} ms; "
+                  f"300 ms timeout poll took {timeout_poll.group(3)} ms; "
+                  f"trace: {submits.count(ctx_id)} submit(s) for ctx {ctx_id:#x}, {len(fences)} fence_resp; "
+                  f"{output.count(f'{tag}: pass ')} probe checks passed")
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -4816,6 +4896,7 @@ TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
 TESTS["gpu-context"] = test_gpu_context
 TESTS["gpu-blob"] = test_gpu_blob
+TESTS["gpu-submit"] = test_gpu_submit
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -4887,10 +4968,11 @@ def main():
             trace_lines = 0
             make = ("gpu=multi",) if name == "gpu-heads" else ()
             run_args = args
-            if name == "gpu-context":
+            if name in ("gpu-context", "gpu-submit"):
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
-                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_CONTEXT_TRACE]})
+                extra_trace = GPU_CONTEXT_TRACE if name == "gpu-context" else GPU_SUBMIT_TRACE
+                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *extra_trace]})
             elif name == "gpu-blob":
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
