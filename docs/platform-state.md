@@ -52,6 +52,7 @@ Component sources cited here are the checkouts a fetch puts in `recipes/core/<na
 
 - RedoxFS has no fsck or repair tool: `Cargo.toml` of `redoxfs` at `5ba45a68` builds five binaries, `redoxfs` (mount), `redoxfs-ar`, `redoxfs-clone`, `redoxfs-mkfs` and `redoxfs-resize`. A damaged image is rebuilt, not repaired.
 - When the installer reports "No space left on device", raise `filesystem_size` in the config first.
+- Advisory file locks are real on RedoxFS through the relibc and RedoxFS patches `ferrion-file-locks.patch`: fcntl `F_SETLK`, `F_SETLKW` (blocking, with deadlock detection) and `F_GETLK`, open-file-description locks and `flock`, released when the owner closes the file or exits. A conflict answers `EAGAIN`, and `flock` answers `EWOULDBLOCK`. `scripts/vm-test.py file-locks` runs `lock-probe` (25 checks) and two SQLite writers in WAL and rollback-journal mode; it passed on 2026-11-21.
 
 ### Debugging and virtual machines
 

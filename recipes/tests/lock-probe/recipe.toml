@@ -1,0 +1,12 @@
+[package]
+description = "Checks fcntl and flock advisory locks between processes, and two SQLite writers sharing one database"
+
+[build]
+template = "custom"
+dependencies = ["sqlite3"]
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/lock-probe" "${COOKBOOK_RECIPE}/lock-probe.c" ${LDFLAGS}
+${CC} ${CFLAGS} -O2 -Wall -Wextra -I"${COOKBOOK_SYSROOT}/include" -o "${COOKBOOK_STAGE}/usr/bin/lock-probe-sqlite" "${COOKBOOK_RECIPE}/lock-probe-sqlite.c" -L"${COOKBOOK_SYSROOT}/lib" ${LDFLAGS} -lsqlite3
+"""

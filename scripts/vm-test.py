@@ -5061,6 +5061,83 @@ def test_vk_exact(vm, args):
     return True, f"Venus rendered exact vulkan frame with host submit trace; see {log} and {trace_log}"
 
 
+LOCK_PROBE_CHECKS = (
+    "fcntl-conflict", "getlk-holder", "fcntl-shared", "fcntl-split-merge", "seek-cur-and-end",
+    "release-on-close", "release-on-close-other-fd", "path-lookups-keep-locks", "release-on-exit", "release-on-kill",
+    "ofd-shared-by-fork", "ofd-survives-child-exit", "ofd-conflicts-with-process-lock",
+    "ofd-released-on-close", "process-lock-not-inherited", "setlkw-wakes", "ofd-setlkw-wakes",
+    "setlkw-eintr", "setlkw-edeadlk", "flock-exclusive-nb", "flock-shared", "flock-wakes",
+    "flock-owned-by-description", "flock-independent-of-fcntl", "flock-release-on-close",
+)
+
+
+def test_file_locks(vm, args):
+    """Advisory file locks on /tmp, as `user`: lock-probe checks fcntl record locks (conflicts, F_GETLK's holder and pid, splitting and merging, SEEK_CUR and SEEK_END, release on close of any descriptor, on exit and on SIGKILL but not on stat(), access() or closing an O_PATH descriptor, OFD against process ownership across fork, F_SETLKW and F_OFD_SETLKW waking, EINTR, EDEADLK) and flock (LOCK_NB, waiting, ownership by the open description, independence from fcntl); then two sqlite3 processes each commit 100 read-modify-write transactions to one database, in WAL and in rollback-journal mode, with a 20 s busy timeout; then two processes write a WAL database in /home/user and exit, and a read-only connection in a new process reads it, and again after a reboot."""
+    ok, note = user_probe(vm, args, "lock-probe", LOCK_PROBE_CHECKS, timeout=240)
+    if note and note.startswith("no serial login"):
+        return False, note
+    problems = [] if ok else [note]
+    report, log = [], []
+    for mode in ("wal", "delete"):
+        status, out = guest_run(vm, f"sq{mode}", f"lock-probe-sqlite {mode} 100", 900)
+        log.append(f"[{mode}] exit {status}\n{out}\n")
+        found = re.search(rf"sqlite-{mode}: status (\d+) (\d+) result (\S+) (\d+) (\d+) (\d+)", out)
+        seconds = re.search(rf"sqlite-{mode}: journal (\S+) seconds (\d+)", out)
+        verdict = found.groups() if found else None
+        if verdict != ("0", "0", "ok", "200", "200", "200") or re.search(r"locked|busy|malformed", out, re.I):
+            problems.append(f"sqlite {mode}: " + (" ".join(verdict) if verdict else "no result"))
+        else:
+            report.append(f"sqlite {seconds.group(1) if seconds else mode}: 200 of 200 updates in {seconds.group(2) if seconds else '?'} s")
+    persist = "/home/user/lock-probe-persist.db"
+    reads = []
+    for step, line in (("create", f"lock-probe-sqlite create {persist}"), ("read", f"lock-probe-sqlite read {persist}"),
+                       ("reboot", None), ("read", f"lock-probe-sqlite read {persist}")):
+        if line is None:
+            trouble = reboot_to_user(vm, args)
+            log.append(f"[reboot] {trouble or 'login as user again'}\n")
+            if trouble:
+                problems.append(trouble)
+                break
+            continue
+        status, out = guest_run(vm, f"sq{step}", line, 120)
+        log.append(f"[{step}] exit {status}\n{out}\n")
+        if step == "read":
+            reads.append(status == 0 and re.search(r"sqlite-read: rows 100 5050", out) is not None)
+            if not reads[-1]:
+                failure = re.search(r"sqlite-read: .*", out)
+                problems.append(f"read-only reader {len(reads)}: " + (failure.group(0).strip() if failure else f"exit {status}"))
+        elif status != 0:
+            problems.append(f"sqlite create: exit {status}")
+    if reads == [True, True]:
+        report.append("read-only reader of a WAL database two exited processes wrote: 100 rows, and after a reboot")
+    (vm.out / "file-locks-sqlite.txt").write_text("".join(log))
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, f"lock-probe passed {len(LOCK_PROBE_CHECKS)} checks; " + "; ".join(report)
+
+
+def reboot_to_user(vm, args):
+    """From `user`'s serial login shell: logs out, reboots as root with `shutdown -r`, and logs in as `user` again; returns a problem or None."""
+    since = vm.mark()
+    vm.type("exit\n")
+    if not vm.wait_serial(r"login: ", args.timeout, since):
+        return "no login prompt after logging out"
+    since = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20, since):
+        return "no password prompt for root"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, since):
+        return "no root shell"
+    since = vm.mark()
+    vm.type("shutdown -r\n")
+    if not vm.wait_serial(r"login: ", args.timeout * 2, since):
+        return "no login prompt after the reboot"
+    vm.type("user\n")
+    time.sleep(3)
+    return None
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -5099,6 +5176,7 @@ TESTS["gtk-window"] = test_gtk_window
 TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
+TESTS["file-locks"] = test_file_locks
 TESTS["gpu-context"] = test_gpu_context
 TESTS["gpu-blob"] = test_gpu_blob
 TESTS["gpu-submit"] = test_gpu_submit
