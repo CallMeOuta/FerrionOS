@@ -1,0 +1,15 @@
+[package]
+name = "ferrion-update"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Signed update index verification library for FerrionOS"
+
+[dependencies]
+blake3 = { version = "1.8", default-features = false }
+dryoc = { version = "1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[workspace]

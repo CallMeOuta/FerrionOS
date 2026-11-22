@@ -1,0 +1,27 @@
+pub mod client;
+pub mod crypto;
+pub mod error;
+pub mod format;
+pub mod pkgar;
+
+pub const FORMAT_VERSION: u32 = 1;
+pub const USER_AGENT: &str = "ferrion-update/1";
+pub const MAX_ROOT_BYTES: usize = 64 * 1024;
+pub const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_OBJECT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_ROTATION_BYTES: usize = 4 * 1024;
+pub const SIGNATURE_BYTES: usize = 64;
+pub const PUBLIC_KEY_BYTES: usize = 32;
+pub const HASH_BYTES: usize = 32;
+pub const MAX_RELEASES_IN_ROOT: usize = 1024;
+pub const MAX_PACKAGES_IN_INDEX: usize = 4096;
+pub const MAX_FIXES_IN_INDEX: usize = 256;
+pub const MAX_NEEDS_PER_PACKAGE: usize = 128;
+pub const MAX_PATCHES_PER_PACKAGE: usize = 16;
+pub const MAX_MIRRORS: usize = 32;
+pub const MAX_ROLLOUT_STEPS: usize = 32;
+pub const MAX_FRESH_DAYS: u32 = 3650;
+pub const MAX_PKGAR_ENTRIES: usize = 131_072;
+pub const MAX_STRING_LEN: usize = 256;
+pub const MAX_URL_LEN: usize = 512;
+pub const MAX_WAYPOINT_HOPS: usize = 32;

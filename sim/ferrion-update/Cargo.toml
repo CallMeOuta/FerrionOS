@@ -1,0 +1,16 @@
+[package]
+name = "ferrion-update-sim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Deterministic simulation test of FerrionOS signed update index verification"
+
+[dependencies]
+ferrion-update = { path = "../../recipes/core/ferrion-update/crate" }
+
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+
+[workspace]

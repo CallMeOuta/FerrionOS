@@ -22,6 +22,10 @@ path = "src/bin/repo_builder.rs"
 name = "repo_editor"
 path = "src/bin/repo_editor/main.rs"
 
+[[bin]]
+name = "ferrion-release"
+path = "src/bin/ferrion_release.rs"
+
 [lib]
 name = "cookbook"
 path = "src/lib.rs"
@@ -33,6 +37,7 @@ tui = ["ratatui", "ansi-to-tui", "strip-ansi-escapes"]
 
 [dependencies]
 blake3 = "1"
+ferrion-update = { path = "recipes/core/ferrion-update/crate" }
 globset = "0.4"
 libc = "0.2"
 ignore = "0.4"
