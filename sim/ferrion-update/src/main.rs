@@ -17,6 +17,43 @@ use ferrion_update::{FORMAT_VERSION, MAX_ROOT_BYTES, USER_AGENT};
 
 const MAX_SEEDS: usize = 100_000;
 const MAX_STEPS: usize = 100_000;
+const MAX_RELEASES_PER_DAY: u8 = 95;
+
+struct Clock {
+    day: i64,
+    counter: u8,
+}
+
+impl Clock {
+    fn base_date() -> CalendarDate {
+        CalendarDate::new(2026, 11, 1).expect("valid base date")
+    }
+
+    fn today(&self) -> CalendarDate {
+        CalendarDate::from_days_since_epoch(Self::base_date().days_since_epoch() + self.day)
+            .expect("valid offset date")
+    }
+
+    fn next_release(&mut self) -> ReleaseNumber {
+        if self.counter >= MAX_RELEASES_PER_DAY {
+            self.day += 1;
+            self.counter = 0;
+        }
+        let d = Clock::today(self);
+        let raw = (d.year as u64) * 1_000_000
+            + (d.month as u64) * 10_000
+            + (d.day as u64) * 100
+            + u64::from(self.counter);
+        self.counter += 1;
+        ReleaseNumber::new(raw).expect("valid release number")
+    }
+
+    fn advance_days(&mut self, days: i64) {
+        assert!(days >= 0);
+        self.day += days;
+        self.counter = 0;
+    }
+}
 
 struct Rng(u64);
 
@@ -130,17 +167,6 @@ impl Fetcher for MockFetcher {
     }
 }
 
-fn make_release_number(day_offset: i64, counter: u64) -> ReleaseNumber {
-    let base = CalendarDate::new(2026, 11, 1).expect("valid base date");
-    let d = CalendarDate::from_days_since_epoch(base.days_since_epoch() + day_offset)
-        .expect("valid offset date");
-    let raw = (d.year as u64) * 1_000_000
-        + (d.month as u64) * 10_000
-        + (d.day as u64) * 100
-        + (counter % 100);
-    ReleaseNumber::new(raw).expect("valid release number")
-}
-
 fn publish_snapshot(
     rng: &mut Rng,
     release_key: &Keypair,
@@ -155,6 +181,7 @@ fn publish_snapshot(
     fresh_days: u32,
     extra_releases: &BTreeMap<ReleaseNumber, ReleaseEntry>,
 ) -> PublishedSnapshot {
+    assert!(release.date() <= signed);
     let pkg_count = 1 + rng.below(3);
     let mut packages = Vec::with_capacity(pkg_count);
     let mut objects = BTreeMap::new();
@@ -248,10 +275,8 @@ struct SimEnv {
     attacker_key: Keypair,
     emergency_key: Keypair,
     pkgar_key: Keypair,
-    day_offset: i64,
-    next_counter: u64,
+    clock: Clock,
     next_serial: u64,
-    today: CalendarDate,
     state: ClientState,
     history: Vec<PublishedSnapshot>,
 }
@@ -273,8 +298,9 @@ impl SimEnv {
         let attacker_key = Keypair::from_seed(&rng.seed32());
         let emergency_key = Keypair::from_seed(&rng.seed32());
         let pkgar_key = Keypair::from_seed(&rng.seed32());
-        let base_date = CalendarDate::new(2026, 11, 1).expect("valid date");
-        let rel0 = make_release_number(0, 0);
+        let mut clock = Clock { day: 0, counter: 0 };
+        let base_date = clock.today();
+        let rel0 = clock.next_release();
         let snap0 = publish_snapshot(
             &mut rng,
             &release_key,
@@ -314,25 +340,15 @@ impl SimEnv {
             attacker_key,
             emergency_key,
             pkgar_key,
-            day_offset: 1,
-            next_counter: 1,
+            clock: Clock { day: 1, counter: 1 },
             next_serial: 2,
-            today: CalendarDate::from_days_since_epoch(base_date.days_since_epoch() + 1)
-                .expect("valid date"),
             state,
             history: vec![snap0],
         }
     }
 
     fn alloc_release(&mut self) -> ReleaseNumber {
-        let day = self.day_offset;
-        let c = self.next_counter;
-        self.next_counter += 1;
-        if self.next_counter >= 95 {
-            self.day_offset += 1;
-            self.next_counter = 0;
-        }
-        make_release_number(day, c)
+        self.clock.next_release()
     }
 
     fn alloc_serial(&mut self) -> u64 {
@@ -342,15 +358,13 @@ impl SimEnv {
     }
 
     fn advance_days(&mut self, days: i64) {
-        self.day_offset += days;
-        self.next_counter = 0;
-        self.today = CalendarDate::from_days_since_epoch(self.today.days_since_epoch() + days)
-            .expect("valid date");
+        self.clock.advance_days(days);
     }
 
-    fn make_valid_next(&mut self, signed: CalendarDate, fresh_days: u32) -> PublishedSnapshot {
+    fn make_valid_next(&mut self, fresh_days: u32) -> PublishedSnapshot {
         let rel = self.alloc_release();
         let ser = self.alloc_serial();
+        let signed = self.clock.today();
         publish_snapshot(
             &mut self.rng,
             &self.release_key,
@@ -371,13 +385,13 @@ impl SimEnv {
         let before = self.state.clone();
         match case_id {
             0 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 if self.rng.below(2) == 0 {
                     snap.root_bytes = b"\xff\xfe not even valid utf8 or toml {{{{".to_vec();
                 }
                 snap.root_sig = self.attacker_key.sign(&snap.root_bytes).0.to_vec();
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("case 1 wrong key must fail");
                 counts.total_requests += f.requests;
                 if !matches!(
@@ -401,9 +415,9 @@ impl SimEnv {
                     .iter()
                     .any(|s| s.serial < self.state.trusted_serial)
                 {
-                    let good = self.make_valid_next(self.today, 45);
+                    let good = self.make_valid_next(45);
                     let mut f = MockFetcher::from_snapshot(&good, self.arch);
-                    apply_update(&mut self.state, self.today, &mut f, true)
+                    apply_update(&mut self.state, self.clock.today(), &mut f, true)
                         .map_err(|e| format!("case 2 setup upgrade failed: {e}"))?;
                     counts.total_requests += f.requests;
                     self.history.push(good);
@@ -417,7 +431,7 @@ impl SimEnv {
                     .cloned()
                     .ok_or("case 2 missing older snapshot")?;
                 let mut f = MockFetcher::from_snapshot(&old, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("case 2 replay must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::RollbackSerial { .. }) {
@@ -429,9 +443,9 @@ impl SimEnv {
                 counts.case2_replay_serial += 1;
             }
             2 => {
-                let good = self.make_valid_next(self.today, 45);
+                let good = self.make_valid_next(45);
                 let mut f = MockFetcher::from_snapshot(&good, self.arch);
-                apply_update(&mut self.state, self.today, &mut f, true)
+                apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .map_err(|e| format!("case 3 setup upgrade failed: {e}"))?;
                 counts.total_requests += f.requests;
                 self.history.push(good);
@@ -460,7 +474,7 @@ impl SimEnv {
                 let root = RootFile {
                     format: FORMAT_VERSION,
                     serial: ser,
-                    signed: self.today,
+                    signed: self.clock.today(),
                     fresh_days: 45,
                     channels,
                     releases,
@@ -472,7 +486,7 @@ impl SimEnv {
                 let mut f = MockFetcher::from_snapshot(&self.history[0], self.arch);
                 f.files.insert("/root.toml".to_string(), root_bytes);
                 f.files.insert("/root.toml.sig".to_string(), root_sig);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("case 3 downgrade must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::RollbackRelease { .. }) {
@@ -484,7 +498,7 @@ impl SimEnv {
                 counts.case3_channel_downgrade += 1;
             }
             3 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 if self.rng.below(2) == 0 {
                     snap.index_bytes = b"\xff bad toml {{{{".to_vec();
                 } else {
@@ -492,7 +506,7 @@ impl SimEnv {
                 }
                 snap.index_sig = self.release_key.sign(&snap.index_bytes).0.to_vec();
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("case 4 index hash mismatch must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::IndexHashMismatch { .. }) {
@@ -504,13 +518,13 @@ impl SimEnv {
                 counts.case4_index_hash_mismatch += 1;
             }
             4 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 let key = snap.objects.keys().next().cloned().ok_or("no object")?;
                 let bytes = snap.objects.get_mut(&key).expect("object exists");
                 let pos = self.rng.below(bytes.len());
                 bytes[pos] ^= 0x01;
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("case 5 byte flip must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::ObjectHashMismatch { .. }) {
@@ -522,13 +536,13 @@ impl SimEnv {
                 counts.case5_object_byte_flip += 1;
             }
             5 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 let key = snap.objects.keys().next().cloned().ok_or("no object")?;
                 let bytes = snap.objects.get_mut(&key).expect("object exists");
                 let extra = 1 + self.rng.below(64);
                 bytes.extend(std::iter::repeat_n(0x41u8, extra));
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("case 6 oversized object must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::ObjectTooLarge { .. }) {
@@ -541,7 +555,7 @@ impl SimEnv {
             }
             6 => {
                 let variant = self.rng.below(4);
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 match variant {
                     0 => {
                         let mut text = String::from_utf8(snap.root_bytes).expect("utf8");
@@ -549,7 +563,7 @@ impl SimEnv {
                         snap.root_bytes = text.into_bytes();
                         snap.root_sig = self.release_key.sign(&snap.root_bytes).0.to_vec();
                         let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                        let err = apply_update(&mut self.state, self.today, &mut f, true)
+                        let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                             .expect_err("case 7a unknown root key must fail");
                         counts.total_requests += f.requests;
                         if !matches!(
@@ -579,7 +593,7 @@ impl SimEnv {
                         snap.index_bytes = new_idx;
                         snap.index_sig = self.release_key.sign(&snap.index_bytes).0.to_vec();
                         let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                        let err = apply_update(&mut self.state, self.today, &mut f, true)
+                        let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                             .expect_err("case 7b unknown index key must fail");
                         counts.total_requests += f.requests;
                         if !matches!(
@@ -603,7 +617,7 @@ impl SimEnv {
                         snap.root_bytes = text.into_bytes();
                         snap.root_sig = self.release_key.sign(&snap.root_bytes).0.to_vec();
                         let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                        let err = apply_update(&mut self.state, self.today, &mut f, true)
+                        let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                             .expect_err("case 7c unknown root format must fail");
                         counts.total_requests += f.requests;
                         if !matches!(
@@ -635,7 +649,7 @@ impl SimEnv {
                         snap.index_bytes = new_idx;
                         snap.index_sig = self.release_key.sign(&snap.index_bytes).0.to_vec();
                         let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                        let err = apply_update(&mut self.state, self.today, &mut f, true)
+                        let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                             .expect_err("case 7d unknown index format must fail");
                         counts.total_requests += f.requests;
                         if !matches!(
@@ -658,13 +672,12 @@ impl SimEnv {
                 counts.case7_unknown_key_or_format += 1;
             }
             7 => {
-                let stale_signed = self.today;
                 let fresh_days = 45u32;
-                let stale_snap = self.make_valid_next(stale_signed, fresh_days);
+                let stale_snap = self.make_valid_next(fresh_days);
                 let overdue = 1 + (self.rng.below(90) as i64);
                 self.advance_days(fresh_days as i64 + overdue);
                 let mut f1 = MockFetcher::from_snapshot(&stale_snap, self.arch);
-                let outcome1 = apply_update(&mut self.state, self.today, &mut f1, true)
+                let outcome1 = apply_update(&mut self.state, self.clock.today(), &mut f1, true)
                     .map_err(|e| format!("case 8 stale root must be accepted, got {e}"))?;
                 counts.total_requests += f1.requests;
                 let Some(notice) = outcome1.stale_notice else {
@@ -679,9 +692,9 @@ impl SimEnv {
                 }
                 self.history.push(stale_snap);
 
-                let fresh_snap = self.make_valid_next(self.today, fresh_days);
+                let fresh_snap = self.make_valid_next(fresh_days);
                 let mut f2 = MockFetcher::from_snapshot(&fresh_snap, self.arch);
-                let outcome2 = apply_update(&mut self.state, self.today, &mut f2, true)
+                let outcome2 = apply_update(&mut self.state, self.clock.today(), &mut f2, true)
                     .map_err(|e| format!("case 8 replacement root failed: {e}"))?;
                 counts.total_requests += f2.requests;
                 if outcome2.stale_notice.is_some() {
@@ -696,11 +709,11 @@ impl SimEnv {
                 counts.case8_stale_then_fresh += 1;
             }
             8 => {
-                let snap = self.make_valid_next(self.today, 45);
+                let snap = self.make_valid_next(45);
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
                 f.files
                     .insert("/root.toml".to_string(), vec![b'a'; MAX_ROOT_BYTES + 1]);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("oversized root must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::RootTooLarge { .. }) {
@@ -712,10 +725,10 @@ impl SimEnv {
                 counts.extra_root_too_large += 1;
             }
             9 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 snap.index_sig = self.attacker_key.sign(&snap.index_bytes).0.to_vec();
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("bad index sig must fail");
                 counts.total_requests += f.requests;
                 if !matches!(
@@ -734,7 +747,7 @@ impl SimEnv {
                 counts.extra_bad_index_sig += 1;
             }
             10 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 let new_idx = self.history[0].index_bytes.clone();
                 let new_hash = Blake3Hash::hash_bytes(&new_idx);
                 let root_str = String::from_utf8(snap.root_bytes)
@@ -745,7 +758,7 @@ impl SimEnv {
                 snap.index_bytes = new_idx;
                 snap.index_sig = self.release_key.sign(&snap.index_bytes).0.to_vec();
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("index release mismatch must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::IndexReleaseMismatch { .. }) {
@@ -757,12 +770,12 @@ impl SimEnv {
                 counts.extra_index_release_mismatch += 1;
             }
             11 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 let key = snap.objects.keys().next().cloned().ok_or("no object")?;
                 let bytes = snap.objects.get_mut(&key).expect("object exists");
                 bytes.pop();
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("truncated object must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::ObjectSizeMismatch { .. }) {
@@ -817,7 +830,7 @@ impl SimEnv {
                 let root = RootFile {
                     format: FORMAT_VERSION,
                     serial: ser,
-                    signed: self.today,
+                    signed: self.clock.today(),
                     fresh_days: 45,
                     channels,
                     releases,
@@ -839,7 +852,7 @@ impl SimEnv {
                     objects,
                 };
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("corrupt pkgar must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::PkgarInvalid { .. }) {
@@ -863,7 +876,7 @@ impl SimEnv {
                     self.state.installed_release,
                     None,
                     wp_ser,
-                    self.today,
+                    self.clock.today(),
                     45,
                     &BTreeMap::new(),
                 );
@@ -893,7 +906,7 @@ impl SimEnv {
                     wp_rel,
                     Some(wp_rel),
                     target_ser,
-                    self.today,
+                    self.clock.today(),
                     45,
                     &extra,
                 );
@@ -906,7 +919,7 @@ impl SimEnv {
                 for (p, b) in &wp_snap.objects {
                     f.files.insert(p.clone(), b.clone());
                 }
-                let out1 = apply_update(&mut self.state, self.today, &mut f, true)
+                let out1 = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .map_err(|e| format!("waypoint step 1 failed: {e}"))?;
                 if !out1.via_waypoint || out1.target_release != wp_rel {
                     return Err(format!(
@@ -914,7 +927,7 @@ impl SimEnv {
                         out1.target_release
                     ));
                 }
-                let out2 = apply_update(&mut self.state, self.today, &mut f, true)
+                let out2 = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .map_err(|e| format!("waypoint step 2 failed: {e}"))?;
                 counts.total_requests += f.requests;
                 if out2.via_waypoint || out2.target_release != target_rel {
@@ -928,14 +941,14 @@ impl SimEnv {
                 counts.extra_waypoint += 1;
             }
             14 => {
-                let mut snap = self.make_valid_next(self.today, 45);
+                let mut snap = self.make_valid_next(45);
                 let text = String::from_utf8(snap.root_bytes)
                     .expect("utf8")
                     .replace("security = false", "security = false\nwithdrawn = true");
                 snap.root_bytes = text.into_bytes();
                 snap.root_sig = self.release_key.sign(&snap.root_bytes).0.to_vec();
                 let mut f = MockFetcher::from_snapshot(&snap, self.arch);
-                let err = apply_update(&mut self.state, self.today, &mut f, true)
+                let err = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .expect_err("withdrawn release must fail");
                 counts.total_requests += f.requests;
                 if !matches!(err, UpdateError::ReleaseWithdrawn { .. }) {
@@ -971,7 +984,7 @@ impl SimEnv {
                     self.state.installed_release,
                     None,
                     rot_ser,
-                    self.today,
+                    self.clock.today(),
                     45,
                     &BTreeMap::new(),
                 );
@@ -1006,7 +1019,7 @@ impl SimEnv {
                 self.release_key = new_key;
                 let revoked_snap = self.history[0].clone();
                 let mut f_rev = MockFetcher::from_snapshot(&revoked_snap, self.arch);
-                let rev_err = apply_update(&mut self.state, self.today, &mut f_rev, true)
+                let rev_err = apply_update(&mut self.state, self.clock.today(), &mut f_rev, true)
                     .expect_err("revoked key snapshot must fail");
                 counts.total_requests += f_rev.requests;
                 if !matches!(
@@ -1020,16 +1033,16 @@ impl SimEnv {
                     ));
                 }
                 let mut f = MockFetcher::from_snapshot(&next_snap, self.arch);
-                apply_update(&mut self.state, self.today, &mut f, true)
+                apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .map_err(|e| format!("post-rotation sync failed: {e}"))?;
                 counts.total_requests += f.requests;
                 self.history = vec![next_snap];
                 counts.extra_key_rotation += 1;
             }
             _ => {
-                let good = self.make_valid_next(self.today, 45);
+                let good = self.make_valid_next(45);
                 let mut f = MockFetcher::from_snapshot(&good, self.arch);
-                let out = apply_update(&mut self.state, self.today, &mut f, true)
+                let out = apply_update(&mut self.state, self.clock.today(), &mut f, true)
                     .map_err(|e| format!("valid upgrade failed: {e}"))?;
                 counts.total_requests += f.requests;
                 if out.stale_notice.is_some() {
