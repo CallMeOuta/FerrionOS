@@ -979,6 +979,12 @@ def test_jit_signal(vm, args):
     return ok, note or "fault handlers read and rewrote the machine context; W^X code pages and PROT_NONE behaved"
 
 
+def test_fdtable_race(vm, args):
+    """Three threads run dup2 and F_DUPFD_CLOEXEC while three others open, dup and close, 20000 rounds each; passes when none deadlocks on the descriptor table (use --config firefox)."""
+    ok, note = user_probe(vm, args, "fdtable-race-probe", ("dup2-against-open",), timeout=120)
+    return ok, note or "dup2 and F_DUPFD raced open, dup and close without a deadlock"
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -5172,6 +5178,7 @@ TESTS["cond-clock"] = test_cond_clock
 TESTS["fork-wake"] = test_fork_wake
 TESTS["ipc-fd"] = test_ipc_fd
 TESTS["jit-signal"] = test_jit_signal
+TESTS["fdtable-race"] = test_fdtable_race
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
 TESTS["linux-hello"] = test_linux_hello

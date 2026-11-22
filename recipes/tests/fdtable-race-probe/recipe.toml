@@ -1,0 +1,10 @@
+[package]
+description = "Checks that dup2 and F_DUPFD on some threads and open, dup and close on others never deadlock on the descriptor table"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/fdtable-race-probe" "${COOKBOOK_RECIPE}/fdtable-race-probe.c" ${LDFLAGS} -lpthread
+"""
