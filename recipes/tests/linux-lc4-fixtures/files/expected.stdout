@@ -13,6 +13,7 @@ recvmsg (b'via sendmsg', 0, 0)
 sendmmsg arrived b'onetwosix'
 closed port ECONNREFUSED
 outside loopback ENETUNREACH
+nb connect True True True True True
 epoll empty []
 epoll ready [(True, 1)]
 epoll still ready [(True, 1)]

@@ -30,23 +30,117 @@ const CONNECT_LIMIT_MS: u128 = 75_000;
 
 type Addr = (u32, u16);
 
-#[derive(Default)]
+#[derive(Clone, Copy)]
+enum Via {
+    Emulated { local: Addr },
+    Native,
+}
+
+struct ListenPath {
+    owner: i32,
+    path: CString,
+}
+
+enum Stream {
+    Fresh,
+    Bound { local: Addr, path: ListenPath },
+    PeerBound { local: Addr },
+    Listening { local: Addr, path: ListenPath },
+    Connecting { peer: Addr, via: Via },
+    Connected { peer: Addr, via: Via },
+    Failed { error: i64 },
+}
+
+enum DgramState {
+    Unconnected { local: Option<Addr> },
+    Connected { local: Option<Addr>, peer: Addr },
+}
+
+enum Kind {
+    Stream(Stream),
+    Dgram { native: bool, state: DgramState },
+}
+
 struct Sock {
-    local: Option<Addr>,
-    peer: Option<Addr>,
-    listening: bool,
-    bound: Option<(i32, CString)>,
+    kind: Kind,
     options: BTreeMap<(u64, u64), Vec<u8>>,
-    dgram: bool,
-    native: bool,
-    pending: bool,
-    error: i64,
 }
 
 enum Conn {
     Pending,
     Done,
     Failed(i64),
+}
+
+fn unlink_path(lp: &ListenPath) {
+    if lp.owner == crate::syscall::pid() {
+        unsafe { libc::unlink(lp.path.as_ptr()) };
+    }
+}
+
+impl Sock {
+    fn is_dgram(&self) -> bool {
+        matches!(self.kind, Kind::Dgram { .. })
+    }
+
+    fn is_native(&self) -> bool {
+        matches!(
+            self.kind,
+            Kind::Stream(
+                Stream::Connecting { via: Via::Native, .. }
+                    | Stream::Connected { via: Via::Native, .. }
+            ) | Kind::Dgram { native: true, .. }
+        )
+    }
+
+    fn is_connecting(&self) -> bool {
+        matches!(self.kind, Kind::Stream(Stream::Connecting { .. }))
+    }
+
+    fn is_listening(&self) -> bool {
+        matches!(self.kind, Kind::Stream(Stream::Listening { .. }))
+    }
+
+    fn peer(&self) -> Option<Addr> {
+        match &self.kind {
+            Kind::Stream(Stream::Connected { peer, .. } | Stream::Connecting { peer, .. }) => Some(*peer),
+            Kind::Dgram { state: DgramState::Connected { peer, .. }, .. } => Some(*peer),
+            _ => None,
+        }
+    }
+
+    fn poll_connect(&mut self, fd: i32) -> Conn {
+        let (peer, via) = match self.kind {
+            Kind::Stream(Stream::Connecting { peer, via }) => (peer, via),
+            _ => unreachable!("poll_connect requires Stream::Connecting"),
+        };
+        let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+        let n = unsafe { libc::poll(&mut p, 1, 0) };
+        match via {
+            Via::Native => {
+                if n > 0 && p.revents & libc::POLLOUT != 0 {
+                    self.kind = Kind::Stream(Stream::Connected { peer, via });
+                    return Conn::Done;
+                }
+                if native_name(fd, true).is_none_or(|a| a == (0, 0)) {
+                    self.kind = Kind::Stream(Stream::Failed { error: ECONNREFUSED });
+                    return Conn::Failed(ECONNREFUSED);
+                }
+                Conn::Pending
+            }
+            Via::Emulated { .. } => {
+                if n > 0 && p.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                    self.kind = Kind::Stream(Stream::Failed { error: ECONNREFUSED });
+                    return Conn::Failed(ECONNREFUSED);
+                }
+                if n > 0 && p.revents & libc::POLLOUT != 0 {
+                    self.kind = Kind::Stream(Stream::Connected { peer, via });
+                    return Conn::Done;
+                }
+                Conn::Pending
+            }
+        }
+    }
 }
 
 fn granted() -> bool {
@@ -110,57 +204,46 @@ fn native_name(fd: i32, peer: bool) -> Option<Addr> {
     (r == 0).then(|| from_sockaddr_in(&a))
 }
 
-fn check(fd: i32, s: &mut Sock) -> Conn {
-    if !s.pending {
-        return Conn::Done;
-    }
-    let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
-    if unsafe { libc::poll(&mut p, 1, 0) } > 0 && p.revents & libc::POLLOUT != 0 {
-        s.pending = false;
-        return Conn::Done;
-    }
-    if native_name(fd, true).is_none_or(|a| a == (0, 0)) {
-        s.pending = false;
-        s.peer = None;
-        s.error = ECONNREFUSED;
-        return Conn::Failed(ECONNREFUSED);
-    }
-    Conn::Pending
-}
-
 fn wait_connected(fd: i32, s: &Mutex<Sock>) -> i64 {
     let start = std::time::Instant::now();
     loop {
         let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
         unsafe { libc::poll(&mut p, 1, 50) };
         let mut g = s.lock().unwrap();
-        match check(fd, &mut g) {
-            Conn::Done => return 0,
-            Conn::Failed(e) => {
-                g.error = 0;
-                return -e;
+        match g.kind {
+            Kind::Stream(Stream::Connecting { .. }) => match g.poll_connect(fd) {
+                Conn::Done => return 0,
+                Conn::Failed(e) => {
+                    g.kind = Kind::Stream(Stream::Fresh);
+                    return -e;
+                }
+                Conn::Pending if start.elapsed().as_millis() >= CONNECT_LIMIT_MS => {
+                    g.kind = Kind::Stream(Stream::Fresh);
+                    return -ETIMEDOUT;
+                }
+                Conn::Pending => {}
+            },
+            Kind::Stream(Stream::Connected { .. }) => return 0,
+            Kind::Stream(Stream::Failed { error }) => {
+                g.kind = Kind::Stream(Stream::Fresh);
+                return -error;
             }
-            Conn::Pending if start.elapsed().as_millis() >= CONNECT_LIMIT_MS => {
-                g.pending = false;
-                g.peer = None;
-                return -ETIMEDOUT;
-            }
-            Conn::Pending => {}
+            _ => return -ENOTCONN,
         }
     }
 }
 
 pub fn connecting(fd: i32) -> bool {
-    sock(fd as u64).is_some_and(|s| s.lock().unwrap().pending)
+    sock(fd as u64).is_some_and(|s| s.lock().unwrap().is_connecting())
 }
 
 pub fn settle(fd: i32, events: i16, revents: i16) -> i16 {
     let Some(s) = sock(fd as u64) else { return revents };
     let mut s = s.lock().unwrap();
-    if !s.pending {
+    if !s.is_connecting() {
         return revents;
     }
-    match check(fd, &mut s) {
+    match s.poll_connect(fd) {
         Conn::Pending => revents & !(libc::POLLIN | libc::POLLRDNORM),
         Conn::Done => revents | (events & libc::POLLOUT),
         Conn::Failed(_) => libc::POLLERR | libc::POLLHUP | (events & libc::POLLOUT),
@@ -201,10 +284,8 @@ pub fn closed(fd: i32) {
         return;
     }
     let s = s.lock().unwrap();
-    if let Some((pid, path)) = &s.bound {
-        if *pid == crate::syscall::pid() {
-            unsafe { libc::unlink(path.as_ptr()) };
-        }
+    if let Kind::Stream(Stream::Bound { path, .. } | Stream::Listening { path, .. }) = &s.kind {
+        unlink_path(path);
     }
 }
 
@@ -322,12 +403,17 @@ pub fn socket(domain: u64, kind: u64, protocol: u64) -> i64 {
             libc::fcntl(fd as i32, libc::F_SETFL, libc::O_NONBLOCK);
         }
     }
-    SOCKS.lock().unwrap().insert(fd as i32, Arc::new(Mutex::new(Sock { dgram, native, ..Default::default() })));
+    let sock_kind = if dgram {
+        Kind::Dgram { native, state: DgramState::Unconnected { local: None } }
+    } else {
+        Kind::Stream(Stream::Fresh)
+    };
+    SOCKS.lock().unwrap().insert(fd as i32, Arc::new(Mutex::new(Sock { kind: sock_kind, options: BTreeMap::new() })));
     fd
 }
 
-fn bind_port(fd: i32, s: &mut Sock, addr: u32, port: u16) -> i64 {
-    if s.local.is_some() {
+fn bind_port(fd: i32, stream: &mut Stream, addr: u32, port: u16) -> i64 {
+    if !matches!(stream, Stream::Fresh) {
         return -EINVAL;
     }
     if port != 0 && port < 1024 && unsafe { libc::geteuid() } != 0 {
@@ -338,8 +424,10 @@ fn bind_port(fd: i32, s: &mut Sock, addr: u32, port: u16) -> i64 {
         let path = format!("{}/{p}", session::INET_LISTEN);
         match unix_bind(fd, &path) {
             Ok(()) => {
-                s.local = Some((addr, p));
-                s.bound = Some((crate::syscall::pid(), CString::new(path).unwrap()));
+                *stream = Stream::Bound {
+                    local: (addr, p),
+                    path: ListenPath { owner: crate::syscall::pid(), path: CString::new(path).unwrap() },
+                };
                 return 0;
             }
             Err(EADDRINUSE) if port == 0 => continue,
@@ -362,21 +450,24 @@ pub fn bind(fd: u64, p: u64, len: u64) -> i64 {
         return -EADDRNOTAVAIL;
     }
     let mut s = s.lock().unwrap();
-    if s.dgram {
-        return bind_dgram(fd as i32, &mut s, addr, port);
+    match &mut s.kind {
+        Kind::Dgram { native, state } => bind_dgram(fd as i32, *native, state, addr, port),
+        Kind::Stream(stream) => bind_port(fd as i32, stream, addr, port),
     }
-    bind_port(fd as i32, &mut s, addr, port)
 }
 
-fn bind_dgram(fd: i32, s: &mut Sock, addr: u32, port: u16) -> i64 {
-    if s.local.is_some() {
+fn bind_dgram(fd: i32, native: bool, state: &mut DgramState, addr: u32, port: u16) -> i64 {
+    let local = match state {
+        DgramState::Unconnected { local } | DgramState::Connected { local, .. } => local,
+    };
+    if local.is_some() {
         return -EINVAL;
     }
     if port != 0 && port < 1024 && unsafe { libc::geteuid() } != 0 {
         return -EACCES;
     }
-    if !s.native {
-        s.local = Some((addr, if port == 0 { ephemeral() } else { port }));
+    if !native {
+        *local = Some((addr, if port == 0 { ephemeral() } else { port }));
         return 0;
     }
     if addr != 0 {
@@ -389,27 +480,44 @@ fn bind_dgram(fd: i32, s: &mut Sock, addr: u32, port: u16) -> i64 {
     if r != 0 {
         return -native_errno();
     }
-    s.local = Some(native_name(fd, false).unwrap_or((0, port)));
+    *local = Some(native_name(fd, false).unwrap_or((0, port)));
     0
+}
+
+fn start_listening(fd: i32, s: &mut Sock) -> i64 {
+    let stream = match &mut s.kind {
+        Kind::Dgram { .. } => return -EOPNOTSUPP,
+        Kind::Stream(stream) => stream,
+    };
+    match stream {
+        Stream::Fresh => {
+            let r = bind_port(fd, stream, 0, 0);
+            if r < 0 {
+                return r;
+            }
+        }
+        Stream::Bound { .. } => {}
+        Stream::Listening { .. } => return 0,
+        Stream::Connecting { via: Via::Native, .. } | Stream::Connected { via: Via::Native, .. } => return -EOPNOTSUPP,
+        Stream::PeerBound { .. } | Stream::Connecting { .. } | Stream::Connected { .. } | Stream::Failed { .. } => return -EINVAL,
+    }
+    let prev = core::mem::replace(stream, Stream::Fresh);
+    match prev {
+        Stream::Bound { local, path } => {
+            *stream = Stream::Listening { local, path };
+            0
+        }
+        other => {
+            *stream = other;
+            unreachable!("expected Bound stream before Listening");
+        }
+    }
 }
 
 pub fn listen(fd: u64, _backlog: u64) -> i64 {
     let s = sock_or_err!(fd);
     let mut s = s.lock().unwrap();
-    if s.dgram || s.native {
-        return -EOPNOTSUPP;
-    }
-    if s.peer.is_some() {
-        return -EINVAL;
-    }
-    if s.local.is_none() {
-        let r = bind_port(fd as i32, &mut s, 0, 0);
-        if r < 0 {
-            return r;
-        }
-    }
-    s.listening = true;
-    0
+    start_listening(fd as i32, &mut s)
 }
 
 fn peer_port(fd: i32) -> u16 {
@@ -430,10 +538,10 @@ pub fn accept(fd: u64, addr: u64, len: u64, flags: u64) -> i64 {
     let s = sock_or_err!(fd);
     let local = {
         let s = s.lock().unwrap();
-        if !s.listening {
-            return -EINVAL;
+        match s.kind {
+            Kind::Stream(Stream::Listening { local, .. }) => local,
+            _ => return -EINVAL,
         }
-        s.local.unwrap_or((0, 0))
     };
     let new = unsafe { libc::accept(fd as i32, core::ptr::null_mut(), core::ptr::null_mut()) };
     let new = crate::files::new_fd(ret(new as isize));
@@ -452,7 +560,10 @@ pub fn accept(fd: u64, addr: u64, len: u64, flags: u64) -> i64 {
     let peer = (LOOPBACK, peer_port(new as i32));
     SOCKS.lock().unwrap().insert(
         new as i32,
-        Arc::new(Mutex::new(Sock { local: Some(local), peer: Some(peer), ..Default::default() })),
+        Arc::new(Mutex::new(Sock {
+            kind: Kind::Stream(Stream::Connected { peer, via: Via::Emulated { local } }),
+            options: BTreeMap::new(),
+        })),
     );
     let r = write_addr(addr, len, peer);
     if r < 0 {
@@ -467,7 +578,7 @@ pub fn connect(fd: u64, p: u64, len: u64) -> i64 {
         Ok(a) => a,
         Err(e) => return -e,
     };
-    if s.lock().unwrap().dgram {
+    if s.lock().unwrap().is_dgram() {
         return connect_dgram(fd as i32, &s, family, (addr, port));
     }
     if family != AF_INET {
@@ -475,21 +586,22 @@ pub fn connect(fd: u64, p: u64, len: u64) -> i64 {
     }
     {
         let mut g = s.lock().unwrap();
-        if g.pending {
-            return match check(fd as i32, &mut g) {
-                Conn::Pending => -EALREADY,
-                Conn::Done => -EISCONN,
-                Conn::Failed(e) => {
-                    g.error = 0;
-                    -e
-                }
-            };
-        }
-        if g.peer.is_some() {
-            return -EISCONN;
-        }
-        if g.listening {
-            return -EINVAL;
+        match g.kind {
+            Kind::Stream(Stream::Connecting { .. }) => {
+                return match g.poll_connect(fd as i32) {
+                    Conn::Pending => -EALREADY,
+                    Conn::Done => -EISCONN,
+                    Conn::Failed(e) => {
+                        g.kind = Kind::Stream(Stream::Fresh);
+                        -e
+                    }
+                };
+            }
+            Kind::Stream(Stream::Connected { .. }) => return -EISCONN,
+            Kind::Stream(Stream::Listening { .. }) => return -EINVAL,
+            Kind::Stream(Stream::Failed { .. }) => g.kind = Kind::Stream(Stream::Fresh),
+            Kind::Stream(Stream::Fresh | Stream::Bound { .. } | Stream::PeerBound { .. }) => {}
+            Kind::Dgram { .. } => unreachable!(),
         }
     }
     if !loopback(addr) {
@@ -499,30 +611,50 @@ pub fn connect(fd: u64, p: u64, len: u64) -> i64 {
     if port == 0 || !exists(&target) {
         return -ECONNREFUSED;
     }
-    let mut guard = s.lock().unwrap();
-    if guard.local.is_none() {
-        let mine = ephemeral();
-        let name = format!("{}/{mine}", session::INET_PEER);
-        if let Err(e) = unix_bind(fd as i32, &name) {
-            return -e;
+    let local = {
+        let mut guard = s.lock().unwrap();
+        match guard.kind {
+            Kind::Stream(Stream::Bound { local, .. } | Stream::PeerBound { local }) => local,
+            Kind::Stream(Stream::Fresh) => {
+                let mine = ephemeral();
+                let name = format!("{}/{mine}", session::INET_PEER);
+                if let Err(e) = unix_bind(fd as i32, &name) {
+                    return -e;
+                }
+                let c = CString::new(name).unwrap();
+                unsafe { libc::unlink(c.as_ptr()) };
+                let local = (LOOPBACK, mine);
+                guard.kind = Kind::Stream(Stream::PeerBound { local });
+                local
+            }
+            _ => return -EINVAL,
         }
-        let c = CString::new(name).unwrap();
-        unsafe { libc::unlink(c.as_ptr()) };
-        guard.local = Some((LOOPBACK, mine));
-    }
-    drop(guard);
+    };
+    let peer = (if addr == 0 { LOOPBACK } else { addr }, port);
     let a = unix_addr(&target);
     let r = unsafe {
         libc::connect(fd as i32, &a as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_un>() as u32)
     };
     if r != 0 {
-        return -match last_errno() {
+        let err = last_errno();
+        if err == EAGAIN {
+            let mut g = s.lock().unwrap();
+            if let Kind::Stream(Stream::Bound { path, .. }) = &g.kind {
+                unlink_path(path);
+            }
+            g.kind = Kind::Stream(Stream::Connecting { peer, via: Via::Emulated { local } });
+            return -EINPROGRESS;
+        }
+        return -match err {
             ENOENT | EBADF => ECONNREFUSED,
-            EAGAIN => EINPROGRESS,
             e => e,
         };
     }
-    s.lock().unwrap().peer = Some((if addr == 0 { LOOPBACK } else { addr }, port));
+    let mut g = s.lock().unwrap();
+    if let Kind::Stream(Stream::Bound { path, .. }) = &g.kind {
+        unlink_path(path);
+    }
+    g.kind = Kind::Stream(Stream::Connected { peer, via: Via::Emulated { local } });
     0
 }
 
@@ -548,15 +680,10 @@ fn connect_native(fd: i32, s: &Mutex<Sock>, to: Addr) -> i64 {
     }
     {
         let mut g = s.lock().unwrap();
-        if let Some((pid, path)) = g.bound.take() {
-            if pid == crate::syscall::pid() {
-                unsafe { libc::unlink(path.as_ptr()) };
-            }
+        if let Kind::Stream(Stream::Bound { path, .. }) = &g.kind {
+            unlink_path(path);
         }
-        g.native = true;
-        g.local = None;
-        g.peer = Some(to);
-        g.pending = true;
+        g.kind = Kind::Stream(Stream::Connecting { peer: to, via: Via::Native });
         for name in [20u64, 21] {
             if let Some(v) = g.options.get(&(1, name)) {
                 unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, name as i32, v.as_ptr().cast(), v.len() as u32) };
@@ -571,15 +698,22 @@ fn connect_native(fd: i32, s: &Mutex<Sock>, to: Addr) -> i64 {
 
 fn connect_dgram(fd: i32, s: &Mutex<Sock>, family: u64, to: Addr) -> i64 {
     let mut g = s.lock().unwrap();
+    let (native, state) = match &mut g.kind {
+        Kind::Dgram { native, state } => (*native, state),
+        _ => unreachable!(),
+    };
     if family == 0 {
-        if g.native {
+        if native {
             let mut sa: libc::sockaddr_in = unsafe { core::mem::zeroed() };
             sa.sin_family = libc::AF_UNSPEC as libc::sa_family_t;
             keep_flags(fd, || unsafe {
                 libc::connect(fd, &sa as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_in>() as u32)
             });
         }
-        g.peer = None;
+        let local = match *state {
+            DgramState::Unconnected { local } | DgramState::Connected { local, .. } => local,
+        };
+        *state = DgramState::Unconnected { local };
         return 0;
     }
     if family != AF_INET {
@@ -588,7 +722,7 @@ fn connect_dgram(fd: i32, s: &Mutex<Sock>, family: u64, to: Addr) -> i64 {
     if loopback(to.0) {
         return -ECONNREFUSED;
     }
-    if !granted() || !g.native {
+    if !granted() || !native {
         return -ENETUNREACH;
     }
     let sa = sockaddr_in(to);
@@ -598,25 +732,43 @@ fn connect_dgram(fd: i32, s: &Mutex<Sock>, family: u64, to: Addr) -> i64 {
     if r != 0 {
         return -native_errno();
     }
-    g.peer = Some(to);
-    if let Some(a) = native_name(fd, false) {
-        g.local = Some(a);
-    }
+    let prev_local = match *state {
+        DgramState::Unconnected { local } | DgramState::Connected { local, .. } => local,
+    };
+    let local = native_name(fd, false).or(prev_local);
+    *state = DgramState::Connected { local, peer: to };
     0
 }
 
 pub fn name(fd: u64, addr: u64, len: u64, peer: bool) -> i64 {
     let s = sock_or_err!(fd);
-    let s = s.lock().unwrap();
+    let mut s = s.lock().unwrap();
     let a = if peer {
-        match s.peer {
-            Some(a) => a,
-            None => return -ENOTCONN,
+        if s.is_connecting() {
+            s.poll_connect(fd as i32);
         }
-    } else if s.native && !s.dgram {
-        native_name(fd as i32, false).unwrap_or((0, 0))
+        match s.kind {
+            Kind::Stream(Stream::Connected { peer, .. }) => peer,
+            Kind::Dgram { state: DgramState::Connected { peer, .. }, .. } => peer,
+            _ => return -ENOTCONN,
+        }
     } else {
-        s.local.unwrap_or((0, 0))
+        match s.kind {
+            Kind::Stream(Stream::Fresh | Stream::Failed { .. }) => (0, 0),
+            Kind::Stream(Stream::Bound { local, .. } | Stream::PeerBound { local } | Stream::Listening { local, .. }) => local,
+            Kind::Stream(
+                Stream::Connecting { via: Via::Emulated { local }, .. }
+                | Stream::Connected { via: Via::Emulated { local }, .. },
+            ) => local,
+            Kind::Stream(
+                Stream::Connecting { via: Via::Native, .. }
+                | Stream::Connected { via: Via::Native, .. },
+            ) => native_name(fd as i32, false).unwrap_or((0, 0)),
+            Kind::Dgram {
+                state: DgramState::Unconnected { local } | DgramState::Connected { local, .. },
+                ..
+            } => local.unwrap_or((0, 0)),
+        }
     };
     if addr == 0 {
         return -EFAULT;
@@ -687,7 +839,7 @@ fn send_dgram(fd: i32, s: &Mutex<Sock>, buf: &[u8], flags: u64, dest: u64, dest_
     }
     let (native, peer) = {
         let g = s.lock().unwrap();
-        (g.native, g.peer)
+        (g.is_native(), g.peer())
     };
     let to = if dest == 0 {
         match peer {
@@ -731,8 +883,11 @@ fn recv_dgram(fd: i32, s: &Mutex<Sock>, buf: &mut [u8], flags: u64) -> Result<(i
     if flags & MSG_DONTWAIT != 0 && would_block(fd, libc::POLLIN) {
         return Err(EAGAIN);
     }
-    let peer = s.lock().unwrap().peer;
-    if peer.is_some() || !s.lock().unwrap().native {
+    let (native, peer) = {
+        let g = s.lock().unwrap();
+        (g.is_native(), g.peer())
+    };
+    if peer.is_some() || !native {
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         return if n < 0 { Err(last_errno()) } else { Ok((n as i64, peer)) };
     }
@@ -748,7 +903,7 @@ pub fn sendto(fd: u64, buf: u64, len: u64, flags: u64, dest: u64, dest_len: u64)
         return -EFAULT;
     }
     let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
-    if s.lock().unwrap().dgram {
+    if s.lock().unwrap().is_dgram() {
         return send_dgram(fd as i32, &s, bytes, flags, dest, dest_len);
     }
     send_bytes(fd as i32, bytes, flags)
@@ -760,7 +915,7 @@ pub fn recvfrom(fd: u64, buf: u64, len: u64, flags: u64, src: u64, src_len: u64)
         return -EFAULT;
     }
     let bytes = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
-    if s.lock().unwrap().dgram {
+    if s.lock().unwrap().is_dgram() {
         return match recv_dgram(fd as i32, &s, bytes, flags) {
             Ok((n, from)) => {
                 if let (Some(a), true) = (from, src != 0) {
@@ -774,12 +929,12 @@ pub fn recvfrom(fd: u64, buf: u64, len: u64, flags: u64, src: u64, src_len: u64)
             Err(e) => -e,
         };
     }
-    if flags & MSG_PEEK != 0 && s.lock().unwrap().native {
+    if flags & MSG_PEEK != 0 && s.lock().unwrap().is_native() {
         return -EOPNOTSUPP;
     }
     let n = recv_bytes(fd as i32, bytes, flags);
     if n >= 0 && src != 0 {
-        let peer = s.lock().unwrap().peer;
+        let peer = s.lock().unwrap().peer();
         if let Some(peer) = peer {
             let r = write_addr(src, src_len, peer);
             if r < 0 {
@@ -817,7 +972,7 @@ fn sendmsg_one(fd: u64, s: &Mutex<Sock>, p: u64, flags: u64) -> i64 {
     for (b, l) in m.iov {
         all.extend_from_slice(unsafe { core::slice::from_raw_parts(b as *const u8, l as usize) });
     }
-    if s.lock().unwrap().dgram {
+    if s.lock().unwrap().is_dgram() {
         return send_dgram(fd as i32, s, &all, flags, m.name, m.name_len);
     }
     send_bytes(fd as i32, &all, flags)
@@ -836,17 +991,17 @@ pub fn recvmsg(fd: u64, p: u64, flags: u64) -> i64 {
     };
     let total: u64 = m.iov.iter().map(|&(_, l)| l).sum();
     let mut buf = vec![0u8; total.min(1 << 24) as usize];
-    let dgram = s.lock().unwrap().dgram;
+    let dgram = s.lock().unwrap().is_dgram();
     let (n, from) = if dgram {
         match recv_dgram(fd as i32, &s, &mut buf, flags) {
             Ok(r) => r,
             Err(e) => return -e,
         }
     } else {
-        if flags & MSG_PEEK != 0 && s.lock().unwrap().native {
+        if flags & MSG_PEEK != 0 && s.lock().unwrap().is_native() {
             return -EOPNOTSUPP;
         }
-        (recv_bytes(fd as i32, &mut buf, flags), s.lock().unwrap().peer)
+        (recv_bytes(fd as i32, &mut buf, flags), s.lock().unwrap().peer())
     };
     if n < 0 {
         return n;
@@ -930,7 +1085,7 @@ pub fn setsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
         if len < 16 {
             return -EINVAL;
         }
-        if s.native && unsafe { libc::setsockopt(fd as i32, libc::SOL_SOCKET, name as i32, bytes.as_ptr().cast(), len as u32) } != 0 {
+        if s.is_native() && unsafe { libc::setsockopt(fd as i32, libc::SOL_SOCKET, name as i32, bytes.as_ptr().cast(), len as u32) } != 0 {
             return -native_errno();
         }
     }
@@ -943,17 +1098,26 @@ pub fn getsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
     let mut s = s.lock().unwrap();
     let int = |v: i32| v.to_ne_bytes().to_vec();
     let value = match (level, name) {
-        (1, 3) => int(if s.dgram { SOCK_DGRAM } else { SOCK_STREAM } as i32),
+        (1, 3) => int(if s.is_dgram() { SOCK_DGRAM } else { SOCK_STREAM } as i32),
         (1, 4) => {
-            let e = match check(fd as i32, &mut s) {
-                Conn::Failed(e) => e,
-                _ => s.error,
+            let e = match s.kind {
+                Kind::Stream(Stream::Connecting { .. }) => match s.poll_connect(fd as i32) {
+                    Conn::Failed(e) => {
+                        s.kind = Kind::Stream(Stream::Fresh);
+                        e
+                    }
+                    Conn::Pending | Conn::Done => 0,
+                },
+                Kind::Stream(Stream::Failed { error }) => {
+                    s.kind = Kind::Stream(Stream::Fresh);
+                    error
+                }
+                _ => 0,
             };
-            s.error = 0;
             int(e as i32)
         }
-        (1, 30) => int(s.listening as i32),
-        (1, 38) => int(if s.dgram { 17 } else { 6 }),
+        (1, 30) => int(s.is_listening() as i32),
+        (1, 38) => int(if s.is_dgram() { 17 } else { 6 }),
         (1, 39) => int(AF_INET as i32),
         _ if known_option(level, name) => s.options.get(&(level, name)).cloned().unwrap_or_else(|| match (level, name) {
             (1, 7) => int(16384),
