@@ -215,9 +215,9 @@ pub fn walk_tree_entry(
         (WalkTreeEntry::Deduped, None)
     } else {
         let entry = match (std::fs::metadata(&pkg_path), pkg_toml.is_file()) {
-            (Ok(meta), _) => WalkTreeEntry::Built(meta.len()),
+            (Ok(meta), true) => WalkTreeEntry::Built(meta.len()),
             (Err(_), true) => WalkTreeEntry::Built(0),
-            (Err(_), false) => WalkTreeEntry::NotBuilt,
+            (_, false) => WalkTreeEntry::NotBuilt,
         };
         let mut all_deps_set: HashSet<&PackageName> = HashSet::new();
         match tree_opt {

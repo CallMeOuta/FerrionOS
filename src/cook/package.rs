@@ -17,6 +17,36 @@ use crate::{
     wrap_io_err,
 };
 
+pub fn is_stage_package_committed(
+    package_file: &Path,
+    package_meta: &Path,
+    pkey_path: &Path,
+) -> bool {
+    use pkgar_core::PackageSrc;
+    if !package_meta.is_file() || !package_file.is_file() {
+        return false;
+    }
+    let Ok(pkg_toml) = Package::from_file(package_meta) else {
+        return false;
+    };
+    let Ok(meta) = std::fs::metadata(package_file) else {
+        return false;
+    };
+    if meta.len() != pkg_toml.network_size {
+        return false;
+    }
+    let Ok(expected) = blake3::Hash::from_hex(&pkg_toml.blake3) else {
+        return false;
+    };
+    let Ok(pkey) = PublicKeyFile::open(pkey_path) else {
+        return false;
+    };
+    let Ok(package) = PackageFile::new(package_file, &pkey.pkey) else {
+        return false;
+    };
+    *expected.as_bytes() == package.header().blake3
+}
+
 pub fn package(
     recipe: &CookRecipe,
     build_result: &BuildResult,
@@ -53,31 +83,40 @@ pub fn package(
 
     for package in packages {
         let (stage_dir, package_file, package_meta) = package_stage_paths(package, target_dir);
-        if package_file.is_file() && !build_result.cached {
-            log_to_pty!(logger, "DEBUG: updating '{}'", package_file.display());
-            remove_all(&package_file)?;
-            if package_meta.is_file() {
-                remove_all(&package_meta)?;
-            }
+        let committed = build_result.cached
+            && is_stage_package_committed(&package_file, &package_meta, Path::new(public_path));
+        if committed {
+            continue;
         }
 
-        if !package_file.is_file() {
-            if cook_config.compressed && cook_config.verbose {
-                log_to_pty!(logger, "DEBUG: compressing '{}'", package_file.display());
-            }
-            pkgar::create_with_flags(
-                secret_path,
-                package_file.to_str().unwrap(),
-                stage_dir.to_str().unwrap(),
-                HeaderFlags::latest(
-                    pkgar_core::Architecture::Independent,
-                    match cook_config.compressed {
-                        true => pkgar_core::Packaging::LZMA2,
-                        false => pkgar_core::Packaging::Uncompressed,
-                    },
-                ),
-            )?;
+        if package_meta.is_file() {
+            remove_all(&package_meta)?;
         }
+        if package_file.is_file() {
+            log_to_pty!(logger, "DEBUG: updating '{}'", package_file.display());
+            remove_all(&package_file)?;
+        }
+
+        let package_file_tmp = package_file.with_added_extension("tmp");
+        if package_file_tmp.is_file() {
+            remove_all(&package_file_tmp)?;
+        }
+        if cook_config.compressed && cook_config.verbose {
+            log_to_pty!(logger, "DEBUG: compressing '{}'", package_file.display());
+        }
+        pkgar::create_with_flags(
+            secret_path,
+            package_file_tmp.to_str().unwrap(),
+            stage_dir.to_str().unwrap(),
+            HeaderFlags::latest(
+                pkgar_core::Architecture::Independent,
+                match cook_config.compressed {
+                    true => pkgar_core::Packaging::LZMA2,
+                    false => pkgar_core::Packaging::Uncompressed,
+                },
+            ),
+        )?;
+        rename(&package_file_tmp, &package_file)?;
 
         let deps = if package.is_some() {
             BTreeSet::from([name.with_prefix(PackagePrefix::Any)])
@@ -85,34 +124,41 @@ pub fn package(
             auto_deps.clone()
         };
 
-        if !package_meta.is_file() {
-            let name = match package {
-                Some(p) => PackageName::new(format!("{}.{}", name.name(), p.name))?,
-                None => name.clone(),
-            };
-            let package_deps = match package {
-                Some(p) => p
-                    .dependencies
-                    .iter()
-                    .map(|dep| {
-                        if dep.name().is_empty() {
-                            name.with_suffix(dep.suffix())
-                        } else {
-                            dep.clone()
-                        }
-                    })
-                    .collect(),
-                None => recipe.recipe.package.dependencies.clone(),
-            };
-            package_toml(
-                package_meta,
-                recipe,
-                Some((Path::new(public_path), &package_file)),
-                package,
-                package_deps,
-                &deps,
-            )?;
-        }
+        let pkg_name = match package {
+            Some(p) => PackageName::new(format!("{}.{}", name.name(), p.name))?,
+            None => name.clone(),
+        };
+        let package_deps = match package {
+            Some(p) => p
+                .dependencies
+                .iter()
+                .map(|dep| {
+                    if dep.name().is_empty() {
+                        pkg_name.with_suffix(dep.suffix())
+                    } else {
+                        dep.clone()
+                    }
+                })
+                .collect(),
+            None => recipe.recipe.package.dependencies.clone(),
+        };
+        package_toml(
+            package_meta.clone(),
+            recipe,
+            Some((Path::new(public_path), &package_file)),
+            package,
+            package_deps,
+            &deps,
+        )?;
+
+        use pkgar_core::PackageSrc;
+        let pkey = PublicKeyFile::open(public_path)?.pkey;
+        let verified_pkg = PackageFile::new(&package_file, &pkey)?;
+        let written_meta = Package::from_file(&package_meta)?;
+        let header_hash = blake3::Hash::from_bytes(verified_pkg.header().blake3)
+            .to_hex()
+            .to_string();
+        assert_eq!(written_meta.blake3, header_hash);
     }
 
     Ok(())
