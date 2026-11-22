@@ -9,7 +9,7 @@ use crate::{
         self,
         memory::{AddrSpace, Grant, GrantFileRef, PageSpan, Provider},
     },
-    memory::{Page, PAGE_SIZE},
+    memory::PAGE_SIZE,
     scheme::SchemeId,
     sync::CleanLockToken,
     syscall::{
@@ -59,22 +59,13 @@ fn inner_maps(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec
                     let base_addr = base.start_address().data();
                     let virt_size = grant_info.page_count() * PAGE_SIZE;
 
-                    let mut rss_size = 0;
-
-                    // TODO: cheaper way to get RSS size
-                    for page in Page::range_inclusive(
-                        base,
-                        base.next_by(grant_info.page_count().saturating_sub(1)),
-                    ) {
-                        if addr_space_guard
-                            .table
-                            .utable
-                            .translate(page.start_address())
-                            .is_some()
-                        {
-                            rss_size += PAGE_SIZE;
-                        }
-                    }
+                    let start = base.start_address();
+                    let end = base.next_by(grant_info.page_count()).start_address();
+                    let rss_size = addr_space_guard
+                        .table
+                        .utable
+                        .count_mapped_pages(start, end)
+                        * PAGE_SIZE;
 
                     let (provider_type, opt_file_ref) = match &grant_info.provider {
                         Provider::Allocated { cow_file_ref, .. } => {

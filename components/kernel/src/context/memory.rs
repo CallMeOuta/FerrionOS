@@ -1403,28 +1403,26 @@ impl Grant {
     ) -> Result<Grant, Enomem> {
         const MAX_EAGER_PAGES: usize = 16;
 
-        let (the_frame, the_frame_info) = the_zeroed_frame();
+        if flags.has_user() {
+            let (the_frame, the_frame_info) = the_zeroed_frame();
 
-        // TODO: Use flush_all after a certain number of pages, otherwise no
+            for page in span.pages().take(MAX_EAGER_PAGES) {
+                unsafe {
+                    the_frame_info
+                        .add_ref(RefKind::Cow)
+                        .expect("the static zeroed frame cannot be shared!");
 
-        for page in span.pages().take(MAX_EAGER_PAGES) {
-            // Good thing with lazy page fault handlers, is that if we fail due to ENOMEM here, we
-            // can continue and let the process face the OOM killer later.
-            unsafe {
-                the_frame_info
-                    .add_ref(RefKind::Cow)
-                    .expect("the static zeroed frame cannot be shared!");
-
-                let Some(result) = mapper.map_phys(
-                    page.start_address(),
-                    the_frame.base(),
-                    flags.write(false),
-                    0,
-                ) else {
-                    break;
-                };
-                result.ignore();
-                flusher.queue(the_frame, None, TlbShootdownActions::NEW_MAPPING);
+                    let Some(result) = mapper.map_phys(
+                        page.start_address(),
+                        the_frame.base(),
+                        flags.write(false),
+                        0,
+                    ) else {
+                        break;
+                    };
+                    result.ignore();
+                    flusher.queue(the_frame, None, TlbShootdownActions::NEW_MAPPING);
+                }
             }
         }
 
@@ -1781,40 +1779,85 @@ impl Grant {
         dst_flusher: &mut impl GenericFlusher,
         mode: CopyMappingsMode,
     ) -> Result<Grant, Enomem> {
-        let (allows_writable, rk) = match mode {
-            CopyMappingsMode::Owned { .. } => (false, RefKind::Cow),
-            CopyMappingsMode::Borrowed => (true, RefKind::Shared),
-        };
+        match mode {
+            CopyMappingsMode::Owned { .. } => {
+                let start = src_base.start_address();
+                let end = src_base.next_by(page_count).start_address();
+                unsafe {
+                    src_mapper.try_remap_range_with_full(
+                        start,
+                        end,
+                        |same_phys, old_flags| Some((same_phys, old_flags.write(false))),
+                        |src_virt, phys, _old_flags| {
+                            let frame = Frame::containing(phys);
+                            src_flusher.queue(frame, None, TlbShootdownActions::REVOKE_WRITE);
 
-        // TODO: Page table iterator
-        for page_idx in 0..page_count {
-            let src_page = src_base.next_by(page_idx);
-            let dst_page = dst_base.next_by(page_idx).start_address();
+                            let src_page_info = get_page_info(frame)
+                                .expect("allocated page was not present in the global page array");
+                            let src_frame = match src_page_info.add_ref(RefKind::Cow) {
+                                Ok(()) => frame,
+                                Err(AddRefError::CowToShared) => {
+                                    unreachable!("CowToShared cannot occur in Owned copy_mappings")
+                                }
+                                Err(AddRefError::SharedToCow) => {
+                                    if src_page_info.add_ref(RefKind::Shared)
+                                        == Err(AddRefError::RcOverflow)
+                                    {
+                                        return Err(Enomem);
+                                    }
+                                    let CowResult {
+                                        new_frame,
+                                        old_frame,
+                                    } = cow(frame, src_page_info, RefKind::Cow)
+                                        .map_err(|_| Enomem)?;
+                                    if let Some(old_frame) = old_frame {
+                                        src_flusher.queue(
+                                            old_frame,
+                                            None,
+                                            TlbShootdownActions::FREE,
+                                        );
+                                    }
+                                    new_frame
+                                }
+                                Err(AddRefError::RcOverflow) => return Err(Enomem),
+                            };
 
-            let src_frame = match rk {
-                RefKind::Cow => {
-                    let Some((_, phys, flush)) = (unsafe {
-                        src_mapper.remap_with(src_page.start_address(), |flags| flags.write(false))
-                    }) else {
-                        // Page is not mapped, let the page fault handler take care of that (initializing
-                        // it to zero).
-                        //
-                        // TODO: If eager, allocate zeroed page if writable, or use *the* zeroed page (also
-                        // for read-only)?
-                        continue;
-                    };
-                    unsafe {
-                        flush.ignore();
-                    }
-                    let frame = Frame::containing(phys);
-                    src_flusher.queue(frame, None, TlbShootdownActions::REVOKE_WRITE);
-                    frame
+                            let page_idx =
+                                Page::containing_address(src_virt).offset_from(src_base);
+                            let dst_page = dst_base.next_by(page_idx).start_address();
+                            let Some(map_result) = (unsafe {
+                                dst_mapper.map_phys(
+                                    dst_page,
+                                    src_frame.base(),
+                                    flags.write(false),
+                                    0,
+                                )
+                            }) else {
+                                return Ok(core::ops::ControlFlow::Break(()));
+                            };
+                            unsafe {
+                                map_result.ignore();
+                            }
+                            dst_flusher.queue(
+                                src_frame,
+                                None,
+                                TlbShootdownActions::NEW_MAPPING,
+                            );
+                            Ok(core::ops::ControlFlow::Continue(()))
+                        },
+                    )?;
                 }
-                RefKind::Shared => {
-                    if let Some((phys, _)) = src_mapper.translate(src_page.start_address()) {
+            }
+            CopyMappingsMode::Borrowed => {
+                for page_idx in 0..page_count {
+                    let src_page = src_base.next_by(page_idx);
+                    let dst_page = dst_base.next_by(page_idx).start_address();
+
+                    let src_frame = if let Some((phys, _)) =
+                        src_mapper.translate(src_page.start_address())
+                    {
                         Frame::containing(phys)
                     } else {
-                        // TODO: Omit the unnecessary subsequent add_ref call.
                         let must_be_zero = true;
                         let new_frame =
                             init_frame(RefCount::One, must_be_zero).expect("TODO: handle OOM");
@@ -1827,89 +1870,63 @@ impl Grant {
                             src_flush.ignore();
                         }
                         src_flusher.queue(new_frame, None, TlbShootdownActions::NEW_MAPPING);
-
                         new_frame
-                    }
-                }
-            };
+                    };
 
-            let src_frame = {
-                let src_page_info = get_page_info(src_frame)
-                    .expect("allocated page was not present in the global page array");
+                    let src_frame = {
+                        let src_page_info = get_page_info(src_frame)
+                            .expect("allocated page was not present in the global page array");
 
-                match src_page_info.add_ref(rk) {
-                    Ok(()) => src_frame,
-                    Err(AddRefError::CowToShared) => {
-                        let CowResult {
-                            new_frame,
-                            old_frame,
-                        } = cow(src_frame, src_page_info, rk).map_err(|_| Enomem)?;
-                        if let Some(old_frame) = old_frame {
-                            src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
-                        }
-
-                        // TODO: Flusher
-                        unsafe {
-                            if let Some((_flags, phys, flush)) = src_mapper
-                                .remap_with_full(src_page.start_address(), |_, f| {
-                                    Some((new_frame.base(), f))
-                                })
-                            {
-                                // TODO: flush.ignore() is correct, but seems to be amplifying a
-                                // userspace race condition
-                                //
-                                //flush.ignore();
-                                flush.flush();
-
-                                // FIXME: Is MOVE correct?
-                                src_flusher.queue(
-                                    Frame::containing(phys),
-                                    None,
-                                    TlbShootdownActions::MOVE,
-                                );
+                        match src_page_info.add_ref(RefKind::Shared) {
+                            Ok(()) => src_frame,
+                            Err(AddRefError::CowToShared) => {
+                                let CowResult {
+                                    new_frame,
+                                    old_frame,
+                                } = cow(src_frame, src_page_info, RefKind::Shared)
+                                    .map_err(|_| Enomem)?;
+                                if let Some(old_frame) = old_frame {
+                                    src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+                                }
+                                unsafe {
+                                    if let Some((_flags, phys, flush)) = src_mapper
+                                        .remap_with_full(src_page.start_address(), |_, f| {
+                                            Some((new_frame.base(), f))
+                                        })
+                                    {
+                                        flush.flush();
+                                        src_flusher.queue(
+                                            Frame::containing(phys),
+                                            None,
+                                            TlbShootdownActions::MOVE,
+                                        );
+                                    }
+                                }
+                                new_frame
                             }
+                            Err(AddRefError::SharedToCow) => {
+                                unreachable!("SharedToCow cannot occur in Borrowed copy_mappings")
+                            }
+                            Err(AddRefError::RcOverflow) => return Err(Enomem),
                         }
+                    };
 
-                        new_frame
+                    let Some(map_result) = (unsafe {
+                        dst_mapper.map_phys(
+                            dst_page,
+                            src_frame.base(),
+                            flags.write(flags.has_write()),
+                            0,
+                        )
+                    }) else {
+                        break;
+                    };
+                    unsafe {
+                        map_result.ignore();
                     }
-                    // Cannot be shared and CoW simultaneously.
-                    Err(AddRefError::SharedToCow) => {
-                        // The call to cow() later implicitly removes one ref, so add it here
-                        // first, even if Shared.
-                        if src_page_info.add_ref(RefKind::Shared) == Err(AddRefError::RcOverflow) {
-                            return Err(Enomem);
-                        }
-
-                        // TODO: Copy in place, or use a zeroed page?
-                        let CowResult {
-                            new_frame,
-                            old_frame,
-                        } = cow(src_frame, src_page_info, rk).map_err(|_| Enomem)?;
-                        if let Some(old_frame) = old_frame {
-                            src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
-                        }
-                        new_frame
-                    }
-                    Err(AddRefError::RcOverflow) => return Err(Enomem),
+                    dst_flusher.queue(src_frame, None, TlbShootdownActions::NEW_MAPPING);
                 }
-            };
-
-            let Some(map_result) = (unsafe {
-                dst_mapper.map_phys(
-                    dst_page,
-                    src_frame.base(),
-                    flags.write(flags.has_write() && allows_writable),
-                    // TODO: huge pages?
-                    0,
-                )
-            }) else {
-                break;
-            };
-            unsafe {
-                map_result.ignore();
             }
-
-            dst_flusher.queue(src_frame, None, TlbShootdownActions::NEW_MAPPING);
         }
 
         Ok(Grant {
@@ -1941,40 +1958,57 @@ impl Grant {
         dst_flusher: &mut impl GenericFlusher,
     ) -> Result<Grant> {
         assert!(!self.info.is_pinned());
+        let src_span = self.span();
+        let dst_span = PageSpan::new(dst_base, self.info.page_count);
+        if dst_mapper.is_none() {
+            assert!(!src_span.intersects(dst_span));
+        }
 
-        for src_page in self.span().pages() {
-            let dst_page = dst_base.next_by(src_page.offset_from(self.base));
+        const TRANSFER_BATCH_PAGES: usize = 64;
+        let mut batch = [(
+            VirtualAddress::new(0),
+            rmm::PhysicalAddress::new(0),
+            0u8,
+            PageFlags::new(),
+        ); TRANSFER_BATCH_PAGES];
+        let mut cur = self.base.start_address();
+        let end = self.base.next_by(self.info.page_count).start_address();
 
-            // TODO: Validate flags?
-            let Some((phys, lvl, _flags, flush)) =
-                (unsafe { src_mapper.unmap_phys(src_page.start_address()) })
-            else {
-                continue;
+        while cur < end {
+            let (count, next_cur) = unsafe {
+                src_mapper.unmap_range_batch(
+                    cur,
+                    end,
+                    &mut batch,
+                    Some(|table_phys| unsafe {
+                        TheFrameAllocator(NumaMemoryPolicy::NodeLocalLeniant).free_one(table_phys);
+                    }),
+                )
             };
-            unsafe {
-                flush.ignore();
+            assert!(count <= batch.len());
+            assert!(next_cur > cur);
+            cur = next_cur;
+
+            for &(src_virt, phys, lvl, _flags) in &batch[..count] {
+                assert_eq!(lvl, 0, "no userspace pages have huge mappings");
+                src_flusher.queue(Frame::containing(phys), None, TlbShootdownActions::MOVE);
+                let src_page = Page::containing_address(src_virt);
+                let dst_page = dst_base.next_by(src_page.offset_from(self.base));
+                let dst_mapper_ref = dst_mapper.as_deref_mut().unwrap_or(&mut *src_mapper);
+                let flush = unsafe {
+                    dst_mapper_ref
+                        .map_phys(dst_page.start_address(), phys, flags, 0)
+                        .expect("TODO: OOM")
+                };
+                unsafe {
+                    flush.ignore();
+                }
+                dst_flusher.queue(
+                    Frame::containing(phys),
+                    None,
+                    TlbShootdownActions::NEW_MAPPING,
+                );
             }
-            // TODO: huge pages
-            debug_assert_eq!(lvl, 0, "no userspace pages have huge mappings");
-
-            src_flusher.queue(Frame::containing(phys), None, TlbShootdownActions::MOVE);
-
-            let dst_mapper = dst_mapper.as_deref_mut().unwrap_or(&mut *src_mapper);
-
-            // TODO: Preallocate to handle OOM?
-            let flush = unsafe {
-                dst_mapper
-                    .map_phys(dst_page.start_address(), phys, flags, 0)
-                    .expect("TODO: OOM")
-            };
-            unsafe {
-                flush.ignore();
-            }
-            dst_flusher.queue(
-                Frame::containing(phys),
-                None,
-                TlbShootdownActions::NEW_MAPPING,
-            );
         }
 
         self.base = dst_base;
@@ -1990,29 +2024,27 @@ impl Grant {
     ) {
         assert!(self.info.mapped);
 
-        for page in self.span().pages() {
-            unsafe {
-                // Lazy mappings don't require remapping, as info.flags will be updated.
-                let Some((old_flags, phys, flush)) =
-                    mapper.remap_with_full(page.start_address(), |same_phys, old_flags| {
-                        if !old_flags.has_write() && new_flags.has_write() {
-                            // Page flags will be updated in [`correct_inner`].
-                            Some((same_phys, new_flags.write(false)))
-                        } else {
-                            Some((same_phys, new_flags))
-                        }
-                    })
-                else {
-                    continue;
-                };
-                flush.ignore();
-                //info!("Remapped page {:?} (frame {:?})", page, Frame::containing(mapper.translate(page.start_address()).unwrap().0));
-                flusher.queue(
-                    Frame::containing(phys),
-                    None,
-                    TlbShootdownActions::change_of_flags(old_flags, new_flags),
-                );
-            }
+        let start = self.base.start_address();
+        let end = self.base.next_by(self.info.page_count).start_address();
+        unsafe {
+            mapper.remap_range_with_full(
+                start,
+                end,
+                |same_phys, old_flags| {
+                    if !old_flags.has_write() && new_flags.has_write() {
+                        Some((same_phys, new_flags.write(false)))
+                    } else {
+                        Some((same_phys, new_flags))
+                    }
+                },
+                |_virt, phys, old_flags| {
+                    flusher.queue(
+                        Frame::containing(phys),
+                        None,
+                        TlbShootdownActions::change_of_flags(old_flags, new_flags),
+                    );
+                },
+            );
         }
 
         self.info.flags = new_flags;
@@ -2094,22 +2126,20 @@ impl Grant {
                 TlbShootdownActions::FREE,
             );
         } else {
-            for page in self.span().pages() {
-                // Lazy mappings do not need to be unmapped.
-                let Some((phys, lvl, _, flush)) =
-                    (unsafe { mapper.unmap_phys(page.start_address()) })
-                else {
-                    continue;
-                };
-
-                // TODO: huge pages
-                debug_assert_eq!(lvl, 0);
-
-                unsafe {
-                    flush.ignore();
-                }
-
-                flusher.queue(Frame::containing(phys), None, TlbShootdownActions::FREE);
+            let start = self.base.start_address();
+            let end = self.base.next_by(self.info.page_count).start_address();
+            unsafe {
+                mapper.unmap_range(
+                    start,
+                    end,
+                    |_virt, phys, lvl, _flags| {
+                        assert_eq!(lvl, 0);
+                        flusher.queue(Frame::containing(phys), None, TlbShootdownActions::FREE);
+                    },
+                    Some(|table_phys| unsafe {
+                        TheFrameAllocator(NumaMemoryPolicy::NodeLocalLeniant).free_one(table_phys);
+                    }),
+                );
             }
         }
 

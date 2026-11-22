@@ -53,16 +53,27 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
                     // TODO: All user programs must have some grant in order for executable memory to even
                     // exist, but is this a good indicator of whether it is user or kernel?
                     let is_kernel = addr_space_guard.grants.is_empty();
-                    for (_base, info) in addr_space_guard.grants.iter() {
-                        // wrap as method?
+                    for (base, info) in addr_space_guard.grants.iter() {
                         match info.provider {
                             context::memory::Provider::Allocated { .. } => {
-                                private_memory += info.page_count() * crate::memory::PAGE_SIZE
+                                let start = base.start_address();
+                                let end = base.next_by(info.page_count()).start_address();
+                                private_memory += addr_space_guard
+                                    .table
+                                    .utable
+                                    .count_mapped_pages(start, end)
+                                    * crate::memory::PAGE_SIZE;
                             }
-                            // Excluded because it is not allocable by user, whether
-                            // this region is counted toward usable memory remain unknown
                             context::memory::Provider::PhysBorrowed { .. } => {}
-                            _ => shared_memory += info.page_count() * crate::memory::PAGE_SIZE,
+                            _ => {
+                                let start = base.start_address();
+                                let end = base.next_by(info.page_count()).start_address();
+                                shared_memory += addr_space_guard
+                                    .table
+                                    .utable
+                                    .count_mapped_pages(start, end)
+                                    * crate::memory::PAGE_SIZE;
+                            }
                         }
                     }
                     Some((private_memory, shared_memory, is_kernel))
