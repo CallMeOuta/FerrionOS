@@ -311,9 +311,56 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
     }
  
     if (!driver_loaded) {
+--- a/src/gallium/frontends/dri/dri_drawable.h
++++ b/src/gallium/frontends/dri/dri_drawable.h
+@@ -41,6 +41,12 @@
+ struct dri_context;
+ struct dri_screen;
+ 
++enum kopper_present_mode {
++   KOPPER_PRESENT_NONE = 0,
++   KOPPER_PRESENT_WSI,
++   KOPPER_PRESENT_SWRAST_COPY,
++};
++
+ struct dri_drawable
+ {
+    struct pipe_frontend_drawable base;
+@@ -93,6 +99,7 @@
+    /* kopper */
+    struct kopper_loader_info info;
+    struct dri_image   *image; //texture_from_pixmap
++   enum kopper_present_mode present_mode;
+    bool is_window;
+    bool window_valid;
+ #ifdef VK_USE_PLATFORM_XCB_KHR
 --- a/src/gallium/frontends/dri/kopper.c
 +++ b/src/gallium/frontends/dri/kopper.c
-@@ -453,6 +453,34 @@
+@@ -21,6 +21,7 @@
+  * DEALINGS IN THE SOFTWARE.
+  */
+ 
++#include <assert.h>
+ #include "mesa_interface.h"
+ #include "git_sha1.h"
+ #include "util/format/u_format.h"
+@@ -423,7 +424,14 @@
+    if (screen->loader.kopper->SetSurfaceCreateInfo)
+       screen->loader.kopper->SetSurfaceCreateInfo(drawable->loaderPrivate,
+                                                   &drawable->info);
+-   drawable->is_window = !isPixmap && drawable->info.bos.sType != 0;
++   if (!isPixmap && drawable->info.bos.sType != 0) {
++      drawable->present_mode = KOPPER_PRESENT_WSI;
++   } else if (!isPixmap && screen->loader.swrast != NULL) {
++      drawable->present_mode = KOPPER_PRESENT_SWRAST_COPY;
++   } else {
++      drawable->present_mode = KOPPER_PRESENT_NONE;
++   }
++   drawable->is_window = drawable->present_mode == KOPPER_PRESENT_WSI;
+ 
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+    if (drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR) {
+@@ -453,6 +461,34 @@
  #endif
  }
  
@@ -348,12 +395,24 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  int64_t
  kopperSwapBuffers(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
  {
-@@ -488,6 +516,8 @@
+@@ -488,8 +524,18 @@
     }
  
     kopper_copy_to_front(ctx->st->pipe, drawable, ptex, nrects, stack_boxes);
-+   if (!drawable->is_window && drawable->screen->loader.swrast)
+-   if (drawable->is_window && !zink_kopper_check(ptex))
+-      return -1;
++   switch (drawable->present_mode) {
++   case KOPPER_PRESENT_WSI:
++      if (!zink_kopper_check(ptex))
++         return -1;
++      break;
++   case KOPPER_PRESENT_SWRAST_COPY:
 +      kopper_present_swrast(ctx->st->pipe, drawable, ptex);
-    if (drawable->is_window && !zink_kopper_check(ptex))
-       return -1;
++      break;
++   case KOPPER_PRESENT_NONE:
++      assert(!drawable->is_window);
++      break;
++   }
     if (!drawable->textures[ST_ATTACHMENT_FRONT_LEFT]) {
+       return 0;
+    }
