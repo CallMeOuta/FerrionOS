@@ -27,6 +27,8 @@ pub const MADV_RANDOM: c_int = 1;
 pub const MADV_SEQUENTIAL: c_int = 2;
 pub const MADV_WILLNEED: c_int = 3;
 pub const MADV_DONTNEED: c_int = 4;
+pub const MADV_FREE: c_int = 8;
+pub const MADV_DONTNEED_LOCKED: c_int = 24;
 
 pub const MAP_SHARED: c_int = 0x0001;
 pub const MAP_PRIVATE: c_int = 0x0002;
@@ -75,9 +77,20 @@ pub unsafe extern "C" fn posix_madvise(addr: *mut c_void, len: size_t, advice: c
         return errno::EINVAL;
     }
 
-    match unsafe { Sys::madvise(addr, len, advice) } {
-        Ok(()) => 0,
-        Err(e) => e.0,
+    #[cfg(target_os = "redox")]
+    {
+        let _ = (addr, len);
+        0
+    }
+    #[cfg(not(target_os = "redox"))]
+    {
+        if advice == POSIX_MADV_DONTNEED {
+            return 0;
+        }
+        match unsafe { Sys::madvise(addr, len, advice) } {
+            Ok(()) => 0,
+            Err(e) => e.0,
+        }
     }
 }
 
