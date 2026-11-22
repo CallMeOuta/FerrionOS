@@ -1,0 +1,9 @@
+[package]
+description = "Checks signed update index verification against an HTTP server"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

@@ -3200,6 +3200,269 @@ def test_update_today(vm, args):
     return ok, note
 
 
+def update_index_fixtures(args, scratch):
+    release_bin = ROOT / "target" / "release" / "ferrion-release"
+    if not release_bin.is_file():
+        sys.exit("vm-test: target/release/ferrion-release is missing; build it with cargo build --release --bin ferrion-release")
+    target = f"{args.arch}-unknown-redox"
+    pkg_file = ROOT / "repo" / target / f"{FIXTURE_PACKAGE}.pkgar"
+    if not pkg_file.is_file():
+        sys.exit(f"vm-test: {pkg_file.relative_to(ROOT)} is missing; cook it first: make r.{FIXTURE_PACKAGE}")
+
+    def call(*cmd):
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise RuntimeError(f"{cmd} failed ({proc.returncode}): {proc.stderr.strip()}")
+        return proc.stdout.strip()
+
+    key_dir = scratch / "keys"
+    other_key_dir = scratch / "other-keys"
+    pubkey = call(str(release_bin), "keygen", "--out-dir", str(key_dir))
+    call(str(release_bin), "keygen", "--out-dir", str(other_key_dir))
+    key_pem = str(key_dir / "release.key")
+    other_pem = str(other_key_dir / "release.key")
+
+    def build_site(name, release, serial, signed, prev_root=None, channel=None):
+        out = scratch / name
+        cmd = [
+            str(release_bin), "build",
+            "--repo", str(ROOT / "repo"),
+            "--out", str(out),
+            "--arch", args.arch,
+            "--release", release,
+            "--serial", str(serial),
+            "--signed", signed,
+            "--fresh-days", "45",
+            "--package", FIXTURE_PACKAGE,
+            "--default-set", "app",
+            "--key", key_pem,
+        ]
+        if channel:
+            cmd += ["--channel", channel]
+        else:
+            cmd += ["--channel", f"dev={release}"]
+        if prev_root:
+            cmd += ["--previous-root", str(prev_root)]
+        call(*cmd)
+        return out
+
+    def sign_raw(pem, in_path, out_path):
+        call("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", pem, "-in", str(in_path), "-out", str(out_path))
+
+    r1 = build_site("r1", "2026112100", 1, "2026-11-21")
+    r2 = build_site("r2", "2026112200", 2, "2026-11-22", prev_root=r1 / "root.toml")
+    r3 = build_site("r3", "2027020100", 3, "2027-02-01", prev_root=r2 / "root.toml")
+
+    sites = {"r2": r2, "r3": r3}
+
+    c1 = scratch / "case1-wrong-key"
+    shutil.copytree(r2, c1)
+    sign_raw(other_pem, c1 / "root.toml", c1 / "root.toml.sig")
+    sites["c1"] = c1
+
+    sites["c2"] = r1
+
+    c3 = scratch / "case3-channel-downgrade"
+    shutil.copytree(r2, c3)
+    call(
+        str(release_bin), "sign-root",
+        "--root", str(c3 / "root.toml"),
+        "--out", str(c3),
+        "--serial", "10",
+        "--signed", "2026-11-22",
+        "--channel", "dev=2026112100",
+        "--key", key_pem,
+    )
+    sites["c3"] = c3
+
+    c4 = scratch / "case4-index-hash"
+    shutil.copytree(r3, c4)
+    idx4 = c4 / "snap" / "2027020100" / args.arch / "index.toml"
+    idx4.write_bytes(idx4.read_bytes() + b"\n")
+    sign_raw(key_pem, idx4, c4 / "snap" / "2027020100" / args.arch / "index.toml.sig")
+    sites["c4"] = c4
+
+    c5 = scratch / "case5-object-flip"
+    shutil.copytree(r3, c5)
+    obj5 = next((c5 / "objects").rglob("*"))
+    while obj5.is_dir():
+        obj5 = next(p for p in (c5 / "objects").rglob("*") if p.is_file())
+    raw5 = bytearray(obj5.read_bytes())
+    raw5[0] ^= 0x01
+    obj5.write_bytes(bytes(raw5))
+    sites["c5"] = c5
+
+    c6 = scratch / "case6-object-oversize"
+    shutil.copytree(r3, c6)
+    obj6 = next(p for p in (c6 / "objects").rglob("*") if p.is_file())
+    obj6.write_bytes(obj6.read_bytes() + b"0123456789abcdef")
+    sites["c6"] = c6
+
+    c7a = scratch / "case7a-unknown-key"
+    shutil.copytree(r3, c7a)
+    root7a = c7a / "root.toml"
+    root7a.write_text('unexpected_key = "x"\n' + root7a.read_text())
+    sign_raw(key_pem, root7a, c7a / "root.toml.sig")
+    sites["c7a"] = c7a
+
+    c7b = scratch / "case7b-unknown-format"
+    shutil.copytree(r3, c7b)
+    root7b = c7b / "root.toml"
+    root7b.write_text(root7b.read_text().replace("format = 1", "format = 2", 1))
+    sign_raw(key_pem, root7b, c7b / "root.toml.sig")
+    sites["c7b"] = c7b
+
+    return pubkey, sites
+
+
+def update_index_server(sites):
+    import http.server
+
+    state = {"dir": sites["r2"]}
+    requests_log = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self):
+            requests_log.append({
+                "path": self.path,
+                "user_agent": self.headers.get("User-Agent"),
+                "cookie": self.headers.get("Cookie"),
+            })
+            rel = self.path.lstrip("/")
+            if "?" in self.path or ".." in rel.split("/"):
+                self.send_response(400)
+                self.end_headers()
+                return
+            target = (state["dir"] / rel).resolve()
+            base = state["dir"].resolve()
+            if not str(target).startswith(str(base)) or not target.is_file():
+                self.send_response(404)
+                self.end_headers()
+                return
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, state, requests_log
+
+
+def test_update_index(vm, args):
+    """As root with a working network, runs update-index-probe against a static server on the host serving ferrion-release snapshots across all eight UP1 refusal and staleness cases, checking state immutability, request hygiene, and that ferrion update stays exit 6 (x86_64 desktop)."""
+    scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-up1-"))
+    try:
+        pubkey, sites = update_index_fixtures(args, scratch)
+        server, srv_state, requests_log = update_index_server(sites)
+        port = server.server_address[1]
+        try:
+            if not root_shell(vm, args.timeout):
+                return False, "no root shell on the serial console"
+            since = vm.mark()
+            vm.type("bash --norc --noprofile --noediting\n")
+            if not vm.wait_serial(r"bash-[0-9.]+# ", 30, since):
+                return False, "bash prompt did not appear after root login"
+            status, network = run_status(
+                vm, 'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); '
+                    'while [[ -z "$server" || "$server" == 9.9.9.9 ]] && (( SECONDS < deadline )); do '
+                    'sleep 0.1; server=$(cat /etc/net/dns); done; echo "configured DNS: $server"; '
+                    '[[ -n "$server" && "$server" != 9.9.9.9 ]]', 70)
+            (vm.out / "network.txt").write_text(network)
+            if status != 0:
+                return False, "boot DHCP did not publish a lease DNS server"
+
+            have_code, have_out = run_status(vm, "test -x /usr/bin/update-index-probe")
+            if have_code != 0:
+                return False, "update-index-probe is not installed in this image"
+
+            transcript = []
+
+            def run_case(label, site_key, today, expect_code, expect_marker):
+                srv_state["dir"] = sites[site_key]
+                code, out = run_status(
+                    vm,
+                    f"update-index-probe sync --state /tmp/up1.state --server 10.0.2.2:{port} --today {today}",
+                    60,
+                )
+                transcript.append(f"[{label}] site={site_key} today={today} exit={code}\n{out.strip()}\n")
+                if code != expect_code or expect_marker not in out:
+                    raise ValueError(f"{label}: exit={code}, expected {expect_code} with {expect_marker!r}; got {out.strip()!r}")
+                return out
+
+            def state_hash():
+                code, out = run_status(vm, "sha256sum /tmp/up1.state")
+                if code != 0:
+                    raise ValueError(f"sha256sum /tmp/up1.state failed: {out}")
+                m = re.search(r"([0-9a-f]{64})", out)
+                if not m:
+                    raise ValueError(f"no sha256 in {out!r}")
+                return m.group(1)
+
+            try:
+                init_code, init_out = run_status(
+                    vm,
+                    f"update-index-probe init --state /tmp/up1.state --pubkey {pubkey} --arch {args.arch} --channel dev --installed 2026112100 --serial 1",
+                )
+                transcript.append(f"[init] exit={init_code}\n{init_out.strip()}\n")
+                if init_code != 0 or "INITIALIZED release=2026112100 serial=1" not in init_out:
+                    raise ValueError(f"init failed: {init_code} {init_out}")
+
+                run_case("baseline-r2", "r2", "2026-11-22", 0, "ACCEPTED release=2026112200 serial=2 packages=1 stale=no")
+                baseline_hash = state_hash()
+
+                refusal_cases = [
+                    ("case1-wrong-key", "c1", "2026-11-22", "REFUSED reason=invalid-signature"),
+                    ("case2-replay-serial", "c2", "2026-11-22", "REFUSED reason=rollback-serial"),
+                    ("case3-channel-downgrade", "c3", "2026-11-22", "REFUSED reason=rollback-release"),
+                    ("case4-index-hash-mismatch", "c4", "2027-02-01", "REFUSED reason=index-hash-mismatch"),
+                    ("case5-object-byte-flip", "c5", "2027-02-01", "REFUSED reason=object-hash-mismatch"),
+                    ("case6-object-oversize", "c6", "2027-02-01", "REFUSED reason=object-too-large"),
+                    ("case7a-unknown-key", "c7a", "2027-02-01", "REFUSED reason=unknown-key-or-syntax"),
+                    ("case7b-unknown-format", "c7b", "2027-02-01", "REFUSED reason=unsupported-format"),
+                ]
+                for label, site_key, today, marker in refusal_cases:
+                    run_case(label, site_key, today, 1, marker)
+                    after_hash = state_hash()
+                    if after_hash != baseline_hash:
+                        raise ValueError(f"{label}: installed state changed ({baseline_hash} -> {after_hash})")
+
+                run_case("case8a-stale-accepted", "r2", "2027-02-01", 0, "ACCEPTED release=2026112200 serial=2 packages=1 stale=yes age_days=71")
+                run_case("case8b-fresh-replaces-stale", "r3", "2027-02-01", 0, "ACCEPTED release=2027020100 serial=3 packages=1 stale=no age_days=0")
+                if state_hash() == baseline_hash:
+                    raise ValueError("case8b: state did not advance after fresh replacement")
+
+                up0_code, up0_out = run_status(vm, "ferrion --json update --yes")
+                transcript.append(f"[up0-guard] exit={up0_code}\n{up0_out.strip()}\n")
+                if up0_code != 6:
+                    raise ValueError(f"ferrion update must stay exit 6 until UP3, got {up0_code}")
+
+                for req in requests_log:
+                    if req["user_agent"] != "ferrion-update/1":
+                        raise ValueError(f"unexpected User-Agent: {req!r}")
+                    if "?" in req["path"] or req["cookie"] is not None:
+                        raise ValueError(f"request carried query or cookie: {req!r}")
+            except ValueError as err:
+                (vm.out / "update-index.txt").write_text("\n".join(transcript))
+                (vm.out / "update-index-requests.json").write_text(json.dumps(requests_log, indent=2))
+                return False, f"{err}; see {vm.out}"
+
+            (vm.out / "update-index.txt").write_text("\n".join(transcript))
+            (vm.out / "update-index-requests.json").write_text(json.dumps(requests_log, indent=2))
+            return True, f"8/8 UP1 cases passed (7 refusals left state unchanged; stale accepted with notice then replaced; {len(requests_log)} clean HTTP requests; ferrion update exit 6); see {vm.out}"
+        finally:
+            server.shutdown()
+            server.server_close()
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 # An HTTP server on the host for the ferrion-run test; `seen` lists the paths requested.
 # QEMU's user network takes the guest's connections to 10.0.2.2 to the host's 127.0.0.1.
 def ferrion_run_server():
@@ -5754,6 +6017,7 @@ TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-lo
          "ferrion-run": test_ferrion_run}
 TESTS["ferrion-cli"] = test_ferrion_cli
 TESTS["update-today"] = test_update_today
+TESTS["update-index"] = test_update_index
 TESTS["driver-namespaces"] = test_driver_namespaces
 TESTS["scheme-create"] = test_scheme_create
 TESTS["nsmgr-bounds"] = test_nsmgr_bounds
