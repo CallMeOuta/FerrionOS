@@ -4829,7 +4829,7 @@ def test_gpu_blob(vm, args):
 
 
 def test_gpu_submit(vm, args):
-    """Logs in as root on the serial console and runs gpu-probe-submit on a 3D device (gpu=venus unless --make names another): submits on ring 0 with FENCE_FD_OUT, polls the fence descriptor until signaled, checks a 300 ms poll timeout on an unsignaled fence lands in 270..400 ms, verifies refusal paths, and confirms virtio_gpu_cmd_ctx_submit and virtio_gpu_fence_resp in QEMU's trace."""
+    """Logs in as root on the serial console and runs gpu-probe-submit on a 3D device (gpu=venus unless --make names another): submits on ring 0 with FENCE_FD_OUT and polls the sync file it gets until signaled, merges two submission fences, signals binary and timeline sync objects named as out sync objects, waits on in sync objects and on a FENCE_FD_IN sync file that a sync object gates, checks a 300 ms poll timeout on an unsignaled sync file lands in 270..400 ms, verifies refusal paths, and confirms virtio_gpu_cmd_ctx_submit and a virtio_gpu_fence_resp for every submission in QEMU's trace."""
     tag = "gpu-probe-submit"
     if not root_shell(vm, args.timeout):
         return False, "no root serial login"
@@ -4840,7 +4840,7 @@ def test_gpu_submit(vm, args):
     reasons = []
     fields = dict(re.findall(rf"(?m)^{tag}: (render|context-name) (\S+)", output))
     failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):", output)
-    signaled = re.search(rf"(?m)^{tag}: submit-ring0 signaled fence_id=(\d+) wait_ms=(\d+)", output)
+    signaled = re.search(rf"(?m)^{tag}: submit-ring0 signaled wait_ms=(\d+)", output)
     timeout_poll = re.search(rf"(?m)^{tag}: timeout-poll ret=(-?\d+) revents=(0x[0-9a-f]+|0) elapsed_ms=(\d+)", output)
     if "render" not in fields:
         reasons.append("the probe found no render name")
@@ -4889,13 +4889,11 @@ def test_gpu_submit(vm, args):
         reasons.append(f"QEMU's trace has no virtio_gpu_cmd_ctx_submit for context {ctx_id}")
     if not any(fid != 0 for fid in fences):
         reasons.append("QEMU's trace has no non-zero virtio_gpu_fence_resp")
-    elif signaled:
-        fence_id = int(signaled.group(1))
-        if fence_id not in fences:
-            reasons.append(f"QEMU's trace has no virtio_gpu_fence_resp for fence {fence_id:#x}")
+    elif ctx_id is not None and len(fences) < submits.count(ctx_id):
+        reasons.append(f"{submits.count(ctx_id)} submissions but {len(fences)} virtio_gpu_fence_resp in QEMU's trace")
     if reasons:
         return False, "; ".join(reasons) + f"; see {log}"
-    return True, (f"{fields['render']}: fence {signaled.group(1)} signaled in {signaled.group(2)} ms; "
+    return True, (f"{fields['render']}: first sync file signaled in {signaled.group(1)} ms; "
                   f"300 ms timeout poll took {timeout_poll.group(3)} ms; "
                   f"trace: {submits.count(ctx_id)} submit(s) for ctx {ctx_id:#x}, {len(fences)} fence_resp; "
                   f"{output.count(f'{tag}: pass ')} probe checks passed")

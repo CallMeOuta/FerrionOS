@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,9 +13,10 @@
 
 #define TAG "gpu-probe-submit"
 
-#define DRM_IOC(dir, nr, size) \
-    ((unsigned long)(((unsigned long)(dir) << 30) | ((unsigned long)(size) << 16) | (0x64UL << 8) | (nr)))
-#define DRM_IOWR(nr, type) DRM_IOC(3, nr, sizeof(type))
+#define IOC_NR(dir, type, nr, size) \
+    ((unsigned long)(((unsigned long)(dir) << 30) | ((unsigned long)(size) << 16) | ((unsigned long)(type) << 8) | (nr)))
+#define DRM_IOWR(nr, t) IOC_NR(3, 'd', nr, sizeof(t))
+#define SYNC_IOWR(nr, t) IOC_NR(3, '>', nr, sizeof(t))
 
 struct drm_virtgpu_execbuffer_syncobj {
     uint32_t handle;
@@ -53,15 +55,99 @@ struct drm_virtgpu_context_init {
     uint64_t ctx_set_params;
 };
 
-struct virtgpu_fence_state {
-    uint32_t signaled;
+struct drm_syncobj_create {
+    uint32_t handle;
+    uint32_t flags;
+};
+
+struct drm_syncobj_destroy {
+    uint32_t handle;
+    uint32_t pad;
+};
+
+struct drm_syncobj_handle {
+    uint32_t handle;
+    uint32_t flags;
+    int32_t fd;
+    uint32_t pad;
+    uint64_t point;
+};
+
+struct drm_syncobj_wait {
+    uint64_t handles;
+    int64_t timeout_nsec;
+    uint32_t count_handles;
+    uint32_t flags;
+    uint32_t first_signaled;
+    uint32_t pad;
+    uint64_t deadline_nsec;
+};
+
+struct drm_syncobj_timeline_wait {
+    uint64_t handles;
+    uint64_t points;
+    int64_t timeout_nsec;
+    uint32_t count_handles;
+    uint32_t flags;
+    uint32_t first_signaled;
+    uint32_t pad;
+    uint64_t deadline_nsec;
+};
+
+struct drm_syncobj_array {
+    uint64_t handles;
+    uint32_t count_handles;
+    uint32_t pad;
+};
+
+struct drm_syncobj_timeline_array {
+    uint64_t handles;
+    uint64_t points;
+    uint32_t count_handles;
+    uint32_t flags;
+};
+
+struct sync_merge_data {
+    char name[32];
+    int32_t fd2;
+    int32_t fence;
+    uint32_t flags;
+    uint32_t pad;
+};
+
+struct sync_fence_info {
+    char obj_name[32];
+    char driver_name[32];
     int32_t status;
-    uint64_t fence_id;
+    uint32_t flags;
+    uint64_t timestamp_ns;
+};
+
+struct sync_file_info {
+    char name[32];
+    int32_t status;
+    uint32_t flags;
+    uint32_t num_fences;
+    uint32_t pad;
+    uint64_t sync_fence_info;
 };
 
 #define DRM_IOCTL_VIRTGPU_EXECBUFFER DRM_IOWR(0x42, struct drm_virtgpu_execbuffer)
 #define DRM_IOCTL_VIRTGPU_WAIT DRM_IOWR(0x48, struct drm_virtgpu_3d_wait)
 #define DRM_IOCTL_VIRTGPU_CONTEXT_INIT DRM_IOWR(0x4b, struct drm_virtgpu_context_init)
+#define DRM_IOCTL_SYNCOBJ_CREATE DRM_IOWR(0xbf, struct drm_syncobj_create)
+#define DRM_IOCTL_SYNCOBJ_DESTROY DRM_IOWR(0xc0, struct drm_syncobj_destroy)
+#define DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD DRM_IOWR(0xc1, struct drm_syncobj_handle)
+#define DRM_IOCTL_SYNCOBJ_WAIT DRM_IOWR(0xc3, struct drm_syncobj_wait)
+#define DRM_IOCTL_SYNCOBJ_SIGNAL DRM_IOWR(0xc5, struct drm_syncobj_array)
+#define DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT DRM_IOWR(0xca, struct drm_syncobj_timeline_wait)
+#define DRM_IOCTL_SYNCOBJ_QUERY DRM_IOWR(0xcb, struct drm_syncobj_timeline_array)
+#define SYNC_IOC_MERGE SYNC_IOWR(3, struct sync_merge_data)
+#define SYNC_IOC_FILE_INFO SYNC_IOWR(4, struct sync_file_info)
+
+#define DRM_SYNCOBJ_CREATE_SIGNALED (1U << 0)
+#define DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE (1U << 0)
+#define VIRTGPU_EXECBUF_SYNCOBJ_RESET 0x01
 
 #define VIRTGPU_EXECBUF_FENCE_FD_IN 0x01
 #define VIRTGPU_EXECBUF_FENCE_FD_OUT 0x02
@@ -77,7 +163,6 @@ struct virtgpu_fence_state {
 #define CAPSET_VENUS 4
 
 #define FENCE_DUP_EXECBUFFER 0x42ULL
-#define FENCE_DUP_UNSIGNALED 0x4201ULL
 
 extern intptr_t redox_dup_v1(size_t fd, const uint8_t *buf, size_t len);
 
@@ -125,6 +210,83 @@ static int64_t monotonic_ms(void)
     struct timespec ts = {0};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int64_t monotonic_ns(void)
+{
+    struct timespec ts = {0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static uint32_t syncobj_create(int fd, uint32_t flags)
+{
+    struct drm_syncobj_create create = {.flags = flags};
+    if (ioctl(fd, DRM_IOCTL_SYNCOBJ_CREATE, &create) != 0)
+        return 0;
+    return create.handle;
+}
+
+static void syncobj_destroy(int fd, uint32_t handle)
+{
+    struct drm_syncobj_destroy destroy = {.handle = handle};
+    ioctl(fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
+}
+
+static int syncobj_export(int fd, uint32_t handle, uint32_t flags)
+{
+    struct drm_syncobj_handle args = {.handle = handle, .flags = flags, .fd = -1};
+    if (ioctl(fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &args) != 0)
+        return -1;
+    return args.fd;
+}
+
+static int syncobj_wait(int fd, uint32_t handle, int64_t timeout_ms)
+{
+    struct drm_syncobj_wait wait = {
+        .handles = (uintptr_t)&handle,
+        .timeout_nsec = monotonic_ns() + timeout_ms * 1000000,
+        .count_handles = 1,
+    };
+    return ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait);
+}
+
+static int sync_file_status(int sync_fd, uint32_t *num_fences, uint64_t *timestamp_ns)
+{
+    struct sync_fence_info fences[4];
+    memset(fences, 0, sizeof fences);
+    struct sync_file_info info = {.num_fences = 4, .sync_fence_info = (uintptr_t)fences};
+    if (ioctl(sync_fd, SYNC_IOC_FILE_INFO, &info) != 0)
+        return -1000;
+    if (num_fences)
+        *num_fences = info.num_fences;
+    if (timestamp_ns)
+        *timestamp_ns = fences[0].timestamp_ns;
+    return info.status;
+}
+
+struct blocked_submit {
+    int fd;
+    int sync_fd;
+    int ret;
+    int err;
+    int out_fd;
+    volatile int done;
+};
+
+static void *blocked_submit_thread(void *arg)
+{
+    struct blocked_submit *b = arg;
+    struct drm_virtgpu_execbuffer submit = {
+        .flags = VIRTGPU_EXECBUF_RING_IDX | VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_FENCE_FD_OUT,
+        .ring_idx = 0,
+        .fence_fd = b->sync_fd,
+    };
+    b->ret = ioctl(b->fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &submit);
+    b->err = errno;
+    b->out_fd = submit.fence_fd;
+    b->done = 1;
+    return NULL;
 }
 
 static int find_render_name(char *out, size_t size)
@@ -206,11 +368,26 @@ int gpu_probe_submit(int argc, char **argv)
     struct drm_virtgpu_execbuffer bad_flags = {.flags = 0x100};
     expect_errno("execbuf-unknown-flags", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &bad_flags), EINVAL);
 
-    struct drm_virtgpu_execbuffer fence_in = {
+    uint32_t probe_obj = syncobj_create(fd, 0);
+    if (!probe_obj)
+        fail("syncobj-create", strerror(errno));
+
+    struct drm_virtgpu_execbuffer fence_in_bad = {
         .flags = VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_RING_IDX,
         .fence_fd = -1,
     };
-    expect_errno("execbuf-fence-in-refused", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &fence_in), EOPNOTSUPP);
+    expect_errno("execbuf-fence-in-bad-fd", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &fence_in_bad), EINVAL);
+
+    int syncobj_fd = syncobj_export(fd, probe_obj, 0);
+    if (expect_ok("syncobj-fd", syncobj_fd) >= 0) {
+        struct drm_virtgpu_execbuffer fence_in_wrong = {
+            .flags = VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_RING_IDX,
+            .fence_fd = syncobj_fd,
+        };
+        expect_errno("execbuf-fence-in-not-sync-file",
+                     ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &fence_in_wrong), EINVAL);
+        close(syncobj_fd);
+    }
 
     struct drm_virtgpu_execbuffer bad_ring = {
         .flags = VIRTGPU_EXECBUF_RING_IDX,
@@ -218,7 +395,7 @@ int gpu_probe_submit(int argc, char **argv)
     };
     expect_errno("execbuf-ring-oob", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &bad_ring), EINVAL);
 
-    struct drm_virtgpu_execbuffer_syncobj syncobj = {.handle = 1, .flags = 0, .point = 1};
+    struct drm_virtgpu_execbuffer_syncobj syncobj = {.handle = 9999, .flags = 0, .point = 1};
     struct drm_virtgpu_execbuffer bad_stride = {
         .flags = VIRTGPU_EXECBUF_RING_IDX,
         .syncobj_stride = 8,
@@ -227,13 +404,40 @@ int gpu_probe_submit(int argc, char **argv)
     };
     expect_errno("execbuf-bad-syncobj-stride", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &bad_stride), EINVAL);
 
-    struct drm_virtgpu_execbuffer syncobj_unimpl = {
+    struct drm_virtgpu_execbuffer out_unknown = {
         .flags = VIRTGPU_EXECBUF_RING_IDX,
         .syncobj_stride = 16,
         .num_out_syncobjs = 1,
         .out_syncobjs = (uintptr_t)&syncobj,
     };
-    expect_errno("execbuf-syncobj-unimpl", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &syncobj_unimpl), EOPNOTSUPP);
+    expect_errno("execbuf-out-syncobj-unknown", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &out_unknown), ENOENT);
+
+    struct drm_virtgpu_execbuffer_syncobj out_flagged = {.handle = probe_obj, .flags = 1, .point = 0};
+    struct drm_virtgpu_execbuffer out_flags = {
+        .flags = VIRTGPU_EXECBUF_RING_IDX,
+        .syncobj_stride = 16,
+        .num_out_syncobjs = 1,
+        .out_syncobjs = (uintptr_t)&out_flagged,
+    };
+    expect_errno("execbuf-out-syncobj-flags", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &out_flags), EINVAL);
+
+    struct drm_virtgpu_execbuffer_syncobj in_flagged = {.handle = probe_obj, .flags = 2, .point = 0};
+    struct drm_virtgpu_execbuffer in_flags = {
+        .flags = VIRTGPU_EXECBUF_RING_IDX,
+        .syncobj_stride = 16,
+        .num_in_syncobjs = 1,
+        .in_syncobjs = (uintptr_t)&in_flagged,
+    };
+    expect_errno("execbuf-in-syncobj-flags", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &in_flags), EINVAL);
+
+    struct drm_virtgpu_execbuffer_syncobj in_empty = {.handle = probe_obj, .flags = 0, .point = 0};
+    struct drm_virtgpu_execbuffer in_no_fence = {
+        .flags = VIRTGPU_EXECBUF_RING_IDX,
+        .syncobj_stride = 16,
+        .num_in_syncobjs = 1,
+        .in_syncobjs = (uintptr_t)&in_empty,
+    };
+    expect_errno("execbuf-in-syncobj-no-fence", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &in_no_fence), EINVAL);
 
     uint8_t dummy_cmd[4] = {0};
     struct drm_virtgpu_execbuffer oversized = {
@@ -253,14 +457,13 @@ int gpu_probe_submit(int argc, char **argv)
     expect_errno("wait-unknown-nowait", ioctl(fd, DRM_IOCTL_VIRTGPU_WAIT, &wait_missing_nowait), ENOENT);
 
     expect_errno("dup-bad-fence-handle", dup_with_meta(fd, FENCE_DUP_EXECBUFFER, 9999, 0), ENOENT);
+    expect_errno("dup-unknown-fence-command", dup_with_meta(fd, 0x4201, 0, 0), EINVAL);
 
-    uint64_t first_fence_id = 0;
+    int first_fence = -1;
+    uint64_t first_stamp = 0;
     struct drm_virtgpu_execbuffer submit = {
         .flags = VIRTGPU_EXECBUF_RING_IDX | VIRTGPU_EXECBUF_FENCE_FD_OUT,
-        .size = 0,
-        .command = 0,
         .ring_idx = 0,
-        .syncobj_stride = 0,
         .fence_fd = -1,
     };
     int64_t t0 = monotonic_ms();
@@ -271,24 +474,15 @@ int gpu_probe_submit(int argc, char **argv)
             struct pollfd pfd = {.fd = submit.fence_fd, .events = POLLIN};
             int pret = poll(&pfd, 1, 5000);
             int64_t waited = monotonic_ms() - t0;
-            if (pret == 1 && (pfd.revents & POLLIN)) {
-                struct virtgpu_fence_state state = {0};
-                ssize_t n = read(submit.fence_fd, &state, sizeof state);
-                if (n == (ssize_t)sizeof state && state.signaled == 1 && state.status == 0 && state.fence_id > 0) {
-                    first_fence_id = state.fence_id;
-                    printf(TAG ": submit-ring0 signaled fence_id=%llu wait_ms=%lld\n",
-                           (unsigned long long)state.fence_id, (long long)waited);
-                    snprintf(detail, sizeof detail, "fence %llu signaled in %lld ms",
-                             (unsigned long long)state.fence_id, (long long)waited);
-                    pass("submit-ring0-poll", detail);
-                } else {
-                    snprintf(detail, sizeof detail, "read=%zd signaled=%u status=%d id=%llu",
-                             n, state.signaled, state.status, (unsigned long long)state.fence_id);
-                    fail("submit-ring0-state", detail);
-                }
+            uint32_t count = 0;
+            int status = sync_file_status(submit.fence_fd, &count, &first_stamp);
+            if (pret == 1 && (pfd.revents & POLLIN) && status == 1 && count == 1 && first_stamp > 0) {
+                printf(TAG ": submit-ring0 signaled wait_ms=%lld\n", (long long)waited);
+                snprintf(detail, sizeof detail, "sync file of one fence signaled in %lld ms", (long long)waited);
+                pass("submit-ring0-poll", detail);
             } else {
-                snprintf(detail, sizeof detail, "poll=%d revents=%#x errno=%d wait_ms=%lld",
-                         pret, (unsigned)pfd.revents, errno, (long long)waited);
+                snprintf(detail, sizeof detail, "poll=%d revents=%#x status=%d fences=%u wait_ms=%lld",
+                         pret, (unsigned)pfd.revents, status, count, (long long)waited);
                 fail("submit-ring0-poll", detail);
             }
 
@@ -309,14 +503,12 @@ int gpu_probe_submit(int argc, char **argv)
                     fail("fence-dup-poll", "duplicated fence descriptor not readable");
                 close(dup_fd);
             }
-            close(submit.fence_fd);
+            first_fence = submit.fence_fd;
         }
     }
 
     struct drm_virtgpu_execbuffer no_fence = {
         .flags = VIRTGPU_EXECBUF_RING_IDX,
-        .size = 0,
-        .command = 0,
         .ring_idx = 0,
         .fence_fd = -1,
     };
@@ -329,40 +521,173 @@ int gpu_probe_submit(int argc, char **argv)
 
     struct drm_virtgpu_execbuffer submit2 = {
         .flags = VIRTGPU_EXECBUF_RING_IDX | VIRTGPU_EXECBUF_FENCE_FD_OUT,
-        .size = 0,
-        .command = 0,
         .ring_idx = 0,
         .fence_fd = -1,
     };
     if (expect_ok("submit-second", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &submit2)) == 0 && submit2.fence_fd >= 0) {
         struct pollfd pfd2 = {.fd = submit2.fence_fd, .events = POLLIN};
         int pret2 = poll(&pfd2, 1, 5000);
-        struct virtgpu_fence_state state2 = {0};
-        ssize_t n2 = read(submit2.fence_fd, &state2, sizeof state2);
-        if (pret2 == 1 && (pfd2.revents & POLLIN) && n2 == (ssize_t)sizeof state2 &&
-            state2.signaled == 1 && state2.status == 0 && state2.fence_id > first_fence_id) {
-            snprintf(detail, sizeof detail, "fence %llu > %llu",
-                     (unsigned long long)state2.fence_id, (unsigned long long)first_fence_id);
-            pass("submit-second-monotonic", detail);
+        uint64_t stamp2 = 0;
+        int status2 = sync_file_status(submit2.fence_fd, NULL, &stamp2);
+        if (pret2 == 1 && status2 == 1 && stamp2 >= first_stamp) {
+            snprintf(detail, sizeof detail, "signaled %llu ns after the first",
+                     (unsigned long long)(stamp2 - first_stamp));
+            pass("submit-second-after-first", detail);
         } else {
-            snprintf(detail, sizeof detail, "poll=%d n=%zd signaled=%u id=%llu prev=%llu",
-                     pret2, n2, state2.signaled, (unsigned long long)state2.fence_id,
-                     (unsigned long long)first_fence_id);
-            fail("submit-second-monotonic", detail);
+            snprintf(detail, sizeof detail, "poll=%d status=%d stamp=%llu first=%llu",
+                     pret2, status2, (unsigned long long)stamp2, (unsigned long long)first_stamp);
+            fail("submit-second-after-first", detail);
+        }
+        if (first_fence >= 0) {
+            struct sync_merge_data merge = {.name = "probe-merge", .fd2 = submit2.fence_fd, .fence = -1};
+            if (expect_ok("merge-submission-fences", ioctl(first_fence, SYNC_IOC_MERGE, &merge)) == 0) {
+                uint32_t count = 0;
+                int status = sync_file_status(merge.fence, &count, NULL);
+                snprintf(detail, sizeof detail, "status=%d fences=%u", status, count);
+                if (status == 1 && count == 2)
+                    pass("merge-submission-fences", detail);
+                else
+                    fail("merge-submission-fences", detail);
+                close(merge.fence);
+            }
         }
         close(submit2.fence_fd);
     }
+    if (first_fence >= 0)
+        close(first_fence);
 
-    int unsignaled = dup_with_meta(fd, FENCE_DUP_UNSIGNALED, 0, 0);
-    if (expect_ok("unsignaled-fence", unsignaled) >= 0) {
-        struct virtgpu_fence_state ustate = {1, 1, 1};
-        ssize_t un = read(unsignaled, &ustate, sizeof ustate);
-        if (un == (ssize_t)sizeof ustate && ustate.signaled == 0 && ustate.status == 0 && ustate.fence_id == 0)
-            pass("unsignaled-state", "signaled=0 status=0 fence_id=0");
+    uint32_t bin = syncobj_create(fd, 0);
+    uint32_t tl = syncobj_create(fd, 0);
+    if (bin && tl) {
+        struct drm_virtgpu_execbuffer_syncobj outs[2] = {
+            {.handle = bin, .flags = 0, .point = 0},
+            {.handle = tl, .flags = 0, .point = 7},
+        };
+        struct drm_virtgpu_execbuffer out_submit = {
+            .flags = VIRTGPU_EXECBUF_RING_IDX,
+            .ring_idx = 0,
+            .syncobj_stride = 16,
+            .num_out_syncobjs = 2,
+            .out_syncobjs = (uintptr_t)outs,
+        };
+        if (expect_ok("submit-out-syncobjs", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &out_submit)) == 0) {
+            if (expect_ok("out-binary-wait", syncobj_wait(fd, bin, 5000)) == 0)
+                pass("out-binary-wait", "the binary sync object signals with the submission");
+            uint64_t point = 7;
+            struct drm_syncobj_timeline_wait twait = {
+                .handles = (uintptr_t)&tl,
+                .points = (uintptr_t)&point,
+                .timeout_nsec = monotonic_ns() + 5000000000LL,
+                .count_handles = 1,
+            };
+            if (expect_ok("out-timeline-wait", ioctl(fd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &twait)) == 0)
+                pass("out-timeline-wait", "timeline point 7 signals with the submission");
+            uint64_t queried = 0;
+            struct drm_syncobj_timeline_array query = {
+                .handles = (uintptr_t)&tl,
+                .points = (uintptr_t)&queried,
+                .count_handles = 1,
+            };
+            if (expect_ok("out-timeline-query", ioctl(fd, DRM_IOCTL_SYNCOBJ_QUERY, &query)) == 0) {
+                snprintf(detail, sizeof detail, "point %llu", (unsigned long long)queried);
+                if (queried == 7)
+                    pass("out-timeline-query", detail);
+                else
+                    fail("out-timeline-query", detail);
+            }
+
+            struct drm_virtgpu_execbuffer_syncobj in_point = {.handle = tl, .flags = 0, .point = 7};
+            struct drm_virtgpu_execbuffer in_submit = {
+                .flags = VIRTGPU_EXECBUF_RING_IDX,
+                .ring_idx = 0,
+                .syncobj_stride = 16,
+                .num_in_syncobjs = 1,
+                .in_syncobjs = (uintptr_t)&in_point,
+            };
+            int64_t i0 = monotonic_ms();
+            int iret = ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &in_submit);
+            int64_t ielapsed = monotonic_ms() - i0;
+            if (expect_ok("submit-in-signaled-point", iret) == 0) {
+                snprintf(detail, sizeof detail, "returned in %lld ms", (long long)ielapsed);
+                if (ielapsed < 1000)
+                    pass("submit-in-signaled-point", detail);
+                else
+                    fail("submit-in-signaled-point", detail);
+            }
+        }
+    } else {
+        fail("syncobj-create", "could not create the out sync objects");
+    }
+    if (bin)
+        syncobj_destroy(fd, bin);
+    if (tl)
+        syncobj_destroy(fd, tl);
+
+    uint32_t resettable = syncobj_create(fd, DRM_SYNCOBJ_CREATE_SIGNALED);
+    if (resettable) {
+        struct drm_virtgpu_execbuffer_syncobj in_reset = {
+            .handle = resettable, .flags = VIRTGPU_EXECBUF_SYNCOBJ_RESET, .point = 0};
+        struct drm_virtgpu_execbuffer reset_submit = {
+            .flags = VIRTGPU_EXECBUF_RING_IDX,
+            .ring_idx = 0,
+            .syncobj_stride = 16,
+            .num_in_syncobjs = 1,
+            .in_syncobjs = (uintptr_t)&in_reset,
+        };
+        if (expect_ok("submit-in-reset", ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &reset_submit)) == 0) {
+            if (syncobj_wait(fd, resettable, 0) != 0)
+                pass("submit-in-reset", "the in sync object holds no fence after the submission");
+            else
+                fail("submit-in-reset", "the in sync object is still signaled");
+        }
+        syncobj_destroy(fd, resettable);
+    }
+
+    uint32_t gate = syncobj_create(fd, 0);
+    int gate_fd = gate ? syncobj_export(fd, gate, DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE) : -1;
+    if (expect_ok("gate-sync-file", gate_fd) >= 0) {
+        struct blocked_submit blocked = {.fd = fd, .sync_fd = gate_fd, .out_fd = -1};
+        pthread_t thread;
+        int64_t b0 = monotonic_ms();
+        if (pthread_create(&thread, NULL, blocked_submit_thread, &blocked) != 0) {
+            fail("execbuf-fence-in-waits", "pthread_create failed");
+        } else {
+            usleep(200000);
+            int done_early = blocked.done;
+            struct drm_syncobj_array signal = {.handles = (uintptr_t)&gate, .count_handles = 1};
+            expect_ok("gate-signal", ioctl(fd, DRM_IOCTL_SYNCOBJ_SIGNAL, &signal));
+            pthread_join(thread, NULL);
+            int64_t blocked_ms = monotonic_ms() - b0;
+            snprintf(detail, sizeof detail, "early=%d ret=%d errno=%d returned after %lld ms",
+                     done_early, blocked.ret, blocked.ret ? blocked.err : 0, (long long)blocked_ms);
+            if (!done_early && blocked.ret == 0 && blocked_ms >= 180)
+                pass("execbuf-fence-in-waits", detail);
+            else
+                fail("execbuf-fence-in-waits", detail);
+            if (blocked.ret == 0 && blocked.out_fd >= 0) {
+                struct pollfd opfd = {.fd = blocked.out_fd, .events = POLLIN};
+                if (poll(&opfd, 1, 5000) == 1)
+                    pass("execbuf-fence-in-out-fence", "the submission behind the gate signaled");
+                else
+                    fail("execbuf-fence-in-out-fence", "the submission behind the gate did not signal");
+                close(blocked.out_fd);
+            }
+        }
+        close(gate_fd);
+    }
+    if (gate)
+        syncobj_destroy(fd, gate);
+
+    uint32_t idle = syncobj_create(fd, 0);
+    int idle_fd = idle ? syncobj_export(fd, idle, DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE) : -1;
+    if (expect_ok("unsignaled-sync-file", idle_fd) >= 0) {
+        int status = sync_file_status(idle_fd, NULL, NULL);
+        if (status == 0)
+            pass("unsignaled-state", "status 0");
         else
-            fail("unsignaled-state", "unexpected initial state");
+            fail("unsignaled-state", "unexpected initial status");
 
-        struct pollfd upfd = {.fd = unsignaled, .events = POLLIN};
+        struct pollfd upfd = {.fd = idle_fd, .events = POLLIN};
         int64_t u0 = monotonic_ms();
         int uret = poll(&upfd, 1, 300);
         int64_t elapsed = monotonic_ms() - u0;
@@ -374,8 +699,12 @@ int gpu_probe_submit(int argc, char **argv)
             pass("unsignaled-poll-300ms", detail);
         else
             fail("unsignaled-poll-300ms", detail);
-        close(unsignaled);
+        close(idle_fd);
     }
+    if (idle)
+        syncobj_destroy(fd, idle);
+    if (probe_obj)
+        syncobj_destroy(fd, probe_obj);
 
     close(fd);
     printf(TAG ": %s\n", failures ? "FAIL" : "PASS");
