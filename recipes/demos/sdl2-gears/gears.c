@@ -13,6 +13,14 @@
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_mixer.h>
 #include <SDL2/SDL_ttf.h>
+#include <stdlib.h>
+
+static int compare_doubles(const void *a, const void *b)
+{
+    double da = *(const double *)a;
+    double db = *(const double *)b;
+    return (da > db) - (da < db);
+}
 
 #ifndef M_PI
 #define M_PI 3.14159265
@@ -324,6 +332,9 @@ void cleanup()
 int main(int argc, char *argv[])
 {
     int still = argc == 2 && SDL_strcmp(argv[1], "--still") == 0;
+    int bench_frames = 0;
+    if (argc == 3 && SDL_strcmp(argv[1], "--benchmark") == 0)
+        bench_frames = atoi(argv[2]);
     if (still)
         delta = 0.0f;
 
@@ -438,6 +449,37 @@ int main(int argc, char *argv[])
     int running = 1;
     SDL_Event event;
     int playing_audio = 0;
+    if (bench_frames > 0)
+    {
+        const char *renderer = (const char *)glGetString(GL_RENDERER);
+        double *times_ms = (double *)malloc((size_t)bench_frames * sizeof(double));
+        Uint64 freq = SDL_GetPerformanceFrequency();
+        double total_ms = 0.0;
+        idle();
+        for (int i = 0; i < bench_frames; i++)
+        {
+            Uint64 t0 = SDL_GetPerformanceCounter();
+            idle();
+            Uint64 t1 = SDL_GetPerformanceCounter();
+            double ms = (double)(t1 - t0) * 1000.0 / (double)freq;
+            total_ms += ms;
+            if (times_ms)
+                times_ms[i] = ms;
+        }
+        double median_ms = 0.0;
+        if (times_ms)
+        {
+            qsort(times_ms, (size_t)bench_frames, sizeof(double), compare_doubles);
+            median_ms = (bench_frames % 2)
+                ? times_ms[bench_frames / 2]
+                : 0.5 * (times_ms[bench_frames / 2 - 1] + times_ms[bench_frames / 2]);
+            free(times_ms);
+        }
+        printf("GEARS_BENCH renderer=\"%s\" frames=%d total_ms=%.2f mean_ms=%.2f median_ms=%.2f\n",
+               renderer ? renderer : "", bench_frames, total_ms, total_ms / (double)bench_frames, median_ms);
+        fflush(stdout);
+        running = 0;
+    }
     while (running)
     {
         idle();
