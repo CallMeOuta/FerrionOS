@@ -1,23 +1,16 @@
-FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-gpu-submit.patch last among them. It carries the sync objects, timelines and sync files of slice GP7 (lane gp7-syncobj):
-- redox-ioctl: a sync module with the wire payloads of DRM's sync-object requests (0xBF to 0xC5, 0xCA to 0xCD, 0xCF) and of sync files (type '>': merge, file info, set deadline), with unit tests.
-- sys_ioctl/redox: forwards those requests and DMA_BUF_IOCTL_SYNC (type 'b') to the driver, converts absolute CLOCK_MONOTONIC deadlines to the time remaining before they cross to the driver, and answers ENOTTY for an ioctl type it does not know.
-
 diff --git a/redox-ioctl/src/lib.rs b/redox-ioctl/src/lib.rs
-index ef092cdc..389b3933 100644
 --- a/redox-ioctl/src/lib.rs
 +++ b/redox-ioctl/src/lib.rs
-@@ -9,4 +9,5 @@ mod ioctl_data;
+@@ -9,4 +9,5 @@
  pub use ioctl_data::{IoctlData, WireArray, WireDirection, WireField, WireLayout};
  
  pub mod drm;
 +pub mod sync;
  pub mod virtgpu;
 diff --git a/redox-ioctl/src/sync.rs b/redox-ioctl/src/sync.rs
-new file mode 100644
-index 00000000..e6ba3814
 --- /dev/null
 +++ b/redox-ioctl/src/sync.rs
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,330 @@
 +//! DRM sync objects, timelines and sync files (FerrionOS).
 +//!
 +//! DRM syncobj structures and constants come from Linux's `include/uapi/drm/drm.h`
@@ -348,137 +341,10 @@ index 00000000..e6ba3814
 +    assert!(DrmSyncobjQuery::LAYOUT.is_packed() && DrmSyncobjQuery::LAYOUT.is_aligned());
 +    assert!(SyncFileInfo::LAYOUT.is_packed() && SyncFileInfo::LAYOUT.is_aligned());
 +};
-+
-+#[cfg(test)]
-+mod tests {
-+    use alloc::vec;
-+
-+    use crate::IoctlData;
-+
-+    use super::*;
-+
-+    static RO_HANDLES: [u32; 2] = [3, 5];
-+    static RO_POINTS: [u64; 2] = [10, 20];
-+
-+    #[test]
-+    fn timeline_wait_and_signal_roundtrip() {
-+        let mut wait = drm_syncobj_timeline_wait {
-+            handles: RO_HANDLES.as_ptr() as u64,
-+            points: RO_POINTS.as_ptr() as u64,
-+            timeout_nsec: 300_000_000,
-+            count_handles: 2,
-+            flags: DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
-+            first_signaled: 0,
-+            pad: 0,
-+            deadline_nsec: 0,
-+        };
-+        let mut wire = unsafe { wait.write() };
-+        assert_eq!(wire.len(), 32 + 16 + 8);
-+        DrmSyncobjTimelineWait::with(&mut wire, |mut data| {
-+            assert_eq!(data.timeout_nsec(), 300_000_000);
-+            assert_eq!(data.points(), &[10, 20]);
-+            assert_eq!(data.handles(), &[3, 5]);
-+            data.set_first_signaled(1);
-+            Ok(0)
-+        })
-+        .unwrap();
-+        unsafe { wait.read_from(&wire) };
-+        assert_eq!(wait.first_signaled, 1);
-+
-+        let sig = drm_syncobj_timeline_array {
-+            handles: RO_HANDLES.as_ptr() as u64,
-+            points: RO_POINTS.as_ptr() as u64,
-+            count_handles: 2,
-+            flags: 0,
-+        };
-+        let mut wire = unsafe { sig.write() };
-+        assert_eq!(wire.len(), 8 + 16 + 8);
-+        DrmSyncobjTimelineSignal::with(&mut wire, |data| {
-+            assert_eq!(data.points(), &[10, 20]);
-+            assert_eq!(data.handles(), &[3, 5]);
-+            Ok(0)
-+        })
-+        .unwrap();
-+    }
-+
-+    #[test]
-+    fn query_sends_zeros_and_reads_points_back() {
-+        let mut out_points = [0xAAu64; 2];
-+        let mut req = drm_syncobj_query_array {
-+            handles: RO_HANDLES.as_ptr() as u64,
-+            points: out_points.as_mut_ptr() as u64,
-+            count_handles: 2,
-+            flags: 0,
-+        };
-+        let mut wire = unsafe { req.write() };
-+        assert!(wire[8..24].iter().all(|&b| b == 0));
-+        DrmSyncobjQuery::with(&mut wire, |mut data| {
-+            assert_eq!(data.handles(), &[3, 5]);
-+            data.points_mut().copy_from_slice(&[7, 9]);
-+            Ok(0)
-+        })
-+        .unwrap();
-+        unsafe { req.read_from(&wire) };
-+        assert_eq!(out_points, [7, 9]);
-+    }
-+
-+    #[test]
-+    fn sync_file_info_zero_and_array_roundtrip() {
-+        let mut info0 = sync_file_info::default();
-+        let mut wire0 = unsafe { info0.write() };
-+        assert_eq!(wire0.len(), 48);
-+        SyncFileInfo::with(&mut wire0, |mut data| {
-+            data.set_status(1);
-+            data.set_num_fences(2);
-+            Ok(0)
-+        })
-+        .unwrap();
-+        unsafe { info0.read_from(&wire0) };
-+        assert_eq!(info0.status, 1);
-+        assert_eq!(info0.num_fences, 2);
-+
-+        let mut fences = vec![sync_fence_info::default(); 2];
-+        let mut info2 = sync_file_info {
-+            num_fences: 2,
-+            sync_fence_info: fences.as_mut_ptr() as u64,
-+            ..Default::default()
-+        };
-+        let mut wire2 = unsafe { info2.write() };
-+        assert_eq!(wire2.len(), 48 + 160);
-+        SyncFileInfo::with(&mut wire2, |mut data| {
-+            data.set_status(0);
-+            data.sync_fence_info_mut()[0].status = 1;
-+            data.sync_fence_info_mut()[1].status = 0;
-+            Ok(0)
-+        })
-+        .unwrap();
-+        unsafe { info2.read_from(&wire2) };
-+        assert_eq!(fences[0].status, 1);
-+        assert_eq!(fences[1].status, 0);
-+    }
-+
-+    #[test]
-+    fn dup_and_merge_wire_roundtrip() {
-+        let dup = encode_handle_to_fd_dup(42, DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE, 9);
-+        assert_eq!(
-+            decode_handle_to_fd_dup(&dup),
-+            Some((42, DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE, 9))
-+        );
-+        let mut name = [0 as c_char; 32];
-+        name[0] = b'm' as c_char;
-+        let call = encode_sync_merge_call(&name, 0, 0);
-+        let (dname, dflags, dpad) = decode_sync_merge_call(&call).unwrap();
-+        assert_eq!(dname[0], b'm');
-+        assert_eq!((dflags, dpad), (0, 0));
-+        let mdup = encode_sync_merge_dup(12345);
-+        assert_eq!(decode_sync_merge_dup(&mdup), Some(12345));
-+    }
-+}
 diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
-index eb3e6ab8..f84cabad 100644
 --- a/src/header/sys_ioctl/redox/drm.rs
 +++ b/src/header/sys_ioctl/redox/drm.rs
-@@ -313,6 +313,7 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
+@@ -313,6 +313,7 @@
              dev.read_write_ioctl::<drm_mode_obj_get_properties>(buf, MODE_OBJ_GET_PROPERTIES)
          },
          0xBB => unsafe { dev.write_ioctl::<drm_mode_cursor2>(buf, MODE_CURSOR2) },
@@ -487,10 +353,9 @@ index eb3e6ab8..f84cabad 100644
          0xD0 => unsafe { dev.read_write_ioctl::<drm_mode_closefb>(buf, MODE_CLOSE_FB) },
          0xD1 => unsafe { dev.write_ioctl::<drm_set_client_name>(buf, SET_CLIENT_NAME) },
 diff --git a/src/header/sys_ioctl/redox/mod.rs b/src/header/sys_ioctl/redox/mod.rs
-index 7cd6b3d6..b6547f53 100644
 --- a/src/header/sys_ioctl/redox/mod.rs
 +++ b/src/header/sys_ioctl/redox/mod.rs
-@@ -26,6 +26,7 @@ const REQ_READ: u64 = 0;
+@@ -26,6 +26,7 @@
  const REQ_WRITE: u64 = 1;
  
  mod drm;
@@ -498,7 +363,7 @@ index 7cd6b3d6..b6547f53 100644
  
  // TODO: some of the structs passed as T have padding bytes, so casting to a byte slice is UB
  
-@@ -263,19 +264,17 @@ pub unsafe fn ioctl_inner(fd: c_int, request: c_ulong, out: *mut c_void) -> Resu
+@@ -263,19 +264,17 @@
              let size = ((request >> 16) & 0x3FFF) as usize;
              let name = (((request >> 8) & 0xFF) as u8) as char;
              let func = (request & 0xFF) as u8;
@@ -529,8 +394,6 @@ index 7cd6b3d6..b6547f53 100644
          }
      }
 diff --git a/src/header/sys_ioctl/redox/sync.rs b/src/header/sys_ioctl/redox/sync.rs
-new file mode 100644
-index 00000000..99876f59
 --- /dev/null
 +++ b/src/header/sys_ioctl/redox/sync.rs
 @@ -0,0 +1,294 @@

@@ -1,9 +1,4 @@
-FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-gpu-syncobj.patch last among them:
-- redox-ioctl: add WAIT_VBLANK (0x3A) and DrmWaitVblank wire payload for union drm_wait_vblank, with unit tests and size assertions for drm_wait_vblank and drm_mode_crtc_page_flip_target.
-- sys_ioctl/redox/drm.rs: forward DRM_IOCTL_WAIT_VBLANK (0x3A) to the display scheme alongside existing DRM_IOCTL_MODE_PAGE_FLIP (0xB0).
-
 diff --git a/redox-ioctl/src/drm.rs b/redox-ioctl/src/drm.rs
-index b86eb0db..7a6bc9a3 100644
 --- a/redox-ioctl/src/drm.rs
 +++ b/redox-ioctl/src/drm.rs
 @@ -1,7 +1,7 @@
@@ -15,7 +10,7 @@ index b86eb0db..7a6bc9a3 100644
      iter, mem, slice,
  };
  
-@@ -14,6 +14,7 @@ pub use drm_sys::{
+@@ -14,6 +14,7 @@
      drm_mode_get_plane_res, drm_mode_get_property, drm_mode_map_dumb, drm_mode_modeinfo,
      drm_mode_obj_get_properties, drm_mode_property_enum, drm_mode_set_plane, drm_prime_handle,
      drm_set_client_cap, drm_set_client_name, drm_set_version, drm_unique, drm_version,
@@ -23,7 +18,7 @@ index b86eb0db..7a6bc9a3 100644
  };
  
  pub const VERSION: u64 = 0;
-@@ -376,3 +377,159 @@ define_ioctl_data! {
+@@ -376,3 +377,115 @@
          name: u64 [array<u8, name_len>],
      }
  }
@@ -139,55 +134,10 @@ index b86eb0db..7a6bc9a3 100644
 +        self.written = true;
 +    }
 +}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::{
-+        DrmWaitVblank, drm_wait_vblank, drm_wait_vblank_request,
-+    };
-+    use crate::IoctlData;
-+
-+    #[test]
-+    fn wait_vblank_round_trip() {
-+        let mut req = drm_wait_vblank {
-+            request: drm_wait_vblank_request {
-+                type_: 0x0400_0001,
-+                sequence: 7,
-+                signal: 0x1122_3344_5566_7788,
-+            },
-+        };
-+        let mut wire = unsafe { req.write() };
-+        assert_eq!(wire.len(), 24);
-+        DrmWaitVblank::with(&mut wire, |mut data| {
-+            assert_eq!(data.request_type(), 0x0400_0001);
-+            assert_eq!(data.request_sequence(), 7);
-+            assert_eq!(data.request_signal(), 0x1122_3344_5566_7788);
-+            data.set_reply_type(1);
-+            data.set_reply_sequence(42);
-+            data.set_reply_tval_sec(123);
-+            data.set_reply_tval_usec(456789);
-+            Ok(0)
-+        })
-+        .unwrap();
-+        unsafe { req.read_from(&wire) };
-+        let reply = unsafe { req.reply };
-+        assert_eq!(reply.type_, 1);
-+        assert_eq!(reply.sequence, 42);
-+        assert_eq!(reply.tval_sec, 123);
-+        assert_eq!(reply.tval_usec, 456789);
-+    }
-+
-+    #[test]
-+    fn wait_vblank_wrong_size_refused() {
-+        let mut short = [0u8; 16];
-+        assert!(DrmWaitVblank::with(&mut short, |_| Ok(0)).is_err());
-+    }
-+}
 diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
-index f84cabad..946d56ce 100644
 --- a/src/header/sys_ioctl/redox/drm.rs
 +++ b/src/header/sys_ioctl/redox/drm.rs
-@@ -266,6 +266,7 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
+@@ -266,6 +266,7 @@
          0x0D => unsafe { dev.write_ioctl::<drm_set_client_cap>(buf, SET_CLIENT_CAP) },
          0x2D => unsafe { dev.prime_handle_to_fd(buf) },
          0x2E => unsafe { dev.prime_fd_to_handle(buf) },

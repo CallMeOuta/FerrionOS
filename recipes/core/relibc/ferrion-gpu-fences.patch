@@ -1,12 +1,7 @@
-FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-drm-page-flip.patch last among them. It joins the submission requests of ferrion-gpu-submit.patch to the sync files of ferrion-gpu-syncobj.patch:
-- sys_ioctl/redox/drm.rs: an EXECBUFFER with VIRTGPU_EXECBUF_FENCE_FD_IN names its sync file as the second descriptor of the call, so the driver receives the sync file itself; a negative descriptor gets EINVAL, as does one that is not a descriptor of the same scheme.
-- redox-ioctl: FENCE_DUP_UNSIGNALED, the test-only command that made a fence no submission signals, is gone.
-
 diff --git a/redox-ioctl/src/virtgpu.rs b/redox-ioctl/src/virtgpu.rs
-index d009119c..a8c51e41 100644
 --- a/redox-ioctl/src/virtgpu.rs
 +++ b/redox-ioctl/src/virtgpu.rs
-@@ -598,7 +598,6 @@ pub const EXECBUF_MAX_CMD_SIZE: u32 = 4 * 1024 * 1024;
+@@ -598,7 +598,6 @@
  pub const EXECBUF_MAX_BO_HANDLES: u32 = 1024;
  pub const EXECBUF_MAX_SYNCOBJS: u32 = 1024;
  pub const FENCE_DUP_EXECBUFFER: u64 = EXECBUFFER;
@@ -15,10 +10,9 @@ index d009119c..a8c51e41 100644
  #[repr(C)]
  #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
-index 946d56ce..e5ab0db0 100644
 --- a/src/header/sys_ioctl/redox/drm.rs
 +++ b/src/header/sys_ioctl/redox/drm.rs
-@@ -199,12 +199,25 @@ impl Dev {
+@@ -199,12 +199,25 @@
          }
  
          let mut wire = unsafe { data.write() };
@@ -51,10 +45,9 @@ index 946d56ce..e5ab0db0 100644
  
          if (data.flags & virtgpu::VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0 {
 diff --git a/src/header/sys_ioctl/redox/sync.rs b/src/header/sys_ioctl/redox/sync.rs
-index 99876f59..d378e8b4 100644
 --- a/src/header/sys_ioctl/redox/sync.rs
 +++ b/src/header/sys_ioctl/redox/sync.rs
-@@ -36,7 +36,7 @@ fn monotonic_remaining_ns(abs_timeout_nsec: i64) -> i64 {
+@@ -36,7 +36,7 @@
      }
  }
  

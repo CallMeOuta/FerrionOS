@@ -1,13 +1,7 @@
-FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-redox-ioctl-virtgpu.patch and ferrion-redox-ioctl-views.patch last among them. It carries the requests of slice GP3 of FerrionOS's GPU plan:
-- The DRM translation forwards DRM's close request (0x09, the virtgpu module's GemClose) and virtio-gpu's get-parameter (0x43), get-capset (0x49) and context-init (0x4b) to the driver; the version request already went through.
-- Context-init sends its parameters by value and then the context's name, which no structure of Linux's carries: the string a DEBUG_NAME parameter points at, else the name the program runs under, as Linux names a context after the process. More than four parameters get EINVAL before any is read, a parameter array or name at address 0 EFAULT.
-- redox-ioctl: a hand-written context-init payload in the virtgpu module that carries the name after the parameters, reads every field by value, and keeps the LAYOUT the layout check compares with Linux's header, with unit tests.
-
 diff --git a/redox-ioctl/src/virtgpu.rs b/redox-ioctl/src/virtgpu.rs
-index 18f83488..8e6577bc 100644
 --- a/redox-ioctl/src/virtgpu.rs
 +++ b/redox-ioctl/src/virtgpu.rs
-@@ -50,7 +50,7 @@ use core::{
+@@ -50,7 +50,7 @@
      slice,
  };
  
@@ -16,7 +10,7 @@ index 18f83488..8e6577bc 100644
  
  /// `DRM_COMMAND_BASE` of Linux's `drm.h`: driver requests start here.
  pub const DRM_COMMAND_BASE: u64 = 0x40;
-@@ -389,11 +389,127 @@ define_ioctl_data! {
+@@ -389,11 +389,127 @@
      }
  }
  
@@ -149,53 +143,7 @@ index 18f83488..8e6577bc 100644
      }
  }
  
-@@ -618,4 +734,44 @@ mod tests {
-         assert!(VirtgpuContextInit::with(payload, |_| Ok(0)).is_err());
-         assert!(VirtgpuGetparam::with(&mut [0u8; 15], |_| Ok(0)).is_err());
-     }
-+
-+    #[test]
-+    fn context_init_carries_its_parameters_and_name() {
-+        let params = [
-+            drm_virtgpu_context_set_param {
-+                param: VIRTGPU_CONTEXT_PARAM_CAPSET_ID,
-+                value: u64::from(VIRTGPU_DRM_CAPSET_VENUS),
-+            },
-+            drm_virtgpu_context_set_param {
-+                param: VIRTGPU_CONTEXT_PARAM_NUM_RINGS,
-+                value: 64,
-+            },
-+        ];
-+        let wire = VirtgpuContextInit::wire(0, &params, b"gpu-probe-context");
-+        assert_eq!(wire.len(), 8 + 32 + 17);
-+        // At an odd address: every field is read by value.
-+        let mut shifted = vec![0u8; wire.len() + 1];
-+        shifted[1..].copy_from_slice(&wire);
-+        VirtgpuContextInit::with(&shifted[1..], |data| {
-+            assert_eq!(data.num_params(), 2);
-+            let got: Vec<_> = data.params().map(|p| (p.param, p.value)).collect();
-+            assert_eq!(got, [(1, 4), (2, 64)]);
-+            assert_eq!(data.name(), b"gpu-probe-context");
-+            Ok(0)
-+        })
-+        .unwrap();
-+    }
-+
-+    #[test]
-+    fn context_name_is_cut_and_bounded() {
-+        let long = [b'x'; 100];
-+        let wire = VirtgpuContextInit::wire(0, &[], &long);
-+        assert_eq!(wire.len(), 8 + CONTEXT_NAME_MAX);
-+        let mut over = wire.clone();
-+        over.push(b'x');
-+        assert!(VirtgpuContextInit::with(&over, |_| Ok(0)).is_err());
-+        let mut huge = wire;
-+        huge[..4].copy_from_slice(&u32::MAX.to_ne_bytes());
-+        assert!(VirtgpuContextInit::with(&huge, |_| Ok(0)).is_err());
-+    }
- }
 diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
-index 7d22e691..d9729a61 100644
 --- a/src/header/sys_ioctl/redox/drm.rs
 +++ b/src/header/sys_ioctl/redox/drm.rs
 @@ -1,12 +1,19 @@
@@ -221,7 +169,7 @@ index 7d22e691..d9729a61 100644
  };
  
  use super::IoctlBuffer;
-@@ -87,6 +94,61 @@ impl Dev {
+@@ -87,6 +94,61 @@
          Ok(res as c_int)
      }
  
@@ -283,7 +231,7 @@ index 7d22e691..d9729a61 100644
      unsafe fn prime_handle_to_fd(&self, mut buf: IoctlBuffer) -> Result<c_int> {
          let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
          let writable = (data.flags & O_RDWR as u32) != 0;
-@@ -124,10 +186,18 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
+@@ -124,10 +186,18 @@
          0x00 => unsafe { dev.read_write_ioctl::<drm_version>(buf, VERSION) },
          0x01 => unsafe { dev.read_write_ioctl::<drm_unique>(buf, GET_UNIQUE) },
          0x07 => unsafe { dev.read_write_ioctl::<drm_set_version>(buf, SET_VERSION) },

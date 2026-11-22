@@ -1,13 +1,7 @@
-FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d. It touches only the crate redox-ioctl, which the other patches leave alone, and leaves the wire format of the drm module as it is:
-- A `virtgpu` module: the numbers, flags and structures of Linux's include/uapi/drm/virtgpu_drm.h at the tag v7.3, with that header's MIT notice, DRM's own close request from drm.h at the same commit, and the payloads the GPU driver will receive for the requests Mesa's Venus driver makes, with unit tests that send them both ways. Nothing calls it yet: relibc's ioctl translation and the driver take it up from slice GP3 of the GPU plan.
-- `define_ioctl_data!` takes a direction for each array: `array`, sent and copied back as before; `in_array`, sent and not copied back, so that a submission's command is copied once and never written into; `out_array`, sent as zeros and copied back.
-- Each payload type that `define_ioctl_data!` builds gains a `LAYOUT` constant: its fixed fields with their offsets and sizes, then its arrays with their element's size and alignment and their direction. The virtgpu module asserts at compile time that its payloads have no padding and that their arrays start aligned whatever the counts. FerrionOS's scripts/virtgpu-layout-check.py reads the constants to compare the payloads with Linux's headers.
-
 diff --git a/redox-ioctl/src/ioctl_data.rs b/redox-ioctl/src/ioctl_data.rs
-index 02530174..e5bc1f16 100644
 --- a/redox-ioctl/src/ioctl_data.rs
 +++ b/redox-ioctl/src/ioctl_data.rs
-@@ -5,7 +5,106 @@ pub trait IoctlData {
+@@ -5,7 +5,106 @@
      unsafe fn read_from(&mut self, buf: &[u8]);
  }
  
@@ -114,7 +108,7 @@ index 02530174..e5bc1f16 100644
      (struct $ioctl_ty:ident, $mem_ty:ident {
          $($rest:tt)*
      }) => {
-@@ -29,7 +128,7 @@ macro_rules! define_ioctl_data {
+@@ -29,7 +128,7 @@
          );
      };
      (struct $ioctl_ty:ident, $mem_ty:ident {
@@ -123,7 +117,7 @@ index 02530174..e5bc1f16 100644
          $($rest:tt)*
      } =>
          ($($ioctl_fields:tt)*),
-@@ -39,13 +138,13 @@ macro_rules! define_ioctl_data {
+@@ -39,13 +138,13 @@
          define_ioctl_data!(
              struct $ioctl_ty, $mem_ty { $($rest)* } =>
                  ($($ioctl_fields)* $field: $ty,),
@@ -139,7 +133,7 @@ index 02530174..e5bc1f16 100644
          ($($noncounted_field:ident: $noncounted_ty:ty,)*)
      ) => {
          // FIXME check ioctl_ty doesn't have padding
-@@ -78,18 +177,7 @@ macro_rules! define_ioctl_data {
+@@ -78,18 +177,7 @@
                  });
                  $(
                      let size = self.$counted_by as usize * size_of::<$el>();
@@ -159,7 +153,7 @@ index 02530174..e5bc1f16 100644
                  )*
                  data
              }
-@@ -102,11 +190,7 @@ macro_rules! define_ioctl_data {
+@@ -102,11 +190,7 @@
                  $(
                      let size = self.$counted_by as usize * size_of::<$el>();
                      let $counted_field = buf.split_off(..size).unwrap();
@@ -172,7 +166,7 @@ index 02530174..e5bc1f16 100644
                  )*
  
                  assert!(buf.is_empty());
-@@ -117,6 +201,23 @@ macro_rules! define_ioctl_data {
+@@ -117,6 +201,23 @@
          }
  
          impl<'a> $mem_ty<'a> {
@@ -197,10 +191,9 @@ index 02530174..e5bc1f16 100644
                  mut buf: &'a mut [u8],
                  f: impl FnOnce($mem_ty<'a>) -> syscall::Result<usize>,
 diff --git a/redox-ioctl/src/lib.rs b/redox-ioctl/src/lib.rs
-index 0746aba7..ef092cdc 100644
 --- a/redox-ioctl/src/lib.rs
 +++ b/redox-ioctl/src/lib.rs
-@@ -6,6 +6,7 @@ extern crate alloc;
+@@ -6,6 +6,7 @@
  
  #[macro_use]
  mod ioctl_data;
@@ -210,11 +203,9 @@ index 0746aba7..ef092cdc 100644
  pub mod drm;
 +pub mod virtgpu;
 diff --git a/redox-ioctl/src/virtgpu.rs b/redox-ioctl/src/virtgpu.rs
-new file mode 100644
-index 00000000..18f83488
 --- /dev/null
 +++ b/redox-ioctl/src/virtgpu.rs
-@@ -0,0 +1,621 @@
+@@ -0,0 +1,516 @@
 +//! The DRM requests of virtio-gpu, and DRM's own close request, which Mesa's
 +//! Venus driver makes on the same device.
 +//!
@@ -731,108 +722,3 @@ index 00000000..18f83488
 +        i += 1;
 +    }
 +};
-+
-+#[cfg(test)]
-+mod tests {
-+    use alloc::vec;
-+
-+    use super::*;
-+
-+    /// A payload buffer as the scheme receives one: aligned to 8 bytes.
-+    fn aligned(wire: &[u8]) -> Vec<u64> {
-+        let mut backing = vec![0u64; wire.len().div_ceil(8)];
-+        unsafe { slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), wire.len()) }
-+            .copy_from_slice(wire);
-+        backing
-+    }
-+
-+    // In read-only memory: copying anything back into it would fault.
-+    static COMMAND: [u8; 12] = [1; 12];
-+
-+    #[test]
-+    fn submission_arrays_are_aligned_and_sent_one_way() {
-+        let out = [drm_virtgpu_execbuffer_syncobj {
-+            handle: 7,
-+            flags: 0,
-+            point: 9,
-+        }];
-+        let mut exbuf = drm_virtgpu_execbuffer {
-+            flags: VIRTGPU_EXECBUF_RING_IDX,
-+            size: 12,
-+            command: COMMAND.as_ptr() as u64,
-+            syncobj_stride: 16,
-+            num_out_syncobjs: 1,
-+            out_syncobjs: out.as_ptr() as u64,
-+            ..Default::default()
-+        };
-+        let mut wire = unsafe { exbuf.write() };
-+        assert_eq!(wire.len(), 32 + 16 + 12);
-+        assert_eq!(wire[48..], COMMAND);
-+
-+        let mut backing = aligned(&wire);
-+        let len = wire.len();
-+        let payload = unsafe { slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), len) };
-+        VirtgpuExecbuffer::with(payload, |mut data| {
-+            assert_eq!(data.out_syncobjs()[0].handle, 7);
-+            assert_eq!(data.out_syncobjs()[0].point, 9);
-+            assert_eq!(data.command(), &COMMAND[..]);
-+            data.set_fence_fd(5);
-+            Ok(0)
-+        })
-+        .unwrap();
-+
-+        wire.copy_from_slice(payload);
-+        for byte in &mut wire[32..] {
-+            *byte = 0xEE;
-+        }
-+        unsafe { exbuf.read_from(&wire) };
-+        assert_eq!(exbuf.fence_fd, 5);
-+        assert_eq!(out[0].handle, 7);
-+    }
-+
-+    #[test]
-+    fn capset_is_sent_as_zeros_and_copied_back() {
-+        let mut capset = [0xAAu8; 160];
-+        let mut caps = drm_virtgpu_get_caps {
-+            cap_set_id: VIRTGPU_DRM_CAPSET_VENUS,
-+            size: 160,
-+            addr: capset.as_mut_ptr() as u64,
-+            ..Default::default()
-+        };
-+        let mut wire = unsafe { caps.write() };
-+        assert_eq!(wire.len(), 16 + 160);
-+        assert!(wire[16..].iter().all(|&byte| byte == 0));
-+        wire[16..].fill(0x42);
-+        unsafe { caps.read_from(&wire) };
-+        assert!(capset.iter().all(|&byte| byte == 0x42));
-+    }
-+
-+    #[test]
-+    fn getparam_answer_is_written_through_value() {
-+        let mut answer: u64 = 0;
-+        let mut param = drm_virtgpu_getparam {
-+            param: VIRTGPU_PARAM_HOST_VISIBLE,
-+            value: core::ptr::from_mut(&mut answer) as u64,
-+        };
-+        let mut wire = unsafe { param.write() };
-+        VirtgpuGetparam::with(&mut wire, |mut data| {
-+            assert_eq!(data.param(), VIRTGPU_PARAM_HOST_VISIBLE);
-+            data.set_value(1);
-+            Ok(0)
-+        })
-+        .unwrap();
-+        unsafe { param.read_from(&wire) };
-+        assert_eq!(answer, 1);
-+    }
-+
-+    #[test]
-+    fn short_or_long_payloads_are_refused() {
-+        let mut wire = vec![0u8; 8 + 16];
-+        wire[..4].copy_from_slice(&2u32.to_ne_bytes());
-+        let mut backing = aligned(&wire);
-+        let payload =
-+            unsafe { slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), wire.len()) };
-+        assert!(VirtgpuContextInit::with(payload, |_| Ok(0)).is_err());
-+        assert!(VirtgpuGetparam::with(&mut [0u8; 15], |_| Ok(0)).is_err());
-+    }
-+}

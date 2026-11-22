@@ -1,12 +1,7 @@
-FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-gpu-blob.patch last among them. It carries the command submission, fence descriptor export and wait requests of slice GP4 (lane gp4-submit):
-- redox-ioctl: adds VirtgpuWait payload for DRM_IOCTL_VIRTGPU_WAIT (0x48), VirtgpuFenceState, fence dup commands and submission bounds constants, with a round-trip unit test.
-- sys_ioctl/redox/drm.rs: forwards DRM_IOCTL_VIRTGPU_EXECBUFFER (0x42) and DRM_IOCTL_VIRTGPU_WAIT (0x48). Requires syncobj_stride == 16 only when a sync-object count is nonzero, bounds array counts and command size, and turns VIRTGPU_EXECBUF_FENCE_FD_OUT into a close-on-exec fence descriptor via dup on the render handle.
-
 diff --git a/redox-ioctl/src/virtgpu.rs b/redox-ioctl/src/virtgpu.rs
-index 8e6577bc..d009119c 100644
 --- a/redox-ioctl/src/virtgpu.rs
 +++ b/redox-ioctl/src/virtgpu.rs
-@@ -594,6 +594,27 @@ define_ioctl_data! {
+@@ -594,6 +594,27 @@
      }
  }
  
@@ -34,7 +29,7 @@ index 8e6577bc..d009119c 100644
  /// Each request that has a payload: its function number, the name of its
  /// structure in Linux's headers, and the payload's layout.
  pub const PAYLOADS: &[(u64, &str, &WireLayout)] = &[
-@@ -609,6 +630,7 @@ pub const PAYLOADS: &[(u64, &str, &WireLayout)] = &[
+@@ -609,6 +630,7 @@
          "drm_virtgpu_resource_info",
          &VirtgpuResourceInfo::LAYOUT,
      ),
@@ -42,38 +37,10 @@ index 8e6577bc..d009119c 100644
      (GET_CAPS, "drm_virtgpu_get_caps", &VirtgpuGetCaps::LAYOUT),
      (
          RESOURCE_CREATE_BLOB,
-@@ -774,4 +796,26 @@ mod tests {
-         huge[..4].copy_from_slice(&u32::MAX.to_ne_bytes());
-         assert!(VirtgpuContextInit::with(&huge, |_| Ok(0)).is_err());
-     }
-+
-+    #[test]
-+    fn wait_round_trips() {
-+        let mut req = drm_virtgpu_3d_wait {
-+            handle: 42,
-+            flags: VIRTGPU_WAIT_NOWAIT,
-+        };
-+        let wire = unsafe { req.write() };
-+        assert_eq!(wire.len(), 8);
-+        let mut backing = aligned(&wire);
-+        let len = wire.len();
-+        let payload = unsafe { slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), len) };
-+        VirtgpuWait::with(payload, |data| {
-+            assert_eq!(data.handle(), 42);
-+            assert_eq!(data.flags(), VIRTGPU_WAIT_NOWAIT);
-+            Ok(0)
-+        })
-+        .unwrap();
-+        unsafe { req.read_from(payload) };
-+        assert_eq!(req.handle, 42);
-+        assert_eq!(req.flags, VIRTGPU_WAIT_NOWAIT);
-+    }
- }
 diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
-index 5c0d9510..eb3e6ab8 100644
 --- a/src/header/sys_ioctl/redox/drm.rs
 +++ b/src/header/sys_ioctl/redox/drm.rs
-@@ -166,6 +166,64 @@ impl Dev {
+@@ -166,6 +166,64 @@
          Ok(res as c_int)
      }
  
@@ -138,7 +105,7 @@ index 5c0d9510..eb3e6ab8 100644
      unsafe fn prime_handle_to_fd(&self, mut buf: IoctlBuffer) -> Result<c_int> {
          let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
          let writable = (data.flags & O_RDWR as u32) != 0;
-@@ -209,12 +267,16 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
+@@ -209,11 +267,15 @@
          0x2D => unsafe { dev.prime_handle_to_fd(buf) },
          0x2E => unsafe { dev.prime_fd_to_handle(buf) },
          0x41 => unsafe { dev.read_write_ioctl::<virtgpu::drm_virtgpu_map>(buf, virtgpu::MAP) },
@@ -148,10 +115,9 @@ index 5c0d9510..eb3e6ab8 100644
          },
          0x45 => unsafe {
              dev.read_write_ioctl::<virtgpu::drm_virtgpu_resource_info>(buf, virtgpu::RESOURCE_INFO)
-         },
++        },
 +        0x48 => unsafe {
 +            dev.read_write_ioctl::<virtgpu::drm_virtgpu_3d_wait>(buf, virtgpu::WAIT)
-+        },
+         },
          0x49 => unsafe {
              dev.read_write_ioctl::<virtgpu::drm_virtgpu_get_caps>(buf, virtgpu::GET_CAPS)
-         },

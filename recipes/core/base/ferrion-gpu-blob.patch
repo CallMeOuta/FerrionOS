@@ -1,11 +1,4 @@
-FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with the FerrionOS patches before it in recipe.toml applied, ferrion-virtio-gpu-render.patch last among them. It adds host-visible blob buffers for slice GP4 of FerrionOS's GPU plan:
-- virtio-core parses PCI shared-memory capabilities (cfg_type 8, PciCapability64, 64-bit offset and length) and exposes SharedMemoryRegion descriptors without mapping the BAR.
-- driver-graphics adds blob.rs for render-handle RESOURCE_CREATE_BLOB, MAP (23-bit handle-local slot, 40-bit byte offset), RESOURCE_INFO, GEM_CLOSE, checked mmap_prep, and munmap/on_close teardown.
-- virtio-gpud adds blob.rs with a page-aligned host-visible window allocator, RESOURCE_CREATE_BLOB, on-demand RESOURCE_MAP_BLOB with map_info cache modes (WB/UC/WC) via PhysBorrowed::map, RESOURCE_UNMAP_BLOB, and RESOURCE_UNREF.
-
 diff --git a/drivers/graphics/driver-graphics/src/blob.rs b/drivers/graphics/driver-graphics/src/blob.rs
-new file mode 100644
-index 00000000..38b31570
 --- /dev/null
 +++ b/drivers/graphics/driver-graphics/src/blob.rs
 @@ -0,0 +1,287 @@
@@ -297,10 +290,9 @@ index 00000000..38b31570
 +    }
 +}
 diff --git a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
-index f20563f5..e22bcec1 100644
 --- a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
 +++ b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
-@@ -23,14 +23,19 @@ pub(crate) fn call_render_ioctl<T>(
+@@ -23,14 +23,19 @@
  ) -> Result<usize> {
      match cmd {
          drm::VERSION => drm::DrmVersion::with(payload, |data| version(device, data)),
@@ -324,10 +316,9 @@ index f20563f5..e22bcec1 100644
              virtgpu::VirtgpuContextInit::with(payload, |data| context_init(device, handle, data))
          }
 diff --git a/drivers/graphics/driver-graphics/src/lib.rs b/drivers/graphics/driver-graphics/src/lib.rs
-index fcc54702..3d402cc1 100644
 --- a/drivers/graphics/driver-graphics/src/lib.rs
 +++ b/drivers/graphics/driver-graphics/src/lib.rs
-@@ -30,12 +30,14 @@ use crate::kms::crtc::{KmsCrtc, KmsCrtcDriver, KmsCrtcState};
+@@ -30,12 +30,14 @@
  use crate::kms::objects::{KmsObjectId, KmsObjects};
  use crate::kms::plane::{KmsPlane, KmsPlaneDriver, KmsPlaneState};
  
@@ -343,21 +334,21 @@ index fcc54702..3d402cc1 100644
  
  #[derive(Debug, Copy, Clone)]
 diff --git a/drivers/graphics/driver-graphics/src/render.rs b/drivers/graphics/driver-graphics/src/render.rs
-index 2aafea34..bc840c7b 100644
 --- a/drivers/graphics/driver-graphics/src/render.rs
 +++ b/drivers/graphics/driver-graphics/src/render.rs
-@@ -17,8 +17,9 @@ use std::marker::PhantomData;
+@@ -17,8 +17,9 @@
  use redox_scheme::CallerCtx;
  use scheme_utils::{ResourceOpenResult, ResourceSync};
  use syscall::schemev2::NewFdFlags;
 -use syscall::{ENODEV, ENOENT, Error, MODE_CHR, Result};
+-
 +use syscall::{ENODEV, ENOENT, ENOSYS, Error, MODE_CHR, MapFlags, MunmapFlags, Result};
- 
++
 +use crate::blob::{BlobCreateParams, BlobInfo, RenderBlobs};
  use crate::{GraphicsAdapter, GraphicsResource, GraphicsSchemeData, ioctl};
  
  /// The device features render handles report, as Linux's virtio-gpu driver reports them.
-@@ -53,6 +54,18 @@ pub trait RenderDevice: Debug {
+@@ -53,6 +54,18 @@
  
      /// Destroys a context `create_context` made, which stops its work on the host.
      fn destroy_context(&mut self, context_id: u32);
@@ -376,7 +367,7 @@ index 2aafea34..bc840c7b 100644
  }
  
  /// The root registered under the render name.
-@@ -95,6 +108,7 @@ impl<T: GraphicsAdapter> ResourceSync for RenderRoot<T> {
+@@ -95,6 +108,7 @@
  /// other handle can reach it.
  pub(crate) struct RenderHandle<T> {
      pub(crate) context: Option<u32>,
@@ -384,7 +375,7 @@ index 2aafea34..bc840c7b 100644
      _adapter: PhantomData<T>,
  }
  
-@@ -102,6 +116,7 @@ impl<T> Debug for RenderHandle<T> {
+@@ -102,6 +116,7 @@
      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
          f.debug_struct("RenderHandle")
              .field("context", &self.context)
@@ -392,7 +383,7 @@ index 2aafea34..bc840c7b 100644
              .finish()
      }
  }
-@@ -110,6 +125,7 @@ impl<T> RenderHandle<T> {
+@@ -110,6 +125,7 @@
      fn new() -> Self {
          Self {
              context: None,
@@ -400,7 +391,7 @@ index 2aafea34..bc840c7b 100644
              _adapter: PhantomData,
          }
      }
-@@ -144,11 +160,39 @@ impl<T: GraphicsAdapter> ResourceSync for RenderHandle<T> {
+@@ -144,11 +160,39 @@
          ioctl::virtgpu::call_render_ioctl(device, self, metadata[0], payload)
      }
  
@@ -444,11 +435,9 @@ index 2aafea34..bc840c7b 100644
      }
  }
 diff --git a/drivers/graphics/virtio-gpud/src/blob.rs b/drivers/graphics/virtio-gpud/src/blob.rs
-new file mode 100644
-index 00000000..d78617aa
 --- /dev/null
 +++ b/drivers/graphics/virtio-gpud/src/blob.rs
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,458 @@
 +use std::collections::HashMap;
 +use std::fmt;
 +
@@ -907,34 +896,10 @@ index 00000000..d78617aa
 +        }
 +    }
 +}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    #[test]
-+    fn allocator_splits_and_coalesces() {
-+        let page = PAGE_SIZE as u64;
-+        let mut alloc = WindowAllocator::new(4 * page + 123);
-+        assert_eq!(alloc.alloc(0), None);
-+        assert_eq!(alloc.alloc(page + 1), None);
-+        let a = alloc.alloc(page).unwrap();
-+        let b = alloc.alloc(2 * page).unwrap();
-+        let c = alloc.alloc(page).unwrap();
-+        assert_eq!((a, b, c), (0, page, 3 * page));
-+        assert_eq!(alloc.alloc(page), None);
-+        alloc.free(a, page);
-+        alloc.free(c, page);
-+        assert_eq!(alloc.alloc(2 * page), None);
-+        alloc.free(b, 2 * page);
-+        assert_eq!(alloc.alloc(4 * page), Some(0));
-+    }
-+}
 diff --git a/drivers/graphics/virtio-gpud/src/main.rs b/drivers/graphics/virtio-gpud/src/main.rs
-index cecbe6a4..4150dac0 100644
 --- a/drivers/graphics/virtio-gpud/src/main.rs
 +++ b/drivers/graphics/virtio-gpud/src/main.rs
-@@ -32,6 +32,7 @@ use event::{user_data, EventQueue};
+@@ -32,6 +32,7 @@
  use pcid_interface::PciFunctionHandle;
  use virtio_core::utils::VolatileCell;
  
@@ -942,7 +907,7 @@ index cecbe6a4..4150dac0 100644
  mod render;
  mod scheme;
  
-@@ -228,8 +229,21 @@ pub struct ResourceId(u32);
+@@ -228,8 +229,21 @@
  impl ResourceId {
      const NONE: ResourceId = ResourceId(0);
  
@@ -966,7 +931,7 @@ index cecbe6a4..4150dac0 100644
      }
  }
  
-@@ -534,6 +548,17 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+@@ -534,6 +548,17 @@
      log::info!("virtio-gpu: initiating startup sequence :^)");
  
      let device = virtio_core::probe_device(&mut pcid_handle)?;
@@ -984,7 +949,7 @@ index cecbe6a4..4150dac0 100644
      let config = unsafe { &mut *(device.device_space as *mut GpuConfig) };
  
      // Negotiate features.
-@@ -589,6 +614,7 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+@@ -589,6 +614,7 @@
          device.transport.clone(),
          has_edid,
          features,
@@ -993,10 +958,9 @@ index cecbe6a4..4150dac0 100644
      )?;
      daemon.ready();
 diff --git a/drivers/graphics/virtio-gpud/src/render.rs b/drivers/graphics/virtio-gpud/src/render.rs
-index 540c0200..281f92a4 100644
 --- a/drivers/graphics/virtio-gpud/src/render.rs
 +++ b/drivers/graphics/virtio-gpud/src/render.rs
-@@ -10,11 +10,13 @@ use std::fmt;
+@@ -10,11 +10,13 @@
  use std::sync::Arc;
  
  use common::dma::Dma;
@@ -1005,13 +969,14 @@ index 540c0200..281f92a4 100644
  use syscall::{EINVAL, EIO, ENOMEM};
  use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
  use virtio_core::transport::{Error, Queue};
+-
 +use virtio_core::SharedMemoryRegion;
- 
++
 +use crate::blob::VirtGpuBlobs;
  use crate::{CommandTy, ControlHeader};
  
  /// The features the driver acknowledged.
-@@ -41,13 +43,13 @@ const MAX_CONTEXTS: usize = 256;
+@@ -41,13 +43,13 @@
  /// not know is never taken for a `CommandTy`.
  #[derive(Default)]
  #[repr(C)]
@@ -1032,7 +997,7 @@ index 540c0200..281f92a4 100644
  }
  
  const _: () = assert!(size_of::<ResponseHeader>() == size_of::<ControlHeader>());
-@@ -96,6 +98,7 @@ pub struct VirtGpuRender {
+@@ -96,6 +98,7 @@
      capsets: Vec<Capset>,
      contexts: BTreeSet<u32>,
      next_context: u32,
@@ -1040,7 +1005,7 @@ index 540c0200..281f92a4 100644
  }
  
  impl fmt::Debug for VirtGpuRender {
-@@ -104,11 +107,12 @@ impl fmt::Debug for VirtGpuRender {
+@@ -104,11 +107,12 @@
              .field("features", &self.features)
              .field("capset_ids", &self.capset_ids())
              .field("contexts", &self.contexts)
@@ -1054,7 +1019,7 @@ index 540c0200..281f92a4 100644
      syscall::Error::new(match error {
          Error::SyscallError(error) => error.errno(),
          _ => EIO,
-@@ -116,7 +120,7 @@ fn errno(error: Error) -> syscall::Error {
+@@ -116,7 +120,7 @@
  }
  
  /// Sends one command whose answer is a bare header, and returns the answer's type.
@@ -1063,7 +1028,7 @@ index 540c0200..281f92a4 100644
      let request = Dma::new(request)?;
      let header = Dma::new(ResponseHeader::default())?;
      let command = ChainBuilder::new()
-@@ -195,7 +199,12 @@ async fn read_capset(queue: &Queue, index: u32) -> Result<Option<Capset>, Error>
+@@ -195,7 +199,12 @@
  impl VirtGpuRender {
      /// The render side of a device that offers 3D, with the capsets it reports; None for a 2D
      /// device.
@@ -1077,7 +1042,7 @@ index 540c0200..281f92a4 100644
          if !features.virgl {
              return None;
          }
-@@ -220,6 +229,7 @@ impl VirtGpuRender {
+@@ -220,6 +229,7 @@
              capsets,
              contexts: BTreeSet::new(),
              next_context: 1,
@@ -1085,7 +1050,7 @@ index 540c0200..281f92a4 100644
          })
      }
  
-@@ -246,7 +256,7 @@ impl RenderDevice for VirtGpuRender {
+@@ -246,7 +256,7 @@
              three_d: self.features.virgl,
              resource_blob: self.features.resource_blob,
              context_init: self.features.context_init,
@@ -1094,10 +1059,11 @@ index 540c0200..281f92a4 100644
          }
      }
  
-@@ -308,4 +318,20 @@ impl RenderDevice for VirtGpuRender {
+@@ -308,4 +318,20 @@
              Err(error) => log::warn!("virtio-gpu: context {context_id}: destroy failed: {error:?}"),
          }
      }
+-}
 +
 +    fn create_blob(&mut self, params: BlobCreateParams<'_>) -> syscall::Result<BlobInfo> {
 +        self.blobs.create_blob(&self.control_queue, params)
@@ -1114,12 +1080,11 @@ index 540c0200..281f92a4 100644
 +    fn destroy_blob(&mut self, res_id: u32) {
 +        self.blobs.destroy_blob(&self.control_queue, res_id);
 +    }
- }
++}
 diff --git a/drivers/graphics/virtio-gpud/src/scheme.rs b/drivers/graphics/virtio-gpud/src/scheme.rs
-index 88acff33..2692be6f 100644
 --- a/drivers/graphics/virtio-gpud/src/scheme.rs
 +++ b/drivers/graphics/virtio-gpud/src/scheme.rs
-@@ -719,6 +719,7 @@ impl<'a> GpuScheme {
+@@ -719,6 +719,7 @@
          transport: Arc<dyn Transport>,
          has_edid: bool,
          features: crate::render::Features,
@@ -1127,7 +1092,7 @@ index 88acff33..2692be6f 100644
          waker: Waker,
      ) -> Result<GraphicsScheme<VirtGpuAdapter<'a>>, Error> {
          let (unref_tx, unref_rx) = mpsc::channel();
-@@ -726,6 +727,7 @@ impl<'a> GpuScheme {
+@@ -726,6 +727,7 @@
              control_queue.clone(),
              features,
              config.num_capsets.get(),
@@ -1136,20 +1101,18 @@ index 88acff33..2692be6f 100644
          let adapter = VirtGpuAdapter {
              unique,
 diff --git a/drivers/virtio-core/src/lib.rs b/drivers/virtio-core/src/lib.rs
-index 7ecd963b..885d6704 100644
 --- a/drivers/virtio-core/src/lib.rs
 +++ b/drivers/virtio-core/src/lib.rs
-@@ -6,4 +6,4 @@ pub mod transport;
+@@ -6,4 +6,4 @@
  pub mod utils;
  
  pub use dma_pool::{DmaPool, PooledPage};
 -pub use probe::{probe_device, reinit, Device};
 +pub use probe::{probe_device, reinit, Device, SharedMemoryRegion};
 diff --git a/drivers/virtio-core/src/probe.rs b/drivers/virtio-core/src/probe.rs
-index d0d29480..73cc4981 100644
 --- a/drivers/virtio-core/src/probe.rs
 +++ b/drivers/virtio-core/src/probe.rs
-@@ -2,15 +2,25 @@ use std::sync::{Arc, Mutex};
+@@ -2,15 +2,25 @@
  
  use common::MemoryType;
  use pcid_interface::irq_helpers::{InterruptVector, Msix};
@@ -1158,7 +1121,7 @@ index d0d29480..73cc4981 100644
  
  use crate::spec::*;
  use crate::transport::{Error, Queue, StandardTransport, Transport};
- 
++
 +#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 +pub struct SharedMemoryRegion {
 +    pub id: u8,
@@ -1167,7 +1130,7 @@ index d0d29480..73cc4981 100644
 +    pub phys_addr: u64,
 +    pub length: u64,
 +}
-+
+ 
  pub struct Device {
      pub transport: Arc<dyn Transport>,
      pub device_space: *const u8,
@@ -1176,10 +1139,11 @@ index d0d29480..73cc4981 100644
  }
  
  // FIXME(andypython): `device_space` should not be `Send` nor `Sync`. Take
-@@ -33,6 +43,17 @@ impl Device {
+@@ -32,6 +42,17 @@
+     /// This does not spawn an IRQ thread. (see virtio-gpud).
      pub fn alloc_irq(&self) -> InterruptVector {
          self.msix.lock().unwrap().alloc()
-     }
++    }
 +
 +    pub fn shared_memory_region(&self, id: u8) -> Option<SharedMemoryRegion> {
 +        self.shared_memory_regions
@@ -1190,11 +1154,10 @@ index d0d29480..73cc4981 100644
 +
 +    pub fn shared_memory_regions(&self) -> &[SharedMemoryRegion] {
 +        &self.shared_memory_regions
-+    }
+     }
  }
  
- /// VirtIO Device Probe
-@@ -60,20 +81,96 @@ pub fn probe_device(pcid_handle: &mut PciFunctionHandle) -> Result<Device, Error
+@@ -60,20 +81,96 @@
      let mut common_addr = None;
      let mut notify_addr = None;
      let mut device_addr = None;
@@ -1203,6 +1166,8 @@ index d0d29480..73cc4981 100644
      for raw_capability in pcid_handle.get_vendor_capabilities() {
 -        // SAFETY: We have verified that the length of the data is correct.
 -        let capability = unsafe { &*(raw_capability.data.as_ptr() as *const PciCapability) };
+-
+-        match capability.cfg_type {
 +        if raw_capability.data.len() < size_of::<PciCapability>() {
 +            log::warn!(
 +                "virtio-core: ignoring short vendor capability ({} bytes)",
@@ -1213,8 +1178,7 @@ index d0d29480..73cc4981 100644
 +        let Some(cfg_type) = CfgType::from_u8(raw_capability.data[0]) else {
 +            continue;
 +        };
- 
--        match capability.cfg_type {
++
 +        if matches!(cfg_type, CfgType::SharedMemory) {
 +            if raw_capability.data.len() < size_of::<PciCapability64>() {
 +                log::warn!(
@@ -1295,7 +1259,7 @@ index d0d29480..73cc4981 100644
              CfgType::Common => {
                  debug_assert!(common_addr.is_none());
                  common_addr = Some(address);
-@@ -81,12 +178,16 @@ pub fn probe_device(pcid_handle: &mut PciFunctionHandle) -> Result<Device, Error
+@@ -81,12 +178,16 @@
  
              CfgType::Notify => {
                  debug_assert!(notify_addr.is_none());
@@ -1317,7 +1281,7 @@ index d0d29480..73cc4981 100644
                          .notify_off_multiplier()
                  };
                  notify_addr = Some((address, multiplier));
-@@ -135,6 +236,7 @@ pub fn probe_device(pcid_handle: &mut PciFunctionHandle) -> Result<Device, Error
+@@ -135,6 +236,7 @@
          transport,
          device_space,
          msix: Mutex::new(msix),
@@ -1326,10 +1290,9 @@ index d0d29480..73cc4981 100644
  
      device.transport.reset();
 diff --git a/drivers/virtio-core/src/spec/transport_pci.rs b/drivers/virtio-core/src/spec/transport_pci.rs
-index 33004b31..1f0ab1ff 100644
 --- a/drivers/virtio-core/src/spec/transport_pci.rs
 +++ b/drivers/virtio-core/src/spec/transport_pci.rs
-@@ -69,6 +69,21 @@ pub enum CfgType {
+@@ -69,6 +69,21 @@
  
  const_assert_eq!(size_of::<CfgType>(), 1);
  
@@ -1351,7 +1314,7 @@ index 33004b31..1f0ab1ff 100644
  #[derive(Debug)]
  #[repr(C)]
  pub struct CommonCfg {
-@@ -173,5 +188,29 @@ impl PciCapabilityNotify {
+@@ -173,5 +188,29 @@
  
  const_assert_eq!(size_of::<PciCapabilityNotify>(), 17);
  
