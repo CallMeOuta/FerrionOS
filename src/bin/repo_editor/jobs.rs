@@ -143,7 +143,9 @@ impl ExecutionManager {
 
         let _ = write!(pipe_writer, "{:?}\n", cmd);
         thread::spawn(move || {
+            let pid = handle.id() as libc::pid_t;
             let code = handle.wait().unwrap().code().unwrap_or(-1);
+            cookbook::cook::pty::unregister_pgid(pid);
             status_tx
                 .send(StatusUpdate::JobFinished(job_id, code))
                 .unwrap();

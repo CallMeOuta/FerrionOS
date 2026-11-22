@@ -10,7 +10,8 @@ use std::{fs::File, mem, ptr, time::Duration};
 
 use crate::{Error, Result, wrap_io_err};
 
-const MAX_ACTIVE_JOBS: usize = 64;
+const MAX_ACTIVE_JOBS: usize = 256;
+const MAX_SLAVE_PGIDS: usize = 64;
 const MAX_REAP_POLLS: usize = 100;
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const GRACEFUL_TERM_POLLS: usize = 20;
@@ -18,20 +19,24 @@ const GRACEFUL_TERM_POLLS: usize = 20;
 static ACTIVE_PGIDS: [AtomicI32; MAX_ACTIVE_JOBS] = [const { AtomicI32::new(0) }; MAX_ACTIVE_JOBS];
 static SIGNAL_HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-fn register_pgid(pgid: libc::pid_t) {
-    assert!(pgid > 0);
+fn register_pgid(pgid: libc::pid_t) -> Result<()> {
+    if pgid <= 0 {
+        return Err(Error::Other(format!("invalid process group id {pgid}")));
+    }
     for slot in &ACTIVE_PGIDS {
         if slot
             .compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            return;
+            return Ok(());
         }
     }
-    panic!("active pty job table exceeded MAX_ACTIVE_JOBS ({MAX_ACTIVE_JOBS})");
+    Err(Error::Other(format!(
+        "active pty job table exceeded MAX_ACTIVE_JOBS ({MAX_ACTIVE_JOBS})"
+    )))
 }
 
-fn unregister_pgid(pgid: libc::pid_t) {
+pub fn unregister_pgid(pgid: libc::pid_t) {
     for slot in &ACTIVE_PGIDS {
         let _ = slot.compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst);
     }
@@ -86,9 +91,9 @@ fn reap_pgid_nonblocking(pgid: libc::pid_t) {
     }
 }
 
-fn kill_and_reap_pgid(pgid: libc::pid_t) {
+fn kill_and_reap_pgid(pgid: libc::pid_t) -> Result<()> {
     if pgid <= 0 {
-        return;
+        return Ok(());
     }
     reap_pgid_nonblocking(pgid);
     if pgid_alive(pgid) {
@@ -116,10 +121,12 @@ fn kill_and_reap_pgid(pgid: libc::pid_t) {
         }
     }
     unregister_pgid(pgid);
-    assert!(
-        !pgid_alive(pgid),
-        "live descendants remain in process group {pgid}"
-    );
+    if pgid_alive(pgid) {
+        return Err(Error::Other(format!(
+            "live descendants remain in process group {pgid}"
+        )));
+    }
+    Ok(())
 }
 
 pub struct Job {
@@ -128,26 +135,33 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn new(child: Child) -> Self {
+    pub fn new(mut child: Child) -> Result<Self> {
         let pgid = child.id() as libc::pid_t;
-        register_pgid(pgid);
-        Self {
+        if let Err(err) = register_pgid(pgid) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err);
+        }
+        Ok(Self {
             child: Some(child),
             pgid,
-        }
+        })
     }
 
     pub fn pgid(&self) -> libc::pid_t {
         self.pgid
     }
 
-    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+    pub fn wait(&mut self) -> Result<ExitStatus> {
         let status = match self.child.as_mut() {
-            Some(child) => child.wait()?,
-            None => return Err(io::Error::other("job already waited")),
+            Some(child) => child
+                .wait()
+                .map_err(|e| Error::from_io_error(e, "Waiting for job"))?,
+            None => return Err(Error::Other("job already waited".to_string())),
         };
-        kill_and_reap_pgid(self.pgid);
+        let reap_res = kill_and_reap_pgid(self.pgid);
         self.child = None;
+        reap_res?;
         Ok(status)
     }
 }
@@ -155,7 +169,7 @@ impl Job {
 impl Drop for Job {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            kill_and_reap_pgid(self.pgid);
+            let _ = kill_and_reap_pgid(self.pgid);
             let _ = child.wait();
         } else {
             unregister_pgid(self.pgid);
@@ -442,11 +456,14 @@ impl PtyFd {
             })
         };
 
-        let mut child = cmd.spawn().map_err(wrap_io_err!("Spawning cmd"))?;
+        let spawned = cmd.spawn();
         cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
         if stdin {
             cmd.stdin(std::process::Stdio::inherit());
+        }
+        let mut child = spawned.map_err(wrap_io_err!("Spawning cmd"))?;
+        if stdin {
             child.stdin.take();
         }
         child.stdout.take();
@@ -478,27 +495,56 @@ fn cloexec(fd: RawFd) -> Result<()> {
 }
 
 impl UnixSlavePty {
-    fn track_child(&self, child: Child) -> Child {
+    fn track_child(&self, mut child: Child) -> Result<Child> {
+        let mut pgids = self.pgids.lock().unwrap();
+        pgids.retain(|&p| {
+            if pgid_alive(p) {
+                true
+            } else {
+                unregister_pgid(p);
+                false
+            }
+        });
+        if pgids.len() >= MAX_SLAVE_PGIDS {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Other(format!(
+                "slave pty tracked process groups exceeded MAX_SLAVE_PGIDS ({MAX_SLAVE_PGIDS})"
+            )));
+        }
         let pgid = child.id() as libc::pid_t;
-        register_pgid(pgid);
-        self.pgids.lock().unwrap().push(pgid);
-        child
+        if let Err(err) = register_pgid(pgid) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err);
+        }
+        pgids.push(pgid);
+        Ok(child)
     }
 
     fn spawn_command(&self, builder: &mut Command) -> Result<std::process::Child> {
         let child = self.fd.spawn_command(builder, false)?;
-        Ok(self.track_child(child))
+        self.track_child(child)
     }
 
     fn spawn_command_stdin(&self, builder: &mut Command) -> Result<std::process::Child> {
         let child = self.fd.spawn_command(builder, true)?;
-        Ok(self.track_child(child))
+        self.track_child(child)
     }
 
-    pub fn reap_and_assert_no_descendants(&self) {
+    pub fn reap_and_assert_no_descendants(&self) -> Result<()> {
         let pgids = std::mem::take(&mut *self.pgids.lock().unwrap());
+        let mut first_err: Option<Error> = None;
         for pgid in pgids {
-            kill_and_reap_pgid(pgid);
+            if let Err(err) = kill_and_reap_pgid(pgid)
+                && first_err.is_none()
+            {
+                first_err = Some(err);
+            }
+        }
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
         }
     }
 }
