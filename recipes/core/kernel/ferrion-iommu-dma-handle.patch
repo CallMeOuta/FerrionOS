@@ -1,0 +1,1030 @@
+FerrionOS change to the Redox kernel (MIT license, kept), made against upstream commit e7f1d4231d0f4b55fbef229d9cd9459302c101f4 with the patches before it in the recipe's list applied (security roadmap S18, IOMMU plan slice 2, the DMA handle):
+- `memory` scheme path `dma/SSSS-BB-DD.F` (hexadecimal segment, bus, device and function) opens the DMA handle of one PCI requester ID; only the unrestricted root and uid 0 may (EACCES), a second open of the same ID fails with EBUSY while the first lives, and at most 64 handles exist (ENFILE);
+- opening it moves the device out of the one-to-one domain into an empty domain of its own: its bus gets a private copy of the shared context table, and the entry is made not present, invalidated, rewritten and invalidated again (domain id 0 under caching mode);
+- `mmap` on the handle allocates zeroed, physically contiguous memory as `zeroed?phys_contiguous` does, takes a second reference on every frame and maps the frames read-write at their own addresses in the device's domain; the offset picks the memory type (0 write-back, 0x1000 uncacheable, 0x2000 write-combining, 0x3000 device memory), at most 256 mappings of at most 4 MiB per handle, and `MAP_SHARED` is refused;
+- a call with metadata 1 and a virtual address answers the device address of a page mapped through the handle (ENOENT for any other page); metadata 2 with a device address and a length removes exactly one mapping, invalidates and waits, then drops the extra references;
+- closing the handle puts the device back into the one-to-one domain, invalidates, frees the domain's tables and only then drops the remaining references, so a frame is never reused while the device can reach it; frames whose invalidation failed stay pinned and are counted as `pinned-forever`;
+- refused requests are attributed to the handle of their requester ID, and `/scheme/sys/iommu` lists each handle as `SSSS:BB:DD.F domain N pages P faults F` (`domain none` without a unit).
+
+diff --git a/src/iommu/handle.rs b/src/iommu/handle.rs
+new file mode 100644
+index 00000000..be7d086c
+--- /dev/null
++++ b/src/iommu/handle.rs
+@@ -0,0 +1,165 @@
++use alloc::sync::Arc;
++use core::num::NonZeroUsize;
++
++use crate::{
++    context::memory::{
++        handle_notify_files, AddrSpace, AddrSpaceWrapper, Grant, PageSpan, UnmapVec,
++    },
++    memory::{get_page_info, Frame, RefKind, VirtualAddress, PAGE_SIZE},
++    sync::CleanLockToken,
++    syscall::{
++        data::Map,
++        error::{Error, Result, EACCES, EINVAL, ENOENT, EOPNOTSUPP},
++        flag::MapFlags,
++        usercopy::UserSliceRw,
++    },
++};
++
++use super::{RequesterId, MAX_HANDLES, MAX_PIN_PAGES};
++
++pub const ID_BASE: usize = 1 << 40;
++pub const VERB_ADDRESS: u64 = 1;
++pub const VERB_RELEASE: u64 = 2;
++const RELEASE_PAYLOAD: usize = 16;
++
++pub fn slot(id: usize) -> Option<usize> {
++    id.checked_sub(ID_BASE).filter(|slot| *slot < MAX_HANDLES)
++}
++
++pub fn open(name: &str, privileged: bool, uid: u32) -> Result<usize> {
++    if !privileged || uid != 0 {
++        return Err(Error::new(EACCES));
++    }
++    let rid = RequesterId::parse(name).ok_or(Error::new(ENOENT))?;
++    Ok(ID_BASE + super::open(rid)?)
++}
++
++pub fn fmap(
++    slot: usize,
++    addr_space: &Arc<AddrSpaceWrapper>,
++    map: &Map,
++    token: &mut CleanLockToken,
++) -> Result<usize> {
++    if map.flags.contains(MapFlags::MAP_SHARED) {
++        return Err(Error::new(EOPNOTSUPP));
++    }
++    let memory_type = map.offset / PAGE_SIZE;
++    if map.offset % PAGE_SIZE != 0 || memory_type > 3 {
++        return Err(Error::new(EINVAL));
++    }
++    let span = PageSpan::validate_nonempty(VirtualAddress::new(map.address), map.size)
++        .ok_or(Error::new(EINVAL))?;
++    let count = NonZeroUsize::new(span.count).ok_or(Error::new(EINVAL))?;
++    if count.get() > MAX_PIN_PAGES {
++        return Err(Error::new(EINVAL));
++    }
++    let mem_policy = {
++        let addrspace = addr_space.inner.read(token.token());
++        addrspace.table.utable.allocator().0
++    };
++    let fixed = map.flags.contains(MapFlags::MAP_FIXED)
++        || map.flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
++
++    super::reserve(slot)?;
++    let mut pinned = None;
++    let mut notify_files = UnmapVec::new();
++    let mapped = {
++        let mut lock_token = token.token();
++        addr_space.acquire_write(lock_token.downgrade()).mmap(
++            addr_space,
++            (map.address != 0 || fixed).then_some(span.base),
++            count,
++            map.flags,
++            Some(&mut notify_files),
++            |dst_page, mut flags, mapper, flusher| {
++                flags = match memory_type {
++                    0 => flags,
++                    1 => flags.uncacheable(true),
++                    2 => flags.write_combining(true),
++                    _ => flags.device_memory(true),
++                };
++                let grant = Grant::zeroed_phys_contiguous(
++                    PageSpan::new(dst_page, count.get()),
++                    flags,
++                    mapper,
++                    flusher,
++                    mem_policy,
++                )?;
++                let (physical, _) = mapper
++                    .translate(dst_page.start_address())
++                    .expect("a physically contiguous grant is mapped when it is made");
++                let base = Frame::containing(physical);
++                for page in 0..count.get() {
++                    get_page_info(base.next_by(page))
++                        .expect("an allocated frame has a PageInfo")
++                        .add_ref(RefKind::Shared)
++                        .expect("a fresh frame takes a second reference");
++                }
++                pinned = Some(base);
++                Ok(grant)
++            },
++        )
++    };
++    handle_notify_files(notify_files, token);
++    let page = match mapped {
++        Ok(page) => page,
++        Err(err) => {
++            super::unreserve(slot);
++            return Err(err);
++        }
++    };
++    let base = pinned.expect("a successful mmap ran the grant closure");
++    match super::map(slot, base, count.get()) {
++        Ok(_) => Ok(page.start_address().data()),
++        Err(err) => {
++            super::unpin(base, count.get());
++            if let Ok(notify) = addr_space.munmap(PageSpan::new(page, count.get()), false, token) {
++                handle_notify_files(notify, token);
++            }
++            Err(err)
++        }
++    }
++}
++
++pub fn call(
++    slot: usize,
++    payload: UserSliceRw,
++    metadata: &[u64],
++    token: &mut CleanLockToken,
++) -> Result<usize> {
++    match metadata.first().copied() {
++        Some(VERB_ADDRESS) => {
++            let virt = VirtualAddress::new(payload.read_usize()?);
++            let physical = {
++                let mut token = token.token();
++                let addr = AddrSpace::current()?;
++                let addr = addr.acquire_read(token.downgrade());
++                let (physical, _) = addr
++                    .table
++                    .utable
++                    .translate(virt)
++                    .ok_or(Error::new(ENOENT))?;
++                physical
++            };
++            let device = super::address(slot, physical.data() as u64)?;
++            payload.write_usize(device as usize)?;
++            Ok(0)
++        }
++        Some(VERB_RELEASE) => {
++            if payload.len() != RELEASE_PAYLOAD {
++                return Err(Error::new(EINVAL));
++            }
++            let mut words = [0u8; RELEASE_PAYLOAD];
++            payload.copy_to_slice(&mut words)?;
++            let address = u64::from_ne_bytes(words[..8].try_into().expect("eight bytes"));
++            let length = u64::from_ne_bytes(words[8..].try_into().expect("eight bytes"));
++            super::release(slot, address, length)?;
++            Ok(0)
++        }
++        _ => Err(Error::new(EINVAL)),
++    }
++}
++
++pub fn close(slot: usize) {
++    super::close(slot);
++}
+diff --git a/src/iommu/mod.rs b/src/iommu/mod.rs
+index 7c4a774f..aa504e03 100644
+--- a/src/iommu/mod.rs
++++ b/src/iommu/mod.rs
+@@ -1,14 +1,97 @@
+ use alloc::{string::String, vec::Vec};
+-use core::fmt::Write;
++use core::fmt::{self, Write};
+ 
+ use spin::Mutex;
+ 
++use crate::{
++    memory::{deallocate_contiguous, deallocate_frame, get_page_info, Frame, PAGE_SIZE},
++    syscall::error::{Error, Result, EBADF, EBUSY, EINVAL, EIO, ENFILE, ENOENT, ENOMEM, ENOSPC},
++};
++
+ #[cfg(target_arch = "x86_64")]
+ mod dmar;
++pub mod handle;
+ #[cfg(target_arch = "x86_64")]
+ mod vtd;
+ 
+ pub const FAULT_LOG_LIMIT: u64 = 64;
++pub const MAX_HANDLES: usize = 64;
++pub const MAX_PINS_PER_HANDLE: usize = 256;
++pub const MAX_PIN_PAGES: usize = 1024;
++#[cfg(target_arch = "x86_64")]
++const FIRST_HANDLE_DOMAIN: u16 = 2;
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub struct RequesterId {
++    pub segment: u16,
++    pub bus: u8,
++    pub device: u8,
++    pub function: u8,
++}
++
++impl RequesterId {
++    pub fn parse(name: &str) -> Option<Self> {
++        let (segment, rest) = name.split_once('-')?;
++        let (bus, rest) = rest.split_once('-')?;
++        let (device, function) = rest.split_once('.')?;
++        let fields = [(segment, 4), (bus, 2), (device, 2), (function, 1)];
++        if !fields.iter().all(|(field, len)| {
++            field.len() == *len && field.bytes().all(|byte| byte.is_ascii_hexdigit())
++        }) {
++            return None;
++        }
++        let device = u8::from_str_radix(device, 16).ok()?;
++        let function = u8::from_str_radix(function, 16).ok()?;
++        if device > 0x1F || function > 0x7 {
++            return None;
++        }
++        Some(Self {
++            segment: u16::from_str_radix(segment, 16).ok()?,
++            bus: u8::from_str_radix(bus, 16).ok()?,
++            device,
++            function,
++        })
++    }
++
++    pub fn source_id(self) -> u16 {
++        u16::from(self.bus) << 8 | u16::from(self.device) << 3 | u16::from(self.function)
++    }
++}
++
++impl fmt::Display for RequesterId {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(
++            f,
++            "{:04x}:{:02x}:{:02x}.{}",
++            self.segment, self.bus, self.device, self.function
++        )
++    }
++}
++
++#[derive(Clone, Copy)]
++struct Pin {
++    base: Frame,
++    count: usize,
++}
++
++struct Handle {
++    rid: RequesterId,
++    pins: Vec<Pin>,
++    reserved: usize,
++    pages: usize,
++    faults: u64,
++    #[cfg(target_arch = "x86_64")]
++    domain: Option<vtd::Domain>,
++}
++
++impl Handle {
++    fn domain_id(&self) -> Option<u16> {
++        #[cfg(target_arch = "x86_64")]
++        return self.domain.as_ref().map(|domain| domain.id);
++        #[cfg(not(target_arch = "x86_64"))]
++        return None;
++    }
++}
+ 
+ #[derive(Clone, Copy, PartialEq, Eq)]
+ enum Mode {
+@@ -23,6 +106,8 @@ struct State {
+     unit: Option<vtd::Unit>,
+     faults: u64,
+     overflows: u64,
++    pinned_forever: usize,
++    handles: [Option<Handle>; MAX_HANDLES],
+ }
+ 
+ static STATE: Mutex<State> = Mutex::new(State {
+@@ -32,6 +117,8 @@ static STATE: Mutex<State> = Mutex::new(State {
+     unit: None,
+     faults: 0,
+     overflows: 0,
++    pinned_forever: 0,
++    handles: [const { None }; MAX_HANDLES],
+ });
+ 
+ fn boot_switch(env: &[u8]) -> Option<&str> {
+@@ -132,12 +219,28 @@ impl State {
+     fn collect_faults(&mut self) {
+         #[cfg(target_arch = "x86_64")]
+         if let Some(unit) = self.unit.as_mut() {
++            let segment = unit.segment;
++            let handles = &mut self.handles;
+             let mut faults = self.faults;
+             let overflows = unit.collect_faults(|fault| {
++                let owner = handles.iter_mut().flatten().find(|handle| {
++                    handle.domain.is_some()
++                        && handle.rid.segment == segment
++                        && handle.rid.source_id() == fault.source
++                });
++                let outside = if owner.is_some() {
++                    "outside the device's DMA handle"
++                } else {
++                    "outside the one-to-one map"
++                };
++                if let Some(owner) = owner {
++                    owner.faults += 1;
++                }
+                 if faults < FAULT_LOG_LIMIT {
+                     warn!(
+-                        "iommu: refused {} by {:02x}:{:02x}.{} at {:#x} (reason {:#x})",
++                        "iommu: refused {} by {:04x}:{:02x}:{:02x}.{} at {:#x}, {outside} (reason {:#x})",
+                         if fault.write { "write" } else { "read" },
++                        segment,
+                         fault.source >> 8,
+                         (fault.source >> 3) & 0x1F,
+                         fault.source & 0x7,
+@@ -153,6 +256,214 @@ impl State {
+             self.overflows += overflows;
+         }
+     }
++
++    fn handle_mut(&mut self, slot: usize) -> Result<&mut Handle> {
++        self.handles
++            .get_mut(slot)
++            .and_then(Option::as_mut)
++            .ok_or(Error::new(EBADF))
++    }
++}
++
++#[cfg(target_arch = "x86_64")]
++fn errno(err: &vtd::Error) -> Error {
++    Error::new(match err {
++        vtd::Error::OutOfMemory => ENOMEM,
++        vtd::Error::NoDomainId(_) => ENFILE,
++        _ => EIO,
++    })
++}
++
++pub fn open(rid: RequesterId) -> Result<usize> {
++    let mut guard = STATE.lock();
++    let state = &mut *guard;
++    if state
++        .handles
++        .iter()
++        .flatten()
++        .any(|handle| handle.rid == rid)
++    {
++        return Err(Error::new(EBUSY));
++    }
++    let slot = state
++        .handles
++        .iter()
++        .position(Option::is_none)
++        .ok_or(Error::new(ENFILE))?;
++    #[cfg(target_arch = "x86_64")]
++    let domain = match state.unit.as_mut() {
++        Some(unit) if state.mode != Mode::Off && unit.segment == rid.segment => {
++            let id = FIRST_HANDLE_DOMAIN + slot as u16;
++            let domain = unit.attach(rid.source_id(), id).map_err(|err| {
++                error!("iommu: no domain for {rid}: {err}");
++                errno(&err)
++            })?;
++            info!("iommu: {rid} left the one-to-one map for domain {id}, empty");
++            Some(domain)
++        }
++        _ => None,
++    };
++    state.handles[slot] = Some(Handle {
++        rid,
++        pins: Vec::with_capacity(MAX_PINS_PER_HANDLE),
++        reserved: 0,
++        pages: 0,
++        faults: 0,
++        #[cfg(target_arch = "x86_64")]
++        domain,
++    });
++    Ok(slot)
++}
++
++pub fn reserve(slot: usize) -> Result<()> {
++    let mut state = STATE.lock();
++    let handle = state.handle_mut(slot)?;
++    if handle.pins.len() + handle.reserved >= MAX_PINS_PER_HANDLE {
++        return Err(Error::new(ENOSPC));
++    }
++    handle.reserved += 1;
++    Ok(())
++}
++
++pub fn unreserve(slot: usize) {
++    if let Ok(handle) = STATE.lock().handle_mut(slot) {
++        handle.reserved = handle.reserved.saturating_sub(1);
++    }
++}
++
++pub fn map(slot: usize, base: Frame, count: usize) -> Result<u64> {
++    assert!(count > 0 && count <= MAX_PIN_PAGES);
++    let mut guard = STATE.lock();
++    let state = &mut *guard;
++    let handle = state
++        .handles
++        .get_mut(slot)
++        .and_then(Option::as_mut)
++        .ok_or(Error::new(EBADF))?;
++    assert!(handle.reserved > 0, "map without a reservation");
++    handle.reserved -= 1;
++    let address = base.base().data() as u64;
++    #[cfg(target_arch = "x86_64")]
++    if let (Some(unit), Some(domain)) = (state.unit.as_mut(), handle.domain.as_ref()) {
++        unit.map_pages(domain, address, count).map_err(|err| {
++            error!(
++                "iommu: mapping {count} pages for {} failed: {err}",
++                handle.rid
++            );
++            errno(&err)
++        })?;
++    }
++    assert!(handle.pins.len() < MAX_PINS_PER_HANDLE);
++    handle.pins.push(Pin { base, count });
++    handle.pages += count;
++    Ok(address)
++}
++
++pub fn address(slot: usize, physical: u64) -> Result<u64> {
++    let mut state = STATE.lock();
++    let handle = state.handle_mut(slot)?;
++    let inside = handle.pins.iter().any(|pin| {
++        let start = pin.base.base().data() as u64;
++        physical >= start && physical - start < (pin.count * PAGE_SIZE) as u64
++    });
++    if inside {
++        Ok(physical)
++    } else {
++        Err(Error::new(ENOENT))
++    }
++}
++
++pub fn release(slot: usize, address: u64, length: u64) -> Result<()> {
++    if length == 0 || length % PAGE_SIZE as u64 != 0 {
++        return Err(Error::new(EINVAL));
++    }
++    let mut guard = STATE.lock();
++    let state = &mut *guard;
++    let handle = state
++        .handles
++        .get_mut(slot)
++        .and_then(Option::as_mut)
++        .ok_or(Error::new(EBADF))?;
++    let index = handle
++        .pins
++        .iter()
++        .position(|pin| {
++            pin.base.base().data() as u64 == address && (pin.count * PAGE_SIZE) as u64 == length
++        })
++        .ok_or(Error::new(ENOENT))?;
++    let pin = handle.pins.swap_remove(index);
++    handle.pages -= pin.count;
++    #[cfg(target_arch = "x86_64")]
++    if let (Some(unit), Some(domain)) = (state.unit.as_mut(), handle.domain.as_ref()) {
++        if let Err(err) = unit.unmap_pages(domain, address, pin.count) {
++            error!(
++                "iommu: release of {} pages for {} failed, they stay pinned: {err}",
++                pin.count, handle.rid
++            );
++            state.pinned_forever += pin.count;
++            return Err(Error::new(EIO));
++        }
++    }
++    drop(guard);
++    unpin(pin.base, pin.count);
++    Ok(())
++}
++
++pub fn close(slot: usize) {
++    let mut guard = STATE.lock();
++    let state = &mut *guard;
++    let Some(mut handle) = state.handles.get_mut(slot).and_then(Option::take) else {
++        return;
++    };
++    #[cfg(target_arch = "x86_64")]
++    if let Some(domain) = handle.domain.take() {
++        let id = domain.id;
++        let unit = state
++            .unit
++            .as_mut()
++            .expect("a handle with a domain has a unit");
++        match unit.detach(handle.rid.source_id(), domain) {
++            Ok(tables) => {
++                info!(
++                    "iommu: {} back in the one-to-one map, domain {id} and its {tables} tables freed",
++                    handle.rid
++                );
++            }
++            Err(err) => {
++                error!(
++                    "iommu: detaching {} failed, its {} pages stay pinned: {err}",
++                    handle.rid, handle.pages
++                );
++                state.pinned_forever += handle.pages;
++                return;
++            }
++        }
++    }
++    drop(guard);
++    for pin in handle.pins.drain(..) {
++        unpin(pin.base, pin.count);
++    }
++}
++
++pub(crate) fn unpin(base: Frame, count: usize) {
++    let mut all_free = true;
++    for page in 0..count {
++        let info = get_page_info(base.next_by(page)).expect("a pinned frame has a PageInfo");
++        if info.remove_ref().is_some() {
++            all_free = false;
++        }
++    }
++    if all_free {
++        unsafe { deallocate_contiguous(base, count) };
++        return;
++    }
++    for page in 0..count {
++        let frame = base.next_by(page);
++        let info = get_page_info(frame).expect("a pinned frame has a PageInfo");
++        if info.refcount().is_none() {
++            unsafe { deallocate_frame(frame) };
++        }
++    }
+ }
+ 
+ pub fn status() -> Vec<u8> {
+@@ -190,5 +501,22 @@ pub fn status() -> Vec<u8> {
+     if state.overflows > 0 {
+         let _ = writeln!(out, "fault-overflows: {}", state.overflows);
+     }
++    if state.pinned_forever > 0 {
++        let _ = writeln!(out, "pinned-forever: {}", state.pinned_forever);
++    }
++    for handle in state.handles.iter().flatten() {
++        let _ = match handle.domain_id() {
++            Some(id) => writeln!(
++                out,
++                "{} domain {id} pages {} faults {}",
++                handle.rid, handle.pages, handle.faults
++            ),
++            None => writeln!(
++                out,
++                "{} domain none pages {} faults {}",
++                handle.rid, handle.pages, handle.faults
++            ),
++        };
++    }
+     out.into_bytes()
+ }
+diff --git a/src/iommu/vtd.rs b/src/iommu/vtd.rs
+index e1aa4a6e..68b1be2f 100644
+--- a/src/iommu/vtd.rs
++++ b/src/iommu/vtd.rs
+@@ -1,3 +1,4 @@
++use arrayvec::ArrayVec;
+ use core::{
+     arch::asm,
+     hint::spin_loop,
+@@ -6,7 +7,8 @@ use core::{
+ };
+ 
+ use crate::memory::{
+-    allocate_frame, map_device_memory, Frame, PhysicalAddress, RmmA, RmmArch, PAGE_SIZE,
++    allocate_frame, deallocate_frame, map_device_memory, Frame, PhysicalAddress, RmmA, RmmArch,
++    PAGE_SIZE,
+ };
+ 
+ use super::dmar::{RemappingUnit, ReservedRegion, MAX_REGISTER_PAGES};
+@@ -59,6 +61,8 @@ const DESC_CONTEXT: u64 = 0x1;
+ const DESC_IOTLB: u64 = 0x2;
+ const DESC_WAIT: u64 = 0x5;
+ const DESC_GLOBAL: u64 = 1 << 4;
++const DESC_DOMAIN: u64 = 2 << 4;
++const DESC_DEVICE: u64 = 3 << 4;
+ const DESC_IOTLB_DRAIN_READ: u64 = 1 << 7;
+ const DESC_IOTLB_DRAIN_WRITE: u64 = 1 << 6;
+ const DESC_WAIT_STATUS_WRITE: u64 = 1 << 5;
+@@ -82,6 +86,9 @@ pub enum Error {
+     QueueError,
+     AddressTooWide(u64),
+     Broken,
++    AlreadyMapped(u64),
++    NotMapped(usize),
++    NoDomainId(u16),
+ }
+ 
+ impl core::fmt::Display for Error {
+@@ -99,6 +106,9 @@ impl core::fmt::Display for Error {
+                 write!(f, "address {address:#x} beyond the table depth")
+             }
+             Self::Broken => write!(f, "unit stopped after an earlier timeout"),
++            Self::AlreadyMapped(address) => write!(f, "device address {address:#x} already mapped"),
++            Self::NotMapped(count) => write!(f, "{count} pages were not mapped"),
++            Self::NoDomainId(id) => write!(f, "domain id {id} beyond what the unit supports"),
+         }
+     }
+ }
+@@ -160,9 +170,16 @@ pub struct Domain {
+     top: Frame,
+ }
+ 
++enum Slot {
++    At(Frame, usize),
++    Covered,
++    Missing,
++}
++
+ pub struct Unit {
+     registers: Registers,
+     pub register_base: u64,
++    pub segment: u16,
+     pub version: u32,
+     pub cap: u64,
+     pub ecap: u64,
+@@ -175,6 +192,7 @@ pub struct Unit {
+     drain: u64,
+     root: Frame,
+     shared_context: Frame,
++    bus_context: [Option<Frame>; ROOT_ENTRIES],
+     identity: Domain,
+     queue: Frame,
+     queue_tail: usize,
+@@ -268,6 +286,7 @@ impl Unit {
+         let mut unit = Unit {
+             registers,
+             register_base: description.register_base,
++            segment: description.segment,
+             version,
+             cap,
+             ecap,
+@@ -280,6 +299,7 @@ impl Unit {
+             drain,
+             root,
+             shared_context,
++            bus_context: [None; ROOT_ENTRIES],
+             identity: Domain {
+                 id: IDENTITY_DOMAIN,
+                 top: identity_top,
+@@ -306,7 +326,7 @@ impl Unit {
+             identity_entries += unit.map_identity(region.base, region.end, false)?;
+         }
+ 
+-        let (context_low, context_high) = unit.context_words(&unit.identity);
++        let (context_low, context_high) = unit.context_words(IDENTITY_DOMAIN, identity_top);
+         for device_function in 0..CONTEXT_ENTRIES {
+             write_word(shared_context, device_function * 2 + 1, context_high);
+             write_word(shared_context, device_function * 2, context_low);
+@@ -362,13 +382,246 @@ impl Unit {
+         }
+     }
+ 
+-    fn context_words(&self, domain: &Domain) -> (u64, u64) {
++    fn context_words(&self, id: u16, top: Frame) -> (u64, u64) {
+         (
+-            (domain.top.base().data() as u64 & PTE_ADDR_MASK) | ENTRY_PRESENT,
+-            self.address_width_field | (u64::from(domain.id) << 8),
++            (top.base().data() as u64 & PTE_ADDR_MASK) | ENTRY_PRESENT,
++            self.address_width_field | (u64::from(id) << 8),
+         )
+     }
+ 
++    pub fn domain_ids(&self) -> u32 {
++        1u32 << (4 + 2 * (self.cap & 0x7) as u32)
++    }
++
++    pub fn attach(&mut self, source: u16, id: u16) -> Result<Domain, Error> {
++        if self.broken {
++            return Err(Error::Broken);
++        }
++        if id <= IDENTITY_DOMAIN || u32::from(id) >= self.domain_ids() {
++            return Err(Error::NoDomainId(id));
++        }
++        let mut tables = TableAllocator {
++            coherent: self.coherent,
++        };
++        let top = tables.allocate()?;
++        let context = match self.private_context(usize::from(source >> 8)) {
++            Ok(context) => context,
++            Err(err) => {
++                unsafe { deallocate_frame(top) };
++                return Err(err);
++            }
++        };
++        self.replace_context(context, source, IDENTITY_DOMAIN, id, top)?;
++        Ok(Domain { id, top })
++    }
++
++    pub fn detach(&mut self, source: u16, domain: Domain) -> Result<usize, Error> {
++        let context = self.bus_context[usize::from(source >> 8)]
++            .expect("a device with its own domain has its own context table");
++        self.replace_context(
++            context,
++            source,
++            domain.id,
++            IDENTITY_DOMAIN,
++            self.identity.top,
++        )?;
++        Ok(self.free_domain(domain))
++    }
++
++    fn private_context(&mut self, bus: usize) -> Result<Frame, Error> {
++        assert!(bus < ROOT_ENTRIES);
++        if let Some(context) = self.bus_context[bus] {
++            return Ok(context);
++        }
++        let mut tables = TableAllocator {
++            coherent: self.coherent,
++        };
++        let context = tables.allocate()?;
++        for word in 0..CONTEXT_ENTRIES * 2 {
++            write_word(context, word, read_word(self.shared_context, word));
++        }
++        self.flush_page(context);
++        write_word(
++            self.root,
++            bus * 2,
++            (context.base().data() as u64 & PTE_ADDR_MASK) | ENTRY_PRESENT,
++        );
++        self.flush_word(self.root, bus * 2);
++        self.bus_context[bus] = Some(context);
++        self.submit(&[(DESC_CONTEXT | DESC_GLOBAL, 0)])?;
++        Ok(context)
++    }
++
++    fn replace_context(
++        &mut self,
++        context: Frame,
++        source: u16,
++        old: u16,
++        new: u16,
++        top: Frame,
++    ) -> Result<(), Error> {
++        let index = usize::from(source & 0xFF) * 2;
++        let device = u64::from(source) << 32;
++        write_word(context, index, 0);
++        self.flush_word(context, index);
++        self.submit(&[
++            (
++                DESC_CONTEXT | DESC_DEVICE | (u64::from(old) << 16) | device,
++                0,
++            ),
++            (
++                DESC_IOTLB | DESC_DOMAIN | self.drain | (u64::from(old) << 16),
++                0,
++            ),
++        ])?;
++        let (low, high) = self.context_words(new, top);
++        write_word(context, index + 1, high);
++        self.flush_word(context, index + 1);
++        fence(Ordering::SeqCst);
++        write_word(context, index, low);
++        self.flush_word(context, index);
++        let tag = if self.caching_mode { 0 } else { u64::from(new) };
++        self.submit(&[
++            (DESC_CONTEXT | DESC_DEVICE | (tag << 16) | device, 0),
++            (
++                DESC_IOTLB | DESC_DOMAIN | self.drain | (u64::from(new) << 16),
++                0,
++            ),
++        ])
++    }
++
++    pub fn map_pages(&mut self, domain: &Domain, base: u64, count: usize) -> Result<(), Error> {
++        if self.broken {
++            return Err(Error::Broken);
++        }
++        let end = base.saturating_add(count as u64 * PAGE_4K);
++        if end > self.address_limit() {
++            return Err(Error::AddressTooWide(end));
++        }
++        for page in 0..count {
++            let address = base + page as u64 * PAGE_4K;
++            if let Err(err) = self.map_page(domain.top, address) {
++                for undo in 0..page {
++                    self.clear_page(domain.top, base + undo as u64 * PAGE_4K);
++                }
++                self.invalidate_domain(domain.id)?;
++                return Err(err);
++            }
++        }
++        if self.caching_mode {
++            self.invalidate_domain(domain.id)?;
++        }
++        Ok(())
++    }
++
++    pub fn unmap_pages(&mut self, domain: &Domain, base: u64, count: usize) -> Result<(), Error> {
++        let mut missing = 0;
++        for page in 0..count {
++            if !self.clear_page(domain.top, base + page as u64 * PAGE_4K) {
++                missing += 1;
++            }
++        }
++        self.invalidate_domain(domain.id)?;
++        if missing > 0 {
++            return Err(Error::NotMapped(missing));
++        }
++        Ok(())
++    }
++
++    fn invalidate_domain(&mut self, id: u16) -> Result<(), Error> {
++        self.submit(&[(
++            DESC_IOTLB | DESC_DOMAIN | self.drain | (u64::from(id) << 16),
++            0,
++        )])
++    }
++
++    fn map_page(&mut self, top: Frame, address: u64) -> Result<(), Error> {
++        match self.slot(top, address, 1, true)? {
++            Slot::At(table, index) => {
++                if read_word(table, index) & (PTE_READ | PTE_WRITE) != 0 {
++                    return Err(Error::AlreadyMapped(address));
++                }
++                write_word(
++                    table,
++                    index,
++                    (address & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE,
++                );
++                self.flush_word(table, index);
++                Ok(())
++            }
++            Slot::Covered => Err(Error::AlreadyMapped(address)),
++            Slot::Missing => unreachable!("a walk that creates tables finds no hole"),
++        }
++    }
++
++    fn clear_page(&mut self, top: Frame, address: u64) -> bool {
++        match self.slot(top, address, 1, false) {
++            Ok(Slot::At(table, index)) if read_word(table, index) & (PTE_READ | PTE_WRITE) != 0 => {
++                write_word(table, index, 0);
++                self.flush_word(table, index);
++                true
++            }
++            _ => false,
++        }
++    }
++
++    fn slot(&mut self, top: Frame, address: u64, level: u8, create: bool) -> Result<Slot, Error> {
++        let mut table = top;
++        let mut current = self.levels;
++        for _ in 0..self.levels {
++            let index = ((address >> (12 + 9 * u32::from(current - 1))) & 0x1FF) as usize;
++            if current == level {
++                return Ok(Slot::At(table, index));
++            }
++            let entry = read_word(table, index);
++            if entry & (PTE_READ | PTE_WRITE) == 0 {
++                if !create {
++                    return Ok(Slot::Missing);
++                }
++                let mut tables = TableAllocator {
++                    coherent: self.coherent,
++                };
++                let next = tables.allocate()?;
++                write_word(
++                    table,
++                    index,
++                    (next.base().data() as u64 & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE,
++                );
++                self.flush_word(table, index);
++                table = next;
++            } else if entry & PTE_LARGE != 0 {
++                return Ok(Slot::Covered);
++            } else {
++                table = frame_of(entry);
++            }
++            current -= 1;
++        }
++        unreachable!("page-table walk ran past level 1");
++    }
++
++    fn free_domain(&mut self, domain: Domain) -> usize {
++        let mut stack: ArrayVec<(Frame, u8, usize), 4> = ArrayVec::new();
++        stack.push((domain.top, self.levels, 0));
++        let mut freed = 0;
++        while let Some(last) = stack.last_mut() {
++            let (table, level, index) = *last;
++            if index == TABLE_ENTRIES {
++                stack.pop();
++                unsafe { deallocate_frame(table) };
++                freed += 1;
++                continue;
++            }
++            last.2 += 1;
++            if level > 1 {
++                let entry = read_word(table, index);
++                if entry & (PTE_READ | PTE_WRITE) != 0 && entry & PTE_LARGE == 0 {
++                    stack.push((frame_of(entry), level - 1, 0));
++                }
++            }
++        }
++        freed
++    }
++
+     fn address_limit(&self) -> u64 {
+         1u64 << (12 + 9 * u32::from(self.levels))
+     }
+@@ -406,16 +659,9 @@ impl Unit {
+     }
+ 
+     fn map_identity_page(&mut self, address: u64, level: u8) -> Result<bool, Error> {
+-        let mut table = self.identity.top;
+-        let mut current = self.levels;
+-        let mut tables = TableAllocator {
+-            coherent: self.coherent,
+-        };
+-        for _ in 0..self.levels {
+-            let index = ((address >> (12 + 9 * u32::from(current - 1))) & 0x1FF) as usize;
+-            let entry = read_word(table, index);
+-            if current == level {
+-                if entry & (PTE_READ | PTE_WRITE) != 0 {
++        match self.slot(self.identity.top, address, level, true)? {
++            Slot::At(table, index) => {
++                if read_word(table, index) & (PTE_READ | PTE_WRITE) != 0 {
+                     return Ok(false);
+                 }
+                 let large = if level > 1 { PTE_LARGE } else { 0 };
+@@ -425,25 +671,11 @@ impl Unit {
+                     (address & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE | large,
+                 );
+                 self.flush_word(table, index);
+-                return Ok(true);
++                Ok(true)
+             }
+-            if entry & (PTE_READ | PTE_WRITE) == 0 {
+-                let next = tables.allocate()?;
+-                write_word(
+-                    table,
+-                    index,
+-                    (next.base().data() as u64 & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE,
+-                );
+-                self.flush_word(table, index);
+-                table = next;
+-            } else if entry & PTE_LARGE != 0 {
+-                return Ok(false);
+-            } else {
+-                table = frame_of(entry);
+-            }
+-            current -= 1;
++            Slot::Covered => Ok(false),
++            Slot::Missing => unreachable!("a walk that creates tables finds no hole"),
+         }
+-        unreachable!("page-table walk ran past level 1");
+     }
+ 
+     fn flush_word(&self, frame: Frame, index: usize) {
+diff --git a/src/scheme/memory.rs b/src/scheme/memory.rs
+index ac031b0a..5c9eb2cf 100644
+--- a/src/scheme/memory.rs
++++ b/src/scheme/memory.rs
+@@ -224,6 +224,14 @@ impl KernelScheme for MemoryScheme {
+         }
+         let path = path.trim_start_matches('/');
+ 
++        #[cfg(feature = "iommu")]
++        if let Some(name) = path.strip_prefix("dma/") {
++            return Ok(OpenResult::SchemeLocal(
++                crate::iommu::handle::open(name, privileged, ctx.uid)?,
++                InternalFlags::empty(),
++            ));
++        }
++
+         let (before_memty, memty_str) = path.split_once('@').unwrap_or((path, ""));
+         let (before_ty, type_str) = memty_str.split_once('?').unwrap_or((memty_str, ""));
+ 
+@@ -289,13 +297,18 @@ impl KernelScheme for MemoryScheme {
+         fds: &[usize],
+         payload: UserSliceRw,
+         _flags: syscall::CallFlags,
+-        _metadata: &[u64],
++        metadata: &[u64],
+         token: &mut CleanLockToken,
+     ) -> Result<usize> {
+         if fds.len() != 1 {
+             return Err(Error::new(EINVAL));
+         }
+         let id = fds[0];
++        #[cfg(feature = "iommu")]
++        if let Some(slot) = crate::iommu::handle::slot(id) {
++            return crate::iommu::handle::call(slot, payload, metadata, token);
++        }
++        let _ = metadata;
+         let (handle_ty, _, _) = u32::try_from(id)
+             .ok()
+             .and_then(from_raw)
+@@ -339,6 +352,10 @@ impl KernelScheme for MemoryScheme {
+         _consume: bool,
+         token: &mut CleanLockToken,
+     ) -> Result<usize> {
++        #[cfg(feature = "iommu")]
++        if let Some(slot) = crate::iommu::handle::slot(id) {
++            return crate::iommu::handle::fmap(slot, addr_space, map, token);
++        }
+         let (handle_ty, mem_ty, flags) = u32::try_from(id)
+             .ok()
+             .and_then(from_raw)
+@@ -356,6 +373,14 @@ impl KernelScheme for MemoryScheme {
+             HandleTy::Translation | HandleTy::PortIo => Err(Error::new(EOPNOTSUPP)),
+         }
+     }
++    fn close(&self, id: usize, _token: &mut CleanLockToken) -> Result<()> {
++        #[cfg(feature = "iommu")]
++        if let Some(slot) = crate::iommu::handle::slot(id) {
++            crate::iommu::handle::close(slot);
++        }
++        let _ = id;
++        Ok(())
++    }
+     fn kfpath(&self, _id: usize, buf: UserSliceWo, _token: &mut CleanLockToken) -> Result<usize> {
+         //TODO: construct useful path?
+         buf.copy_common_bytes_from_slice("/scheme/memory/".as_bytes())

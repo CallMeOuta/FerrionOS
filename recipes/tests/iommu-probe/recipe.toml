@@ -1,0 +1,9 @@
+[package]
+description = "Checks that QEMU's iommu-testdev reaches only memory allocated through its DMA handle"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

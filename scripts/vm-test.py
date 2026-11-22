@@ -7533,12 +7533,14 @@ def test_fortify_chk_aborts(vm, args):
     return True, "; ".join(summary)
 
 IOMMU_TRACE = ["vtd_reg_dmar_root", "vtd_dmar_enable", "vtd_reg_write_gcmd", "vtd_ir_enable",
-               "vtd_dmar_translate", "vtd_dmar_fault"]
+               "vtd_dmar_translate", "vtd_dmar_fault", "iommu_testdev_dma_result"]
+IOMMU_TESTDEV = "1b36:0005"
 IOMMU_NVME = "1b36:0010"
 IOMMU_TRANSLATE = re.compile(r"vtd_dmar_translate dev ([0-9a-f]{2}):([0-9a-f]{2})\.([0-9a-f]{2}) "
                              r"iova 0x([0-9a-f]+) -> gpa 0x([0-9a-f]+)")
-IOMMU_STATUS_LINE = re.compile(r"^(?:backend|translation|mode|interrupt-remapping|unit|faults|fault-overflows): .*$",
-                               re.M)
+IOMMU_STATUS_LINE = re.compile(r"^(?:backend|translation|mode|interrupt-remapping|unit|faults|fault-overflows|"
+                               r"pinned-forever): .*$|^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] domain .*$", re.M)
+IOMMU_FAULT = re.compile(r"vtd_dmar_fault sid 0x([0-9a-f]+) fault (\d+) addr 0x([0-9a-f]+) write (\d)")
 
 
 def iommu_mode(args):
@@ -7655,6 +7657,48 @@ def test_iommu(vm, args):
     return True, f"{', '.join(summary)}{extra}, DHCP exchange captured"
 
 
+def test_dma_outside_grant(vm, args):
+    """Slice 2 of S18 (probe dma-outside-grant, image of --config iommu-test, iommu=test): iommu-probe has QEMU's iommu-testdev write to buffer A, allocated through the device's DMA handle, and to buffer B, allocated the old way; A succeeds, B is refused with a fault naming the device and B's address, B is unchanged, and the status the probe read lists the device's domain with one fault."""
+    found = vm.wait_serial(r"iommu-probe: granted: (\w+), not granted: (\w+)", args.timeout)
+    devices = pci_functions(vm)
+    text = vm.text()
+    (vm.out / "iommu-probe.txt").write_text("\n".join(line for line in text.splitlines() if "iommu" in line) + "\n")
+    if not found:
+        return False, f"iommu-probe printed no verdict within {args.timeout}s; see {vm.out / 'serial.log'}"
+    problems = []
+    if (found.group(1), found.group(2)) != ("ok", "blocked"):
+        problems.append(f"probe: granted {found.group(1)}, not granted {found.group(2)}")
+    testdev = devices.get(IOMMU_TESTDEV)
+    if testdev is None:
+        return False, f"QEMU lists no iommu-testdev ({IOMMU_TESTDEV})"
+    sid = testdev[0] << 8 | testdev[1] << 3 | testdev[2]
+    name = f"{testdev[0]:02x}:{testdev[1]:02x}.{testdev[2]}"
+    b_address = re.search(r"iommu-probe: buffer B at 0x([0-9a-f]+)", text)
+    results = []
+    for line in vm.trace("iommu_testdev_dma_result"):
+        match = re.search(r"(0x[0-9a-f]+|\b[0-9]+\b)\s*$", line.strip())
+        if match:
+            results.append(int(match.group(1), 0))
+    if results[-2:] != [0, 0xDEAD0002]:
+        problems.append(f"testdev results {[hex(r) for r in results]}, expected 0x0 then 0xdead0002 last")
+    faults = [m for m in (IOMMU_FAULT.search(line) for line in vm.trace("vtd_dmar_fault")) if m]
+    mine = [m for m in faults if int(m.group(1), 16) == sid]
+    if not b_address:
+        problems.append("the probe printed no address for buffer B")
+    elif not any(int(m.group(3), 16) & ~0xFFF == int(b_address.group(1), 16) & ~0xFFF for m in mine):
+        problems.append(f"no vtd_dmar_fault for sid {sid:#x} at B {b_address.group(1)}; saw {[m.group(0) for m in faults]}")
+    if len(faults) != len(mine):
+        problems.append(f"{len(faults) - len(mine)} faults from other devices")
+    status = re.search(rf"iommu-probe: status: 0000:{re.escape(name)} domain (\d+) pages (\d+) faults (\d+)", text)
+    if not status:
+        problems.append(f"the probe's status snapshot lists no domain for {name}")
+    elif status.group(3) != "1":
+        problems.append(f"status lists {status.group(3)} faults for {name}, expected 1")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, (f"granted: ok, not granted: blocked; testdev {name} results 0x0 then 0xdead0002, "
+                  f"fault at B {b_address.group(1)}, status domain {status.group(1)} pages {status.group(2)} faults 1")
+
 
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
@@ -7721,6 +7765,7 @@ TESTS["canary-random"] = test_canary_random
 TESTS["stack-smash-aborts"] = test_stack_smash_aborts
 TESTS["fortify-chk-aborts"] = test_fortify_chk_aborts
 TESTS["iommu"] = test_iommu
+TESTS["dma-outside-grant"] = test_dma_outside_grant
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -7825,9 +7870,9 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *VK_EXACT_TRACE]})
-            elif name == "iommu":
+            elif name in ("iommu", "dma-outside-grant"):
                 if not any(assignment.startswith("iommu=") for assignment in args.make):
-                    make = ("iommu=yes",)
+                    make = ("iommu=yes",) if name == "iommu" else ("iommu=test",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *IOMMU_TRACE]})
             elif name == "gl-exact" and args.venus:
                 if not any(assignment.startswith("gpu=") for assignment in args.make):

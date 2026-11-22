@@ -1,0 +1,11 @@
+[package]
+name = "iommu-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Checks that QEMU's iommu-testdev reaches only memory allocated through its DMA handle (security roadmap S18)"
+publish = false
+
+[dependencies]
+libredox = "0.2.0"
+redox_syscall = "0.9.5"

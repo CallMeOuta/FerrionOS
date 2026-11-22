@@ -1,0 +1,14 @@
+include = ["desktop.toml"]
+
+[packages]
+iommu-probe = {}
+
+[[files]]
+path = "/usr/lib/pcid.d/iommu-probe.toml"
+data = """
+[[drivers]]
+name = "QEMU IOMMU test device"
+vendor = 0x1B36
+device = 0x0005
+command = ["/usr/bin/iommu-probe"]
+"""

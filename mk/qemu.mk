@@ -169,8 +169,13 @@ endif
 # work with KVM's in-kernel interrupt controller, so the controller is split between KVM and
 # QEMU (kernel-irqchip=split). caching-mode=on makes the guest report every change of its
 # translation tables to the device, which a device passed through from the host would need.
+# iommu=test adds QEMU's test devices behind the same IOMMU: iommu-testdev, which writes a
+# pattern by DMA where it is told, and edu, which raises an interrupt on request.
 ifeq ($(iommu),yes)
 	QEMUFLAGS+=-machine $(QEMU_MACHINE),kernel-irqchip=split -device intel-iommu,intremap=on,caching-mode=on
+else ifeq ($(iommu),test)
+	QEMUFLAGS+=-machine $(QEMU_MACHINE),kernel-irqchip=split -device intel-iommu,intremap=on,caching-mode=on
+	QEMUFLAGS+=-device iommu-testdev -device edu
 else
 	QEMUFLAGS+=-machine $(QEMU_MACHINE)
 endif
