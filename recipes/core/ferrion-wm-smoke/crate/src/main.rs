@@ -76,21 +76,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut target = renderer.bind(&mut image)?;
                 smithay::desktop::space::render_output::<_, WaylandSurfaceRenderElement<PixmanRenderer>, _, _>(&output, &mut renderer, &mut target, 1.0, 0, [&state.space], &[], &mut damage, [15.0 / 255.0, 14.0 / 255.0, 12.0 / 255.0, 1.0])?;
             }
-            let presentation = match backend.present() {
-                Ok(presentation) => presentation,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            match backend.present() {
+                Ok(presentation) => {
+                    let handed = Instant::now();
+                    let presented_ns = monotonic_ns()?;
+                    scheduler.record_render(handed.duration_since(started));
+                    for (client, sequence, received) in state.commits.drain(..) {
+                        println!("DD1_FRAME client={client} frame={sequence} dispatch_to_present_us={} monotonic_ns={} present_us={} present_started_us={}", handed.duration_since(received).as_micros(), presented_ns, presentation.completed_us, presentation.started_us);
+                    }
+                    for window in state.space.elements() {
+                        window.send_frame(&output, state.start.elapsed(), Some(Duration::ZERO), |_, _| Some(output.clone()));
+                    }
+                    state.space.refresh();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error.into()),
-            };
-            let handed = Instant::now();
-            let presented_ns = monotonic_ns()?;
-            scheduler.record_render(handed.duration_since(started));
-            for (client, sequence, received) in state.commits.drain(..) {
-                println!("DD1_FRAME client={client} frame={sequence} dispatch_to_present_us={} monotonic_ns={} present_us={} present_started_us={}", handed.duration_since(received).as_micros(), presented_ns, presentation.completed_us, presentation.started_us);
             }
-            for window in state.space.elements() {
-                window.send_frame(&output, state.start.elapsed(), Some(Duration::ZERO), |_, _| Some(output.clone()));
-            }
-            state.space.refresh();
             next_frame = scheduler.next_start(backend.now_us());
         }
         state.dh.flush_clients()?;
