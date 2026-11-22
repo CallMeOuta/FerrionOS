@@ -180,7 +180,13 @@ def cleanup_children():
             pass
 
 
+def record_result(verdict):
+    assert verdict in ("pass", "fail", "stall", "blocked"), f"invalid result {verdict!r}"
+    (out / "result").write_text(verdict + "\n")
+
+
 def fail(note):
+    record_result("fail")
     print(f"FAIL {name}: {note}")
     sys.exit(1)
 
@@ -331,10 +337,12 @@ try:
     if login is None:
         if "BdsDxe: starting" not in serial():
             # The firmware never started the bootloader: the caller retries once.
+            record_result("stall")
             print(f"STALL {name}: the firmware did not start the bootloader within {timeout:.0f}s")
             sys.exit(3)
         fail(f"no graphical login within {timeout:.0f}s")
     if not tpm:
+        record_result("pass")
         print(f"PASS {name}: graphical login at {login:.1f}s without a TPM")
         sys.exit(0)
 
@@ -372,6 +380,7 @@ try:
     if pcrs.get(4) == bytes(32):
         # The firmware measures the boot application into PCR 4 before starting it: its TPM had
         # stopped answering before the bootloader ran, which the caller retries once like a stall.
+        record_result("stall")
         print(f"STALL {name}: the firmware's TPM failed before the bootloader started (PCR 4 is zero)")
         sys.exit(3)
 
@@ -445,49 +454,80 @@ try:
         problems.append("the menu boot's environment still holds QUIET=1")
     if problems:
         fail("; ".join(problems))
+    record_result("pass")
     print(f"PASS {name}: login at {login:.1f}s; PCR 9 {pcrs[9].hex()} = {' + '.join(names)} + separator; "
           f"PCRs 7, 8, 9 replay from the bootloader's event log ({len(events)} events)")
 finally:
+    if not (out / "result").exists():
+        record_result("fail")
     cleanup_children()
 EOF
 }
 
-FAILED=0
-BLOCKED=0
-BOOTS=0
-STALLS=0
+CASE_MAX_ATTEMPTS=2
+CASE_NAMES=()
+rm -f "$OUT"/compare-*.result
+
+read_result() {
+    local path="$1" value
+    [ -f "$path" ] || { echo missing; return; }
+    value="$(tr -d '[:space:]' < "$path")"
+    case "$value" in
+        pass|fail|stall|blocked|not-comparable) echo "$value" ;;
+        *) boot_die "assertion failed: invalid result '$value' in $path" ;;
+    esac
+}
+
 run_case() {
-    local name="$1" attempt status
-    for attempt in 1 2; do
-        BOOTS=$((BOOTS + 1))
-        rm -f "$OUT/$name/pcr8.hex" "$OUT/$name/pcr9.hex"
+    local name="$1" attempt status outcome
+    CASE_NAMES+=("$name")
+    rm -f "$OUT/$name"/attempt-*.result "$OUT/$name/result" "$OUT/$name/pcr8.hex" "$OUT/$name/pcr9.hex"
+    for ((attempt = 1; attempt <= CASE_MAX_ATTEMPTS; attempt++)); do
+        rm -f "$OUT/$name/pcr8.hex" "$OUT/$name/pcr9.hex" "$OUT/$name/result"
         set +e
         boot_case "$@" | tee -a "$OUT/summary.txt"
         status="${PIPESTATUS[0]}"
         set -e
-        [ "$status" = 3 ] || break
-        STALLS=$((STALLS + 1))
+        if [ ! -f "$OUT/$name/result" ]; then
+            if [ "$status" = 3 ]; then
+                printf '%s\n' stall > "$OUT/$name/result"
+            else
+                printf '%s\n' fail > "$OUT/$name/result"
+            fi
+        fi
+        outcome="$(read_result "$OUT/$name/result")"
+        printf '%s\n' "$outcome" > "$OUT/$name/attempt-$attempt.result"
+        [ "$outcome" = stall ] || break
         mv "$OUT/$name/serial.log" "$OUT/$name/serial.stall$attempt.log"
     done
-    case "$status" in
-        0) ;;
-        3) echo "BLOCKED $name: two firmware stalls in a row, so the case proved nothing" | tee -a "$OUT/summary.txt"; BLOCKED=1 ;;
-        *) FAILED=1 ;;
-    esac
+    if [ "$(read_result "$OUT/$name/result")" = stall ]; then
+        printf '%s\n' blocked > "$OUT/$name/result"
+        echo "BLOCKED $name: two firmware stalls in a row, so the case proved nothing" | tee -a "$OUT/summary.txt"
+    fi
 }
 
 compare() {
-    local pcr="$1" a="$2" b="$3" expect="$4" result words
-    [ -f "$OUT/$a/pcr$pcr.hex" ] && [ -f "$OUT/$b/pcr$pcr.hex" ] || return 0
+    local pcr="$1" a="$2" b="$3" expect="$4" ra rb result words out_file
+    out_file="$OUT/compare-pcr${pcr}-${a}-${b}.result"
+    ra="$(read_result "$OUT/$a/result")"
+    rb="$(read_result "$OUT/$b/result")"
+    if [ "$ra" != pass ] || [ "$rb" != pass ]; then
+        echo "NOT COMPARABLE $b: PCR $pcr vs $a ($a=$ra, $b=$rb)" | tee -a "$OUT/summary.txt"
+        printf '%s\n' not-comparable > "$out_file"
+        return 0
+    fi
+    [ -f "$OUT/$a/pcr$pcr.hex" ] && [ -f "$OUT/$b/pcr$pcr.hex" ] \
+        || boot_die "assertion failed: passed case missing pcr$pcr.hex ($a, $b)"
     result=differs
     cmp -s "$OUT/$a/pcr$pcr.hex" "$OUT/$b/pcr$pcr.hex" && result=same
     words="differs from"
     [ "$result" = same ] && words="is the same as"
     if [ "$result" = "$expect" ]; then
         echo "PASS $b: PCR $pcr $words $a's" | tee -a "$OUT/summary.txt"
+        printf '%s\n' pass > "$out_file"
     else
         echo "FAIL $b: PCR $pcr $words $a's" | tee -a "$OUT/summary.txt"
-        FAILED=1
+        printf '%s\n' fail > "$out_file"
     fi
 }
 
@@ -502,6 +542,28 @@ compare 8 tpm tpm-initfs same
 compare 8 tpm tpm-menu differs
 compare 9 tpm tpm-menu same
 run_case no-tpm "$WORK/harddrive.img" ""
+
+BOOTS=0
+STALLS=0
+FAILED=0
+BLOCKED=0
+for name in "${CASE_NAMES[@]}"; do
+    for attempt_file in "$OUT/$name"/attempt-*.result; do
+        [ -f "$attempt_file" ] || continue
+        BOOTS=$((BOOTS + 1))
+        [ "$(read_result "$attempt_file")" = stall ] && STALLS=$((STALLS + 1))
+    done
+    case "$(read_result "$OUT/$name/result")" in
+        pass) ;;
+        blocked) BLOCKED=1 ;;
+        fail) FAILED=1 ;;
+        *) boot_die "assertion failed: unexpected final result for $name" ;;
+    esac
+done
+for cmp_file in "$OUT"/compare-*.result; do
+    [ -f "$cmp_file" ] || continue
+    [ "$(read_result "$cmp_file")" = fail ] && FAILED=1
+done
 {
     echo "firmware stalls (bootloader never started, or the TPM was gone by then): $STALLS of $BOOTS boots"
     echo "image: $IMAGE ($([ "$VERIFIED" = 1 ] && echo "verified boot, key $SLOT" || echo "no verified-boot key"))"
