@@ -2535,6 +2535,10 @@ def test_firefox_js(vm, args):
         found = vm.wait_serial(r"(?s)\n(.*?)FXJSRC-42=(\d+)\s", timeout, since)
         return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
 
+    status, _ = run("unset MAIL MAILPATH MAILCHECK; exec 8< <(sleep 100000); " + GUEST_WATCH, 30)
+    if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
+        return False, "the guest watcher did not start"
+
     def fetch_png(name):
         since = vm.mark()
         vm.type(f"echo FXJSPNG-BEGIN; base64 -w 0 {directory}/{name}.png; echo; echo FXJSPNG-END\n")
@@ -2552,21 +2556,25 @@ def test_firefox_js(vm, args):
 
     def guarded(command, timeout, name):
         line = (f"{command} > {directory}/{name}.log 2>&1 & fx=$!; n=0; "
-                f"while kill -0 $fx 2>/dev/null && [ $n -lt {timeout} ]; do sleep 1; n=$((n+1)); done; "
-                f"if kill -0 $fx 2>/dev/null; then cat /scheme/sys/context > {directory}/{name}.context 2>&1; "
-                f"cat /scheme/sys/syscall >> {directory}/{name}.context 2>&1; kill -9 $fx; wait $fx; "
-                "echo FXHUNG; false; else wait $fx; fi")
+                f"while kill -0 $fx 2>/dev/null && [ $n -lt {timeout} ]; do read -t 1 -u 8; n=$((n+1)); done; "
+                "if kill -0 $fx 2>/dev/null; then echo FXHUNG; false; else wait $fx; fi")
         started = time.monotonic()
         status, output = run(line, timeout + 120)
         seconds = round(time.monotonic() - started, 1)
         if status is None or re.search(r"(?m)^FXHUNG\s*$", output):
+            if status is None:
+                vm.type("\x03\n")
+                time.sleep(1)
+            guest_watch(vm, "watch-failed-1", "context syscall", 60)
+            time.sleep(3)
+            guest_watch(vm, "watch-failed-2", "context syscall", 60)
+            guest_watch(vm, "watch-failed-iostat", "iostat", 60)
             samples = []
             for _ in range(3):
                 samples.append(vm.command("info registers -a"))
                 time.sleep(2)
             (vm.out / f"{name}.cpus").write_text("\n=====\n".join(samples))
-            _, context = run(f"cat {directory}/{name}.context", 180)
-            (vm.out / f"{name}.context").write_text(context)
+            run("kill -9 $fx 2>/dev/null; wait $fx 2>/dev/null", 30)
             return None, seconds
         return status, seconds
 
@@ -2756,6 +2764,9 @@ FIREFOX_WINDOW_DIR = "/tmp/firefox-window"
 FIREFOX_WINDOW_PAGES = {"first": ("1f8a4c", "First page"), "second": ("c2185b", "Second page")}
 FIREFOX_WINDOW_KEYS = {" ": "spc", "-": "minus", ".": "dot", "/": "slash", ":": "shift-semicolon", "\n": "ret"}
 FIREFOX_WINDOW_UNITS = {"KB": 1 / 1024, "MB": 1, "GB": 1024}
+GUEST_WATCH = ("exec 7>&1; coproc GWATCH { exec 1>&7 2>&7; cd /scheme/sys || exit; "
+               "while read -r tag files; do echo \"WATCH-BEGIN $tag\"; for f in $files; do "
+               "while IFS= read -r l; do echo \"W:$f $l\"; done < \"$f\"; done; echo \"WATCH-END $tag\"; done; }")
 FIREFOX_WINDOW_PREFS = [
     'user_pref("datareporting.policy.firstRunURL", "");',
     'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
@@ -2796,6 +2807,16 @@ def firefox_window_chrome(frame, page):
         return 0
     return len({frame.rgb[(y * frame.width + x) * 3:(y * frame.width + x) * 3 + 3]
                 for y in range(top - 40, top) for x in range(left, right + 1)})
+
+
+def guest_watch(vm, tag, files, timeout):
+    """Asks the GUEST_WATCH coprocess to print `files` of /scheme/sys, opened relative to its working directory so the namespace manager is never asked, and saves them as <tag>.watch."""
+    since = vm.mark()
+    vm.type(f"echo {tag} {files} >&${{GWATCH[1]}}\n")
+    found = vm.wait_serial(rf"(?s)WATCH-BEGIN {tag}\r?\n(.*?)WATCH-END {tag}", timeout, since)
+    text = found.group(1) if found else vm.text(since)
+    (vm.out / f"{tag}.watch").write_text(text)
+    return bool(found)
 
 
 def test_firefox_window(vm, args):
@@ -2848,20 +2869,31 @@ def test_firefox_window(vm, args):
         return False, f"cosmic-comp wrote no session file within {GTK_SESSION_WAIT}s of the shell"
     session_file = vm.elapsed()
     used_before = firefox_window_used(run)
+    status, _ = run("unset MAIL MAILPATH MAILCHECK; " + GUEST_WATCH, 30)
+    if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
+        return False, "the guest watcher did not start"
 
     first_color = FIREFOX_WINDOW_PAGES["first"][0]
     started = time.monotonic()
     status, _ = run(f"GDK_BACKEND=wayland MOZ_ENABLE_WAYLAND=1 firefox --no-remote --profile {FIREFOX_WINDOW_DIR}/profile "
                     f"file://{FIREFOX_WINDOW_DIR}/first.html > {FIREFOX_WINDOW_DIR}/firefox.log 2>&1 & true", 30)
-    frame, page = wait_page(first_color, 600)
+    frame, page = wait_page(first_color, args.timeout)
     first_paint = time.monotonic() - started
     frame.save_png(vm.out / "firefox-window-first.png")
     results = {"session_file_s": round(session_file, 1), "first_paint_s": round(first_paint, 1), "first": page,
                "used_before_mb": used_before}
 
     def finish(ok, note):
-        _, log = run(f"tail -n 60 {FIREFOX_WINDOW_DIR}/firefox.log", 30)
+        if not ok:
+            guest_watch(vm, "watch-failed-1", "context syscall", 60)
+            time.sleep(3)
+            guest_watch(vm, "watch-failed-2", "context syscall", 60)
+            guest_watch(vm, "watch-failed-iostat", "iostat", 60)
+        answered, log = run(f"tail -n 60 {FIREFOX_WINDOW_DIR}/firefox.log", 30)
         (vm.out / "firefox.log").write_text(log)
+        if ok and answered is None:
+            guest_watch(vm, "watch-silent", "context syscall", 60)
+            ok, note = False, f"the guest stopped answering after the checks ({note}); see serial.log"
         results["used_with_firefox_mb"] = firefox_window_used(run)
         _, memory = run("ps | awk 'NR == 1 || (/firefox|cosmic-comp/ && !seen[$1]++)'", 60)
         (vm.out / "memory.txt").write_text(memory)
@@ -2890,7 +2922,7 @@ def test_firefox_window(vm, args):
     time.sleep(1)
     typed = time.monotonic()
     keys(f"file://{FIREFOX_WINDOW_DIR}/second.html\n")
-    frame, page = wait_page(second_color, 300)
+    frame, page = wait_page(second_color, args.timeout)
     results["second_load_s"] = round(time.monotonic() - typed, 1)
     results["second"] = page
     frame.save_png(vm.out / "firefox-window-second.png")
