@@ -13,11 +13,12 @@ fn main() {
 mod probe {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    use std::os::fd::IntoRawFd;
+    use std::os::fd::{AsRawFd, IntoRawFd};
     use std::os::unix::process::CommandExt;
 
     use libredox::call;
-    use syscall::flag::{F_DUPFD, F_SETFD, UPPER_FDTBL_TAG};
+    use syscall::data::StdFsCallMeta;
+    use syscall::flag::{F_DUPFD, F_SETFD, StdFsCallKind, UPPER_FDTBL_TAG};
 
     const FDS_VAR: &str = "FERRION_RUN_PROBE_FDS";
 
@@ -69,6 +70,9 @@ mod probe {
             ["fill", path, kib] => fill_file(path, kib.parse().unwrap_or(0)),
             ["fill-disk", path, reserve] => fill_disk(path, reserve),
             ["rename-onto-dir", from, to] => rename_onto_dir(from, to),
+            ["lock-hold", path, secs] => lock_hold(path, secs.parse().unwrap_or(0)),
+            ["lock-try", path] => lock_try(path),
+            ["lock-fchmod", path] => lock_fchmod(path),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
@@ -152,6 +156,75 @@ mod probe {
                 0
             }
         }
+    }
+
+    fn ofd_lock_ex(fd: usize) -> syscall::Result<usize> {
+        const LOCK_OFD: u64 = 1 << 63;
+        const LOCK_EX: u64 = 1 << 63;
+        let mut payload = 0u64.to_ne_bytes();
+        let meta = StdFsCallMeta::new(StdFsCallKind::Lock, LOCK_OFD, LOCK_EX);
+        syscall::std_fs_call(fd, &mut payload, &meta)
+    }
+
+    fn lock_hold(path: &str, secs: u64) -> i32 {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: open {path}: {e}");
+                return 2;
+            }
+        };
+        if let Err(e) = ofd_lock_ex(file.as_raw_fd() as usize) {
+            println!("LOCK_BUSY {}", e.errno);
+            return 1;
+        }
+        println!("LOCK_HELD");
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        drop(file);
+        0
+    }
+
+    fn lock_try(path: &str) -> i32 {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: open {path}: {e}");
+                return 2;
+            }
+        };
+        match ofd_lock_ex(file.as_raw_fd() as usize) {
+            Ok(_) => {
+                println!("LOCK_ACQUIRED");
+                0
+            }
+            Err(e) => {
+                println!("LOCK_BUSY {}", e.errno);
+                1
+            }
+        }
+    }
+
+    fn lock_fchmod(path: &str) -> i32 {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: open {path}: {e}");
+                return 2;
+            }
+        };
+        if let Err(e) = ofd_lock_ex(file.as_raw_fd() as usize) {
+            println!("LOCK_BUSY {}", e.errno);
+            return 1;
+        }
+        if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+            eprintln!(
+                "ferrion-run-probe: fchmod {path}: {}",
+                std::io::Error::last_os_error()
+            );
+            return 1;
+        }
+        println!("LOCK_FCHMOD OK");
+        0
     }
 
     fn hold_socket(address: &str, rest: &[&str]) -> i32 {

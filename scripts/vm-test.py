@@ -6682,6 +6682,13 @@ def test_agent_scope(vm, args):
     if SCOPE_MARKER not in output:
         problems.append(f"a session given the whole home could not read a file in it (exit {status})")
 
+    run("sclock0", "touch /home/user/scope/lockf")
+    run("sclock1", "ferrion-run --files /home/user/scope bash -c \"ferrion-run-probe lock-hold /home/user/scope/lockf 4 & sleep 1\"")
+    run("sclock2", "sleep 5")
+    status, output = run("sclock3", "ferrion-run --files /home/user/scope ferrion-run-probe lock-try /home/user/scope/lockf")
+    if status != 0 or "LOCK_ACQUIRED" not in output:
+        problems.append(f"flock held past session end leaked (exit {status}, {output.strip()[-120:]})")
+
     since = vm.mark()
     vm.type("exit\n")
     if not vm.wait_serial(r"login: ", args.timeout, since):
@@ -6820,6 +6827,18 @@ def test_agent_clone(vm, args):
     rn_clone_line = re.search(r"RENAME (?:OK|ERR \d+)", rn_clone)
     if not rn_direct_line or not rn_clone_line or rn_direct_line.group(0) != rn_clone_line.group(0) or "RN_INTACT" not in rn_dir:
         problems.append(f"rename file onto lower dir: direct={rn_direct_line.group(0) if rn_direct_line else None} clone={rn_clone_line.group(0) if rn_clone_line else None} intact={'RN_INTACT' in rn_dir}")
+
+    run("cllk0", "rm -rf /home/user/cl-lk && mkdir -p /home/user/cl-lk && echo one > /home/user/cl-lk/f")
+    status, lk_out = run("cllk1", "ferrion-run --clone /home/user/cl-lk ferrion-run-probe lock-fchmod /home/user/cl-lk/f")
+    lk_sess = re.search(r"session (\d+-\d+) keeps", lk_out)
+    if lk_sess:
+        run("cllk2", f"ferrion-run discard {lk_sess.group(1)}")
+    status2, lk_try = run("cllk3", "ferrion-run --clone /home/user/cl-lk ferrion-run-probe lock-try /home/user/cl-lk/f")
+    lk_sess2 = re.search(r"session (\d+-\d+) keeps", lk_try)
+    if lk_sess2:
+        run("cllk4", f"ferrion-run discard {lk_sess2.group(1)}")
+    if status != 0 or "LOCK_FCHMOD OK" not in lk_out or status2 != 0 or "LOCK_ACQUIRED" not in lk_try:
+        problems.append(f"clone lock+fchmod leaked lock (step1={status}, step2={status2}, {lk_try.strip()[-120:]})")
 
     run("clen0", "rm -rf /home/user/cl-enospc /home/user/.ballast /home/user/.reserve && mkdir -p /home/user/cl-enospc && ferrion-run-probe fill /home/user/cl-enospc/big.bin 2048")
     _, big_before = run("clen1", "sha256sum /home/user/cl-enospc/big.bin")

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -24,6 +24,7 @@ pub struct Overlay {
     upper: BTreeSet<String>,
     whiteouts: BTreeSet<String>,
     opaque: BTreeSet<String>,
+    origin_inodes: BTreeMap<String, usize>,
 }
 
 fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
@@ -67,8 +68,19 @@ impl Overlay {
         assert!(self.whiteouts.is_disjoint(&self.upper));
         assert!(self.opaque.is_subset(&self.upper));
         assert!(self.opaque.is_disjoint(&self.whiteouts));
+        assert!(self.origin_inodes.keys().all(|k| self.upper.contains(k)));
         assert!(self.upper.len() <= MAX_ENTRIES);
         assert!(self.whiteouts.len() <= MAX_ENTRIES);
+    }
+
+    pub fn set_origin_inode(&mut self, rel: &str, inode: usize) {
+        assert!(self.upper.contains(rel));
+        self.origin_inodes.insert(rel.to_owned(), inode);
+        self.check_invariants();
+    }
+
+    pub fn origin_inode(&self, rel: &str) -> Option<usize> {
+        self.origin_inodes.get(rel).copied()
     }
 
     pub fn copy_up_done(&mut self, rel: &str) -> Result<(), i32> {
@@ -127,6 +139,8 @@ impl Overlay {
         self.upper.retain(|p| !p.starts_with(&below));
         self.whiteouts.retain(|p| !p.starts_with(&below));
         self.opaque.retain(|p| p != rel && !p.starts_with(&below));
+        self.origin_inodes
+            .retain(|p, _| p != rel && !p.starts_with(&below));
         if lower_had {
             if !self.whiteouts.contains(rel) && self.whiteouts.len() >= MAX_ENTRIES {
                 return Err(crate::scope::EIO);
@@ -156,10 +170,24 @@ impl Overlay {
             .filter(|p| p.as_str() == from || under(p, from))
             .cloned()
             .collect();
+        self.opaque.retain(|p| p.as_str() != to && !under(p, to));
         for p in moved_opaque {
             self.opaque.remove(&p);
             let dst = format!("{to}{}", &p[from.len()..]);
             self.opaque.insert(dst);
+        }
+        let moved_origins: Vec<(String, usize)> = self
+            .origin_inodes
+            .iter()
+            .filter(|(p, _)| p.as_str() == from || under(p, from))
+            .map(|(p, ino)| (p.clone(), *ino))
+            .collect();
+        self.origin_inodes
+            .retain(|p, _| p.as_str() != to && !under(p, to));
+        for (p, ino) in moved_origins {
+            self.origin_inodes.remove(&p);
+            let dst = format!("{to}{}", &p[from.len()..]);
+            self.origin_inodes.insert(dst, ino);
         }
         self.check_invariants();
     }
@@ -174,6 +202,10 @@ impl Overlay {
     ) -> Result<(), i32> {
         if opaque_new {
             assert!(is_dir);
+        }
+        if from == to {
+            self.check_invariants();
+            return Ok(());
         }
         self.moved(from, to);
         self.removed(from, whiteout_old)?;

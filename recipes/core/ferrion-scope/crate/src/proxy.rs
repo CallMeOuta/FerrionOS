@@ -126,14 +126,54 @@ fn list_real(real: &str, out: &mut BTreeMap<String, (DirentKind, u64)>) -> Resul
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodePlace {
+    Lower,
+    Upper,
+}
+
+enum NodeState {
+    Open { fd: OwnedFd, place: NodePlace },
+    Detached,
+}
+
 struct Node {
     session: u32,
     vpath: String,
-    fd: Option<OwnedFd>,
+    state: NodeState,
+    lock_inode: Option<usize>,
     listing: Option<Vec<(String, DirentKind, u64)>>,
     grant: Option<usize>,
-    upper: bool,
     flags: usize,
+}
+
+impl Node {
+    fn fd(&self) -> Option<&OwnedFd> {
+        match &self.state {
+            NodeState::Open { fd, .. } => Some(fd),
+            NodeState::Detached => None,
+        }
+    }
+
+    fn place(&self) -> Option<NodePlace> {
+        match &self.state {
+            NodeState::Open { place, .. } => Some(*place),
+            NodeState::Detached => None,
+        }
+    }
+}
+
+fn stat_inode(fd: &OwnedFd) -> Result<usize> {
+    let mut st = Stat::default();
+    raw_stat(fd.as_raw_fd() as usize, &mut st)?;
+    Ok(st.st_ino as usize)
+}
+
+fn lstat_inode(real: &str) -> Result<usize> {
+    let c = cpath(real)?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    check(unsafe { libc::lstat(c.as_ptr(), &mut st) })?;
+    Ok(st.st_ino as usize)
 }
 
 enum Handle {
@@ -299,14 +339,26 @@ fn skeleton(
         .into_iter()
         .map(|name| (name, DirentKind::Directory, 0))
         .collect();
-    let fd = sys_open(vpath, O_STAT | O_DIRECTORY).ok();
+    let (state, lock_inode) = match sys_open(vpath, O_STAT | O_DIRECTORY).ok() {
+        Some(fd) => {
+            let ino = stat_inode(&fd)?;
+            (
+                NodeState::Open {
+                    fd,
+                    place: NodePlace::Lower,
+                },
+                Some(ino),
+            )
+        }
+        None => (NodeState::Detached, None),
+    };
     Ok(Opened::Node(Node {
         session,
         vpath: vpath.to_owned(),
-        fd,
+        state,
+        lock_inode,
         listing: Some(listing),
         grant: None,
-        upper: false,
         flags,
     }))
 }
@@ -607,7 +659,15 @@ impl Proxy {
                     let real = scope.real_path(grant, &rel);
                     let read_only = access == Access::ReadOnly;
                     let opened = self.open_real(
-                        session, vpath, grant, &real, false, flags, follow, read_only,
+                        session,
+                        vpath,
+                        grant,
+                        &real,
+                        NodePlace::Lower,
+                        None,
+                        flags,
+                        follow,
+                        read_only,
                     );
                     if matches!(opened, Ok(Opened::Node(_)))
                         && !read_only
@@ -636,7 +696,8 @@ impl Proxy {
         vpath: &str,
         grant: usize,
         real: &str,
-        upper: bool,
+        place: NodePlace,
+        origin_inode: Option<usize>,
         flags: usize,
         follow: bool,
         read_only: bool,
@@ -644,14 +705,22 @@ impl Proxy {
         let keeps_link = flags & O_SYMLINK != 0 && flags & O_ACCMODE == O_RDONLY;
         let base =
             (flags & !(O_CREAT | O_EXCL | O_TRUNC)) | if keeps_link { 0 } else { O_NOFOLLOW };
-        let node = |fd: OwnedFd| Node {
-            session,
-            vpath: vpath.to_owned(),
-            fd: Some(fd),
-            listing: None,
-            grant: Some(grant),
-            upper,
-            flags,
+        let make_node = |fd: OwnedFd| -> Result<Node> {
+            let lock_inode = match origin_inode {
+                Some(ino) => ino,
+                None => stat_inode(&fd)?,
+            };
+            let node = Node {
+                session,
+                vpath: vpath.to_owned(),
+                state: NodeState::Open { fd, place },
+                lock_inode: Some(lock_inode),
+                listing: None,
+                grant: Some(grant),
+                flags,
+            };
+            assert!(node.lock_inode.is_some());
+            Ok(node)
         };
         for _ in 0..MAX_CREATE_TRIES {
             match sys_open(real, base) {
@@ -669,7 +738,7 @@ impl Proxy {
                     if flags & O_TRUNC != 0 && accmode_writes(flags) {
                         check(unsafe { libc::ftruncate(fd.as_raw_fd(), 0) })?;
                     }
-                    return Ok(Opened::Node(node(fd)));
+                    return Ok(Opened::Node(make_node(fd)?));
                 }
                 Err(e) if e.errno == syscall::error::ELOOP && follow => {
                     return Ok(Opened::Symlink(readlink(real)?));
@@ -679,7 +748,7 @@ impl Proxy {
                         return Err(err(EROFS));
                     }
                     match sys_open(real, (flags & !O_TRUNC) | O_CREAT | O_EXCL | O_NOFOLLOW) {
-                        Ok(fd) => return Ok(Opened::Node(node(fd))),
+                        Ok(fd) => return Ok(Opened::Node(make_node(fd)?)),
                         Err(e) if e.errno == syscall::error::EEXIST && flags & O_EXCL == 0 => {
                             continue;
                         }
@@ -753,6 +822,7 @@ impl Proxy {
         let (from, to) = (join(&lower, rel), join(&layer, rel));
         let io = |e: std::io::Error| err(e.raw_os_error().unwrap_or(EIO));
         let meta = fs::symlink_metadata(&from).map_err(io)?;
+        let lower_ino = lstat_inode(&from)?;
         let stage_res = if meta.file_type().is_symlink() {
             fs::read_link(&from)
                 .and_then(|target| symlink(target, &staged))
@@ -774,11 +844,10 @@ impl Proxy {
         }
         let (ov, _, layer) = self.overlay_parts(session, grant)?;
         let mut next_ov = ov.clone();
-        if let Err(e) = next_ov
-            .copy_up_done(rel)
-            .map_err(err)
-            .and_then(|()| save_overlay(&layer, &next_ov))
-        {
+        if let Err(e) = next_ov.copy_up_done(rel).map_err(err).and_then(|()| {
+            next_ov.set_origin_inode(rel, lower_ino);
+            save_overlay(&layer, &next_ov)
+        }) {
             remove_path(&to);
             return Err(e);
         }
@@ -804,8 +873,22 @@ impl Proxy {
         let wants_write = accmode_writes(flags) || flags & O_TRUNC != 0;
         match located {
             Located::Real(real, true) => {
-                let opened =
-                    self.open_real(session, vpath, grant, &real, true, flags, follow, false)?;
+                let origin_inode = self
+                    .sessions
+                    .get(&session)
+                    .and_then(|s| s.overlays[grant].as_ref())
+                    .and_then(|ov| ov.origin_inode(rel));
+                let opened = self.open_real(
+                    session,
+                    vpath,
+                    grant,
+                    &real,
+                    NodePlace::Upper,
+                    origin_inode,
+                    flags,
+                    follow,
+                    false,
+                )?;
                 self.listing_for(session, grant, rel, opened)
             }
             Located::Real(real, false) => {
@@ -818,13 +901,16 @@ impl Proxy {
                         return Err(err(EISDIR));
                     }
                     self.copy_up(session, grant, rel)?;
-                    let (_, _, layer) = self.overlay_parts(session, grant)?;
+                    let (ov, _, layer) = self.overlay_parts(session, grant)?;
+                    let origin_inode = ov.origin_inode(rel);
+                    assert!(origin_inode.is_some());
                     return self.open_real(
                         session,
                         vpath,
                         grant,
                         &join(&layer, rel),
-                        true,
+                        NodePlace::Upper,
+                        origin_inode,
                         flags,
                         follow,
                         false,
@@ -835,7 +921,8 @@ impl Proxy {
                     vpath,
                     grant,
                     &real,
-                    false,
+                    NodePlace::Lower,
+                    None,
                     flags & !O_CREAT,
                     follow,
                     true,
@@ -858,7 +945,8 @@ impl Proxy {
                     vpath,
                     grant,
                     &target,
-                    true,
+                    NodePlace::Upper,
+                    None,
                     flags | O_EXCL,
                     follow,
                     false,
@@ -923,7 +1011,7 @@ impl Proxy {
         let Opened::Node(mut node) = opened else {
             return Ok(opened);
         };
-        let is_dir = match &node.fd {
+        let is_dir = match node.fd() {
             Some(fd) => {
                 let mut st = Stat::default();
                 raw_stat(fd.as_raw_fd() as usize, &mut st)?;
@@ -949,22 +1037,22 @@ impl Proxy {
 
     fn node_fd(&self, id: usize) -> Result<usize> {
         self.node(id)?
-            .fd
-            .as_ref()
+            .fd()
             .map(|fd| fd.as_raw_fd() as usize)
             .ok_or(err(EISDIR))
     }
 
     fn mutable_fd(&mut self, id: usize) -> Result<usize> {
-        let (session, grant, vpath, upper, flags) = {
+        let (session, grant, vpath, place, flags, before_inode) = {
             let node = self.node(id)?;
             let grant = node.grant.ok_or(err(EROFS))?;
             (
                 node.session,
                 grant,
                 node.vpath.clone(),
-                node.upper,
+                node.place(),
                 node.flags,
+                node.lock_inode,
             )
         };
         let scope = self.scope(session)?;
@@ -972,7 +1060,7 @@ impl Proxy {
         match g.access {
             Access::ReadOnly => return Err(err(EROFS)),
             Access::ReadWrite => return self.node_fd(id),
-            Access::Clone if upper => return self.node_fd(id),
+            Access::Clone if place == Some(NodePlace::Upper) => return self.node_fd(id),
             Access::Clone => {}
         }
         let (located_session, located_grant, rel, _, located_upper) = self.located_node(id)?;
@@ -988,8 +1076,12 @@ impl Proxy {
         )?;
         let raw = fd.as_raw_fd() as usize;
         if let Some(Handle::Node(node)) = self.handles.get_mut(&id) {
-            node.fd = Some(fd);
-            node.upper = true;
+            node.state = NodeState::Open {
+                fd,
+                place: NodePlace::Upper,
+            };
+            assert_eq!(node.lock_inode, before_inode);
+            assert!(node.lock_inode.is_some());
         }
         Ok(raw)
     }
@@ -1036,7 +1128,7 @@ impl Proxy {
             (
                 node.session,
                 node.vpath.clone(),
-                node.fd.as_ref().map(|f| f.as_raw_fd() as usize),
+                node.fd().map(|f| f.as_raw_fd() as usize),
             )
         };
         let fd = fd.ok_or(err(EROFS))?;
@@ -1393,7 +1485,7 @@ impl Proxy {
             .collect();
         for other in ids {
             if let Some(Handle::Node(node)) = self.handles.get_mut(&other) {
-                node.fd = None;
+                node.state = NodeState::Detached;
                 node.listing = None;
             }
         }
@@ -1432,10 +1524,10 @@ impl Proxy {
     }
 
     pub fn inode_of(&self, id: usize) -> Option<usize> {
-        let fd = self.node_fd(id).ok()?;
-        let mut st = Stat::default();
-        raw_stat(fd, &mut st).ok()?;
-        Some(st.st_ino as usize)
+        match self.handles.get(&id) {
+            Some(Handle::Node(node)) => node.lock_inode,
+            _ => None,
+        }
     }
 }
 
@@ -1507,16 +1599,13 @@ impl SchemeSync for Proxy {
             Handle::Ctl { .. } | Handle::External { .. } => Err(err(EINVAL)),
             Handle::Node(node)
                 if node.listing.is_none()
-                    && node.fd.is_some()
+                    && node.fd().is_some()
                     && !path.is_empty()
                     && !path.starts_with('/') =>
             {
                 let mut st = Stat::default();
                 raw_stat(
-                    node.fd
-                        .as_ref()
-                        .map(|f| f.as_raw_fd() as usize)
-                        .unwrap_or(0),
+                    node.fd().map(|f| f.as_raw_fd() as usize).unwrap_or(0),
                     &mut st,
                 )?;
                 if st.st_mode & MODE_TYPE != MODE_DIR {
@@ -1640,7 +1729,7 @@ impl SchemeSync for Proxy {
     }
 
     fn fcntl(&mut self, id: usize, cmd: usize, arg: usize, _ctx: &CallerCtx) -> Result<usize> {
-        match self.node(id)?.fd.as_ref() {
+        match self.node(id)?.fd() {
             Some(fd) => syscall::fcntl(fd.as_raw_fd() as usize, cmd, arg),
             None => Ok(0),
         }
@@ -1705,7 +1794,7 @@ impl SchemeSync for Proxy {
             }
             Handle::Node(node) => {
                 self.live(node.session)?;
-                match &node.fd {
+                match node.fd() {
                     Some(fd) => raw_stat(fd.as_raw_fd() as usize, stat),
                     None => {
                         *stat = Stat {
@@ -1783,7 +1872,7 @@ impl SchemeSync for Proxy {
             }
             return Ok(buf);
         }
-        let fd = node.fd.as_ref().ok_or(err(EBADF))?.as_raw_fd() as usize;
+        let fd = node.fd().ok_or(err(EBADF))?.as_raw_fd() as usize;
         let session = node.session;
         let vpath = node.vpath.clone();
         let mut raw = vec![0u8; 4096];
