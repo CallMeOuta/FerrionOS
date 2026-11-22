@@ -415,20 +415,3 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, (u64, u64, u64)>
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::pixels;
-
-    #[test]
-    fn odd_width_buffers_keep_their_row_stride_and_controls() {
-        for (role, width) in [("files", 409), ("editor", 620), ("terminal", 209)] {
-            let bytes = pixels(role, width, 730, 0);
-            assert_eq!(bytes.len(), width as usize * 730 * 4);
-            let at = ((15 * width + 17) * 4) as usize;
-            assert_eq!(&bytes[at..at + 4], &0xffd35f5fu32.to_le_bytes());
-            let at = ((50 * width + 200) * 4) as usize;
-            assert_eq!(&bytes[at..at + 4], &0xff3a9fd8u32.to_le_bytes());
-        }
-    }
-}

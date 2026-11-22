@@ -4,7 +4,7 @@ Status: accepted
 
 ## Context
 
-The full compositor needs the same inputd virtual terminal, DRM presentation and independent cursor updates as the Wayland smoke session. niri's Linux integrations cannot run on FerrionOS, and its Smithay revision is newer than the backend crate's optional Smithay adapter. The display scheme has no page-flip completion event.
+The full compositor needs the same inputd virtual terminal, DRM presentation and independent cursor updates as the Wayland smoke session. niri's Linux integrations cannot run on FerrionOS, and its Smithay revision is newer than the backend crate's optional Smithay adapter. This backend uses synchronous display handoff and does not consume the page-flip completion events added by the GPU integration.
 
 ## Decision
 
@@ -14,7 +14,7 @@ The target build selects only the `ferrion` feature. `tty`, `winit` and `use-sys
 
 The renderer creates a surfaceless EGL context, draws into an offscreen texture and copies its pixels into the native framebuffer before presentation. Mesa and libglvnd are explicit runtime dependencies because Smithay loads EGL dynamically, which ELF dependency scanning cannot discover. The generated configuration selects a fixed output and CPU rendering. A calloop ping wakes the compositor when the native reader queues input; a timer and the backend's `FrameScheduler` defer drawing according to the recent frame cost. The compositor's cursor elements supply the cursor-plane image and hotspot. The native reader can move that plane during a full-frame presentation. An image that exceeds the plane's capacity falls back to compositor rendering.
 
-Frame callbacks and presentation feedback follow the synchronous DRM handoff. Their timestamp means that the driver accepted the update; it does not claim physical scanout or vertical-blank synchronization. A later backend with completion events must move that boundary to the completion event.
+Frame callbacks and presentation feedback follow the synchronous DRM handoff. Their timestamp means that the driver accepted the update; it does not claim physical scanout or vertical-blank synchronization. Migrating the backend to the display scheme’s completion events must move that boundary to the completion event.
 
 `config/wm-columns.toml` follows the smoke session: it starts a root compositor on its own virtual terminal, inheriting input and display access from init, and retains development accounts. Its serial root shell can control the compositor through ordinary IPC and launch Wayland clients. It adds no account, group, scheme entry or hardening exception. This test session provides no capability gate; desktop authorization remains planned work.
 
@@ -37,4 +37,4 @@ Source and test code carry their respective GPL and MIT notices. The package ins
 - `config/wm-columns.toml`, `scripts/ferrion-wm-config.py`
 - `recipes/tests/desktop-layout-probe/`, `recipes/tests/shm-reuse-probe/`
 - `scripts/desktop_columns.py`, `scripts/desktop_fixtures.py`, `scripts/vm-test.py`
-- `scripts/desktop_load.py`, `scripts/test_desktop_load.py`
+- `scripts/desktop_load.py`

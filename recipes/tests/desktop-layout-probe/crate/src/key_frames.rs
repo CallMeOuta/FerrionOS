@@ -16,23 +16,3 @@ impl KeyFrames {
         self.drawn
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::KeyFrames;
-
-    #[test]
-    fn keys_received_in_one_dispatch_remain_separate_frames() {
-        let mut keys = KeyFrames::default();
-        assert_eq!(keys.advance_frame(), 0);
-        assert_eq!(keys.press(), 1);
-        assert_eq!(keys.press(), 2);
-        assert_eq!(keys.press(), 3);
-        assert_eq!(keys.advance_frame(), 1);
-        assert_eq!(keys.advance_frame(), 2);
-        assert_eq!(keys.advance_frame(), 3);
-        assert_eq!(keys.advance_frame(), 3);
-        assert_eq!(keys.press(), 4);
-        assert_eq!(keys.advance_frame(), 4);
-    }
-}

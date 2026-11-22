@@ -39,4 +39,4 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0033](0033-venus-on-ferrionos.md) | Mesa's Venus Vulkan driver, its pinned protocol and its render-scheme discovery |
 | [0034](0034-zink-selection.md) | Zink, the EGL platforms that choose it, and its frames in Orbital windows |
 | [0035](0035-signed-update-index.md) | Signed update index, verify-before-parse client and release tool |
-| [0024](0024-native-window-compositor.md) | The native window compositor, its dependency gates and layout timing check |
+| [0036](0036-native-window-compositor.md) | The native window compositor, its dependency gates and layout timing check |
