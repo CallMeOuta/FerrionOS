@@ -373,12 +373,44 @@ pub struct Proxy {
     maps: BTreeMap<(usize, u64), (usize, usize)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkMode {
+    Follow,
+    OpenLinkItself,
+    CreateLink,
+    NoFollow,
+}
+
+impl LinkMode {
+    fn from_flags(flags: usize) -> Self {
+        let mode = if flags & O_SYMLINK != 0 && flags & O_CREAT != 0 {
+            LinkMode::CreateLink
+        } else if flags & O_SYMLINK != 0 && flags & O_ACCMODE == O_RDONLY {
+            LinkMode::OpenLinkItself
+        } else if flags & O_NOFOLLOW != 0 {
+            LinkMode::NoFollow
+        } else {
+            LinkMode::Follow
+        };
+        match mode {
+            LinkMode::CreateLink => assert!(flags & O_CREAT != 0),
+            LinkMode::OpenLinkItself => assert!(flags & O_ACCMODE == O_RDONLY),
+            LinkMode::Follow | LinkMode::NoFollow => {}
+        }
+        mode
+    }
+
+    fn follows(self) -> bool {
+        self == LinkMode::Follow
+    }
+}
+
 fn skeleton(
     scope: &Scope,
     session: u32,
     vpath: &str,
     flags: usize,
-    follow: bool,
+    mode: LinkMode,
 ) -> Result<Opened> {
     if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
         return Err(err(syscall::error::EEXIST));
@@ -386,7 +418,7 @@ fn skeleton(
     if accmode_writes(flags) || flags & O_TRUNC != 0 {
         return Err(err(EISDIR));
     }
-    if flags & O_SYMLINK != 0 && !follow {
+    if matches!(mode, LinkMode::OpenLinkItself | LinkMode::CreateLink) {
         return Err(err(EINVAL));
     }
     let listing = scope
@@ -649,14 +681,13 @@ impl Proxy {
         flags: usize,
     ) -> Result<OpenResult> {
         self.live(session)?;
-        let follow = flags & O_NOFOLLOW == 0
-            && !(flags & O_SYMLINK != 0 && (flags & O_ACCMODE == O_RDONLY || flags & O_CREAT != 0));
+        let mode = LinkMode::from_flags(flags);
         let mut links = 0;
         let mut walked = self.walk(session, start, path, &mut links)?;
         loop {
             let vpath = match walked {
                 Walked::External(target) => {
-                    if flags & O_SYMLINK != 0 && flags & O_CREAT == 0 {
+                    if mode == LinkMode::OpenLinkItself {
                         let id = self.insert(Handle::External {
                             session,
                             path: target,
@@ -670,7 +701,7 @@ impl Proxy {
                 }
                 Walked::Path(vpath) => vpath,
             };
-            match self.open_place(session, &vpath, flags, follow)? {
+            match self.open_place(session, &vpath, flags, mode)? {
                 Opened::Node(node) => {
                     let id = self.insert(Handle::Node(node))?;
                     return Ok(OpenResult::ThisScheme {
@@ -697,18 +728,18 @@ impl Proxy {
         session: u32,
         vpath: &str,
         flags: usize,
-        follow: bool,
+        mode: LinkMode,
     ) -> Result<Opened> {
         let scope = self.scope(session)?;
         match scope.classify(vpath) {
             Place::Outside => Err(err(ENOENT)),
-            Place::Skeleton => skeleton(scope, session, vpath, flags, follow),
+            Place::Skeleton => skeleton(scope, session, vpath, flags, mode),
             Place::Inside { grant, rel } => {
                 let access = scope.grants[grant].access;
                 let wants_write = accmode_writes(flags) || flags & O_TRUNC != 0;
                 if access == Access::ReadOnly && wants_write {
                     let real = scope.real_path(grant, &rel);
-                    if follow && lkind(&real).is_ok_and(|k| k == Kind::Symlink) {
+                    if mode.follows() && lkind(&real).is_ok_and(|k| k == Kind::Symlink) {
                         return Ok(Opened::Symlink(readlink(&real)?));
                     }
                     return Err(err(EROFS));
@@ -718,7 +749,7 @@ impl Proxy {
                 }
                 let ancestor = scope.ancestor_of_grant(vpath);
                 let opened = if access == Access::Clone {
-                    self.open_clone(session, vpath, grant, &rel, flags, follow)
+                    self.open_clone(session, vpath, grant, &rel, flags, mode)
                 } else {
                     let real = scope.real_path(grant, &rel);
                     let read_only = access == Access::ReadOnly;
@@ -730,12 +761,12 @@ impl Proxy {
                         NodePlace::Lower,
                         None,
                         flags,
-                        follow,
+                        mode,
                         read_only,
                     );
                     if matches!(opened, Ok(Opened::Node(_)))
                         && !read_only
-                        && flags & O_SYMLINK != 0
+                        && mode == LinkMode::CreateLink
                         && accmode_writes(flags)
                         && let Some(s) = self.sessions.get_mut(&session)
                     {
@@ -745,7 +776,7 @@ impl Proxy {
                 };
                 match opened {
                     Err(e) if e.errno == ENOENT && ancestor => {
-                        skeleton(self.scope(session)?, session, vpath, flags, follow)
+                        skeleton(self.scope(session)?, session, vpath, flags, mode)
                     }
                     other => other,
                 }
@@ -763,12 +794,15 @@ impl Proxy {
         place: NodePlace,
         origin_inode: Option<usize>,
         flags: usize,
-        follow: bool,
+        mode: LinkMode,
         read_only: bool,
     ) -> Result<Opened> {
-        let keeps_link = flags & O_SYMLINK != 0 && flags & O_ACCMODE == O_RDONLY;
-        let base =
-            (flags & !(O_CREAT | O_EXCL | O_TRUNC)) | if keeps_link { 0 } else { O_NOFOLLOW };
+        let base = (flags & !(O_CREAT | O_EXCL | O_TRUNC))
+            | if mode == LinkMode::OpenLinkItself {
+                0
+            } else {
+                O_NOFOLLOW
+            };
         let make_node = |fd: OwnedFd| -> Result<Node> {
             let lock_inode = match origin_inode {
                 Some(ino) => ino,
@@ -792,7 +826,7 @@ impl Proxy {
                     if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
                         return Err(err(syscall::error::EEXIST));
                     }
-                    if follow && flags & (O_STAT | O_SYMLINK) != 0 {
+                    if mode.follows() && flags & (O_STAT | O_SYMLINK) != 0 {
                         let mut st = Stat::default();
                         raw_stat(fd.as_raw_fd() as usize, &mut st)?;
                         if st.st_mode & MODE_TYPE == MODE_SYMLINK {
@@ -804,7 +838,7 @@ impl Proxy {
                     }
                     return Ok(Opened::Node(make_node(fd)?));
                 }
-                Err(e) if e.errno == syscall::error::ELOOP && follow => {
+                Err(e) if e.errno == syscall::error::ELOOP && mode.follows() => {
                     return Ok(Opened::Symlink(readlink(real)?));
                 }
                 Err(e) if e.errno == ENOENT && flags & O_CREAT != 0 => {
@@ -932,7 +966,7 @@ impl Proxy {
         grant: usize,
         rel: &str,
         flags: usize,
-        follow: bool,
+        mode: LinkMode,
     ) -> Result<Opened> {
         let located = {
             let (_, grants) = self.live(session)?;
@@ -955,7 +989,7 @@ impl Proxy {
                     NodePlace::Upper,
                     origin_inode,
                     flags,
-                    follow,
+                    mode,
                     false,
                 )?;
                 self.listing_for(session, grant, rel, opened)
@@ -965,7 +999,7 @@ impl Proxy {
                     return Err(err(syscall::error::EEXIST));
                 }
                 let kind = lkind(&real)?;
-                if wants_write && !(kind == Kind::Symlink && follow) {
+                if wants_write && !(kind == Kind::Symlink && mode.follows()) {
                     if kind == Kind::Dir {
                         return Err(err(EISDIR));
                     }
@@ -981,7 +1015,7 @@ impl Proxy {
                         NodePlace::Upper,
                         origin_inode,
                         flags,
-                        follow,
+                        mode,
                         false,
                     );
                 }
@@ -993,7 +1027,7 @@ impl Proxy {
                     NodePlace::Lower,
                     None,
                     flags & !O_CREAT,
-                    follow,
+                    mode,
                     true,
                 )?;
                 self.listing_for(session, grant, rel, opened)
@@ -1017,7 +1051,7 @@ impl Proxy {
                     NodePlace::Upper,
                     None,
                     flags | O_EXCL,
-                    follow,
+                    mode,
                     false,
                 )?;
                 let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
