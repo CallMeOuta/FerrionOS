@@ -72,6 +72,9 @@ pub extern "C" fn lr_dispatch(frame: *mut Frame, data: usize) {
                 _ => signal::send_thread(thread, 13, thread),
             }
         }
+        if r == -EAGAIN && matches!(number, 0 | 1 | 19 | 20 | 43 | 44 | 45 | 46 | 47 | 288) {
+            crate::wait::drained(frame.rdi as i32);
+        }
         if r == -EINTR && number != 34 && number != 130 && signal::restart_after_eintr(thread) {
             // Restarted as Linux does: back over the two-byte `syscall` with the call number,
             // after any handler that runs first.

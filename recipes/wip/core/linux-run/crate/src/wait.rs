@@ -10,11 +10,20 @@ const EPOLLONESHOT: u32 = 1 << 30;
 const EPOLLET: u32 = 1 << 31;
 const READINESS: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x40 | 0x80 | 0x100 | 0x200;
 
+enum Edge {
+    Level,
+    Edge { reported: u32 },
+}
+
+enum Registration {
+    Armed { edge: Edge },
+    Disarmed,
+}
+
 struct Interest {
     events: u32,
     data: u64,
-    disabled: bool,
-    last: u32,
+    reg: Registration,
 }
 
 #[derive(Default)]
@@ -36,8 +45,43 @@ pub fn duplicated(old: i32, new: i32) {
     }
 }
 
+fn unique_epolls() -> Vec<Arc<Mutex<Epoll>>> {
+    let e = EPOLLS.lock().unwrap();
+    let mut out: Vec<Arc<Mutex<Epoll>>> = Vec::new();
+    for ep in e.values() {
+        if !out.iter().any(|seen| Arc::ptr_eq(seen, ep)) {
+            out.push(Arc::clone(ep));
+        }
+    }
+    out
+}
+
 pub fn closed(fd: i32) {
-    EPOLLS.lock().unwrap().remove(&fd);
+    let epolls = {
+        let mut e = EPOLLS.lock().unwrap();
+        e.remove(&fd);
+        let mut out: Vec<Arc<Mutex<Epoll>>> = Vec::new();
+        for ep in e.values() {
+            if !out.iter().any(|seen| Arc::ptr_eq(seen, ep)) {
+                out.push(Arc::clone(ep));
+            }
+        }
+        out
+    };
+    for ep in epolls {
+        ep.lock().unwrap().list.remove(&fd);
+    }
+}
+
+pub fn drained(fd: i32) {
+    for ep in unique_epolls() {
+        let mut ep = ep.lock().unwrap();
+        if let Some(i) = ep.list.get_mut(&fd) {
+            if let Registration::Armed { edge: Edge::Edge { reported } } = &mut i.reg {
+                *reported = 0;
+            }
+        }
+    }
 }
 
 fn ret(r: isize) -> i64 {
@@ -93,7 +137,8 @@ pub fn epoll_ctl(epfd: u64, op: u64, fd: u64, event: u64) -> i64 {
             if op == MOD && !ep.list.contains_key(&fd) {
                 return -ENOENT;
             }
-            ep.list.insert(fd, Interest { events, data, disabled: false, last: 0 });
+            let edge = if events & EPOLLET != 0 { Edge::Edge { reported: 0 } } else { Edge::Level };
+            ep.list.insert(fd, Interest { events, data, reg: Registration::Armed { edge } });
             0
         }
         DEL => {
@@ -135,7 +180,7 @@ pub fn epoll_wait(thread: &Thread, epfd: u64, out: u64, max: u64, timeout: i64, 
             let ep = ep.lock().unwrap();
             ep.list
                 .iter()
-                .filter(|(_, i)| !i.disabled)
+                .filter(|(_, i)| matches!(i.reg, Registration::Armed { .. }))
                 .map(|(&fd, i)| {
                     let mut events = poll_events(i.events);
                     if crate::net::connecting(fd) {
@@ -173,13 +218,22 @@ pub fn epoll_wait(thread: &Thread, epfd: u64, out: u64, max: u64, timeout: i64, 
                     ready |= EPOLLRDHUP;
                 }
                 let ready = ready & (i.events | EPOLLERR | EPOLLHUP);
-                let report = if i.events & EPOLLET != 0 { ready & !i.last } else { ready };
-                i.last = ready;
+                let report = match &mut i.reg {
+                    Registration::Disarmed => continue,
+                    Registration::Armed { edge } => match edge {
+                        Edge::Level => ready,
+                        Edge::Edge { reported } => {
+                            let r = ready & !*reported;
+                            *reported = ready;
+                            r
+                        }
+                    },
+                };
                 if report == 0 {
                     continue;
                 }
                 if i.events & EPOLLONESHOT != 0 {
-                    i.disabled = true;
+                    i.reg = Registration::Disarmed;
                 }
                 let at = out + 12 * got;
                 unsafe {

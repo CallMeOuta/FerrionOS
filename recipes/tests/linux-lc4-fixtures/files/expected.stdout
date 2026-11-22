@@ -18,6 +18,8 @@ epoll ready [(True, 1)]
 epoll still ready [(True, 1)]
 epoll drained []
 oneshot 1 0
+epoll et rearm True [(True, 1)] [(True, 1)]
+epoll close reuse True [] [(True, 1)]
 poll [(False, 4), (True, 1)]
 poll hangup [(False, 0), (True, 17)]
 mremap b'kept bytes' 1048576

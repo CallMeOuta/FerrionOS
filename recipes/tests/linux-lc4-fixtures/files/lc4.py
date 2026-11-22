@@ -130,6 +130,42 @@ ep.modify(r, select.EPOLLIN | select.EPOLLONESHOT)
 os.write(w, b"y")
 say("oneshot", len(ep.poll(1)), len(ep.poll(0)))
 ep.close()
+
+r_et, w_et = os.pipe()
+os.set_blocking(r_et, False)
+ep_et = select.epoll()
+ep_et.register(r_et, select.EPOLLIN | select.EPOLLET)
+os.write(w_et, b"a")
+et_first = [(fd == r_et, ev) for fd, ev in ep_et.poll(0.2)]
+et_drained = False
+for _ in range(16):
+    try:
+        os.read(r_et, 64)
+    except BlockingIOError:
+        et_drained = True
+        break
+os.write(w_et, b"b")
+et_second = [(fd == r_et, ev) for fd, ev in ep_et.poll(0.2)]
+say("epoll et rearm", et_drained, et_first, et_second)
+ep_et.close()
+os.close(r_et)
+os.close(w_et)
+
+r2, w2 = os.pipe()
+ep2 = select.epoll()
+ep2.register(r2, select.EPOLLIN)
+old_r2 = r2
+os.close(r2)
+r3, w3 = os.pipe()
+os.write(w3, b"z")
+after_reuse = ep2.poll(0)
+ep2.register(r3, select.EPOLLIN)
+after_rereg = [(fd == r3, ev) for fd, ev in ep2.poll(0)]
+say("epoll close reuse", r3 == old_r2, after_reuse, after_rereg)
+ep2.close()
+os.close(w2)
+os.close(r3)
+os.close(w3)
 p = select.poll()
 p.register(w, select.POLLOUT)
 p.register(r, select.POLLIN)
