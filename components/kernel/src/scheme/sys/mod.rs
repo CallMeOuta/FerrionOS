@@ -76,6 +76,8 @@ const FILES: &[(&str, Kind)] = &[
     #[cfg(feature = "sys_fdstat")]
     ("fdstat", Rd(fdstat::resource)),
     ("exe", Rd(exe::resource)),
+    #[cfg(feature = "iommu")]
+    ("iommu", Rd(|_| Ok(crate::iommu::status()))),
     ("iostat", Rd(iostat::resource)),
     ("irq", Rd(irq::resource)),
     ("log", Rd(log::resource)),

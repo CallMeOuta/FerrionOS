@@ -223,6 +223,9 @@ fn continue_after_kmain_stack(
             // Initialize all of the non-core devices not otherwise needed to complete initialization
             device::init_noncore();
 
+            #[cfg(feature = "iommu")]
+            crate::iommu::init(args.env());
+
             args.bootstrap()
         };
 

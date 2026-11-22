@@ -62,6 +62,9 @@ mod devices;
 /// Event handling
 mod event;
 
+#[cfg(feature = "iommu")]
+mod iommu;
+
 /// Logging
 mod log;
 
