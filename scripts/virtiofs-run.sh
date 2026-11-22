@@ -98,6 +98,7 @@ declare -A SHARED_DIRS=()
 start_virtiofsd() {
   local sock="${SOCKS[$1]}" dir
   mkdir -p "$(dirname "${sock}")"
+  rm -f "${sock}"
   dir="$(cd "${DIRS[$1]}" && pwd)"
   if [[ -n "${SHARED_DIRS[${dir}]:-}" ]]; then
     echo "virtiofs: warning: ${dir} is shared more than once; the instances do not share caches" >&2
