@@ -1,0 +1,4 @@
+include = ["minimal.toml"]
+
+[packages]
+stack-guard-probe = "source"

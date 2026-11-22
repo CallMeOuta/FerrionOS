@@ -7319,6 +7319,93 @@ def test_hardened_malloc_discard(vm, args):
     )
 
 
+OLD_STACK_GUARD_CONST = 0xD048C37519FCADFE
+STACK_GUARD_PROBES = (
+    ("static", "/usr/bin/stack-guard-probe-static", False),
+    ("dynamic", "/usr/bin/stack-guard-probe-dynamic", True),
+    ("pie", "/usr/bin/stack-guard-probe-pie", True),
+)
+
+
+def parse_hex_fields(text, prefix):
+    match = re.search(rf"{re.escape(prefix)}[^\r\n]*", text)
+    if not match:
+        return {}
+    return {k: int(v, 16) for k, v in re.findall(r"([a-z_]+)=0x([0-9a-fA-F]+)", match.group(0))}
+
+
+def test_canary_random(vm, args):
+    """Two runs and a parent/exec'd child of static, dynamic and PIE probes print distinct non-constant __stack_chk_guard values matching AT_RANDOM and DSO constructors (use --config stack-guard)."""
+    if not root_shell(vm, args.timeout):
+        return False, f"no root serial login within {args.timeout}s"
+    summary = []
+    for label, binary, has_dso in STACK_GUARD_PROBES:
+        guards = []
+        for run_idx in (1, 2):
+            status, out = run_status(vm, f"{binary} guard", 30)
+            (vm.out / f"{label}-guard-{run_idx}.txt").write_text(f"exit {status}\n{out}\n")
+            if status != 0:
+                return False, f"{label} guard run {run_idx} failed (exit {status})"
+            fields = parse_hex_fields(out, "stack-guard-probe:")
+            guard = fields.get("guard")
+            if guard is None:
+                return False, f"{label} guard run {run_idx} printed no guard"
+            if guard == 0 or guard == OLD_STACK_GUARD_CONST:
+                return False, f"{label} run {run_idx} guard is constant/zero: 0x{guard:016x}"
+            if fields.get("exe_ctor") != guard:
+                return False, f"{label} run {run_idx} exe_ctor 0x{fields.get('exe_ctor', 0):016x} != guard 0x{guard:016x}"
+            if fields.get("aux") != guard:
+                return False, f"{label} run {run_idx} AT_RANDOM 0x{fields.get('aux', 0):016x} != guard 0x{guard:016x}"
+            if has_dso:
+                if fields.get("dso_ctor") != guard or fields.get("dso_live") != guard:
+                    return False, (
+                        f"{label} run {run_idx} dso guard mismatch "
+                        f"(ctor=0x{fields.get('dso_ctor', 0):016x}, live=0x{fields.get('dso_live', 0):016x}, guard=0x{guard:016x})"
+                    )
+            guards.append(guard)
+        if guards[0] == guards[1]:
+            return False, f"{label} two runs shared guard 0x{guards[0]:016x}"
+        status, out = run_status(vm, f"{binary} exec", 30)
+        (vm.out / f"{label}-exec.txt").write_text(f"exit {status}\n{out}\n")
+        if status != 0:
+            return False, f"{label} exec check failed (exit {status})"
+        parent = parse_hex_fields(out, "stack-guard-probe: parent=").get("parent")
+        child = parse_hex_fields(out, "stack-guard-probe: child=").get("child")
+        if parent is None or child is None:
+            return False, f"{label} exec printed no parent/child guards"
+        if parent in (0, OLD_STACK_GUARD_CONST) or child in (0, OLD_STACK_GUARD_CONST):
+            return False, f"{label} exec guard constant/zero (parent=0x{parent:016x}, child=0x{child:016x})"
+        if parent == child:
+            return False, f"{label} parent and exec'd child shared guard 0x{parent:016x}"
+        summary.append(f"{label}: run1=0x{guards[0]:016x} run2=0x{guards[1]:016x} parent=0x{parent:016x} child=0x{child:016x}")
+    return True, "; ".join(summary)
+
+
+def test_stack_smash_aborts(vm, args):
+    """Overflows in -fstack-protector-strong functions (static, dynamic, DSO, PIE) with both pattern bytes and the old constant guard abort through __stack_chk_fail (use --config stack-guard)."""
+    if not root_shell(vm, args.timeout):
+        return False, f"no root serial login within {args.timeout}s"
+    summary = []
+    for label, binary, has_dso in STACK_GUARD_PROBES:
+        status, out = run_status(vm, f"{binary} smash", 30)
+        (vm.out / f"{label}-smash.txt").write_text(f"exit {status}\n{out}\n")
+        cases = ["smash-pattern", "smash-const"]
+        if has_dso:
+            cases.extend(["dso-smash-pattern", "dso-smash-const"])
+        sigs = []
+        for case in cases:
+            if f"stack-guard-probe: {case} SURVIVED" in out:
+                return False, f"{label} {case} survived stack overflow"
+            found = re.search(rf"stack-guard-probe: {re.escape(case)} ABORTED sig=(\d+)", out)
+            if not found:
+                return False, f"{label} {case} did not abort via signal (exit {status})"
+            sigs.append(f"{case}:sig={found.group(1)}")
+        if status != 0:
+            return False, f"{label} smash exited {status}"
+        summary.append(f"{label}({', '.join(sigs)})")
+    return True, "; ".join(summary)
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -7379,6 +7466,8 @@ TESTS["hardened-malloc-hotpath"] = test_hardened_malloc_hotpath
 TESTS["hardened-malloc-sparse"] = test_hardened_malloc_sparse
 TESTS["hardened-malloc-pt-order"] = test_hardened_malloc_pt_order
 TESTS["hardened-malloc-discard"] = test_hardened_malloc_discard
+TESTS["canary-random"] = test_canary_random
+TESTS["stack-smash-aborts"] = test_stack_smash_aborts
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
