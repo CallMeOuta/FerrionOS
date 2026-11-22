@@ -183,6 +183,10 @@ impl SessionDir {
         assert!(matches!(self.life, Life::Preparing));
         self.life = Life::Ran { clones };
     }
+
+    fn has_run(&self) -> bool {
+        matches!(self.life, Life::Ran { .. })
+    }
 }
 
 impl Drop for SessionDir {
@@ -235,6 +239,7 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
         .unwrap_or(0);
     let id = format!("{seconds}-{}", process::id());
     let dir = SessionDir::create(root.join(&id))?;
+    dir.write_pid()?;
     let home = dir.path().join("home");
     let tmp = dir.path().join("tmp");
     private_dir(&home)?;
@@ -291,7 +296,6 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
             layer: None,
         });
     }
-    dir.write_pid()?;
     Ok(Prepared {
         dir,
         home,
@@ -536,15 +540,25 @@ pub fn run(options: &Options, withhold_network: bool, allow_sudo: bool) -> Outco
         Err(reason) => return Outcome::Refused(reason),
     };
     assert!(prepared.dir.path().join(PID).is_file());
-    let outcome = launch(options, withhold_network, allow_sudo, &cwd, &prepared);
-    if matches!(outcome, Outcome::Exited(_)) {
-        prepared.dir.mark_ran(prepared.clones);
-        assert_eq!(
-            prepared.clones,
-            clone_dirs(prepared.dir.path())
-                .map(|v| v.len())
-                .unwrap_or(0)
-        );
+    let outcome = launch(options, withhold_network, allow_sudo, &cwd, &mut prepared);
+    if prepared.dir.has_run() {
+        match clone_dirs(prepared.dir.path()) {
+            Ok(actual) if actual.len() != prepared.clones => {
+                eprintln!(
+                    "ferrion-run: expected {} clone layers in {}, found {}",
+                    prepared.clones,
+                    prepared.dir.path().display(),
+                    actual.len()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "ferrion-run: cannot inspect clone layers in {}: {e}",
+                    prepared.dir.path().display()
+                );
+            }
+            Ok(_) => {}
+        }
         if prepared.clones > 0
             && let Some(id) = prepared.dir.path().file_name()
         {
@@ -563,7 +577,7 @@ fn launch(
     withhold_network: bool,
     allow_sudo: bool,
     cwd: &Path,
-    prepared: &Prepared,
+    prepared: &mut Prepared,
 ) -> Outcome {
     let schemes = match caller_schemes() {
         Ok(caller) => child_schemes(&caller, withhold_network, allow_sudo, options.pty),
@@ -611,6 +625,7 @@ fn launch(
         eprintln!("ferrion-run: {reason}");
         unsafe { libc::_exit(crate::EXIT_REFUSED) };
     }
+    prepared.dir.mark_ran(prepared.clones);
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
