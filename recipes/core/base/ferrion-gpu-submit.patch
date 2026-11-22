@@ -1,0 +1,863 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with the FerrionOS patches before it in recipe.toml applied, ferrion-gpu-blob.patch last among them. It carries command submission, fences and wait for slice GP4 (lane gp4-submit):
+- virtio-gpud/src/submit.rs: asynchronous SUBMIT_3D with VIRTIO_GPU_FLAG_FENCE, VIRTIO_GPU_FLAG_INFO_RING_IDX, monotonic fence ids and ring index, completed from the control queue via the existing FrameWake and poll_pending loop without busy-waiting.
+- driver-graphics/src/submit.rs: DRM_IOCTL_VIRTGPU_EXECBUFFER (bounded command size, BO handle count and syncobj count; syncobj_stride == 16 only when syncobj counts are nonzero; FENCE_FD_IN refused with EOPNOTSUPP; FENCE_FD_OUT exported via dup as a bounded FenceResource answering poll/fevent once signaled and read with 16-byte VirtgpuFenceState) and DRM_IOCTL_VIRTGPU_WAIT (non-blocking NOWAIT or readiness-based wait on a resource's last fence, ENOENT for unknown resources).
+
+diff --git a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+index e22bcec1..0655932d 100644
+--- a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
++++ b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+@@ -20,11 +20,15 @@ pub(crate) fn call_render_ioctl<T>(
+     handle: &mut RenderHandle<T>,
+     cmd: u64,
+     payload: &mut [u8],
++    pending_wait: &mut Option<crate::submit::PendingWait>,
+ ) -> Result<usize> {
+     match cmd {
+         drm::VERSION => drm::DrmVersion::with(payload, |data| version(device, data)),
+         virtgpu::GEM_CLOSE => virtgpu::GemClose::with(payload, |data| handle.blobs.gem_close(device, data)),
+         virtgpu::MAP => virtgpu::VirtgpuMap::with(payload, |data| handle.blobs.map_ioctl(data)),
++        virtgpu::EXECBUFFER => virtgpu::VirtgpuExecbuffer::with(payload, |data| {
++            crate::submit::execbuffer(device, handle, data)
++        }),
+         virtgpu::GETPARAM => virtgpu::VirtgpuGetparam::with(payload, |mut data| {
+             data.set_value(getparam(device, data.param())?);
+             Ok(0)
+@@ -32,6 +36,9 @@ pub(crate) fn call_render_ioctl<T>(
+         virtgpu::RESOURCE_INFO => {
+             virtgpu::VirtgpuResourceInfo::with(payload, |data| handle.blobs.resource_info(data))
+         }
++        virtgpu::WAIT => {
++            virtgpu::VirtgpuWait::with(payload, |data| crate::submit::wait(handle, data, pending_wait))
++        }
+         virtgpu::GET_CAPS => virtgpu::VirtgpuGetCaps::with(payload, |data| get_caps(device, data)),
+         virtgpu::RESOURCE_CREATE_BLOB => virtgpu::VirtgpuResourceCreateBlob::with(payload, |data| {
+             handle.blobs.create_blob(device, handle.context, data)
+@@ -166,5 +173,6 @@ fn context_init<T>(
+         })
+         .collect();
+     handle.context = Some(device.create_context(capset_id.unwrap_or(0), &name)?);
++    handle.num_rings = num_rings.unwrap_or(0) as u32;
+     Ok(0)
+ }
+diff --git a/drivers/graphics/driver-graphics/src/lib.rs b/drivers/graphics/driver-graphics/src/lib.rs
+index 3d402cc1..cb916619 100644
+--- a/drivers/graphics/driver-graphics/src/lib.rs
++++ b/drivers/graphics/driver-graphics/src/lib.rs
+@@ -8,6 +8,8 @@ use std::fs::File;
+ use std::io::{self, Write};
+ use std::marker::PhantomData;
+ use std::rc::Rc;
++use std::sync::Arc;
++use std::sync::atomic::AtomicUsize;
+ use std::task::{Context, Waker};
+ 
+ use graphics_ipc::redox_uapi_exts::{
+@@ -36,9 +38,11 @@ mod handle;
+ mod ioctl;
+ pub mod kms;
+ mod render;
++mod submit;
+ 
+ pub use blob::{BlobCreateParams, BlobInfo};
+ pub use render::{RenderDevice, RenderFeatures};
++pub use submit::Fence;
+ 
+ #[derive(Debug, Copy, Clone)]
+ pub struct Damage {
+@@ -236,6 +240,7 @@ impl<T: GraphicsAdapter> GraphicsScheme<T> {
+             GraphicsSchemeData {
+                 adapter,
+                 waker,
++                live_fences: Arc::new(AtomicUsize::new(0)),
+                 disable_graphical_debug,
+                 objects,
+                 active_vt: 0,
+@@ -331,8 +336,14 @@ impl<T: GraphicsAdapter> GraphicsScheme<T> {
+                 &mut self.inner,
+                 |id, inner| {
+                     for (_, resource) in inner.handles_mut_and_scheme_data().0 {
+-                        if let GraphicsResource::DrmHandle(handle) = resource {
+-                            handle.pending_frames.remove(&id);
++                        match resource {
++                            GraphicsResource::DrmHandle(handle) => {
++                                handle.pending_frames.remove(&id);
++                            }
++                            GraphicsResource::RenderHandle(handle) => {
++                                handle.pending_waits.remove(&id);
++                            }
++                            _ => {}
+                         }
+                     }
+                 },
+@@ -367,6 +378,17 @@ impl<T: GraphicsAdapter> GraphicsScheme<T> {
+                             .unwrap();
+                     }
+                 }
++                GraphicsResource::Fence(fence) => {
++                    if fence.should_post_event() {
++                        self.handler
++                            .socket()
++                            .write_response(
++                                Response::post_fevent(id, EventFlags::EVENT_READ.bits()),
++                                SignalBehavior::Restart,
++                            )
++                            .unwrap();
++                    }
++                }
+                 _ => {}
+             }
+         }
+@@ -384,12 +406,14 @@ resource_scheme! {
+         DrmBuffer(DrmBuffer<T>),
+         RenderRoot(render::RenderRoot<T>),
+         RenderHandle(render::RenderHandle<T>),
++        Fence(submit::FenceResource<T>),
+     }
+ }
+ 
+ struct GraphicsSchemeData<T: GraphicsAdapter> {
+     adapter: T,
+     waker: Waker,
++    live_fences: Arc<AtomicUsize>,
+ 
+     disable_graphical_debug: Option<File>,
+     objects: KmsObjects<T>,
+diff --git a/drivers/graphics/driver-graphics/src/render.rs b/drivers/graphics/driver-graphics/src/render.rs
+index bc840c7b..e360e9d3 100644
+--- a/drivers/graphics/driver-graphics/src/render.rs
++++ b/drivers/graphics/driver-graphics/src/render.rs
+@@ -11,16 +11,18 @@
+ //! driver makes, in `ioctl::virtgpu`; everything a client sends is checked there before the
+ //! device sees it.
+ 
++use std::collections::{HashMap, HashSet};
+ use std::fmt::Debug;
+ use std::marker::PhantomData;
++use std::sync::Arc;
+ 
+-use redox_scheme::CallerCtx;
++use redox_scheme::{CallerCtx, Id};
+ use scheme_utils::{ResourceOpenResult, ResourceSync};
+ use syscall::schemev2::NewFdFlags;
+-use syscall::{ENODEV, ENOENT, ENOSYS, Error, MODE_CHR, MapFlags, MunmapFlags, Result};
++use syscall::{EINVAL, ENODEV, ENOENT, ENOSYS, Error, EventFlags, MODE_CHR, MapFlags, MunmapFlags, Result};
+ 
+ use crate::blob::{BlobCreateParams, BlobInfo, RenderBlobs};
+-use crate::{GraphicsAdapter, GraphicsResource, GraphicsSchemeData, ioctl};
++use crate::{Fence, GraphicsAdapter, GraphicsResource, GraphicsSchemeData, ioctl};
+ 
+ /// The device features render handles report, as Linux's virtio-gpu driver reports them.
+ #[derive(Clone, Copy, Debug, Default)]
+@@ -66,6 +68,15 @@ pub trait RenderDevice: Debug {
+     fn unmap_blob(&mut self, _res_id: u32) {}
+ 
+     fn destroy_blob(&mut self, _res_id: u32) {}
++
++    fn submit_3d(
++        &mut self,
++        _context_id: u32,
++        _ring_idx: Option<u8>,
++        _command: &[u8],
++    ) -> Result<Arc<Fence>> {
++        Err(Error::new(EINVAL))
++    }
+ }
+ 
+ /// The root registered under the render name.
+@@ -109,6 +120,13 @@ impl<T: GraphicsAdapter> ResourceSync for RenderRoot<T> {
+ pub(crate) struct RenderHandle<T> {
+     pub(crate) context: Option<u32>,
+     pub(crate) blobs: RenderBlobs,
++    pub(crate) num_rings: u32,
++    pub(crate) known_resources: HashSet<u32>,
++    pub(crate) resource_fences: HashMap<u32, Arc<Fence>>,
++    pub(crate) last_fence: Option<Arc<Fence>>,
++    pub(crate) pending_fences: HashMap<i32, Arc<Fence>>,
++    next_fence_handle: i32,
++    pub(crate) pending_waits: HashMap<Id, crate::submit::PendingWait>,
+     _adapter: PhantomData<T>,
+ }
+ 
+@@ -117,6 +135,7 @@ impl<T> Debug for RenderHandle<T> {
+         f.debug_struct("RenderHandle")
+             .field("context", &self.context)
+             .field("blobs", &self.blobs)
++            .field("num_rings", &self.num_rings)
+             .finish()
+     }
+ }
+@@ -126,15 +145,41 @@ impl<T> RenderHandle<T> {
+         Self {
+             context: None,
+             blobs: RenderBlobs::new(),
++            num_rings: 0,
++            known_resources: HashSet::new(),
++            resource_fences: HashMap::new(),
++            last_fence: None,
++            pending_fences: HashMap::new(),
++            next_fence_handle: 1,
++            pending_waits: HashMap::new(),
+             _adapter: PhantomData,
+         }
+     }
++
++    pub(crate) fn alloc_pending_fence(&mut self, fence: Arc<Fence>) -> i32 {
++        loop {
++            let id = self.next_fence_handle;
++            self.next_fence_handle = self.next_fence_handle.checked_add(1).unwrap_or(1);
++            if id > 0 && !self.pending_fences.contains_key(&id) {
++                self.pending_fences.insert(id, fence);
++                return id;
++            }
++        }
++    }
+ }
+ 
+ impl<T: GraphicsAdapter> ResourceSync for RenderHandle<T> {
+     type SchemeData = GraphicsSchemeData<T>;
+     type ResourceEnum = GraphicsResource<T>;
+ 
++    fn fevent(
++        &mut self,
++        _scheme_data: &mut Self::SchemeData,
++        _flags: EventFlags,
++    ) -> Result<EventFlags> {
++        Ok(EventFlags::empty())
++    }
++
+     fn fstat(
+         &mut self,
+         _scheme_data: &mut Self::SchemeData,
+@@ -151,13 +196,42 @@ impl<T: GraphicsAdapter> ResourceSync for RenderHandle<T> {
+         scheme_data: &mut Self::SchemeData,
+         payload: &mut [u8],
+         metadata: &[u64],
+-        _ctx: &CallerCtx,
++        ctx: &CallerCtx,
+     ) -> Result<usize> {
++        if let Some(wait) = self.pending_waits.get(&ctx.id) {
++            let Some(result) = wait.poll_result() else {
++                return Err(Error::new(syscall::EWOULDBLOCK));
++            };
++            self.pending_waits.remove(&ctx.id);
++            return result;
++        }
+         let device = scheme_data
+             .adapter
+             .render_device()
+             .ok_or(Error::new(ENODEV))?;
+-        ioctl::virtgpu::call_render_ioctl(device, self, metadata[0], payload)
++        let mut pending_wait = None;
++        let res = ioctl::virtgpu::call_render_ioctl(
++            device,
++            self,
++            metadata[0],
++            payload,
++            &mut pending_wait,
++        );
++        if let Some(wait) = pending_wait {
++            self.pending_waits.insert(ctx.id, wait);
++            Err(Error::new(syscall::EWOULDBLOCK))
++        } else {
++            res
++        }
++    }
++
++    fn dup(
++        &mut self,
++        scheme_data: &mut Self::SchemeData,
++        buf: &[u8],
++        _ctx: &CallerCtx,
++    ) -> Result<ResourceOpenResult<Self::ResourceEnum>> {
++        crate::submit::dup_fence(self, &scheme_data.live_fences, buf)
+     }
+ 
+     fn mmap_prep(
+diff --git a/drivers/graphics/driver-graphics/src/submit.rs b/drivers/graphics/driver-graphics/src/submit.rs
+new file mode 100644
+index 00000000..0ce8eeb9
+--- /dev/null
++++ b/drivers/graphics/driver-graphics/src/submit.rs
+@@ -0,0 +1,311 @@
++use std::fmt;
++use std::marker::PhantomData;
++use std::slice;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
++
++use redox_ioctl::virtgpu;
++use scheme_utils::{ResourceOpenResult, ResourceSync};
++use syscall::schemev2::NewFdFlags;
++use syscall::{EBUSY, EINVAL, EMFILE, ENOENT, ENOMEM, ENOSYS, EOPNOTSUPP, Error, EventFlags, MODE_CHR, Result};
++
++use crate::render::{RenderDevice, RenderHandle};
++use crate::{GraphicsAdapter, GraphicsResource, GraphicsSchemeData};
++
++pub const MAX_PENDING_FENCES_PER_HANDLE: usize = 64;
++pub const MAX_LIVE_FENCE_DESCRIPTORS: usize = 1024;
++
++#[derive(Debug)]
++pub struct Fence {
++    fence_id: AtomicU64,
++    signaled: AtomicBool,
++    status: AtomicI32,
++}
++
++impl Fence {
++    pub fn new(fence_id: u64) -> Arc<Self> {
++        Arc::new(Self {
++            fence_id: AtomicU64::new(fence_id),
++            signaled: AtomicBool::new(false),
++            status: AtomicI32::new(0),
++        })
++    }
++
++    pub fn new_unsignaled() -> Arc<Self> {
++        Self::new(0)
++    }
++
++    pub fn signal(&self, status: i32) {
++        self.status.store(status, Ordering::Release);
++        self.signaled.store(true, Ordering::Release);
++    }
++
++    pub fn is_signaled(&self) -> bool {
++        self.signaled.load(Ordering::Acquire)
++    }
++
++    pub fn state(&self) -> virtgpu::VirtgpuFenceState {
++        let signaled = self.signaled.load(Ordering::Acquire);
++        let status = if signaled {
++            self.status.load(Ordering::Acquire)
++        } else {
++            0
++        };
++        virtgpu::VirtgpuFenceState {
++            signaled: u32::from(signaled),
++            status,
++            fence_id: self.fence_id.load(Ordering::Relaxed),
++        }
++    }
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct PendingWait {
++    fence: Arc<Fence>,
++}
++
++impl PendingWait {
++    pub(crate) fn poll_result(&self) -> Option<Result<usize>> {
++        if self.fence.is_signaled() {
++            Some(Ok(0))
++        } else {
++            None
++        }
++    }
++}
++
++pub(crate) struct FenceResource<T> {
++    fence: Arc<Fence>,
++    live_count: Arc<AtomicUsize>,
++    requested_events: EventFlags,
++    notified_read: bool,
++    _adapter: PhantomData<T>,
++}
++
++impl<T> fmt::Debug for FenceResource<T> {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("FenceResource")
++            .field("fence", &self.fence)
++            .finish()
++    }
++}
++
++impl<T> FenceResource<T> {
++    fn new(fence: Arc<Fence>, live_count: Arc<AtomicUsize>) -> Self {
++        Self {
++            fence,
++            live_count,
++            requested_events: EventFlags::empty(),
++            notified_read: false,
++            _adapter: PhantomData,
++        }
++    }
++
++    pub(crate) fn should_post_event(&mut self) -> bool {
++        if self.requested_events.contains(EventFlags::EVENT_READ)
++            && self.fence.is_signaled()
++            && !self.notified_read
++        {
++            self.notified_read = true;
++            true
++        } else {
++            false
++        }
++    }
++}
++
++impl<T> Drop for FenceResource<T> {
++    fn drop(&mut self) {
++        self.live_count.fetch_sub(1, Ordering::AcqRel);
++    }
++}
++
++impl<T: GraphicsAdapter> ResourceSync for FenceResource<T> {
++    type SchemeData = GraphicsSchemeData<T>;
++    type ResourceEnum = GraphicsResource<T>;
++
++    fn read(
++        &mut self,
++        _scheme_data: &mut Self::SchemeData,
++        buf: &mut [u8],
++        _offset: u64,
++        _fcntl_flags: u32,
++    ) -> Result<usize> {
++        let state = self.fence.state();
++        let bytes = unsafe {
++            slice::from_raw_parts(
++                (&raw const state).cast::<u8>(),
++                size_of::<virtgpu::VirtgpuFenceState>(),
++            )
++        };
++        if buf.len() < bytes.len() {
++            return Err(Error::new(EINVAL));
++        }
++        buf[..bytes.len()].copy_from_slice(bytes);
++        Ok(bytes.len())
++    }
++
++    fn fevent(
++        &mut self,
++        _scheme_data: &mut Self::SchemeData,
++        flags: EventFlags,
++    ) -> Result<EventFlags> {
++        self.requested_events = flags;
++        if !flags.contains(EventFlags::EVENT_READ) {
++            return Ok(EventFlags::empty());
++        }
++        if self.fence.is_signaled() {
++            self.notified_read = true;
++            Ok(EventFlags::EVENT_READ)
++        } else {
++            self.notified_read = false;
++            Ok(EventFlags::empty())
++        }
++    }
++
++    fn fstat(
++        &mut self,
++        _scheme_data: &mut Self::SchemeData,
++        stat: &mut syscall::Stat,
++    ) -> Result<()> {
++        stat.st_mode = MODE_CHR;
++        Ok(())
++    }
++}
++
++pub(crate) fn execbuffer<T>(
++    device: &mut dyn RenderDevice,
++    handle: &mut RenderHandle<T>,
++    mut data: virtgpu::VirtgpuExecbuffer<'_>,
++) -> Result<usize> {
++    if !device.features().three_d {
++        return Err(Error::new(ENOSYS));
++    }
++    let ctx_id = handle.context.ok_or(Error::new(EINVAL))?;
++    let flags = data.flags();
++    if flags & !virtgpu::VIRTGPU_EXECBUF_FLAGS != 0 {
++        return Err(Error::new(EINVAL));
++    }
++    if (flags & virtgpu::VIRTGPU_EXECBUF_FENCE_FD_IN) != 0 {
++        return Err(Error::new(EOPNOTSUPP));
++    }
++    let ring_idx = if (flags & virtgpu::VIRTGPU_EXECBUF_RING_IDX) != 0 {
++        if handle.num_rings == 0 || data.ring_idx() >= handle.num_rings {
++            return Err(Error::new(EINVAL));
++        }
++        Some(data.ring_idx() as u8)
++    } else {
++        None
++    };
++    if data.num_in_syncobjs() != 0 || data.num_out_syncobjs() != 0 {
++        if data.syncobj_stride() != size_of::<virtgpu::drm_virtgpu_execbuffer_syncobj>() as u32
++            || data.num_in_syncobjs() > virtgpu::EXECBUF_MAX_SYNCOBJS
++            || data.num_out_syncobjs() > virtgpu::EXECBUF_MAX_SYNCOBJS
++        {
++            return Err(Error::new(EINVAL));
++        }
++        return Err(Error::new(EOPNOTSUPP));
++    }
++    if data.size() > virtgpu::EXECBUF_MAX_CMD_SIZE
++        || data.num_bo_handles() > virtgpu::EXECBUF_MAX_BO_HANDLES
++    {
++        return Err(Error::new(EINVAL));
++    }
++    for &bo_handle in data.bo_handles() {
++        if bo_handle == 0 || !handle.known_resources.contains(&bo_handle) {
++            return Err(Error::new(ENOENT));
++        }
++    }
++    let want_fence_fd = (flags & virtgpu::VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0;
++    if want_fence_fd && handle.pending_fences.len() >= MAX_PENDING_FENCES_PER_HANDLE {
++        return Err(Error::new(ENOMEM));
++    }
++
++    let fence = device.submit_3d(ctx_id, ring_idx, data.command())?;
++    for &bo_handle in data.bo_handles() {
++        handle.resource_fences.insert(bo_handle, fence.clone());
++    }
++    handle.last_fence = Some(fence.clone());
++    if want_fence_fd {
++        let fence_handle = handle.alloc_pending_fence(fence);
++        data.set_fence_fd(fence_handle);
++    }
++    Ok(0)
++}
++
++pub(crate) fn wait<T>(
++    handle: &RenderHandle<T>,
++    data: virtgpu::VirtgpuWait<'_>,
++    pending_wait: &mut Option<PendingWait>,
++) -> Result<usize> {
++    if data.flags() & !virtgpu::VIRTGPU_WAIT_NOWAIT != 0 {
++        return Err(Error::new(EINVAL));
++    }
++    let res_handle = data.handle();
++    if res_handle == 0 || !handle.known_resources.contains(&res_handle) {
++        return Err(Error::new(ENOENT));
++    }
++    let Some(fence) = handle.resource_fences.get(&res_handle) else {
++        return Ok(0);
++    };
++    if fence.is_signaled() {
++        return Ok(0);
++    }
++    if (data.flags() & virtgpu::VIRTGPU_WAIT_NOWAIT) != 0 {
++        return Err(Error::new(EBUSY));
++    }
++    *pending_wait = Some(PendingWait {
++        fence: fence.clone(),
++    });
++    Ok(0)
++}
++
++pub(crate) fn dup_fence<T: GraphicsAdapter>(
++    handle: &mut RenderHandle<T>,
++    live_fences: &Arc<AtomicUsize>,
++    buf: &[u8],
++) -> Result<ResourceOpenResult<GraphicsResource<T>>> {
++    if buf.len() != 16 {
++        return Err(Error::new(EINVAL));
++    }
++    let cmd = u64::from_ne_bytes(buf[0..8].try_into().unwrap());
++    let fence_handle = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
++    let flags = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
++    if flags != 0 {
++        return Err(Error::new(EINVAL));
++    }
++    let prev = live_fences.fetch_add(1, Ordering::AcqRel);
++    if prev >= MAX_LIVE_FENCE_DESCRIPTORS {
++        live_fences.fetch_sub(1, Ordering::AcqRel);
++        return Err(Error::new(EMFILE));
++    }
++    let fence = match cmd {
++        virtgpu::FENCE_DUP_EXECBUFFER => {
++            match i32::try_from(fence_handle)
++                .ok()
++                .and_then(|id| handle.pending_fences.remove(&id))
++            {
++                Some(fence) => fence,
++                None => {
++                    live_fences.fetch_sub(1, Ordering::AcqRel);
++                    return Err(Error::new(ENOENT));
++                }
++            }
++        }
++        virtgpu::FENCE_DUP_UNSIGNALED => {
++            if fence_handle != 0 {
++                live_fences.fetch_sub(1, Ordering::AcqRel);
++                return Err(Error::new(EINVAL));
++            }
++            Fence::new_unsignaled()
++        }
++        _ => {
++            live_fences.fetch_sub(1, Ordering::AcqRel);
++            return Err(Error::new(EINVAL));
++        }
++    };
++    Ok(ResourceOpenResult::ThisScheme {
++        data: GraphicsResource::Fence(FenceResource::new(fence, live_fences.clone())),
++        flags: NewFdFlags::empty(),
++    })
++}
+diff --git a/drivers/graphics/virtio-gpud/src/main.rs b/drivers/graphics/virtio-gpud/src/main.rs
+index 4150dac0..1c540526 100644
+--- a/drivers/graphics/virtio-gpud/src/main.rs
++++ b/drivers/graphics/virtio-gpud/src/main.rs
+@@ -35,6 +35,7 @@ use virtio_core::utils::VolatileCell;
+ mod blob;
+ mod render;
+ mod scheme;
++mod submit;
+ 
+ struct FrameWake(File);
+ 
+@@ -136,8 +137,8 @@ pub enum CommandTy {
+ 
+ static_assertions::const_assert_eq!(size_of::<CommandTy>(), 4);
+ 
+-const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
+-//const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
++pub(crate) const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
++pub(crate) const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
+ 
+ #[derive(Debug)]
+ #[repr(C)]
+diff --git a/drivers/graphics/virtio-gpud/src/render.rs b/drivers/graphics/virtio-gpud/src/render.rs
+index 281f92a4..39e9f7c6 100644
+--- a/drivers/graphics/virtio-gpud/src/render.rs
++++ b/drivers/graphics/virtio-gpud/src/render.rs
+@@ -8,9 +8,10 @@
+ use std::collections::BTreeSet;
+ use std::fmt;
+ use std::sync::Arc;
++use std::task::{Context, Waker};
+ 
+ use common::dma::Dma;
+-use driver_graphics::{BlobCreateParams, BlobInfo, RenderDevice, RenderFeatures};
++use driver_graphics::{BlobCreateParams, BlobInfo, Fence, RenderDevice, RenderFeatures};
+ use syscall::{EINVAL, EIO, ENOMEM};
+ use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
+ use virtio_core::transport::{Error, Queue};
+@@ -99,6 +100,7 @@ pub struct VirtGpuRender {
+     contexts: BTreeSet<u32>,
+     next_context: u32,
+     blobs: VirtGpuBlobs,
++    submits: crate::submit::SubmitQueue,
+ }
+ 
+ impl fmt::Debug for VirtGpuRender {
+@@ -204,6 +206,7 @@ impl VirtGpuRender {
+         features: Features,
+         num_capsets: u32,
+         host_visible_window: Option<SharedMemoryRegion>,
++        waker: Waker,
+     ) -> Option<Self> {
+         if !features.virgl {
+             return None;
+@@ -223,6 +226,7 @@ impl VirtGpuRender {
+                 }
+             }
+         });
++        let submits = crate::submit::SubmitQueue::new(control_queue.clone(), waker);
+         Some(Self {
+             control_queue,
+             features,
+@@ -230,9 +234,14 @@ impl VirtGpuRender {
+             contexts: BTreeSet::new(),
+             next_context: 1,
+             blobs: VirtGpuBlobs::new(host_visible_window),
++            submits,
+         })
+     }
+ 
++    pub fn poll_pending(&mut self, cx: &mut Context<'_>) {
++        self.submits.poll_pending(cx);
++    }
++
+     /// A context number no live context has; 0 is never one.
+     fn allocate_context(&mut self) -> u32 {
+         loop {
+@@ -334,4 +343,16 @@ impl RenderDevice for VirtGpuRender {
+     fn destroy_blob(&mut self, res_id: u32) {
+         self.blobs.destroy_blob(&self.control_queue, res_id);
+     }
++
++    fn submit_3d(
++        &mut self,
++        context_id: u32,
++        ring_idx: Option<u8>,
++        command: &[u8],
++    ) -> syscall::Result<Arc<Fence>> {
++        if !self.contexts.contains(&context_id) {
++            return Err(syscall::Error::new(EINVAL));
++        }
++        self.submits.submit(context_id, ring_idx, command)
++    }
+ }
+diff --git a/drivers/graphics/virtio-gpud/src/scheme.rs b/drivers/graphics/virtio-gpud/src/scheme.rs
+index 2692be6f..d616ab40 100644
+--- a/drivers/graphics/virtio-gpud/src/scheme.rs
++++ b/drivers/graphics/virtio-gpud/src/scheme.rs
+@@ -585,6 +585,9 @@ impl<'a> GraphicsAdapter for VirtGpuAdapter<'a> {
+             }
+             self.pending_frames.pop_front();
+         }
++        if let Some(render) = self.render.as_mut() {
++            render.poll_pending(cx);
++        }
+     }
+ 
+     fn set_plane(
+@@ -728,6 +731,7 @@ impl<'a> GpuScheme {
+             features,
+             config.num_capsets.get(),
+             host_visible_window,
++            waker.clone(),
+         );
+         let adapter = VirtGpuAdapter {
+             unique,
+diff --git a/drivers/graphics/virtio-gpud/src/submit.rs b/drivers/graphics/virtio-gpud/src/submit.rs
+new file mode 100644
+index 00000000..b1620e47
+--- /dev/null
++++ b/drivers/graphics/virtio-gpud/src/submit.rs
+@@ -0,0 +1,148 @@
++use std::future::Future;
++use std::pin::Pin;
++use std::slice;
++use std::sync::Arc;
++use std::task::{Context, Waker};
++
++use common::dma::Dma;
++use driver_graphics::Fence;
++use syscall::{EBUSY, EINVAL, EIO, ENOMEM};
++use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
++use virtio_core::transport::{Error, Queue};
++
++use crate::render::ResponseHeader;
++use crate::{CommandTy, ControlHeader, VIRTIO_GPU_FLAG_FENCE, VIRTIO_GPU_FLAG_INFO_RING_IDX};
++
++const MAX_IN_FLIGHT_SUBMITS: usize = 256;
++
++#[repr(C)]
++struct CmdSubmit {
++    header: ControlHeader,
++    size: u32,
++    padding: u32,
++}
++
++const _: () = assert!(size_of::<CmdSubmit>() == 32);
++
++pub struct SubmitQueue {
++    control_queue: Arc<Queue>,
++    waker: Waker,
++    next_fence_id: u64,
++    pending: Vec<Pin<Box<dyn Future<Output = ()>>>>,
++}
++
++fn errno(error: Error) -> syscall::Error {
++    syscall::Error::new(match error {
++        Error::SyscallError(error) => error.errno(),
++        _ => EIO,
++    })
++}
++
++impl SubmitQueue {
++    pub fn new(control_queue: Arc<Queue>, waker: Waker) -> Self {
++        Self {
++            control_queue,
++            waker,
++            next_fence_id: 1,
++            pending: Vec::new(),
++        }
++    }
++
++    fn alloc_fence_id(&mut self) -> u64 {
++        let id = self.next_fence_id;
++        self.next_fence_id = self.next_fence_id.checked_add(1).unwrap_or(1);
++        id
++    }
++
++    pub fn submit(
++        &mut self,
++        ctx_id: u32,
++        ring_idx: Option<u8>,
++        command: &[u8],
++    ) -> syscall::Result<Arc<Fence>> {
++        if self.pending.len() >= MAX_IN_FLIGHT_SUBMITS {
++            return Err(syscall::Error::new(EBUSY));
++        }
++        let cmd_size = u32::try_from(command.len()).map_err(|_| syscall::Error::new(EINVAL))?;
++        let fence_id = self.alloc_fence_id();
++        let mut flags = VIRTIO_GPU_FLAG_FENCE;
++        let ring_index = match ring_idx {
++            Some(idx) => {
++                flags |= VIRTIO_GPU_FLAG_INFO_RING_IDX;
++                idx
++            }
++            None => 0,
++        };
++        let header = CmdSubmit {
++            header: ControlHeader {
++                ty: CommandTy::Submit3d,
++                flags,
++                fence_id,
++                ctx_id,
++                ring_index,
++                ..Default::default()
++            },
++            size: cmd_size,
++            padding: 0,
++        };
++        let total = size_of::<CmdSubmit>()
++            .checked_add(command.len())
++            .ok_or_else(|| syscall::Error::new(EINVAL))?;
++        let mut request = unsafe {
++            Dma::<[u8]>::zeroed_slice(total)
++                .map_err(Error::from)
++                .map_err(errno)?
++                .assume_init()
++        };
++        let header_bytes = unsafe {
++            slice::from_raw_parts((&raw const header).cast::<u8>(), size_of::<CmdSubmit>())
++        };
++        request[..size_of::<CmdSubmit>()].copy_from_slice(header_bytes);
++        request[size_of::<CmdSubmit>()..].copy_from_slice(command);
++        let response = Dma::new(ResponseHeader::default())
++            .map_err(Error::from)
++            .map_err(errno)?;
++        let chain = ChainBuilder::new()
++            .chain(Buffer::new(request))
++            .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++
++        let queue = self.control_queue.clone();
++        let fence = Fence::new(fence_id);
++        let done = fence.clone();
++        let mut fut = Box::pin(async move {
++            let (_, [_, response]) = queue.send(chain).await.into_parts();
++            let response: Dma<ResponseHeader> = response.into_inner();
++            let status = if response.ty == CommandTy::RespOkNodata as u32 {
++                if (response.flags & VIRTIO_GPU_FLAG_FENCE) != 0 && response.fence_id != fence_id {
++                    log::warn!(
++                        "virtio-gpu: submit ctx {ctx_id}: expected fence {fence_id}, got {}",
++                        response.fence_id
++                    );
++                }
++                0
++            } else {
++                log::warn!(
++                    "virtio-gpu: submit ctx {ctx_id} fence {fence_id}: device answered {:#x}",
++                    response.ty
++                );
++                if response.ty == CommandTy::RespErrOutOfMemory as u32 {
++                    -(ENOMEM as i32)
++                } else {
++                    -(EIO as i32)
++                }
++            };
++            done.signal(status);
++        });
++
++        let mut cx = Context::from_waker(&self.waker);
++        if fut.as_mut().poll(&mut cx).is_pending() {
++            self.pending.push(fut);
++        }
++        Ok(fence)
++    }
++
++    pub fn poll_pending(&mut self, cx: &mut Context<'_>) {
++        self.pending.retain_mut(|fut| fut.as_mut().poll(cx).is_pending());
++    }
++}
