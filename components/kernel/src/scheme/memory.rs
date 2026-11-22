@@ -224,6 +224,14 @@ impl KernelScheme for MemoryScheme {
         }
         let path = path.trim_start_matches('/');
 
+        #[cfg(feature = "iommu")]
+        if let Some(name) = path.strip_prefix("dma/") {
+            return Ok(OpenResult::SchemeLocal(
+                crate::iommu::handle::open(name, privileged, ctx.uid)?,
+                InternalFlags::empty(),
+            ));
+        }
+
         let (before_memty, memty_str) = path.split_once('@').unwrap_or((path, ""));
         let (before_ty, type_str) = memty_str.split_once('?').unwrap_or((memty_str, ""));
 
@@ -289,13 +297,18 @@ impl KernelScheme for MemoryScheme {
         fds: &[usize],
         payload: UserSliceRw,
         _flags: syscall::CallFlags,
-        _metadata: &[u64],
+        metadata: &[u64],
         token: &mut CleanLockToken,
     ) -> Result<usize> {
         if fds.len() != 1 {
             return Err(Error::new(EINVAL));
         }
         let id = fds[0];
+        #[cfg(feature = "iommu")]
+        if let Some(slot) = crate::iommu::handle::slot(id) {
+            return crate::iommu::handle::call(slot, payload, metadata, token);
+        }
+        let _ = metadata;
         let (handle_ty, _, _) = u32::try_from(id)
             .ok()
             .and_then(from_raw)
@@ -339,6 +352,10 @@ impl KernelScheme for MemoryScheme {
         _consume: bool,
         token: &mut CleanLockToken,
     ) -> Result<usize> {
+        #[cfg(feature = "iommu")]
+        if let Some(slot) = crate::iommu::handle::slot(id) {
+            return crate::iommu::handle::fmap(slot, addr_space, map, token);
+        }
         let (handle_ty, mem_ty, flags) = u32::try_from(id)
             .ok()
             .and_then(from_raw)
@@ -355,6 +372,14 @@ impl KernelScheme for MemoryScheme {
             HandleTy::PhysBorrow => Self::physmap(map.offset, map.size, map.flags, mem_ty, token),
             HandleTy::Translation | HandleTy::PortIo => Err(Error::new(EOPNOTSUPP)),
         }
+    }
+    fn close(&self, id: usize, _token: &mut CleanLockToken) -> Result<()> {
+        #[cfg(feature = "iommu")]
+        if let Some(slot) = crate::iommu::handle::slot(id) {
+            crate::iommu::handle::close(slot);
+        }
+        let _ = id;
+        Ok(())
     }
     fn kfpath(&self, _id: usize, buf: UserSliceWo, _token: &mut CleanLockToken) -> Result<usize> {
         //TODO: construct useful path?

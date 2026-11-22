@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use core::{
     arch::asm,
     hint::spin_loop,
@@ -6,7 +7,8 @@ use core::{
 };
 
 use crate::memory::{
-    allocate_frame, map_device_memory, Frame, PhysicalAddress, RmmA, RmmArch, PAGE_SIZE,
+    allocate_frame, deallocate_frame, map_device_memory, Frame, PhysicalAddress, RmmA, RmmArch,
+    PAGE_SIZE,
 };
 
 use super::dmar::{RemappingUnit, ReservedRegion, MAX_REGISTER_PAGES};
@@ -59,6 +61,8 @@ const DESC_CONTEXT: u64 = 0x1;
 const DESC_IOTLB: u64 = 0x2;
 const DESC_WAIT: u64 = 0x5;
 const DESC_GLOBAL: u64 = 1 << 4;
+const DESC_DOMAIN: u64 = 2 << 4;
+const DESC_DEVICE: u64 = 3 << 4;
 const DESC_IOTLB_DRAIN_READ: u64 = 1 << 7;
 const DESC_IOTLB_DRAIN_WRITE: u64 = 1 << 6;
 const DESC_WAIT_STATUS_WRITE: u64 = 1 << 5;
@@ -82,6 +86,9 @@ pub enum Error {
     QueueError,
     AddressTooWide(u64),
     Broken,
+    AlreadyMapped(u64),
+    NotMapped(usize),
+    NoDomainId(u16),
 }
 
 impl core::fmt::Display for Error {
@@ -99,6 +106,9 @@ impl core::fmt::Display for Error {
                 write!(f, "address {address:#x} beyond the table depth")
             }
             Self::Broken => write!(f, "unit stopped after an earlier timeout"),
+            Self::AlreadyMapped(address) => write!(f, "device address {address:#x} already mapped"),
+            Self::NotMapped(count) => write!(f, "{count} pages were not mapped"),
+            Self::NoDomainId(id) => write!(f, "domain id {id} beyond what the unit supports"),
         }
     }
 }
@@ -160,9 +170,16 @@ pub struct Domain {
     top: Frame,
 }
 
+enum Slot {
+    At(Frame, usize),
+    Covered,
+    Missing,
+}
+
 pub struct Unit {
     registers: Registers,
     pub register_base: u64,
+    pub segment: u16,
     pub version: u32,
     pub cap: u64,
     pub ecap: u64,
@@ -175,6 +192,7 @@ pub struct Unit {
     drain: u64,
     root: Frame,
     shared_context: Frame,
+    bus_context: [Option<Frame>; ROOT_ENTRIES],
     identity: Domain,
     queue: Frame,
     queue_tail: usize,
@@ -268,6 +286,7 @@ impl Unit {
         let mut unit = Unit {
             registers,
             register_base: description.register_base,
+            segment: description.segment,
             version,
             cap,
             ecap,
@@ -280,6 +299,7 @@ impl Unit {
             drain,
             root,
             shared_context,
+            bus_context: [None; ROOT_ENTRIES],
             identity: Domain {
                 id: IDENTITY_DOMAIN,
                 top: identity_top,
@@ -306,7 +326,7 @@ impl Unit {
             identity_entries += unit.map_identity(region.base, region.end, false)?;
         }
 
-        let (context_low, context_high) = unit.context_words(&unit.identity);
+        let (context_low, context_high) = unit.context_words(IDENTITY_DOMAIN, identity_top);
         for device_function in 0..CONTEXT_ENTRIES {
             write_word(shared_context, device_function * 2 + 1, context_high);
             write_word(shared_context, device_function * 2, context_low);
@@ -362,11 +382,244 @@ impl Unit {
         }
     }
 
-    fn context_words(&self, domain: &Domain) -> (u64, u64) {
+    fn context_words(&self, id: u16, top: Frame) -> (u64, u64) {
         (
-            (domain.top.base().data() as u64 & PTE_ADDR_MASK) | ENTRY_PRESENT,
-            self.address_width_field | (u64::from(domain.id) << 8),
+            (top.base().data() as u64 & PTE_ADDR_MASK) | ENTRY_PRESENT,
+            self.address_width_field | (u64::from(id) << 8),
         )
+    }
+
+    pub fn domain_ids(&self) -> u32 {
+        1u32 << (4 + 2 * (self.cap & 0x7) as u32)
+    }
+
+    pub fn attach(&mut self, source: u16, id: u16) -> Result<Domain, Error> {
+        if self.broken {
+            return Err(Error::Broken);
+        }
+        if id <= IDENTITY_DOMAIN || u32::from(id) >= self.domain_ids() {
+            return Err(Error::NoDomainId(id));
+        }
+        let mut tables = TableAllocator {
+            coherent: self.coherent,
+        };
+        let top = tables.allocate()?;
+        let context = match self.private_context(usize::from(source >> 8)) {
+            Ok(context) => context,
+            Err(err) => {
+                unsafe { deallocate_frame(top) };
+                return Err(err);
+            }
+        };
+        self.replace_context(context, source, IDENTITY_DOMAIN, id, top)?;
+        Ok(Domain { id, top })
+    }
+
+    pub fn detach(&mut self, source: u16, domain: Domain) -> Result<usize, Error> {
+        let context = self.bus_context[usize::from(source >> 8)]
+            .expect("a device with its own domain has its own context table");
+        self.replace_context(
+            context,
+            source,
+            domain.id,
+            IDENTITY_DOMAIN,
+            self.identity.top,
+        )?;
+        Ok(self.free_domain(domain))
+    }
+
+    fn private_context(&mut self, bus: usize) -> Result<Frame, Error> {
+        assert!(bus < ROOT_ENTRIES);
+        if let Some(context) = self.bus_context[bus] {
+            return Ok(context);
+        }
+        let mut tables = TableAllocator {
+            coherent: self.coherent,
+        };
+        let context = tables.allocate()?;
+        for word in 0..CONTEXT_ENTRIES * 2 {
+            write_word(context, word, read_word(self.shared_context, word));
+        }
+        self.flush_page(context);
+        write_word(
+            self.root,
+            bus * 2,
+            (context.base().data() as u64 & PTE_ADDR_MASK) | ENTRY_PRESENT,
+        );
+        self.flush_word(self.root, bus * 2);
+        self.bus_context[bus] = Some(context);
+        self.submit(&[(DESC_CONTEXT | DESC_GLOBAL, 0)])?;
+        Ok(context)
+    }
+
+    fn replace_context(
+        &mut self,
+        context: Frame,
+        source: u16,
+        old: u16,
+        new: u16,
+        top: Frame,
+    ) -> Result<(), Error> {
+        let index = usize::from(source & 0xFF) * 2;
+        let device = u64::from(source) << 32;
+        write_word(context, index, 0);
+        self.flush_word(context, index);
+        self.submit(&[
+            (
+                DESC_CONTEXT | DESC_DEVICE | (u64::from(old) << 16) | device,
+                0,
+            ),
+            (
+                DESC_IOTLB | DESC_DOMAIN | self.drain | (u64::from(old) << 16),
+                0,
+            ),
+        ])?;
+        let (low, high) = self.context_words(new, top);
+        write_word(context, index + 1, high);
+        self.flush_word(context, index + 1);
+        fence(Ordering::SeqCst);
+        write_word(context, index, low);
+        self.flush_word(context, index);
+        let tag = if self.caching_mode { 0 } else { u64::from(new) };
+        self.submit(&[
+            (DESC_CONTEXT | DESC_DEVICE | (tag << 16) | device, 0),
+            (
+                DESC_IOTLB | DESC_DOMAIN | self.drain | (u64::from(new) << 16),
+                0,
+            ),
+        ])
+    }
+
+    pub fn map_pages(&mut self, domain: &Domain, base: u64, count: usize) -> Result<(), Error> {
+        if self.broken {
+            return Err(Error::Broken);
+        }
+        let end = base.saturating_add(count as u64 * PAGE_4K);
+        if end > self.address_limit() {
+            return Err(Error::AddressTooWide(end));
+        }
+        for page in 0..count {
+            let address = base + page as u64 * PAGE_4K;
+            if let Err(err) = self.map_page(domain.top, address) {
+                for undo in 0..page {
+                    self.clear_page(domain.top, base + undo as u64 * PAGE_4K);
+                }
+                self.invalidate_domain(domain.id)?;
+                return Err(err);
+            }
+        }
+        if self.caching_mode {
+            self.invalidate_domain(domain.id)?;
+        }
+        Ok(())
+    }
+
+    pub fn unmap_pages(&mut self, domain: &Domain, base: u64, count: usize) -> Result<(), Error> {
+        let mut missing = 0;
+        for page in 0..count {
+            if !self.clear_page(domain.top, base + page as u64 * PAGE_4K) {
+                missing += 1;
+            }
+        }
+        self.invalidate_domain(domain.id)?;
+        if missing > 0 {
+            return Err(Error::NotMapped(missing));
+        }
+        Ok(())
+    }
+
+    fn invalidate_domain(&mut self, id: u16) -> Result<(), Error> {
+        self.submit(&[(
+            DESC_IOTLB | DESC_DOMAIN | self.drain | (u64::from(id) << 16),
+            0,
+        )])
+    }
+
+    fn map_page(&mut self, top: Frame, address: u64) -> Result<(), Error> {
+        match self.slot(top, address, 1, true)? {
+            Slot::At(table, index) => {
+                if read_word(table, index) & (PTE_READ | PTE_WRITE) != 0 {
+                    return Err(Error::AlreadyMapped(address));
+                }
+                write_word(
+                    table,
+                    index,
+                    (address & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE,
+                );
+                self.flush_word(table, index);
+                Ok(())
+            }
+            Slot::Covered => Err(Error::AlreadyMapped(address)),
+            Slot::Missing => unreachable!("a walk that creates tables finds no hole"),
+        }
+    }
+
+    fn clear_page(&mut self, top: Frame, address: u64) -> bool {
+        match self.slot(top, address, 1, false) {
+            Ok(Slot::At(table, index)) if read_word(table, index) & (PTE_READ | PTE_WRITE) != 0 => {
+                write_word(table, index, 0);
+                self.flush_word(table, index);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn slot(&mut self, top: Frame, address: u64, level: u8, create: bool) -> Result<Slot, Error> {
+        let mut table = top;
+        let mut current = self.levels;
+        for _ in 0..self.levels {
+            let index = ((address >> (12 + 9 * u32::from(current - 1))) & 0x1FF) as usize;
+            if current == level {
+                return Ok(Slot::At(table, index));
+            }
+            let entry = read_word(table, index);
+            if entry & (PTE_READ | PTE_WRITE) == 0 {
+                if !create {
+                    return Ok(Slot::Missing);
+                }
+                let mut tables = TableAllocator {
+                    coherent: self.coherent,
+                };
+                let next = tables.allocate()?;
+                write_word(
+                    table,
+                    index,
+                    (next.base().data() as u64 & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE,
+                );
+                self.flush_word(table, index);
+                table = next;
+            } else if entry & PTE_LARGE != 0 {
+                return Ok(Slot::Covered);
+            } else {
+                table = frame_of(entry);
+            }
+            current -= 1;
+        }
+        unreachable!("page-table walk ran past level 1");
+    }
+
+    fn free_domain(&mut self, domain: Domain) -> usize {
+        let mut stack: ArrayVec<(Frame, u8, usize), 4> = ArrayVec::new();
+        stack.push((domain.top, self.levels, 0));
+        let mut freed = 0;
+        while let Some(last) = stack.last_mut() {
+            let (table, level, index) = *last;
+            if index == TABLE_ENTRIES {
+                stack.pop();
+                unsafe { deallocate_frame(table) };
+                freed += 1;
+                continue;
+            }
+            last.2 += 1;
+            if level > 1 {
+                let entry = read_word(table, index);
+                if entry & (PTE_READ | PTE_WRITE) != 0 && entry & PTE_LARGE == 0 {
+                    stack.push((frame_of(entry), level - 1, 0));
+                }
+            }
+        }
+        freed
     }
 
     fn address_limit(&self) -> u64 {
@@ -406,16 +659,9 @@ impl Unit {
     }
 
     fn map_identity_page(&mut self, address: u64, level: u8) -> Result<bool, Error> {
-        let mut table = self.identity.top;
-        let mut current = self.levels;
-        let mut tables = TableAllocator {
-            coherent: self.coherent,
-        };
-        for _ in 0..self.levels {
-            let index = ((address >> (12 + 9 * u32::from(current - 1))) & 0x1FF) as usize;
-            let entry = read_word(table, index);
-            if current == level {
-                if entry & (PTE_READ | PTE_WRITE) != 0 {
+        match self.slot(self.identity.top, address, level, true)? {
+            Slot::At(table, index) => {
+                if read_word(table, index) & (PTE_READ | PTE_WRITE) != 0 {
                     return Ok(false);
                 }
                 let large = if level > 1 { PTE_LARGE } else { 0 };
@@ -425,25 +671,11 @@ impl Unit {
                     (address & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE | large,
                 );
                 self.flush_word(table, index);
-                return Ok(true);
+                Ok(true)
             }
-            if entry & (PTE_READ | PTE_WRITE) == 0 {
-                let next = tables.allocate()?;
-                write_word(
-                    table,
-                    index,
-                    (next.base().data() as u64 & PTE_ADDR_MASK) | PTE_READ | PTE_WRITE,
-                );
-                self.flush_word(table, index);
-                table = next;
-            } else if entry & PTE_LARGE != 0 {
-                return Ok(false);
-            } else {
-                table = frame_of(entry);
-            }
-            current -= 1;
+            Slot::Covered => Ok(false),
+            Slot::Missing => unreachable!("a walk that creates tables finds no hole"),
         }
-        unreachable!("page-table walk ran past level 1");
     }
 
     fn flush_word(&self, frame: Frame, index: usize) {
