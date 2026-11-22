@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -20,8 +22,21 @@
 
 static char path[128];
 static int failures;
-static int up[2];
-static int down[2];
+static int up[2] = {-1, -1};
+static int down[2] = {-1, -1};
+
+#define READY_LIMIT_MS 30000
+
+struct child {
+    pid_t pid;
+    int ready_fd;
+};
+
+enum ready {
+    READY,
+    CHILD_EXITED,
+    TIMED_OUT,
+};
 
 static void sleep_ms(long ms) {
     struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
@@ -100,6 +115,11 @@ static struct flock getlk(int fd, int cmd, short type, off_t start, off_t len) {
     return fl;
 }
 
+static int post_parent(int fd) {
+    char byte = 1;
+    return write(fd, &byte, 1) == 1 ? 0 : -1;
+}
+
 static void post(int fd) {
     char byte = 1;
     if (write(fd, &byte, 1) != 1) {
@@ -114,31 +134,91 @@ static void await_byte(int fd) {
     }
 }
 
-static void open_pipes(void) {
-    if (pipe(up) != 0 || pipe(down) != 0) {
-        printf("lock-probe: FAIL pipe: %s\n", strerror(errno));
-        exit(2);
+static void close_fd(int *fd) {
+    if (*fd >= 0) {
+        close(*fd);
+        *fd = -1;
     }
 }
 
 static void close_pipes(void) {
-    close(up[0]);
-    close(up[1]);
-    close(down[0]);
-    close(down[1]);
+    close_fd(&up[0]);
+    close_fd(&up[1]);
+    close_fd(&down[0]);
+    close_fd(&down[1]);
 }
 
-static pid_t spawn(int (*body)(int), int arg) {
+static int open_pipes(void) {
+    up[0] = up[1] = down[0] = down[1] = -1;
+    if (pipe(up) != 0) {
+        return -1;
+    }
+    if (pipe(down) != 0) {
+        close_pipes();
+        return -1;
+    }
+    return 0;
+}
+
+static int spawn_child(int (*body)(int), int arg, int with_pipes, struct child *out) {
+    out->pid = -1;
+    out->ready_fd = -1;
+    if (with_pipes && open_pipes() != 0) {
+        return -1;
+    }
     fflush(stdout);
     pid_t pid = fork();
+    if (pid < 0) {
+        if (with_pipes) {
+            close_pipes();
+        }
+        return -1;
+    }
     if (pid == 0) {
+        if (with_pipes) {
+            close_fd(&up[0]);
+            close_fd(&down[1]);
+        }
         alarm(20);
         _exit(body(arg));
     }
-    return pid;
+    if (with_pipes) {
+        close_fd(&up[1]);
+        close_fd(&down[0]);
+        out->ready_fd = up[0];
+    }
+    out->pid = pid;
+    return 0;
+}
+
+static enum ready await_ready(struct child *c, int limit_ms) {
+    struct pollfd pfd = {.fd = c->ready_fd, .events = POLLIN, .revents = 0};
+    int r = poll(&pfd, 1, limit_ms);
+    if (r == 0) {
+        return TIMED_OUT;
+    }
+    if (r < 0) {
+        return CHILD_EXITED;
+    }
+    char byte = 0;
+    ssize_t n = read(c->ready_fd, &byte, 1);
+    return n == 1 ? READY : CHILD_EXITED;
+}
+
+static const char *ready_problem(enum ready r) {
+    switch (r) {
+    case READY:
+        return NULL;
+    case CHILD_EXITED:
+        return "child exited before signaling ready";
+    case TIMED_OUT:
+        return "child timed out before signaling ready";
+    }
+    return "child ready check failed";
 }
 
 static int reap(pid_t pid, int seconds) {
+    assert(pid > 0);
     double deadline = now() + seconds;
     int status;
     while (now() < deadline) {
@@ -167,6 +247,9 @@ static const char *child_status(int status) {
     if (status == 0) {
         return NULL;
     }
+    if (status == 98) {
+        return "fork failed";
+    }
     if (status == 99) {
         return "child did not finish (blocked or hung)";
     }
@@ -174,7 +257,11 @@ static const char *child_status(int status) {
 }
 
 static int run(int (*body)(int), int arg, int seconds) {
-    return reap(spawn(body, arg), seconds);
+    struct child c;
+    if (spawn_child(body, arg, 0, &c) != 0) {
+        return 98;
+    }
+    return reap(c.pid, seconds);
 }
 
 static int child_conflict(int unused) {
@@ -423,11 +510,20 @@ static void case_exit(void) {
     result("release-on-exit", problem);
 
     fresh("kill");
-    open_pipes();
-    pid_t pid = spawn(child_hold_and_exit, 1);
-    await_byte(up[0]);
-    kill(pid, SIGKILL);
-    reap(pid, 10);
+    struct child c;
+    if (spawn_child(child_hold_and_exit, 1, 1, &c) != 0) {
+        result("release-on-kill", "fork failed");
+        return;
+    }
+    enum ready r = await_ready(&c, READY_LIMIT_MS);
+    if (r != READY) {
+        reap(c.pid, 10);
+        close_pipes();
+        result("release-on-kill", ready_problem(r));
+        return;
+    }
+    kill(c.pid, SIGKILL);
+    reap(c.pid, 10);
     close_pipes();
     result("release-on-kill",
            run(child_lock_whole, 0, 10) == 0 ? NULL : "a lock outlived the killed process that held it");
@@ -457,15 +553,25 @@ static void case_setlkw(void) {
         close(fd);
         return;
     }
-    open_pipes();
-    pid_t pid = spawn(child_setlkw, F_SETLKW | fd << 8);
-    await_byte(up[0]);
-    sleep_ms(1000);
-    setlk(fd, F_UNLCK, 0, 1);
-    int status = reap(pid, 10);
-    close_pipes();
-    result("setlkw-wakes", status == 2 ? "F_SETLKW returned before the lock was released"
-                                       : child_status(status));
+    struct child c;
+    if (spawn_child(child_setlkw, F_SETLKW | fd << 8, 1, &c) != 0) {
+        result("setlkw-wakes", "fork failed");
+    } else {
+        enum ready r = await_ready(&c, READY_LIMIT_MS);
+        if (r != READY) {
+            setlk(fd, F_UNLCK, 0, 1);
+            reap(c.pid, 10);
+            close_pipes();
+            result("setlkw-wakes", ready_problem(r));
+        } else {
+            sleep_ms(1000);
+            setlk(fd, F_UNLCK, 0, 1);
+            int status = reap(c.pid, 10);
+            close_pipes();
+            result("setlkw-wakes", status == 2 ? "F_SETLKW returned before the lock was released"
+                                               : child_status(status));
+        }
+    }
     close(fd);
 
     fresh("ofd-setlkw");
@@ -475,12 +581,22 @@ static void case_setlkw(void) {
         close(fd);
         return;
     }
-    open_pipes();
-    pid = spawn(child_setlkw, F_OFD_SETLKW | fd << 8);
-    await_byte(up[0]);
+    if (spawn_child(child_setlkw, F_OFD_SETLKW | fd << 8, 1, &c) != 0) {
+        close(fd);
+        result("ofd-setlkw-wakes", "fork failed");
+        return;
+    }
+    enum ready r = await_ready(&c, READY_LIMIT_MS);
+    if (r != READY) {
+        close(fd);
+        reap(c.pid, 10);
+        close_pipes();
+        result("ofd-setlkw-wakes", ready_problem(r));
+        return;
+    }
     sleep_ms(1000);
     close(fd);
-    status = reap(pid, 10);
+    int status = reap(c.pid, 10);
     close_pipes();
     result("ofd-setlkw-wakes", status == 2 ? "F_OFD_SETLKW returned before the lock was released"
                                            : child_status(status));
@@ -556,9 +672,22 @@ static void case_deadlock(void) {
         close(fd);
         return;
     }
-    open_pipes();
-    pid_t pid = spawn(child_deadlock, 0);
-    await_byte(up[0]);
+    struct child c;
+    if (spawn_child(child_deadlock, 0, 1, &c) != 0) {
+        setlk(fd, F_UNLCK, 0, 0);
+        result("setlkw-edeadlk", "fork failed");
+        close(fd);
+        return;
+    }
+    enum ready r = await_ready(&c, READY_LIMIT_MS);
+    if (r != READY) {
+        setlk(fd, F_UNLCK, 0, 0);
+        reap(c.pid, 10);
+        close_pipes();
+        result("setlkw-edeadlk", ready_problem(r));
+        close(fd);
+        return;
+    }
     sleep_ms(500);
     catch_alarm();
     alarms = 0;
@@ -567,7 +696,7 @@ static void case_deadlock(void) {
     alarm(0);
     signal(SIGALRM, SIG_DFL);
     setlk(fd, F_UNLCK, 0, 0);
-    int status = reap(pid, 10);
+    int status = reap(c.pid, 10);
     close_pipes();
     const char *problem = NULL;
     if (err != EDEADLK) {
@@ -754,15 +883,25 @@ static void case_flock(void) {
     if (flock_err(fd, LOCK_EX) != 0) {
         result("flock-wakes", "LOCK_EX failed");
     } else {
-        open_pipes();
-        pid_t pid = spawn(child_flock, 3);
-        await_byte(up[0]);
-        sleep_ms(1000);
-        flock(fd, LOCK_UN);
-        int status = reap(pid, 10);
-        close_pipes();
-        result("flock-wakes", status == 6 ? "LOCK_EX returned before the lock was released"
-                                          : child_status(status));
+        struct child c;
+        if (spawn_child(child_flock, 3, 1, &c) != 0) {
+            result("flock-wakes", "fork failed");
+        } else {
+            enum ready r = await_ready(&c, READY_LIMIT_MS);
+            if (r != READY) {
+                flock(fd, LOCK_UN);
+                reap(c.pid, 10);
+                close_pipes();
+                result("flock-wakes", ready_problem(r));
+            } else {
+                sleep_ms(1000);
+                flock(fd, LOCK_UN);
+                int status = reap(c.pid, 10);
+                close_pipes();
+                result("flock-wakes", status == 6 ? "LOCK_EX returned before the lock was released"
+                                                  : child_status(status));
+            }
+        }
     }
     close(fd);
 
@@ -803,13 +942,24 @@ static void case_flock(void) {
     close(fd);
 
     fresh("flock-close");
-    open_pipes();
-    pid_t pid = spawn(child_flock, 6);
-    await_byte(up[0]);
+    struct child c;
+    if (spawn_child(child_flock, 6, 1, &c) != 0) {
+        result("flock-release-on-close", "fork failed");
+        return;
+    }
+    enum ready r = await_ready(&c, READY_LIMIT_MS);
+    if (r != READY) {
+        reap(c.pid, 10);
+        close_pipes();
+        result("flock-release-on-close", ready_problem(r));
+        return;
+    }
     fd = open_file();
     problem = flock_err(fd, LOCK_EX | LOCK_NB) == 0 ? NULL : "the lock outlived close() in a live process";
-    post(down[1]);
-    int status = reap(pid, 10);
+    if (post_parent(down[1]) != 0 && !problem) {
+        problem = "failed to signal child";
+    }
+    int status = reap(c.pid, 10);
     close_pipes();
     result("flock-release-on-close", problem ? problem : child_status(status));
     close(fd);
