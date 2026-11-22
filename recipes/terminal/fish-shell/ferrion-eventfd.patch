@@ -1,0 +1,23 @@
+FerrionOS change to fish-shell at 54e8ad7e90a8213c01ba58de0640223bee6846d6 (GPL-2.0-only AND LGPL-2.0-or-later AND MIT AND PSF-2.0, kept), after redox.patch:
+- excludes ferrion-vendor from fish's workspace and points the libc dependency at the recipe's patched copy of rust-lang/libc at b31ee9b22f99354f2ca00c68d038d6f377c8b8a4 so fish compiles with HAVE_EVENTFD against relibc's sys/eventfd.h.
+
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,7 @@
+ [workspace]
+ resolver = "2"
+ members = ["printf", "gettext-extraction"]
++exclude = ["ferrion-vendor"]
+ 
+ [workspace.package]
+ # To build revisions that use Corrosion (those before 2024-01), use CMake 3.19, Rustc 1.78 and Rustup 1.27.
+@@ -35,7 +36,7 @@ pcre2 = { git = "https://github.com/fish-shell/rust-pcre2", tag = "0.2.9-utf32",
+ 
+ bitflags = "2.5.0"
+ errno = "0.3.0"
+-libc = { git = "https://github.com/rust-lang/libc", rev = "b31ee9b22f99354f2ca00c68d038d6f377c8b8a4", features = ["extra_traits"] }
++libc = { path = "ferrion-vendor/libc-b31ee9b22f99354f2ca00c68d038d6f377c8b8a4", features = ["extra_traits"] }
+ # lru pulls in hashbrown by default, which uses a faster (though less DoS resistant) hashing algo.
+ # disabling default features uses the stdlib instead, but it doubles the time to rewrite the history
+ # files as of 22 April 2024.

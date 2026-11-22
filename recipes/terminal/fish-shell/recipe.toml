@@ -4,7 +4,19 @@ description = "Modern user-friendly terminal shell"
 [source]
 git = "https://github.com/fish-shell/fish-shell"
 rev = "54e8ad7e90a8213c01ba58de0640223bee6846d6"
-patches = ["redox.patch"]
+patches = ["redox.patch", "ferrion-eventfd.patch"]
+script = """
+recipe_dir="$(dirname "${PWD}")"
+libc_rev="b31ee9b22f99354f2ca00c68d038d6f377c8b8a4"
+libc_sha256="5405f9bfe95bd6a169cf3cbc213d364d7e0a2184ab13dab00aa437f76bee93e8"
+rm -rf "ferrion-vendor/libc-${libc_rev}" "ferrion-vendor/libc-${libc_rev}.tar.gz"
+mkdir -p ferrion-vendor
+wget -O "ferrion-vendor/libc-${libc_rev}.tar.gz" "https://github.com/rust-lang/libc/archive/${libc_rev}.tar.gz"
+echo "${libc_sha256}  ferrion-vendor/libc-${libc_rev}.tar.gz" | sha256sum -c -
+tar -xzf "ferrion-vendor/libc-${libc_rev}.tar.gz" -C ferrion-vendor
+rm "ferrion-vendor/libc-${libc_rev}.tar.gz"
+patch --directory="ferrion-vendor/libc-${libc_rev}" --strip=1 < "${recipe_dir}/ferrion-libc-eventfd.patch"
+"""
 
 [build]
 template = "custom"

@@ -1,0 +1,36 @@
+FerrionOS change to rust-lang/libc at b31ee9b22f99354f2ca00c68d038d6f377c8b8a4 (MIT OR Apache-2.0, kept), applied by the fish-shell recipe's source script:
+- exposes eventfd_t, EFD_SEMAPHORE, EFD_CLOEXEC, EFD_NONBLOCK, eventfd, eventfd_read and eventfd_write for this target, matching relibc's sys/eventfd.h.
+
+diff --git a/src/unix/redox/mod.rs b/src/unix/redox/mod.rs
+--- a/src/unix/redox/mod.rs
++++ b/src/unix/redox/mod.rs
+@@ -7,6 +7,7 @@ pub type blksize_t = c_long;
+ pub type clock_t = c_long;
+ pub type clockid_t = c_int;
+ pub type dev_t = c_long;
++pub type eventfd_t = u64;
+ pub type fsblkcnt_t = c_ulong;
+ pub type fsfilcnt_t = c_ulong;
+ pub type ino_t = c_ulonglong;
+@@ -704,6 +705,10 @@ pub const EPOLLWAKEUP: c_int = 1 << 29;
+ pub const EPOLLONESHOT: c_int = 1 << 30;
+ pub const EPOLLET: c_int = 1 << 31;
+ 
++pub const EFD_SEMAPHORE: c_int = 1;
++pub const EFD_CLOEXEC: c_int = O_CLOEXEC;
++pub const EFD_NONBLOCK: c_int = O_NONBLOCK;
++
+ // sys/stat.h
+ pub const S_IFMT: c_int = 0o17_0000;
+ pub const S_IFDIR: c_int = 0o4_0000;
+@@ -1305,6 +1310,10 @@ extern "C" {
+     ) -> c_int;
+     pub fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *mut crate::epoll_event) -> c_int;
+ 
++    pub fn eventfd(init: c_uint, flags: c_int) -> c_int;
++    pub fn eventfd_read(fd: c_int, value: *mut eventfd_t) -> c_int;
++    pub fn eventfd_write(fd: c_int, value: eventfd_t) -> c_int;
++
+     // sys/ioctl.h
+     pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+ 
