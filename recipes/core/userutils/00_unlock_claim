@@ -1,0 +1,2 @@
+rm -rf /var/run/unlock-session
+mkdir -m 0700 /var/run/unlock-session

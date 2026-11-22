@@ -12,5 +12,7 @@ script = """
 DYNAMIC_INIT
 cookbook_cargo
 cp -rv "${COOKBOOK_SOURCE}/res" "${COOKBOOK_STAGE}/etc"
+mkdir -pv "${COOKBOOK_STAGE}/usr/lib/init.d"
+cp "${COOKBOOK_RECIPE}/00_unlock_claim" "${COOKBOOK_STAGE}/usr/lib/init.d/00_unlock_claim"
 ln -s id "${COOKBOOK_STAGE}/usr/bin/whoami"
 """
