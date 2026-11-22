@@ -1,0 +1,1383 @@
+FerrionOS change to base (MIT license, kept), made against upstream commit 20f7573b4dc011ea5267189185edc0b2f12bab0f with the FerrionOS patches before it in recipe.toml applied, ferrion-virtio-gpu-render.patch last among them. It adds host-visible blob buffers for slice GP4 of FerrionOS's GPU plan:
+- virtio-core parses PCI shared-memory capabilities (cfg_type 8, PciCapability64, 64-bit offset and length) and exposes SharedMemoryRegion descriptors without mapping the BAR.
+- driver-graphics adds blob.rs for render-handle RESOURCE_CREATE_BLOB, MAP (23-bit handle-local slot, 40-bit byte offset), RESOURCE_INFO, GEM_CLOSE, checked mmap_prep, and munmap/on_close teardown.
+- virtio-gpud adds blob.rs with a page-aligned host-visible window allocator, RESOURCE_CREATE_BLOB, on-demand RESOURCE_MAP_BLOB with map_info cache modes (WB/UC/WC) via PhysBorrowed::map, RESOURCE_UNMAP_BLOB, and RESOURCE_UNREF.
+
+diff --git a/drivers/graphics/driver-graphics/src/blob.rs b/drivers/graphics/driver-graphics/src/blob.rs
+new file mode 100644
+index 00000000..38b31570
+--- /dev/null
++++ b/drivers/graphics/driver-graphics/src/blob.rs
+@@ -0,0 +1,287 @@
++use std::collections::HashMap;
++
++use redox_ioctl::virtgpu;
++use syscall::{EINVAL, ENOENT, ENOMEM, Error, MapFlags, PAGE_SIZE, Result};
++
++use crate::render::RenderDevice;
++
++pub const BLOB_OFFSET_SHIFT: u32 = 40;
++pub const BLOB_OFFSET_MASK: u64 = (1u64 << BLOB_OFFSET_SHIFT) - 1;
++pub const MAX_BLOB_SLOT: u32 = (1u32 << 23) - 1;
++pub const MAX_BLOBS_PER_HANDLE: usize = 4096;
++pub const MAX_BLOB_CMD_SIZE: usize = 64 * 1024;
++
++const ALLOWED_BLOB_FLAGS: u32 = virtgpu::VIRTGPU_BLOB_FLAG_USE_MAPPABLE
++    | virtgpu::VIRTGPU_BLOB_FLAG_USE_SHAREABLE
++    | virtgpu::VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
++
++#[derive(Clone, Copy, Debug)]
++pub struct BlobCreateParams<'a> {
++    pub context_id: u32,
++    pub blob_mem: u32,
++    pub blob_flags: u32,
++    pub size: u64,
++    pub blob_id: u64,
++    pub blob_hints: u32,
++    pub cmd: &'a [u8],
++}
++
++#[derive(Clone, Copy, Debug)]
++pub struct BlobInfo {
++    pub res_id: u32,
++    pub size: u64,
++    pub blob_mem: u32,
++    pub blob_flags: u32,
++}
++
++#[derive(Debug)]
++struct SlotEntry {
++    info: BlobInfo,
++    mapped_pages: usize,
++    closed: bool,
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct RenderBlobs {
++    bo_to_slot: HashMap<u32, u32>,
++    slots: HashMap<u32, SlotEntry>,
++    next_slot: u32,
++}
++
++impl RenderBlobs {
++    pub(crate) fn new() -> Self {
++        Self {
++            bo_to_slot: HashMap::new(),
++            slots: HashMap::new(),
++            next_slot: 1,
++        }
++    }
++
++    fn allocate_slot(&mut self) -> Result<u32> {
++        if self.slots.len() >= MAX_BLOBS_PER_HANDLE {
++            return Err(Error::new(ENOMEM));
++        }
++        for _ in 0..MAX_BLOB_SLOT {
++            let slot = self.next_slot;
++            self.next_slot = if slot >= MAX_BLOB_SLOT { 1 } else { slot + 1 };
++            if slot != 0 && !self.slots.contains_key(&slot) && !self.bo_to_slot.contains_key(&slot) {
++                return Ok(slot);
++            }
++        }
++        Err(Error::new(ENOMEM))
++    }
++
++    pub(crate) fn create_blob(
++        &mut self,
++        device: &mut dyn RenderDevice,
++        context_id: Option<u32>,
++        mut data: virtgpu::VirtgpuResourceCreateBlob<'_>,
++    ) -> Result<usize> {
++        let features = device.features();
++        if !features.resource_blob {
++            return Err(Error::new(EINVAL));
++        }
++        if data.pad() != 0 || data.pad2() != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        let blob_mem = data.blob_mem();
++        let blob_flags = data.blob_flags();
++        let blob_hints = data.blob_hints();
++        if blob_flags & !ALLOWED_BLOB_FLAGS != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        if blob_flags & virtgpu::VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        if blob_hints & !virtgpu::DRM_VIRTGPU_BLOB_FLAG_HINT_DEFER_MAPPING != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        if blob_mem != virtgpu::VIRTGPU_BLOB_MEM_HOST3D {
++            return Err(Error::new(EINVAL));
++        }
++        if !features.three_d {
++            return Err(Error::new(EINVAL));
++        }
++        if blob_flags & virtgpu::VIRTGPU_BLOB_FLAG_USE_MAPPABLE != 0 && !features.host_visible {
++            return Err(Error::new(EINVAL));
++        }
++        let Some(context_id) = context_id else {
++            return Err(Error::new(EINVAL));
++        };
++        let req_size = data.size();
++        if req_size == 0 {
++            return Err(Error::new(EINVAL));
++        }
++        let aligned_size = req_size
++            .checked_next_multiple_of(PAGE_SIZE as u64)
++            .ok_or(Error::new(EINVAL))?;
++        if aligned_size > BLOB_OFFSET_MASK + 1 || usize::try_from(aligned_size).is_err() {
++            return Err(Error::new(EINVAL));
++        }
++        let cmd = data.cmd();
++        if cmd.len() > MAX_BLOB_CMD_SIZE {
++            return Err(Error::new(EINVAL));
++        }
++
++        let slot = self.allocate_slot()?;
++        let info = device.create_blob(BlobCreateParams {
++            context_id,
++            blob_mem,
++            blob_flags,
++            size: aligned_size,
++            blob_id: data.blob_id(),
++            blob_hints,
++            cmd,
++        })?;
++        self.slots.insert(
++            slot,
++            SlotEntry {
++                info,
++                mapped_pages: 0,
++                closed: false,
++            },
++        );
++        self.bo_to_slot.insert(slot, slot);
++        data.set_bo_handle(slot);
++        data.set_res_handle(info.res_id);
++        Ok(0)
++    }
++
++    pub(crate) fn map_ioctl(&self, mut data: virtgpu::VirtgpuMap<'_>) -> Result<usize> {
++        let Some(&slot) = self.bo_to_slot.get(&data.handle()) else {
++            return Err(Error::new(ENOENT));
++        };
++        let Some(entry) = self.slots.get(&slot) else {
++            return Err(Error::new(ENOENT));
++        };
++        if entry.info.blob_flags & virtgpu::VIRTGPU_BLOB_FLAG_USE_MAPPABLE == 0 {
++            return Err(Error::new(EINVAL));
++        }
++        data.set_offset(u64::from(slot) << BLOB_OFFSET_SHIFT);
++        Ok(0)
++    }
++
++    pub(crate) fn resource_info(
++        &self,
++        mut data: virtgpu::VirtgpuResourceInfo<'_>,
++    ) -> Result<usize> {
++        let Some(&slot) = self.bo_to_slot.get(&data.bo_handle()) else {
++            return Err(Error::new(ENOENT));
++        };
++        let Some(entry) = self.slots.get(&slot) else {
++            return Err(Error::new(ENOENT));
++        };
++        data.set_res_handle(entry.info.res_id);
++        data.set_size(entry.info.size as u32);
++        data.set_blob_mem(entry.info.blob_mem);
++        Ok(0)
++    }
++
++    pub(crate) fn gem_close(
++        &mut self,
++        device: &mut dyn RenderDevice,
++        data: virtgpu::GemClose<'_>,
++    ) -> Result<usize> {
++        if data.pad() != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        let Some(slot) = self.bo_to_slot.remove(&data.handle()) else {
++            return Err(Error::new(EINVAL));
++        };
++        let mut destroy_res = None;
++        if let Some(entry) = self.slots.get_mut(&slot) {
++            entry.closed = true;
++            if entry.mapped_pages == 0 {
++                destroy_res = Some(entry.info.res_id);
++            }
++        }
++        if let Some(res_id) = destroy_res {
++            self.slots.remove(&slot);
++            device.destroy_blob(res_id);
++        }
++        Ok(0)
++    }
++
++    pub(crate) fn mmap_prep(
++        &mut self,
++        device: &mut dyn RenderDevice,
++        offset: u64,
++        size: usize,
++        _flags: MapFlags,
++    ) -> Result<usize> {
++        if offset & (1u64 << 63) != 0 || size == 0 {
++            return Err(Error::new(EINVAL));
++        }
++        let slot = (offset >> BLOB_OFFSET_SHIFT) as u32;
++        let in_blob = offset & BLOB_OFFSET_MASK;
++        if in_blob % PAGE_SIZE as u64 != 0 {
++            return Err(Error::new(EINVAL));
++        }
++        let aligned_len = size
++            .checked_next_multiple_of(PAGE_SIZE)
++            .ok_or(Error::new(EINVAL))?;
++        let end = in_blob
++            .checked_add(aligned_len as u64)
++            .ok_or(Error::new(EINVAL))?;
++        let (res_id, blob_size, mappable) = {
++            let entry = self.slots.get(&slot).ok_or(Error::new(ENOENT))?;
++            if entry.closed {
++                return Err(Error::new(ENOENT));
++            }
++            (
++                entry.info.res_id,
++                entry.info.size,
++                entry.info.blob_flags & virtgpu::VIRTGPU_BLOB_FLAG_USE_MAPPABLE != 0,
++            )
++        };
++        if !mappable || end > blob_size {
++            return Err(Error::new(EINVAL));
++        }
++        let base = device.map_blob(res_id)?;
++        let addr = base
++            .checked_add(usize::try_from(in_blob).map_err(|_| Error::new(EINVAL))?)
++            .ok_or(Error::new(EINVAL))?;
++        if let Some(entry) = self.slots.get_mut(&slot) {
++            entry.mapped_pages = entry.mapped_pages.saturating_add(aligned_len / PAGE_SIZE);
++        }
++        Ok(addr)
++    }
++
++    pub(crate) fn munmap(
++        &mut self,
++        device: &mut dyn RenderDevice,
++        offset: u64,
++        size: usize,
++    ) -> Result<()> {
++        if offset & (1u64 << 63) != 0 {
++            return Ok(());
++        }
++        let slot = (offset >> BLOB_OFFSET_SHIFT) as u32;
++        let pages = size.div_ceil(PAGE_SIZE);
++        let mut unmap_res = None;
++        let mut destroy_res = None;
++        if let Some(entry) = self.slots.get_mut(&slot) {
++            entry.mapped_pages = entry.mapped_pages.saturating_sub(pages);
++            if entry.mapped_pages == 0 {
++                unmap_res = Some(entry.info.res_id);
++                if entry.closed {
++                    destroy_res = Some(entry.info.res_id);
++                }
++            }
++        }
++        if let Some(res_id) = destroy_res {
++            self.slots.remove(&slot);
++            device.destroy_blob(res_id);
++        } else if let Some(res_id) = unmap_res {
++            device.unmap_blob(res_id);
++        }
++        Ok(())
++    }
++
++    pub(crate) fn destroy_all(&mut self, device: &mut dyn RenderDevice) {
++        self.bo_to_slot.clear();
++        for (_, entry) in self.slots.drain() {
++            device.destroy_blob(entry.info.res_id);
++        }
++    }
++}
+diff --git a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+index f20563f5..e22bcec1 100644
+--- a/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
++++ b/drivers/graphics/driver-graphics/src/ioctl/virtgpu.rs
+@@ -23,14 +23,19 @@ pub(crate) fn call_render_ioctl<T>(
+ ) -> Result<usize> {
+     match cmd {
+         drm::VERSION => drm::DrmVersion::with(payload, |data| version(device, data)),
+-        // A render handle holds no buffer before blobs exist, so every number is unknown, as
+-        // Linux answers an unknown number.
+-        virtgpu::GEM_CLOSE => virtgpu::GemClose::with(payload, |_| Err(Error::new(EINVAL))),
++        virtgpu::GEM_CLOSE => virtgpu::GemClose::with(payload, |data| handle.blobs.gem_close(device, data)),
++        virtgpu::MAP => virtgpu::VirtgpuMap::with(payload, |data| handle.blobs.map_ioctl(data)),
+         virtgpu::GETPARAM => virtgpu::VirtgpuGetparam::with(payload, |mut data| {
+             data.set_value(getparam(device, data.param())?);
+             Ok(0)
+         }),
++        virtgpu::RESOURCE_INFO => {
++            virtgpu::VirtgpuResourceInfo::with(payload, |data| handle.blobs.resource_info(data))
++        }
+         virtgpu::GET_CAPS => virtgpu::VirtgpuGetCaps::with(payload, |data| get_caps(device, data)),
++        virtgpu::RESOURCE_CREATE_BLOB => virtgpu::VirtgpuResourceCreateBlob::with(payload, |data| {
++            handle.blobs.create_blob(device, handle.context, data)
++        }),
+         virtgpu::CONTEXT_INIT => {
+             virtgpu::VirtgpuContextInit::with(payload, |data| context_init(device, handle, data))
+         }
+diff --git a/drivers/graphics/driver-graphics/src/lib.rs b/drivers/graphics/driver-graphics/src/lib.rs
+index fcc54702..3d402cc1 100644
+--- a/drivers/graphics/driver-graphics/src/lib.rs
++++ b/drivers/graphics/driver-graphics/src/lib.rs
+@@ -30,12 +30,14 @@ use crate::kms::crtc::{KmsCrtc, KmsCrtcDriver, KmsCrtcState};
+ use crate::kms::objects::{KmsObjectId, KmsObjects};
+ use crate::kms::plane::{KmsPlane, KmsPlaneDriver, KmsPlaneState};
+ 
++mod blob;
+ mod buffer;
+ mod handle;
+ mod ioctl;
+ pub mod kms;
+ mod render;
+ 
++pub use blob::{BlobCreateParams, BlobInfo};
+ pub use render::{RenderDevice, RenderFeatures};
+ 
+ #[derive(Debug, Copy, Clone)]
+diff --git a/drivers/graphics/driver-graphics/src/render.rs b/drivers/graphics/driver-graphics/src/render.rs
+index 2aafea34..bc840c7b 100644
+--- a/drivers/graphics/driver-graphics/src/render.rs
++++ b/drivers/graphics/driver-graphics/src/render.rs
+@@ -17,8 +17,9 @@ use std::marker::PhantomData;
+ use redox_scheme::CallerCtx;
+ use scheme_utils::{ResourceOpenResult, ResourceSync};
+ use syscall::schemev2::NewFdFlags;
+-use syscall::{ENODEV, ENOENT, Error, MODE_CHR, Result};
++use syscall::{ENODEV, ENOENT, ENOSYS, Error, MODE_CHR, MapFlags, MunmapFlags, Result};
+ 
++use crate::blob::{BlobCreateParams, BlobInfo, RenderBlobs};
+ use crate::{GraphicsAdapter, GraphicsResource, GraphicsSchemeData, ioctl};
+ 
+ /// The device features render handles report, as Linux's virtio-gpu driver reports them.
+@@ -53,6 +54,18 @@ pub trait RenderDevice: Debug {
+ 
+     /// Destroys a context `create_context` made, which stops its work on the host.
+     fn destroy_context(&mut self, context_id: u32);
++
++    fn create_blob(&mut self, _params: BlobCreateParams<'_>) -> Result<BlobInfo> {
++        Err(Error::new(ENOSYS))
++    }
++
++    fn map_blob(&mut self, _res_id: u32) -> Result<usize> {
++        Err(Error::new(ENOSYS))
++    }
++
++    fn unmap_blob(&mut self, _res_id: u32) {}
++
++    fn destroy_blob(&mut self, _res_id: u32) {}
+ }
+ 
+ /// The root registered under the render name.
+@@ -95,6 +108,7 @@ impl<T: GraphicsAdapter> ResourceSync for RenderRoot<T> {
+ /// other handle can reach it.
+ pub(crate) struct RenderHandle<T> {
+     pub(crate) context: Option<u32>,
++    pub(crate) blobs: RenderBlobs,
+     _adapter: PhantomData<T>,
+ }
+ 
+@@ -102,6 +116,7 @@ impl<T> Debug for RenderHandle<T> {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("RenderHandle")
+             .field("context", &self.context)
++            .field("blobs", &self.blobs)
+             .finish()
+     }
+ }
+@@ -110,6 +125,7 @@ impl<T> RenderHandle<T> {
+     fn new() -> Self {
+         Self {
+             context: None,
++            blobs: RenderBlobs::new(),
+             _adapter: PhantomData,
+         }
+     }
+@@ -144,11 +160,39 @@ impl<T: GraphicsAdapter> ResourceSync for RenderHandle<T> {
+         ioctl::virtgpu::call_render_ioctl(device, self, metadata[0], payload)
+     }
+ 
+-    fn on_close(self, scheme_data: &mut Self::SchemeData) {
+-        if let Some(context) = self.context {
+-            if let Some(device) = scheme_data.adapter.render_device() {
++    fn mmap_prep(
++        &mut self,
++        scheme_data: &mut Self::SchemeData,
++        offset: u64,
++        size: usize,
++        flags: MapFlags,
++    ) -> Result<usize> {
++        let device = scheme_data
++            .adapter
++            .render_device()
++            .ok_or(Error::new(ENODEV))?;
++        self.blobs.mmap_prep(device, offset, size, flags)
++    }
++
++    fn munmap(
++        &mut self,
++        scheme_data: &mut Self::SchemeData,
++        offset: u64,
++        size: usize,
++        _flags: MunmapFlags,
++    ) -> Result<()> {
++        if let Some(device) = scheme_data.adapter.render_device() {
++            self.blobs.munmap(device, offset, size)?;
++        }
++        Ok(())
++    }
++
++    fn on_close(mut self, scheme_data: &mut Self::SchemeData) {
++        if let Some(device) = scheme_data.adapter.render_device() {
++            if let Some(context) = self.context {
+                 device.destroy_context(context);
+             }
++            self.blobs.destroy_all(device);
+         }
+     }
+ }
+diff --git a/drivers/graphics/virtio-gpud/src/blob.rs b/drivers/graphics/virtio-gpud/src/blob.rs
+new file mode 100644
+index 00000000..d78617aa
+--- /dev/null
++++ b/drivers/graphics/virtio-gpud/src/blob.rs
+@@ -0,0 +1,481 @@
++use std::collections::HashMap;
++use std::fmt;
++
++use common::dma::Dma;
++use common::{MemoryType, PhysBorrowed, Prot};
++use driver_graphics::{BlobCreateParams, BlobInfo};
++use syscall::{EINVAL, ENOENT, ENOMEM, PAGE_SIZE};
++use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
++use virtio_core::transport::{Error, Queue};
++use virtio_core::SharedMemoryRegion;
++
++use crate::render::{errno, send, ResponseHeader};
++use crate::{CommandTy, ControlHeader, ResourceId, ResourceUnref};
++
++pub const VIRTIO_GPU_SHM_ID_HOST_VISIBLE: u8 = 1;
++
++const VIRTIO_GPU_BLOB_MEM_HOST3D: u32 = 0x0002;
++const VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
++
++const VIRTIO_GPU_MAP_CACHE_MASK: u32 = 0x0f;
++const VIRTIO_GPU_MAP_CACHE_CACHED: u32 = 0x01;
++const VIRTIO_GPU_MAP_CACHE_UNCACHED: u32 = 0x02;
++const VIRTIO_GPU_MAP_CACHE_WC: u32 = 0x03;
++
++#[repr(C)]
++struct ResourceCreateBlob {
++    header: ControlHeader,
++    resource_id: u32,
++    blob_mem: u32,
++    blob_flags: u32,
++    nr_entries: u32,
++    blob_id: u64,
++    size: u64,
++}
++
++const _: () = assert!(size_of::<ResourceCreateBlob>() == 56);
++
++#[repr(C)]
++struct ResourceMapBlob {
++    header: ControlHeader,
++    resource_id: u32,
++    padding: u32,
++    offset: u64,
++}
++
++const _: () = assert!(size_of::<ResourceMapBlob>() == 40);
++
++#[derive(Default)]
++#[repr(C)]
++struct RespMapInfo {
++    header: ResponseHeader,
++    map_info: u32,
++    padding: u32,
++}
++
++const _: () = assert!(size_of::<RespMapInfo>() == 32);
++
++#[repr(C)]
++struct ResourceUnmapBlob {
++    header: ControlHeader,
++    resource_id: u32,
++    padding: u32,
++}
++
++const _: () = assert!(size_of::<ResourceUnmapBlob>() == 32);
++
++#[repr(C)]
++struct CmdSubmit3d {
++    header: ControlHeader,
++    size: u32,
++    padding: u32,
++}
++
++const _: () = assert!(size_of::<CmdSubmit3d>() == 32);
++
++#[derive(Debug)]
++pub struct WindowAllocator {
++    free: Vec<(u64, u64)>,
++}
++
++impl WindowAllocator {
++    pub fn new(length: u64) -> Self {
++        let aligned = length & !(PAGE_SIZE as u64 - 1);
++        let free = if aligned > 0 {
++            vec![(0, aligned)]
++        } else {
++            Vec::new()
++        };
++        Self { free }
++    }
++
++    pub fn alloc(&mut self, size: u64) -> Option<u64> {
++        if size == 0 || size % PAGE_SIZE as u64 != 0 {
++            return None;
++        }
++        let pos = self.free.iter().position(|&(_, len)| len >= size)?;
++        let (start, len) = self.free[pos];
++        if len == size {
++            self.free.remove(pos);
++        } else {
++            self.free[pos] = (start + size, len - size);
++        }
++        Some(start)
++    }
++
++    pub fn free(&mut self, offset: u64, size: u64) {
++        if size == 0 {
++            return;
++        }
++        let idx = self.free.partition_point(|&(start, _)| start < offset);
++        self.free.insert(idx, (offset, size));
++        if idx + 1 < self.free.len() {
++            let (cur_start, cur_len) = self.free[idx];
++            let (next_start, next_len) = self.free[idx + 1];
++            if cur_start.checked_add(cur_len) == Some(next_start) {
++                self.free[idx] = (cur_start, cur_len + next_len);
++                self.free.remove(idx + 1);
++            }
++        }
++        if idx > 0 {
++            let (prev_start, prev_len) = self.free[idx - 1];
++            let (cur_start, cur_len) = self.free[idx];
++            if prev_start.checked_add(prev_len) == Some(cur_start) {
++                self.free[idx - 1] = (prev_start, prev_len + cur_len);
++                self.free.remove(idx);
++            }
++        }
++    }
++}
++
++struct HostVisibleWindow {
++    region: SharedMemoryRegion,
++    allocator: WindowAllocator,
++}
++
++struct MappedBlob {
++    offset: u64,
++    size: u64,
++    mapping: PhysBorrowed,
++}
++
++struct VirtGpuBlob {
++    size: u64,
++    blob_mem: u32,
++    blob_flags: u32,
++    mapped: Option<MappedBlob>,
++}
++
++pub struct VirtGpuBlobs {
++    window: Option<HostVisibleWindow>,
++    blobs: HashMap<u32, VirtGpuBlob>,
++    logged_first_map: bool,
++}
++
++impl fmt::Debug for VirtGpuBlobs {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("VirtGpuBlobs")
++            .field("window", &self.window.as_ref().map(|w| w.region))
++            .field("blob_count", &self.blobs.len())
++            .finish()
++    }
++}
++
++fn device_errno(ty: u32) -> syscall::Error {
++    syscall::Error::new(if ty == CommandTy::RespErrOutOfMemory as u32 {
++        ENOMEM
++    } else {
++        EINVAL
++    })
++}
++
++fn map_info_memory_type(map_info: u32) -> Option<MemoryType> {
++    match map_info & VIRTIO_GPU_MAP_CACHE_MASK {
++        VIRTIO_GPU_MAP_CACHE_CACHED => Some(MemoryType::Writeback),
++        VIRTIO_GPU_MAP_CACHE_UNCACHED => Some(MemoryType::Uncacheable),
++        VIRTIO_GPU_MAP_CACHE_WC => Some(MemoryType::WriteCombining),
++        _ => None,
++    }
++}
++
++async fn send_submit_3d(queue: &Queue, context_id: u32, cmd: &[u8]) -> Result<u32, Error> {
++    let request = Dma::new(CmdSubmit3d {
++        header: ControlHeader {
++            ctx_id: context_id,
++            ..ControlHeader::with_ty(CommandTy::Submit3d)
++        },
++        size: cmd.len() as u32,
++        padding: 0,
++    })?;
++    let mut payload = unsafe { Dma::<[u8]>::zeroed_slice(cmd.len())?.assume_init() };
++    payload.copy_from_slice(cmd);
++    let header = Dma::new(ResponseHeader::default())?;
++    let command = ChainBuilder::new()
++        .chain(Buffer::new(request))
++        .chain(Buffer::new(payload))
++        .chain(Buffer::new(header).flags(DescriptorFlags::WRITE_ONLY))
++        .build();
++    let (_, [_, _, header]) = queue.send(command).await.into_parts();
++    Ok(header.into_inner::<Dma<ResponseHeader>>().ty)
++}
++
++async fn send_map_blob(
++    queue: &Queue,
++    resource_id: u32,
++    offset: u64,
++) -> Result<(u32, RespMapInfo), Error> {
++    let request = Dma::new(ResourceMapBlob {
++        header: ControlHeader::with_ty(CommandTy::ResourceMapBlob),
++        resource_id,
++        padding: 0,
++        offset,
++    })?;
++    let response = Dma::new(RespMapInfo::default())?;
++    let command = ChainBuilder::new()
++        .chain(Buffer::new(request))
++        .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++        .build();
++    let (written, [_, response]) = queue.send(command).await.into_parts();
++    let response: Dma<RespMapInfo> = response.into_inner();
++    let copy = RespMapInfo {
++        header: ResponseHeader {
++            ty: response.header.ty,
++            flags: response.header.flags,
++            fence_id: response.header.fence_id,
++            ctx_id: response.header.ctx_id,
++            ring_index: response.header.ring_index,
++            padding: response.header.padding,
++        },
++        map_info: response.map_info,
++        padding: response.padding,
++    };
++    Ok((written, copy))
++}
++
++fn unmap_on_device(queue: &Queue, resource_id: u32) -> bool {
++    let command = ResourceUnmapBlob {
++        header: ControlHeader::with_ty(CommandTy::ResourceUnmapBlob),
++        resource_id,
++        padding: 0,
++    };
++    match futures::executor::block_on(send(queue, command)) {
++        Ok(ty) if ty == CommandTy::RespOkNodata as u32 => true,
++        Ok(ty) => {
++            log::warn!("virtio-gpu: blob {resource_id}: unmap answered {ty:#x}");
++            false
++        }
++        Err(error) => {
++            log::warn!("virtio-gpu: blob {resource_id}: unmap failed: {error:?}");
++            false
++        }
++    }
++}
++
++impl VirtGpuBlobs {
++    pub fn new(region: Option<SharedMemoryRegion>) -> Self {
++        let window = region.map(|region| {
++            let allocator = WindowAllocator::new(region.length);
++            HostVisibleWindow { region, allocator }
++        });
++        Self {
++            window,
++            blobs: HashMap::new(),
++            logged_first_map: false,
++        }
++    }
++
++    pub fn has_window(&self) -> bool {
++        self.window.is_some()
++    }
++
++    pub fn create_blob(
++        &mut self,
++        queue: &Queue,
++        params: BlobCreateParams<'_>,
++    ) -> syscall::Result<BlobInfo> {
++        if params.blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D {
++            return Err(syscall::Error::new(EINVAL));
++        }
++        if params.blob_flags & VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE != 0 {
++            let Some(window) = &self.window else {
++                return Err(syscall::Error::new(EINVAL));
++            };
++            if params.size > window.region.length {
++                return Err(syscall::Error::new(ENOMEM));
++            }
++        }
++        if !params.cmd.is_empty() {
++            let ty = futures::executor::block_on(send_submit_3d(
++                queue,
++                params.context_id,
++                params.cmd,
++            ))
++            .map_err(errno)?;
++            if ty != CommandTy::RespOkNodata as u32 {
++                log::warn!(
++                    "virtio-gpu: context {}: blob create cmd answered {ty:#x}",
++                    params.context_id
++                );
++                return Err(device_errno(ty));
++            }
++        }
++        let res_id = ResourceId::alloc();
++        let command = ResourceCreateBlob {
++            header: ControlHeader {
++                ctx_id: params.context_id,
++                ..ControlHeader::with_ty(CommandTy::ResourceCreateBlob)
++            },
++            resource_id: res_id.raw(),
++            blob_mem: params.blob_mem,
++            blob_flags: params.blob_flags,
++            nr_entries: 0,
++            blob_id: params.blob_id,
++            size: params.size,
++        };
++        let ty = futures::executor::block_on(send(queue, command)).map_err(errno)?;
++        if ty != CommandTy::RespOkNodata as u32 {
++            log::warn!(
++                "virtio-gpu: blob {} create answered {ty:#x}",
++                res_id.raw()
++            );
++            return Err(device_errno(ty));
++        }
++        self.blobs.insert(
++            res_id.raw(),
++            VirtGpuBlob {
++                size: params.size,
++                blob_mem: params.blob_mem,
++                blob_flags: params.blob_flags,
++                mapped: None,
++            },
++        );
++        Ok(BlobInfo {
++            res_id: res_id.raw(),
++            size: params.size,
++            blob_mem: params.blob_mem,
++            blob_flags: params.blob_flags,
++        })
++    }
++
++    pub fn map_blob(&mut self, queue: &Queue, res_id: u32) -> syscall::Result<usize> {
++        let Some(blob) = self.blobs.get(&res_id) else {
++            return Err(syscall::Error::new(ENOENT));
++        };
++        if let Some(mapped) = &blob.mapped {
++            return Ok(mapped.mapping.as_ptr() as usize);
++        }
++        if blob.blob_flags & VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE == 0 {
++            return Err(syscall::Error::new(EINVAL));
++        }
++        let size = blob.size;
++        let len = usize::try_from(size).map_err(|_| syscall::Error::new(EINVAL))?;
++        let (phys_base, offset) = {
++            let Some(window) = self.window.as_mut() else {
++                return Err(syscall::Error::new(EINVAL));
++            };
++            let Some(offset) = window.allocator.alloc(size) else {
++                return Err(syscall::Error::new(ENOMEM));
++            };
++            let Some(phys) = window.region.phys_addr.checked_add(offset) else {
++                window.allocator.free(offset, size);
++                return Err(syscall::Error::new(EINVAL));
++            };
++            (phys, offset)
++        };
++
++        let (written, resp) = match futures::executor::block_on(send_map_blob(queue, res_id, offset))
++        {
++            Ok(pair) => pair,
++            Err(error) => {
++                if let Some(window) = self.window.as_mut() {
++                    window.allocator.free(offset, size);
++                }
++                return Err(errno(error));
++            }
++        };
++        if (written as usize) < size_of::<RespMapInfo>()
++            || resp.header.ty != CommandTy::RespOkMapInfo as u32
++        {
++            log::warn!(
++                "virtio-gpu: blob {res_id} map at {offset:#x} answered {:#x}",
++                resp.header.ty
++            );
++            if let Some(window) = self.window.as_mut() {
++                window.allocator.free(offset, size);
++            }
++            return Err(device_errno(resp.header.ty));
++        }
++        let Some(mem_type) = map_info_memory_type(resp.map_info) else {
++            log::warn!(
++                "virtio-gpu: blob {res_id} map returned unsupported map_info {:#x}",
++                resp.map_info
++            );
++            if unmap_on_device(queue, res_id) {
++                if let Some(window) = self.window.as_mut() {
++                    window.allocator.free(offset, size);
++                }
++            }
++            return Err(syscall::Error::new(EINVAL));
++        };
++        let phys_usize = usize::try_from(phys_base).map_err(|_| syscall::Error::new(EINVAL))?;
++        let mapping = match PhysBorrowed::map(phys_usize, len, Prot::RW, mem_type) {
++            Ok(mapping) => mapping,
++            Err(error) => {
++                log::warn!(
++                    "virtio-gpu: blob {res_id} physmap {phys_base:#x} +{len:#x} ({mem_type}) failed: {error:?}"
++                );
++                if unmap_on_device(queue, res_id) {
++                    if let Some(window) = self.window.as_mut() {
++                        window.allocator.free(offset, size);
++                    }
++                }
++                return Err(syscall::Error::new(error.errno()));
++            }
++        };
++        let addr = mapping.as_ptr() as usize;
++        if !self.logged_first_map {
++            self.logged_first_map = true;
++            log::info!(
++                "virtio-gpu: first map-blob res={res_id} offset={offset:#x} size={size:#x} map_info={:#x} ({mem_type})",
++                resp.map_info
++            );
++        }
++        if let Some(blob) = self.blobs.get_mut(&res_id) {
++            blob.mapped = Some(MappedBlob {
++                offset,
++                size,
++                mapping,
++            });
++        }
++        Ok(addr)
++    }
++
++    pub fn unmap_blob(&mut self, queue: &Queue, res_id: u32) {
++        let Some(mapped) = self.blobs.get_mut(&res_id).and_then(|blob| blob.mapped.take()) else {
++            return;
++        };
++        let (offset, size) = (mapped.offset, mapped.size);
++        drop(mapped.mapping);
++        if unmap_on_device(queue, res_id) {
++            if let Some(window) = self.window.as_mut() {
++                window.allocator.free(offset, size);
++            }
++        }
++    }
++
++    pub fn destroy_blob(&mut self, queue: &Queue, res_id: u32) {
++        self.unmap_blob(queue, res_id);
++        if self.blobs.remove(&res_id).is_none() {
++            return;
++        }
++        let command = ResourceUnref::new(ResourceId::from_raw(res_id));
++        match futures::executor::block_on(send(queue, command)) {
++            Ok(ty) if ty == CommandTy::RespOkNodata as u32 => {}
++            Ok(ty) => log::warn!("virtio-gpu: blob {res_id}: unref answered {ty:#x}"),
++            Err(error) => log::warn!("virtio-gpu: blob {res_id}: unref failed: {error:?}"),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn allocator_splits_and_coalesces() {
++        let page = PAGE_SIZE as u64;
++        let mut alloc = WindowAllocator::new(4 * page + 123);
++        assert_eq!(alloc.alloc(0), None);
++        assert_eq!(alloc.alloc(page + 1), None);
++        let a = alloc.alloc(page).unwrap();
++        let b = alloc.alloc(2 * page).unwrap();
++        let c = alloc.alloc(page).unwrap();
++        assert_eq!((a, b, c), (0, page, 3 * page));
++        assert_eq!(alloc.alloc(page), None);
++        alloc.free(a, page);
++        alloc.free(c, page);
++        assert_eq!(alloc.alloc(2 * page), None);
++        alloc.free(b, 2 * page);
++        assert_eq!(alloc.alloc(4 * page), Some(0));
++    }
++}
+diff --git a/drivers/graphics/virtio-gpud/src/main.rs b/drivers/graphics/virtio-gpud/src/main.rs
+index cecbe6a4..4150dac0 100644
+--- a/drivers/graphics/virtio-gpud/src/main.rs
++++ b/drivers/graphics/virtio-gpud/src/main.rs
+@@ -32,6 +32,7 @@ use event::{user_data, EventQueue};
+ use pcid_interface::PciFunctionHandle;
+ use virtio_core::utils::VolatileCell;
+ 
++mod blob;
+ mod render;
+ mod scheme;
+ 
+@@ -228,8 +229,21 @@ pub struct ResourceId(u32);
+ impl ResourceId {
+     const NONE: ResourceId = ResourceId(0);
+ 
+-    fn alloc() -> Self {
+-        ResourceId(RESOURCE_ALLOC.fetch_add(1, Ordering::SeqCst))
++    pub(crate) fn alloc() -> Self {
++        loop {
++            let id = RESOURCE_ALLOC.fetch_add(1, Ordering::SeqCst);
++            if id != 0 {
++                return ResourceId(id);
++            }
++        }
++    }
++
++    pub(crate) fn raw(self) -> u32 {
++        self.0
++    }
++
++    pub(crate) fn from_raw(id: u32) -> Self {
++        ResourceId(id)
+     }
+ }
+ 
+@@ -534,6 +548,17 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+     log::info!("virtio-gpu: initiating startup sequence :^)");
+ 
+     let device = virtio_core::probe_device(&mut pcid_handle)?;
++    let host_visible_window = device.shared_memory_region(blob::VIRTIO_GPU_SHM_ID_HOST_VISIBLE);
++    match host_visible_window {
++        Some(region) => log::info!(
++            "virtio-gpu: host-visible window bar={} offset={:#x} phys={:#x} size={:#x}",
++            region.bar,
++            region.bar_offset,
++            region.phys_addr,
++            region.length
++        ),
++        None => log::info!("virtio-gpu: host-visible window absent"),
++    }
+     let config = unsafe { &mut *(device.device_space as *mut GpuConfig) };
+ 
+     // Negotiate features.
+@@ -589,6 +614,7 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+         device.transport.clone(),
+         has_edid,
+         features,
++        host_visible_window,
+         frame_waker,
+     )?;
+     daemon.ready();
+diff --git a/drivers/graphics/virtio-gpud/src/render.rs b/drivers/graphics/virtio-gpud/src/render.rs
+index 540c0200..281f92a4 100644
+--- a/drivers/graphics/virtio-gpud/src/render.rs
++++ b/drivers/graphics/virtio-gpud/src/render.rs
+@@ -10,11 +10,13 @@ use std::fmt;
+ use std::sync::Arc;
+ 
+ use common::dma::Dma;
+-use driver_graphics::{RenderDevice, RenderFeatures};
++use driver_graphics::{BlobCreateParams, BlobInfo, RenderDevice, RenderFeatures};
+ use syscall::{EINVAL, EIO, ENOMEM};
+ use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
+ use virtio_core::transport::{Error, Queue};
++use virtio_core::SharedMemoryRegion;
+ 
++use crate::blob::VirtGpuBlobs;
+ use crate::{CommandTy, ControlHeader};
+ 
+ /// The features the driver acknowledged.
+@@ -41,13 +43,13 @@ const MAX_CONTEXTS: usize = 256;
+ /// not know is never taken for a `CommandTy`.
+ #[derive(Default)]
+ #[repr(C)]
+-struct ResponseHeader {
+-    ty: u32,
+-    flags: u32,
+-    fence_id: u64,
+-    ctx_id: u32,
+-    ring_index: u8,
+-    padding: [u8; 3],
++pub(crate) struct ResponseHeader {
++    pub(crate) ty: u32,
++    pub(crate) flags: u32,
++    pub(crate) fence_id: u64,
++    pub(crate) ctx_id: u32,
++    pub(crate) ring_index: u8,
++    pub(crate) padding: [u8; 3],
+ }
+ 
+ const _: () = assert!(size_of::<ResponseHeader>() == size_of::<ControlHeader>());
+@@ -96,6 +98,7 @@ pub struct VirtGpuRender {
+     capsets: Vec<Capset>,
+     contexts: BTreeSet<u32>,
+     next_context: u32,
++    blobs: VirtGpuBlobs,
+ }
+ 
+ impl fmt::Debug for VirtGpuRender {
+@@ -104,11 +107,12 @@ impl fmt::Debug for VirtGpuRender {
+             .field("features", &self.features)
+             .field("capset_ids", &self.capset_ids())
+             .field("contexts", &self.contexts)
++            .field("blobs", &self.blobs)
+             .finish()
+     }
+ }
+ 
+-fn errno(error: Error) -> syscall::Error {
++pub(crate) fn errno(error: Error) -> syscall::Error {
+     syscall::Error::new(match error {
+         Error::SyscallError(error) => error.errno(),
+         _ => EIO,
+@@ -116,7 +120,7 @@ fn errno(error: Error) -> syscall::Error {
+ }
+ 
+ /// Sends one command whose answer is a bare header, and returns the answer's type.
+-async fn send<T: Send + 'static>(queue: &Queue, request: T) -> Result<u32, Error> {
++pub(crate) async fn send<T: Send + 'static>(queue: &Queue, request: T) -> Result<u32, Error> {
+     let request = Dma::new(request)?;
+     let header = Dma::new(ResponseHeader::default())?;
+     let command = ChainBuilder::new()
+@@ -195,7 +199,12 @@ async fn read_capset(queue: &Queue, index: u32) -> Result<Option<Capset>, Error>
+ impl VirtGpuRender {
+     /// The render side of a device that offers 3D, with the capsets it reports; None for a 2D
+     /// device.
+-    pub fn new(control_queue: Arc<Queue>, features: Features, num_capsets: u32) -> Option<Self> {
++    pub fn new(
++        control_queue: Arc<Queue>,
++        features: Features,
++        num_capsets: u32,
++        host_visible_window: Option<SharedMemoryRegion>,
++    ) -> Option<Self> {
+         if !features.virgl {
+             return None;
+         }
+@@ -220,6 +229,7 @@ impl VirtGpuRender {
+             capsets,
+             contexts: BTreeSet::new(),
+             next_context: 1,
++            blobs: VirtGpuBlobs::new(host_visible_window),
+         })
+     }
+ 
+@@ -246,7 +256,7 @@ impl RenderDevice for VirtGpuRender {
+             three_d: self.features.virgl,
+             resource_blob: self.features.resource_blob,
+             context_init: self.features.context_init,
+-            host_visible: false,
++            host_visible: self.features.resource_blob && self.blobs.has_window(),
+         }
+     }
+ 
+@@ -308,4 +318,20 @@ impl RenderDevice for VirtGpuRender {
+             Err(error) => log::warn!("virtio-gpu: context {context_id}: destroy failed: {error:?}"),
+         }
+     }
++
++    fn create_blob(&mut self, params: BlobCreateParams<'_>) -> syscall::Result<BlobInfo> {
++        self.blobs.create_blob(&self.control_queue, params)
++    }
++
++    fn map_blob(&mut self, res_id: u32) -> syscall::Result<usize> {
++        self.blobs.map_blob(&self.control_queue, res_id)
++    }
++
++    fn unmap_blob(&mut self, res_id: u32) {
++        self.blobs.unmap_blob(&self.control_queue, res_id);
++    }
++
++    fn destroy_blob(&mut self, res_id: u32) {
++        self.blobs.destroy_blob(&self.control_queue, res_id);
++    }
+ }
+diff --git a/drivers/graphics/virtio-gpud/src/scheme.rs b/drivers/graphics/virtio-gpud/src/scheme.rs
+index 88acff33..2692be6f 100644
+--- a/drivers/graphics/virtio-gpud/src/scheme.rs
++++ b/drivers/graphics/virtio-gpud/src/scheme.rs
+@@ -719,6 +719,7 @@ impl<'a> GpuScheme {
+         transport: Arc<dyn Transport>,
+         has_edid: bool,
+         features: crate::render::Features,
++        host_visible_window: Option<virtio_core::SharedMemoryRegion>,
+         waker: Waker,
+     ) -> Result<GraphicsScheme<VirtGpuAdapter<'a>>, Error> {
+         let (unref_tx, unref_rx) = mpsc::channel();
+@@ -726,6 +727,7 @@ impl<'a> GpuScheme {
+             control_queue.clone(),
+             features,
+             config.num_capsets.get(),
++            host_visible_window,
+         );
+         let adapter = VirtGpuAdapter {
+             unique,
+diff --git a/drivers/virtio-core/src/lib.rs b/drivers/virtio-core/src/lib.rs
+index 7ecd963b..885d6704 100644
+--- a/drivers/virtio-core/src/lib.rs
++++ b/drivers/virtio-core/src/lib.rs
+@@ -6,4 +6,4 @@ pub mod transport;
+ pub mod utils;
+ 
+ pub use dma_pool::{DmaPool, PooledPage};
+-pub use probe::{probe_device, reinit, Device};
++pub use probe::{probe_device, reinit, Device, SharedMemoryRegion};
+diff --git a/drivers/virtio-core/src/probe.rs b/drivers/virtio-core/src/probe.rs
+index d0d29480..73cc4981 100644
+--- a/drivers/virtio-core/src/probe.rs
++++ b/drivers/virtio-core/src/probe.rs
+@@ -2,15 +2,25 @@ use std::sync::{Arc, Mutex};
+ 
+ use common::MemoryType;
+ use pcid_interface::irq_helpers::{InterruptVector, Msix};
+-use pcid_interface::PciFunctionHandle;
++use pcid_interface::{PciBar, PciFunctionHandle};
+ 
+ use crate::spec::*;
+ use crate::transport::{Error, Queue, StandardTransport, Transport};
+ 
++#[derive(Debug, Copy, Clone, PartialEq, Eq)]
++pub struct SharedMemoryRegion {
++    pub id: u8,
++    pub bar: u8,
++    pub bar_offset: u64,
++    pub phys_addr: u64,
++    pub length: u64,
++}
++
+ pub struct Device {
+     pub transport: Arc<dyn Transport>,
+     pub device_space: *const u8,
+     msix: Mutex<Msix>,
++    shared_memory_regions: Vec<SharedMemoryRegion>,
+ }
+ 
+ // FIXME(andypython): `device_space` should not be `Send` nor `Sync`. Take
+@@ -33,6 +43,17 @@ impl Device {
+     pub fn alloc_irq(&self) -> InterruptVector {
+         self.msix.lock().unwrap().alloc()
+     }
++
++    pub fn shared_memory_region(&self, id: u8) -> Option<SharedMemoryRegion> {
++        self.shared_memory_regions
++            .iter()
++            .copied()
++            .find(|region| region.id == id)
++    }
++
++    pub fn shared_memory_regions(&self) -> &[SharedMemoryRegion] {
++        &self.shared_memory_regions
++    }
+ }
+ 
+ /// VirtIO Device Probe
+@@ -60,20 +81,96 @@ pub fn probe_device(pcid_handle: &mut PciFunctionHandle) -> Result<Device, Error
+     let mut common_addr = None;
+     let mut notify_addr = None;
+     let mut device_addr = None;
++    let mut shared_memory_regions: Vec<SharedMemoryRegion> = Vec::new();
+ 
+     for raw_capability in pcid_handle.get_vendor_capabilities() {
+-        // SAFETY: We have verified that the length of the data is correct.
+-        let capability = unsafe { &*(raw_capability.data.as_ptr() as *const PciCapability) };
++        if raw_capability.data.len() < size_of::<PciCapability>() {
++            log::warn!(
++                "virtio-core: ignoring short vendor capability ({} bytes)",
++                raw_capability.data.len()
++            );
++            continue;
++        }
++        let Some(cfg_type) = CfgType::from_u8(raw_capability.data[0]) else {
++            continue;
++        };
+ 
+-        match capability.cfg_type {
++        if matches!(cfg_type, CfgType::SharedMemory) {
++            if raw_capability.data.len() < size_of::<PciCapability64>() {
++                log::warn!(
++                    "virtio-core: ignoring short shared-memory capability ({} bytes)",
++                    raw_capability.data.len()
++                );
++                continue;
++            }
++            let cap64 = unsafe {
++                raw_capability
++                    .data
++                    .as_ptr()
++                    .cast::<PciCapability64>()
++                    .read_unaligned()
++            };
++            let bar = cap64.cap.bar;
++            let id = cap64.cap.id;
++            let bar_offset = cap64.offset();
++            let length = cap64.length();
++            let Some(&pci_bar) = pci_config.func.bars.get(usize::from(bar)) else {
++                log::warn!("virtio-core: shared-memory region {id} names invalid BAR {bar}");
++                continue;
++            };
++            let (bar_addr, bar_size) = match pci_bar {
++                PciBar::Memory32 { addr, size } => (u64::from(addr), u64::from(size)),
++                PciBar::Memory64 { addr, size } => (addr, size),
++                _ => {
++                    log::warn!("virtio-core: shared-memory region {id} BAR {bar} is not memory");
++                    continue;
++                }
++            };
++            let Some(bar_end) = bar_offset.checked_add(length) else {
++                log::warn!("virtio-core: shared-memory region {id} overflows BAR {bar}");
++                continue;
++            };
++            let Some(phys_addr) = bar_addr.checked_add(bar_offset) else {
++                log::warn!("virtio-core: shared-memory region {id} physical address overflow");
++                continue;
++            };
++            if length == 0 || bar_end > bar_size {
++                log::warn!(
++                    "virtio-core: shared-memory region {id} [{bar_offset:#x}, +{length:#x}) outside BAR {bar} ({bar_size:#x})"
++                );
++                continue;
++            }
++            if shared_memory_regions.iter().any(|region| region.id == id) {
++                log::warn!("virtio-core: ignoring duplicate shared-memory region id {id}");
++                continue;
++            }
++            shared_memory_regions.push(SharedMemoryRegion {
++                id,
++                bar,
++                bar_offset,
++                phys_addr,
++                length,
++            });
++            continue;
++        }
++
++        match cfg_type {
+             CfgType::Common | CfgType::Notify | CfgType::Device => {}
+             _ => continue,
+         }
+ 
++        let capability = unsafe {
++            raw_capability
++                .data
++                .as_ptr()
++                .cast::<PciCapability>()
++                .read_unaligned()
++        };
++
+         let mapped_bar = unsafe { pcid_handle.map_bar(capability.bar, MemoryType::Uncacheable) };
+         let address = mapped_bar.ptr.expose_provenance().get() + capability.offset as usize;
+ 
+-        match capability.cfg_type {
++        match cfg_type {
+             CfgType::Common => {
+                 debug_assert!(common_addr.is_none());
+                 common_addr = Some(address);
+@@ -81,12 +178,16 @@ pub fn probe_device(pcid_handle: &mut PciFunctionHandle) -> Result<Device, Error
+ 
+             CfgType::Notify => {
+                 debug_assert!(notify_addr.is_none());
+-
+-                // SAFETY: The capability type is `Notify`, so its safe to access
+-                //         the `notify_multiplier` field.
++                if raw_capability.data.len() < size_of::<PciCapabilityNotify>() {
++                    log::warn!("virtio-core: ignoring short notify capability");
++                    continue;
++                }
+                 let multiplier = unsafe {
+-                    (&*(raw_capability.data.as_ptr() as *const PciCapability
+-                        as *const PciCapabilityNotify))
++                    raw_capability
++                        .data
++                        .as_ptr()
++                        .cast::<PciCapabilityNotify>()
++                        .read_unaligned()
+                         .notify_off_multiplier()
+                 };
+                 notify_addr = Some((address, multiplier));
+@@ -135,6 +236,7 @@ pub fn probe_device(pcid_handle: &mut PciFunctionHandle) -> Result<Device, Error
+         transport,
+         device_space,
+         msix: Mutex::new(msix),
++        shared_memory_regions,
+     };
+ 
+     device.transport.reset();
+diff --git a/drivers/virtio-core/src/spec/transport_pci.rs b/drivers/virtio-core/src/spec/transport_pci.rs
+index 33004b31..1f0ab1ff 100644
+--- a/drivers/virtio-core/src/spec/transport_pci.rs
++++ b/drivers/virtio-core/src/spec/transport_pci.rs
+@@ -69,6 +69,21 @@ pub enum CfgType {
+ 
+ const_assert_eq!(size_of::<CfgType>(), 1);
+ 
++impl CfgType {
++    pub fn from_u8(value: u8) -> Option<Self> {
++        match value {
++            1 => Some(Self::Common),
++            2 => Some(Self::Notify),
++            3 => Some(Self::Isr),
++            4 => Some(Self::Device),
++            5 => Some(Self::PciConfig),
++            8 => Some(Self::SharedMemory),
++            9 => Some(Self::Vendor),
++            _ => None,
++        }
++    }
++}
++
+ #[derive(Debug)]
+ #[repr(C)]
+ pub struct CommonCfg {
+@@ -173,5 +188,29 @@ impl PciCapabilityNotify {
+ 
+ const_assert_eq!(size_of::<PciCapabilityNotify>(), 17);
+ 
++#[derive(Debug, Copy, Clone)]
++#[repr(C, packed)]
++pub struct PciCapability64 {
++    pub cap: PciCapability,
++    pub offset_hi: u32,
++    pub length_hi: u32,
++}
++
++impl PciCapability64 {
++    pub fn offset(&self) -> u64 {
++        let lo = u32::from_le(self.cap.offset);
++        let hi = u32::from_le(self.offset_hi);
++        u64::from(lo) | (u64::from(hi) << 32)
++    }
++
++    pub fn length(&self) -> u64 {
++        let lo = u32::from_le(self.cap.length);
++        let hi = u32::from_le(self.length_hi);
++        u64::from(lo) | (u64::from(hi) << 32)
++    }
++}
++
++const_assert_eq!(size_of::<PciCapability64>(), 21);
++
+ /// Vector value used to disable MSI for queue
+ pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
