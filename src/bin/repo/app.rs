@@ -1,6 +1,6 @@
 use crate::*;
 use cookbook::cook::fetch::FetchResult;
-use cookbook::cook::pty::{UnixSlavePty, flush_pty, setup_pty, write_to_pty};
+use cookbook::cook::pty::{PtyOut, UnixSlavePty, setup_pty, write_to_pty};
 use cookbook::cook::tui::{drain_buffer_to_lines, join_logs, kill_everything, render_build_log};
 use cookbook::recipe::CookRecipe;
 use cookbook::{Error, Result, staged_pkg};
@@ -353,8 +353,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                 break 'done;
             }
             let name = recipe.name.clone();
-            let (mut stdout_writer, mut stderr_writer) = setup_logger(&cooker_status_tx, &name);
-            let mut logger = Some((&mut stdout_writer, &mut stderr_writer));
             'again: loop {
                 if is_aborting(&cooker_run_state) {
                     break 'done;
@@ -366,19 +364,20 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                     break 'done;
                 }
                 let _ = recipe.reload_recipe();
+                let mut session = setup_logger(&cooker_status_tx, &name);
                 let handler = handle_cook(
                     &recipe,
                     &cooker_config,
                     fetch_result.source_dir.clone(),
-                    &logger,
+                    &session.as_pty_out(),
                 );
+                if let Err(err_ctx) = &handler {
+                    write_to_pty(&session.as_pty_out(), &format!("\n{err_ctx}"));
+                }
+                session.finish();
                 if let Some(log_path) = cooker_config.logs_dir.as_ref()
                     && !matches!(handler, Ok(true))
                 {
-                    if let Err(err_ctx) = &handler {
-                        write_to_pty(&logger, &format!("\n{err_ctx}"));
-                    }
-                    flush_pty(&mut logger);
                     let log_path = log_path.join(format!("{}/{}.log", recipe.target, name.name()));
                     cooker_status_tx
                         .send(StatusUpdate::FlushLog(name.clone(), log_path))
@@ -466,8 +465,6 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                 break 'done;
             }
             let name = recipe.name.clone();
-            let (mut stdout_writer, mut stderr_writer) = setup_logger(&fetcher_status_tx, &name);
-            let mut logger = Some((&mut stdout_writer, &mut stderr_writer));
             'again: loop {
                 if is_aborting(&fetcher_run_state) {
                     break 'done;
@@ -479,14 +476,15 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                     break 'done;
                 }
                 let _ = recipe.reload_recipe();
-                let handler = handle_fetch(&recipe, &fetcher_config, true, &logger);
+                let mut session = setup_logger(&fetcher_status_tx, &name);
+                let handler = handle_fetch(&recipe, &fetcher_config, true, &session.as_pty_out());
+                if let Err(err_ctx) = &handler {
+                    write_to_pty(&session.as_pty_out(), &format!("\n{err_ctx}"));
+                }
+                session.finish();
                 if let Some(log_path) = fetcher_config.logs_dir.as_ref()
                     && !matches!(handler, Ok(FetchResult { cached: true, .. }))
                 {
-                    if let Err(err_ctx) = &handler {
-                        write_to_pty(&logger, &format!("\n{err_ctx}"));
-                    }
-                    flush_pty(&mut logger);
                     let log_path = log_path.join(format!("{}/{}.log", recipe.target, name.name()));
                     fetcher_status_tx
                         .send(StatusUpdate::FlushLog(name.clone(), log_path))
@@ -1107,36 +1105,90 @@ fn spawn_log_reader<R>(
     mut reader: R,
     package_name: PackageName,
     status_tx: mpsc::Sender<StatusUpdate>,
-) where
+) -> thread::JoinHandle<()>
+where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
         let mut buffer = [0; 1024];
         loop {
-            let buf = match reader.read(&mut buffer) {
+            match reader.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(n) => buffer[..n].to_vec(),
-                Err(e) => format!("[IO Error] {}", e).into_bytes(),
-            };
-            if status_tx
-                .send(StatusUpdate::PushLog(package_name.clone(), buf))
-                .is_err()
-            {
-                break;
+                Ok(n) => {
+                    if status_tx
+                        .send(StatusUpdate::PushLog(
+                            package_name.clone(),
+                            buffer[..n].to_vec(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = status_tx.send(StatusUpdate::PushLog(
+                        package_name.clone(),
+                        format!("[IO Error] {}", e).into_bytes(),
+                    ));
+                    break;
+                }
             }
         }
-    });
+    })
 }
 
-pub fn setup_logger(
-    status_tx: &mpsc::Sender<StatusUpdate>,
-    name: &PackageName,
-) -> (UnixSlavePty, std::io::PipeWriter) {
-    let (pty_reader, log_reader, pipes) = setup_pty();
+pub struct LogSession {
+    slave: Option<UnixSlavePty>,
+    log_writer: Option<std::io::PipeWriter>,
+    pty_reader: Option<thread::JoinHandle<()>>,
+    log_reader: Option<thread::JoinHandle<()>>,
+}
 
-    spawn_log_reader(pty_reader, name.clone(), status_tx.clone());
-    spawn_log_reader(log_reader, name.clone(), status_tx.clone());
-    pipes
+impl LogSession {
+    pub fn as_pty_out(&mut self) -> PtyOut<'_> {
+        Some((
+            self.slave.as_mut().expect("LogSession already finished"),
+            self.log_writer
+                .as_mut()
+                .expect("LogSession already finished"),
+        ))
+    }
+
+    pub fn finish(mut self) {
+        self.close_and_join();
+    }
+
+    fn close_and_join(&mut self) {
+        if let Some(slave) = self.slave.take() {
+            slave.reap_and_assert_no_descendants();
+            drop(slave);
+        }
+        drop(self.log_writer.take());
+        if let Some(handle) = self.pty_reader.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.log_reader.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for LogSession {
+    fn drop(&mut self) {
+        self.close_and_join();
+    }
+}
+
+pub fn setup_logger(status_tx: &mpsc::Sender<StatusUpdate>, name: &PackageName) -> LogSession {
+    let (pty_reader, log_reader, (slave, log_writer)) = setup_pty();
+    let pty_reader = spawn_log_reader(pty_reader, name.clone(), status_tx.clone());
+    let log_reader = spawn_log_reader(log_reader, name.clone(), status_tx.clone());
+    LogSession {
+        slave: Some(slave),
+        log_writer: Some(log_writer),
+        pty_reader: Some(pty_reader),
+        log_reader: Some(log_reader),
+    }
 }
 
 #[derive(PartialEq, Clone, Copy)]

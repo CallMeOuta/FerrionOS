@@ -6,7 +6,7 @@ use cookbook::cook::fs::{
     get_relative_exe, remove_all, run_command,
 };
 use cookbook::cook::package::{package, package_handle_push};
-use cookbook::cook::pty::{PtyOut, flush_pty, write_to_pty};
+use cookbook::cook::pty::{PtyOut, install_signal_handlers, write_to_pty};
 use cookbook::cook::tree::{self, DisplayOptions, TreeData, TreeItem, TreeOptions, WalkTreeEntry};
 use cookbook::cook::tui::join_logs;
 use cookbook::cook::{fetch_repo, ident};
@@ -231,6 +231,7 @@ impl CliConfig {
 }
 
 fn main() {
+    install_signal_handlers();
     init_config();
     if let Err(e) = main_inner() {
         match e {
@@ -425,7 +426,7 @@ fn repo_inner(config: &CliConfig, command: &CliCommand, recipe: &CookRecipe) -> 
             };
 
             let (status_tx, status_rx) = mpsc::channel::<StatusUpdate>();
-            let (mut stdout_writer, mut stderr_writer) = setup_logger(&status_tx, &recipe.name);
+            let mut session = setup_logger(&status_tx, &recipe.name);
             let mut app = TuiApp::new(vec![recipe.clone()]);
             app.dump_logs_anyway = config.cook.verbose;
             let dump_fail_logs = !app.dump_logs_anyway;
@@ -443,13 +444,12 @@ fn repo_inner(config: &CliConfig, command: &CliCommand, recipe: &CookRecipe) -> 
                     }
                 }
             });
-            let mut logger = Some((&mut stdout_writer, &mut stderr_writer));
-            let result = repo_inner_fn(&logger);
+            let result = repo_inner_fn(&session.as_pty_out());
             if let Err(err_ctx) = &result {
-                write_to_pty(&logger, &format!("\n{err_ctx}"));
+                write_to_pty(&session.as_pty_out(), &format!("\n{err_ctx}"));
             }
+            session.finish();
             if !matches!(result, Ok(true)) {
-                flush_pty(&mut logger);
                 let log_path =
                     log_path.join(format!("{}/{}.log", recipe.target, recipe.name.name()));
                 status_tx

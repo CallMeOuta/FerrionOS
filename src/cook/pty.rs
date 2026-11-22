@@ -3,10 +3,165 @@ use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::{io::AsRawFd, io::RawFd, process::CommandExt};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::{fs::File, mem, ptr, time::Duration};
 
 use crate::{Error, Result, wrap_io_err};
+
+const MAX_ACTIVE_JOBS: usize = 64;
+const MAX_REAP_POLLS: usize = 100;
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const GRACEFUL_TERM_POLLS: usize = 20;
+
+static ACTIVE_PGIDS: [AtomicI32; MAX_ACTIVE_JOBS] = [const { AtomicI32::new(0) }; MAX_ACTIVE_JOBS];
+static SIGNAL_HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+fn register_pgid(pgid: libc::pid_t) {
+    assert!(pgid > 0);
+    for slot in &ACTIVE_PGIDS {
+        if slot
+            .compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    panic!("active pty job table exceeded MAX_ACTIVE_JOBS ({MAX_ACTIVE_JOBS})");
+}
+
+fn unregister_pgid(pgid: libc::pid_t) {
+    for slot in &ACTIVE_PGIDS {
+        let _ = slot.compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn terminate_active_jobs_on_signal(sig: libc::c_int) {
+    for slot in &ACTIVE_PGIDS {
+        let pgid = slot.load(Ordering::SeqCst);
+        if pgid > 0 {
+            unsafe {
+                libc::kill(-pgid, libc::SIGTERM);
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+pub fn install_signal_handlers() {
+    if SIGNAL_HANDLERS_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    unsafe {
+        let mut sa: libc::sigaction = mem::zeroed();
+        sa.sa_sigaction = terminate_active_jobs_on_signal as *const () as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = 0;
+        libc::sigaction(libc::SIGINT, &sa, ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, ptr::null_mut());
+    }
+}
+
+fn pgid_alive(pgid: libc::pid_t) -> bool {
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    let err = io::Error::last_os_error().raw_os_error();
+    err != Some(libc::ESRCH)
+}
+
+fn reap_pgid_nonblocking(pgid: libc::pid_t) {
+    let mut status: libc::c_int = 0;
+    for _ in 0..MAX_REAP_POLLS {
+        let pid = unsafe { libc::waitpid(-pgid, &mut status, libc::WNOHANG) };
+        if pid <= 0 {
+            break;
+        }
+    }
+}
+
+fn kill_and_reap_pgid(pgid: libc::pid_t) {
+    if pgid <= 0 {
+        return;
+    }
+    reap_pgid_nonblocking(pgid);
+    if pgid_alive(pgid) {
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        for _ in 0..GRACEFUL_TERM_POLLS {
+            reap_pgid_nonblocking(pgid);
+            if !pgid_alive(pgid) {
+                break;
+            }
+            std::thread::sleep(REAP_POLL_INTERVAL);
+        }
+    }
+    if pgid_alive(pgid) {
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+        for _ in 0..MAX_REAP_POLLS {
+            reap_pgid_nonblocking(pgid);
+            if !pgid_alive(pgid) {
+                break;
+            }
+            std::thread::sleep(REAP_POLL_INTERVAL);
+        }
+    }
+    unregister_pgid(pgid);
+    assert!(
+        !pgid_alive(pgid),
+        "live descendants remain in process group {pgid}"
+    );
+}
+
+pub struct Job {
+    child: Option<Child>,
+    pgid: libc::pid_t,
+}
+
+impl Job {
+    pub fn new(child: Child) -> Self {
+        let pgid = child.id() as libc::pid_t;
+        register_pgid(pgid);
+        Self {
+            child: Some(child),
+            pgid,
+        }
+    }
+
+    pub fn pgid(&self) -> libc::pid_t {
+        self.pgid
+    }
+
+    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+        let status = match self.child.as_mut() {
+            Some(child) => child.wait()?,
+            None => return Err(io::Error::other("job already waited")),
+        };
+        kill_and_reap_pgid(self.pgid);
+        self.child = None;
+        Ok(status)
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            kill_and_reap_pgid(self.pgid);
+            let _ = child.wait();
+        } else {
+            unregister_pgid(self.pgid);
+        }
+    }
+}
 
 macro_rules! log_to_pty {
     ($logger:expr, $($arg:tt)+) => {
@@ -80,15 +235,6 @@ pub fn setup_pty_with_stdin() -> (
     let pipes = (pair.slave, log_writer);
 
     (pty_reader, log_reader, pty_writer, pipes)
-}
-
-pub fn flush_pty(logger: &mut PtyOut) {
-    let Some((pty, file)) = logger else {
-        return;
-    };
-    let _ = pty.flush();
-    std::thread::sleep(Duration::from_millis(10));
-    let _ = file.flush();
 }
 
 pub fn spawn_to_pipe(command: &mut Command, stdout_pipe: &PtyOut) -> Result<Child> {
@@ -173,6 +319,7 @@ fn openpty(size: PtySize) -> Result<(UnixMasterPty, UnixSlavePty)> {
     };
     let slave = UnixSlavePty {
         fd: PtyFd(unsafe { File::from_raw_fd(slave) }),
+        pgids: Mutex::new(Vec::new()),
     };
 
     cloexec(master.fd.as_raw_fd())?;
@@ -296,18 +443,16 @@ impl PtyFd {
         };
 
         let mut child = cmd.spawn().map_err(wrap_io_err!("Spawning cmd"))?;
-
+        cmd.stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
         if stdin {
+            cmd.stdin(std::process::Stdio::inherit());
             child.stdin.take();
         }
         child.stdout.take();
         child.stderr.take();
 
         Ok(child)
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        self.0.flush().map_err(wrap_io_err!("Flushing pty"))
     }
 }
 
@@ -317,6 +462,7 @@ pub struct UnixMasterPty {
 
 pub struct UnixSlavePty {
     fd: PtyFd,
+    pgids: Mutex<Vec<libc::pid_t>>,
 }
 
 fn cloexec(fd: RawFd) -> Result<()> {
@@ -332,14 +478,28 @@ fn cloexec(fd: RawFd) -> Result<()> {
 }
 
 impl UnixSlavePty {
+    fn track_child(&self, child: Child) -> Child {
+        let pgid = child.id() as libc::pid_t;
+        register_pgid(pgid);
+        self.pgids.lock().unwrap().push(pgid);
+        child
+    }
+
     fn spawn_command(&self, builder: &mut Command) -> Result<std::process::Child> {
-        self.fd.spawn_command(builder, false)
+        let child = self.fd.spawn_command(builder, false)?;
+        Ok(self.track_child(child))
     }
+
     fn spawn_command_stdin(&self, builder: &mut Command) -> Result<std::process::Child> {
-        self.fd.spawn_command(builder, true)
+        let child = self.fd.spawn_command(builder, true)?;
+        Ok(self.track_child(child))
     }
-    fn flush(&mut self) -> Result<()> {
-        self.fd.flush()
+
+    pub fn reap_and_assert_no_descendants(&self) {
+        let pgids = std::mem::take(&mut *self.pgids.lock().unwrap());
+        for pgid in pgids {
+            kill_and_reap_pgid(pgid);
+        }
     }
 }
 
