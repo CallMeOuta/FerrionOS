@@ -10,6 +10,7 @@ the comment's text, and the code it documents (the next line, or a trailing comm
 
 From the delete-comment skill of the maintainer's agents repository.
 """
+import enum
 import io
 import hashlib
 from pathlib import Path
@@ -79,10 +80,13 @@ class Out:
         self.starts = line_starts(src)
         self.cursor = 0
 
-    def add(self, line, end, text, whole, lang=None):
-        start = self.src.find(text, max(self.starts[line - 1], self.cursor))
-        if start < 0 or pos_to_line(self.starts, start) != line:
-            raise ValueError(f"{self.path}:{line}: cannot locate comment")
+    def add(self, line, end, text, whole, start, lang=None):
+        assert 0 <= start <= len(self.src) and self.src[start:start + len(text)] == text, (
+            f"{self.path}:{line}: comment span mismatch at {start}"
+        )
+        assert pos_to_line(self.starts, start) == line, (
+            f"{self.path}:{line}: start {start} maps to line {pos_to_line(self.starts, start)}"
+        )
         self.cursor = start + len(text)
         self.items.append({"file": self.path, "line": line, "end_line": end,
                            "lang": lang or self.lang,
@@ -117,129 +121,367 @@ def whole_line(src, starts, start, end):
     return before.strip() == "" and after.strip() == ""
 
 
-def emit(out, src, starts, start, end, lang=None, offset=0):
-    text = src[start:end]
-    line = pos_to_line(starts, start) + offset
-    endl = pos_to_line(starts, max(start, end - 1)) + offset
-    out.add(line, endl, text, whole_line(src, starts, start, end), lang)
+def emit(out, src, starts, start, end, lang=None, offset=0, pos_map=None):
+    if pos_map is not None:
+        raw_start = pos_map[start]
+        raw_end = pos_map[end]
+        text = out.src[raw_start:raw_end]
+        line = pos_to_line(out.starts, raw_start)
+        endl = pos_to_line(out.starts, max(raw_start, raw_end - 1))
+        out.add(line, endl, text, whole_line(src, starts, start, end), raw_start, lang)
+    else:
+        text = src[start:end]
+        line = pos_to_line(starts, start) + offset
+        endl = pos_to_line(starts, max(start, end - 1)) + offset
+        out.add(line, endl, text, whole_line(src, starts, start, end), start, lang)
 
 
 HEREDOC = re.compile(r"<<(-?)\s*(\\?)(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\3")
 
 
-def scan_shell(src, out, offset=0, lang=None):
+class ShellMode(enum.Enum):
+    CODE = "code"
+    SQUOTE = "squote"
+    ANSISQUOTE = "ansisquote"
+    DQUOTE = "dquote"
+    CMDSUB = "cmdsub"
+    ARITH = "arith"
+    BACKTICK = "backtick"
+    HEREDOC = "heredoc"
+
+
+def scan_shell(src, out, offset=0, lang=None, pos_map=None):
     starts = line_starts(src)
     i, n = 0, len(src)
+    stack = [(ShellMode.CODE, None)]
     pending = []
     while i < n:
+        prev_i = i
+        mode, data = stack[-1]
         ch = src[i]
+        if mode is ShellMode.HEREDOC:
+            strip_tabs, word = data
+            nl = src.find("\n", i)
+            nl = n if nl < 0 else nl
+            body = src[i:nl]
+            i = nl + 1 if nl < n else n
+            if (body.lstrip("\t") if strip_tabs else body) == word:
+                stack.pop()
+            assert i > prev_i
+            continue
+        if mode is ShellMode.SQUOTE:
+            if ch == "'":
+                stack.pop()
+            i += 1
+            assert i > prev_i
+            continue
+        if mode is ShellMode.ANSISQUOTE:
+            if ch == "\\":
+                i = min(n, i + 2)
+            elif ch == "'":
+                stack.pop()
+                i += 1
+            else:
+                i += 1
+            assert i > prev_i
+            continue
+        if mode is ShellMode.DQUOTE:
+            if ch == "\\":
+                i = min(n, i + 2)
+            elif ch == '"':
+                stack.pop()
+                i += 1
+            elif src.startswith("$((", i):
+                stack.append((ShellMode.ARITH, 2))
+                i += 3
+            elif src.startswith("$(", i):
+                stack.append((ShellMode.CMDSUB, 1))
+                i += 2
+            elif ch == "`":
+                stack.append((ShellMode.BACKTICK, None))
+                i += 1
+            else:
+                i += 1
+            assert i > prev_i
+            continue
+        if mode is ShellMode.BACKTICK:
+            if ch == "\\":
+                i = min(n, i + 2)
+            elif ch == "`":
+                stack.pop()
+                i += 1
+            else:
+                i += 1
+            assert i > prev_i
+            continue
+        if mode is ShellMode.ARITH:
+            if ch == "\\":
+                i = min(n, i + 2)
+            elif src.startswith("))", i) and data == 2:
+                stack.pop()
+                i += 2
+            elif ch == "(":
+                stack[-1] = (ShellMode.ARITH, data + 1)
+                i += 1
+            elif ch == ")":
+                if data > 2:
+                    stack[-1] = (ShellMode.ARITH, data - 1)
+                else:
+                    stack.pop()
+                i += 1
+            elif ch == "'":
+                stack.append((ShellMode.SQUOTE, None))
+                i += 1
+            elif ch == '"':
+                stack.append((ShellMode.DQUOTE, None))
+                i += 1
+            else:
+                i += 1
+            assert i > prev_i
+            continue
         if ch == "\n":
             i += 1
-            while pending:
-                strip_tabs, word = pending.pop(0)
-                while i < n:
-                    nl = src.find("\n", i)
-                    nl = n if nl < 0 else nl
-                    body = src[i:nl]
-                    i = nl + 1
-                    if (body.lstrip("\t") if strip_tabs else body) == word:
-                        break
+            if pending:
+                for spec in reversed(pending):
+                    stack.append((ShellMode.HEREDOC, spec))
+                pending.clear()
+            assert i > prev_i
             continue
         if ch == "\\":
-            i += 2
+            i = min(n, i + 2)
+            assert i > prev_i
             continue
         if ch == "'":
-            j = src.find("'", i + 1)
-            i = n if j < 0 else j + 1
+            stack.append((ShellMode.SQUOTE, None))
+            i += 1
+            assert i > prev_i
             continue
-        if ch == "$" and i + 1 < n and src[i + 1] == "'":
-            j = i + 2
-            while j < n and src[j] != "'":
-                j += 2 if src[j] == "\\" else 1
-            i = j + 1
+        if ch == "$" and src.startswith("$'", i):
+            stack.append((ShellMode.ANSISQUOTE, None))
+            i += 2
+            assert i > prev_i
             continue
-        if ch == '"' or ch == "`":
-            q = ch
-            j = i + 1
-            while j < n and src[j] != q:
-                j += 2 if src[j] == "\\" else 1
-            i = j + 1
+        if ch == '"':
+            stack.append((ShellMode.DQUOTE, None))
+            i += 1
+            assert i > prev_i
             continue
+        if ch == "`":
+            stack.append((ShellMode.BACKTICK, None))
+            i += 1
+            assert i > prev_i
+            continue
+        if src.startswith("$((", i):
+            stack.append((ShellMode.ARITH, 2))
+            i += 3
+            assert i > prev_i
+            continue
+        if src.startswith("$(", i):
+            stack.append((ShellMode.CMDSUB, 1))
+            i += 2
+            assert i > prev_i
+            continue
+        if mode is ShellMode.CMDSUB:
+            if ch == "(":
+                stack[-1] = (ShellMode.CMDSUB, data + 1)
+                i += 1
+                assert i > prev_i
+                continue
+            if ch == ")":
+                if data > 1:
+                    stack[-1] = (ShellMode.CMDSUB, data - 1)
+                else:
+                    stack.pop()
+                i += 1
+                assert i > prev_i
+                continue
         if ch == "<" and src.startswith("<<", i) and not src.startswith("<<<", i):
             m = HEREDOC.match(src, i)
             if m:
                 pending.append((m.group(1) == "-", m.group(4)))
                 i = m.end()
+                assert i > prev_i
                 continue
         if ch == "#":
             prev = src[i - 1] if i > 0 else "\n"
             if prev in " \t\n;&|()<>" and not (prev == "(" and i >= 2 and src[i - 2] == "$"):
                 j = src.find("\n", i)
                 j = n if j < 0 else j
-                emit(out, src, starts, i, j, lang, offset)
+                emit(out, src, starts, i, j, lang, offset, pos_map)
                 i = j
+                assert i > prev_i
                 continue
         i += 1
+        assert i > prev_i
+    if len(stack) != 1 or stack[0][0] is not ShellMode.CODE:
+        raise ValueError(f"{out.path}: unclosed shell mode {stack[-1][0].value} at end of file")
+
+
+class MakeLine(enum.Enum):
+    MAKE = "make"
+    MAKE_CONT = "make-cont"
+    RECIPE = "recipe"
+    RECIPE_CONT = "recipe-cont"
+    DEFINE = "define"
+
+
+def ends_with_continuation(raw):
+    slashes = 0
+    k = len(raw) - 1
+    while k >= 0 and raw[k] == "\\":
+        slashes += 1
+        k -= 1
+    return (slashes % 2) == 1
 
 
 def scan_make(src, out):
     lines = src.split("\n")
-    in_define = 0
-    shell_buf, shell_start = [], None
+    state = MakeLine.MAKE
+    define_depth = 0
+    recipe_lines = []
 
-    def flush():
-        nonlocal shell_buf, shell_start
-        if shell_buf:
-            text = "\n".join(l[1:] if l.startswith("\t") else l for l in shell_buf)
-            scan_shell(text, out, offset=shell_start - 1, lang="sh-in-make")
-        shell_buf, shell_start = [], None
+    def flush_recipe():
+        if not recipe_lines:
+            return
+        chunks = []
+        pos_map = []
+        for idx, (no, raw) in enumerate(recipe_lines):
+            if idx > 0:
+                chunks.append("\n")
+                pos_map.append(out.starts[no - 1] - 1)
+            line_start = out.starts[no - 1]
+            strip_tab = 1 if raw.startswith("\t") else 0
+            text_part = raw[strip_tab:]
+            chunks.append(text_part)
+            pos_map.extend(range(line_start + strip_tab, line_start + len(raw)))
+        last_no, last_raw = recipe_lines[-1]
+        pos_map.append(out.starts[last_no - 1] + len(last_raw))
+        text = "".join(chunks)
+        first_no = recipe_lines[0][0]
+        recipe_lines.clear()
+        scan_shell(text, out, offset=first_no - 1, lang="sh-in-make", pos_map=pos_map)
 
-    cont = False
     for no, raw in enumerate(lines, 1):
-        stripped = raw.strip()
-        if in_define:
+        if state is MakeLine.DEFINE:
             if re.match(r"\s*endef\b", raw):
-                in_define -= 1
+                define_depth -= 1
+                if define_depth == 0:
+                    state = MakeLine.MAKE
             elif re.match(r"\s*define\b", raw):
-                in_define += 1
+                define_depth += 1
             continue
-        if raw.startswith("\t") and not cont:
-            if shell_start is None:
-                shell_start = no
-            shell_buf.append(raw)
-            cont = raw.endswith("\\")
+        if state is MakeLine.RECIPE_CONT:
+            recipe_lines.append((no, raw))
+            state = MakeLine.RECIPE_CONT if ends_with_continuation(raw) else MakeLine.RECIPE
             continue
-        if shell_buf and cont:
-            shell_buf.append(raw)
-            cont = raw.endswith("\\")
+        if raw.startswith("\t") and state in (MakeLine.MAKE, MakeLine.RECIPE):
+            recipe_lines.append((no, raw))
+            state = MakeLine.RECIPE_CONT if ends_with_continuation(raw) else MakeLine.RECIPE
             continue
-        flush()
-        cont = raw.endswith("\\")
-        if re.match(r"\s*define\b", raw):
-            in_define = 1
+        if state is MakeLine.RECIPE:
+            flush_recipe()
+            state = MakeLine.MAKE
+        if re.match(r"\s*define\b", raw) and state is MakeLine.MAKE:
+            define_depth = 1
+            state = MakeLine.DEFINE
             continue
+        line_start = out.starts[no - 1]
+        expr_stack = []
         j = 0
         while j < len(raw):
-            if raw[j] == "\\":
+            prev_j = j
+            ch = raw[j]
+            if ch == "\\":
                 j += 2
-                continue
-            if raw[j] == "#":
-                out.add(no, no, raw[j:], raw[:j].strip() == "")
+            elif ch == "$" and j + 1 < len(raw):
+                nxt = raw[j + 1]
+                if nxt == "$":
+                    j += 2
+                elif nxt == "(":
+                    expr_stack.append(")")
+                    j += 2
+                elif nxt == "{":
+                    expr_stack.append("}")
+                    j += 2
+                else:
+                    j += 1
+            elif expr_stack and ch == expr_stack[-1]:
+                expr_stack.pop()
+                j += 1
+            elif ch == "#" and not expr_stack:
+                out.add(no, no, raw[j:], raw[:j].strip() == "", line_start + j)
                 break
-            j += 1
-    flush()
+            else:
+                j += 1
+            assert j > prev_j
+        state = MakeLine.MAKE_CONT if ends_with_continuation(raw) else MakeLine.MAKE
+    if state in (MakeLine.RECIPE, MakeLine.RECIPE_CONT):
+        flush_recipe()
+    if state is MakeLine.DEFINE:
+        raise ValueError(f"{out.path}: unclosed define block at end of file")
+
+
+TOML_SIMPLE_ESCAPES = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
+
+
+def unescape_toml_basic(src, start, end):
+    chars = []
+    pos_map = []
+    i = start
+    while i < end:
+        prev_i = i
+        ch = src[i]
+        if ch == "\\" and i + 1 < end:
+            nxt = src[i + 1]
+            if nxt in TOML_SIMPLE_ESCAPES:
+                chars.append(TOML_SIMPLE_ESCAPES[nxt])
+                pos_map.append(i)
+                i += 2
+            elif nxt in " \t\r\n":
+                k = i + 1
+                while k < end and src[k] in " \t":
+                    k += 1
+                if k < end and src[k] in "\r\n":
+                    while k < end and src[k] in " \t\r\n":
+                        k += 1
+                    i = k
+                else:
+                    chars.append(ch)
+                    pos_map.append(i)
+                    i += 1
+            elif nxt == "u" and i + 6 <= end:
+                chars.append(chr(int(src[i + 2:i + 6], 16)))
+                pos_map.append(i)
+                i += 6
+            elif nxt == "U" and i + 10 <= end:
+                chars.append(chr(int(src[i + 2:i + 10], 16)))
+                pos_map.append(i)
+                i += 10
+            else:
+                chars.append(ch)
+                pos_map.append(i)
+                i += 1
+        else:
+            chars.append(ch)
+            pos_map.append(i)
+            i += 1
+        assert i > prev_i
+    pos_map.append(end)
+    return "".join(chars), pos_map
 
 
 def scan_toml(src, out):
     starts = line_starts(src)
     i, n = 0, len(src)
     while i < n:
+        prev_i = i
         ch = src[i]
         if ch == "#":
             j = src.find("\n", i)
             j = n if j < 0 else j
             emit(out, src, starts, i, j)
             i = j
+            assert i > prev_i
             continue
         if src.startswith('"""', i) or src.startswith("'''", i):
             q = src[i:i + 3]
@@ -254,17 +496,24 @@ def scan_toml(src, out):
             if src.startswith("\n", body_start):
                 body_start += 1
             if key and key.group(1).strip("\"\'").split(".")[-1] == "script":
-                body = src[body_start:j]
-                scan_shell(body, out, offset=pos_to_line(starts, body_start) - 1, lang="sh-in-toml")
-            i = j + 3
+                if q == '"""':
+                    body, pos_map = unescape_toml_basic(src, body_start, min(j, n))
+                else:
+                    body = src[body_start:j]
+                    pos_map = list(range(body_start, min(j, n) + 1))
+                scan_shell(body, out, offset=pos_to_line(starts, body_start) - 1, lang="sh-in-toml", pos_map=pos_map)
+            i = min(n, j + 3)
+            assert i > prev_i
             continue
         if ch == '"' or ch == "'":
             j = i + 1
             while j < n and src[j] != ch and src[j] != "\n":
                 j += 2 if (ch == '"' and src[j] == "\\") else 1
-            i = j + 1
+            i = min(n, j + 1)
+            assert i > prev_i
             continue
         i += 1
+        assert i > prev_i
 
 
 def scan_yaml(src, out):
@@ -275,19 +524,32 @@ def scan_yaml(src, out):
     def flush():
         nonlocal block_lines
         if block_shell and block_lines:
-            scan_shell("\n".join(block_lines), out, offset=block_start - 1, lang="sh-in-yaml")
+            chunks = []
+            pos_map = []
+            for idx, (no, raw) in enumerate(block_lines):
+                if idx > 0:
+                    chunks.append("\n")
+                    pos_map.append(out.starts[no - 1] - 1)
+                line_start = out.starts[no - 1]
+                chunks.append(raw)
+                pos_map.extend(range(line_start, line_start + len(raw)))
+            last_no, last_raw = block_lines[-1]
+            pos_map.append(out.starts[last_no - 1] + len(last_raw))
+            scan_shell("".join(chunks), out, offset=block_start - 1, lang="sh-in-yaml", pos_map=pos_map)
         block_lines = []
 
     for no, raw in enumerate(lines, 1):
         indent = len(raw) - len(raw.lstrip(" "))
         if block_indent is not None:
             if raw.strip() == "" or indent > block_indent:
-                block_lines.append(raw)
+                block_lines.append((no, raw))
                 continue
             flush()
             block_indent = None
+        line_start = out.starts[no - 1]
         j, quote = 0, None
         while j < len(raw):
+            prev_j = j
             c = raw[j]
             if quote:
                 if c == quote:
@@ -297,9 +559,10 @@ def scan_yaml(src, out):
             elif c in "\"'" and (j == 0 or raw[j - 1] in " :[{,-"):
                 quote = c
             elif c == "#" and (j == 0 or raw[j - 1] in " \t"):
-                out.add(no, no, raw[j:], raw[:j].strip() == "")
+                out.add(no, no, raw[j:], raw[:j].strip() == "", line_start + j)
                 break
             j += 1
+            assert j > prev_j
         code = raw.split(" #", 1)[0].rstrip()
         m = re.search(r"^(\s*)(-\s+)?([A-Za-z0-9_\-]+)?\s*:?\s*[|>][-+0-9]*$", code)
         if m and (code.endswith(("|", ">", "|-", ">-", "|+", ">+")) or re.search(r"[|>][-+]?\d$", code)):
@@ -312,6 +575,15 @@ def scan_yaml(src, out):
 
 REGEX_PREV = set("(,=:[!&|?{};+-*%<>~^")
 REGEX_WORDS = {"return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await"}
+COND_WORDS = {"if", "while", "for", "with", "switch", "catch"}
+
+
+class JsPrev(enum.Enum):
+    START = "start"
+    OP_REGEX = "op-regex"
+    VALUE = "value"
+    KEYWORD_REGEX = "keyword-regex"
+    KEYWORD_COND = "keyword-cond"
 
 
 def scan_clike(src, out, lang):
@@ -319,16 +591,17 @@ def scan_clike(src, out, lang):
     i, n = 0, len(src)
     nested = lang == "rust"
     tmpl = []
-    last_sig = ""
-    last_word = ""
+    prev_token = JsPrev.START
     parens = []
     while i < n:
+        prev_i = i
         ch = src[i]
         if ch == "/" and src.startswith("//", i):
             j = src.find("\n", i)
             j = n if j < 0 else j
             emit(out, src, starts, i, j)
             i = j
+            assert i > prev_i
             continue
         if ch == "/" and src.startswith("/*", i):
             depth, j = 1, i + 2
@@ -343,21 +616,25 @@ def scan_clike(src, out, lang):
                     j += 1
             emit(out, src, starts, i, j)
             i = j
+            assert i > prev_i
             continue
         if lang == "rust" and ch in "rb" and re.match(r"(br|r)#*\"", src[i:i + 40]) and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_")):
             m = re.match(r"(br|r)(#*)\"", src[i:])
             close = '"' + m.group(2)
             j = src.find(close, i + m.end())
             i = n if j < 0 else j + len(close)
-            last_sig = '"'
+            prev_token = JsPrev.VALUE
+            assert i > prev_i
             continue
         if ch == "'" and lang == "rust":
             m = re.match(r"'(\\(x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)|[^\\'\n])'", src[i:])
             if m:
                 i += m.end()
-                last_sig = "'"
+                prev_token = JsPrev.VALUE
+                assert i > prev_i
                 continue
             i += 1
+            assert i > prev_i
             continue
         if ch == '"' or (ch == "'" and lang != "rust") or (ch == "`" and lang in ("js", "go")):
             q = ch
@@ -375,10 +652,12 @@ def scan_clike(src, out, lang):
             if q == "`" and lang == "js" and j < n and src.startswith("${", j):
                 tmpl.append(0)
                 i = j + 2
-                last_sig = "{"
+                prev_token = JsPrev.OP_REGEX
+                assert i > prev_i
                 continue
-            i = j + 1
-            last_sig = q
+            i = min(n, j + 1)
+            prev_token = JsPrev.VALUE
+            assert i > prev_i
             continue
         if lang == "js" and tmpl:
             if ch == "{":
@@ -400,19 +679,32 @@ def scan_clike(src, out, lang):
                     if j < n and src.startswith("${", j):
                         tmpl.append(0)
                         i = j + 2
+                        prev_token = JsPrev.OP_REGEX
+                        assert i > prev_i
                         continue
-                    i = j + 1
-                    last_sig = "`"
+                    i = min(n, j + 1)
+                    prev_token = JsPrev.VALUE
+                    assert i > prev_i
                     continue
                 tmpl[-1] -= 1
         if lang == "js" and ch == "(":
-            parens.append(last_word in {"if", "while", "for", "with", "switch", "catch"})
-        elif lang == "js" and ch == ")" and parens:
-            if parens.pop():
-                last_sig, last_word = "=", ""
-                i += 1
-                continue
-        if lang == "js" and ch == "/" and (last_sig == "" or last_sig in REGEX_PREV or last_word in REGEX_WORDS):
+            parens.append(prev_token is JsPrev.KEYWORD_COND)
+            prev_token = JsPrev.OP_REGEX
+            i += 1
+            assert i > prev_i
+            continue
+        if lang == "js" and ch == ")" and parens:
+            prev_token = JsPrev.OP_REGEX if parens.pop() else JsPrev.VALUE
+            i += 1
+            assert i > prev_i
+            continue
+        if lang == "js" and ch in "+-" and i + 1 < n and src[i + 1] == ch:
+            if prev_token is not JsPrev.VALUE:
+                prev_token = JsPrev.OP_REGEX
+            i += 2
+            assert i > prev_i
+            continue
+        if lang == "js" and ch == "/" and prev_token in (JsPrev.START, JsPrev.OP_REGEX, JsPrev.KEYWORD_REGEX):
             j, in_class = i + 1, False
             while j < n and src[j] != "\n":
                 c = src[j]
@@ -431,37 +723,48 @@ def scan_clike(src, out, lang):
                 while j < n and src[j].isalpha():
                     j += 1
                 i = j
-                last_sig, last_word = "/", ""
+                prev_token = JsPrev.VALUE
+                assert i > prev_i
                 continue
         if ch.isalnum() or ch == "_" or ch == "$":
             j = i
             while j < n and (src[j].isalnum() or src[j] in "_$"):
                 j += 1
-            last_word = src[i:j]
-            last_sig = "a"
+            word = src[i:j]
+            if word in COND_WORDS:
+                prev_token = JsPrev.KEYWORD_COND
+            elif word in REGEX_WORDS:
+                prev_token = JsPrev.KEYWORD_REGEX
+            else:
+                prev_token = JsPrev.VALUE
             i = j
+            assert i > prev_i
             continue
         if not ch.isspace():
-            last_sig, last_word = ch, ""
+            prev_token = JsPrev.OP_REGEX if ch in REGEX_PREV else JsPrev.VALUE
         i += 1
+        assert i > prev_i
 
 
 def scan_nix(src, out):
     starts = line_starts(src)
     i, n = 0, len(src)
     while i < n:
+        prev_i = i
         ch = src[i]
         if ch == "#":
             j = src.find("\n", i)
             j = n if j < 0 else j
             emit(out, src, starts, i, j)
             i = j
+            assert i > prev_i
             continue
         if src.startswith("/*", i):
             j = src.find("*/", i + 2)
             j = n if j < 0 else j + 2
             emit(out, src, starts, i, j)
             i = j
+            assert i > prev_i
             continue
         if src.startswith("''", i):
             j = i + 2
@@ -472,22 +775,26 @@ def scan_nix(src, out):
                 if src.startswith("''", j):
                     break
                 j += 1
-            i = j + 2
+            i = min(n, j + 2)
+            assert i > prev_i
             continue
         if ch == '"':
             j = i + 1
             while j < n and src[j] != '"':
                 j += 2 if src[j] == "\\" else 1
-            i = j + 1
+            i = min(n, j + 1)
+            assert i > prev_i
             continue
         i += 1
+        assert i > prev_i
 
 
 def scan_hashline(src, out):
     for no, raw in enumerate(src.split("\n"), 1):
         s = raw.lstrip()
         if (s.startswith("#") or (out.path.endswith((".ini", ".cfg", ".conf", ".desktop")) and s.startswith(";"))):
-            out.add(no, no, s, True)
+            lead = len(raw) - len(s)
+            out.add(no, no, s, True, out.starts[no - 1] + lead)
 
 
 def scan_python(src, out):
@@ -499,7 +806,7 @@ def scan_python(src, out):
     for t in toks:
         if t.type == tokenize.COMMENT:
             (row, col), (_, ecol) = t.start, t.end
-            out.add(row, row, t.string, lines[row - 1][:col].strip() == "")
+            out.add(row, row, t.string, lines[row - 1][:col].strip() == "", out.starts[row - 1] + col)
 
 
 def group(items):
