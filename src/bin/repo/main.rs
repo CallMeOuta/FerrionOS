@@ -253,33 +253,8 @@ fn main_inner() -> Result<()> {
         ident::init_ident();
     }
     if command == CliCommand::Cook && config.cook.tui {
-        match run_tui_cook(config.clone(), recipes.clone()) {
-            Ok(TuiApp {
-                dump_logs_on_exit: Some((name, err)),
-                ..
-            }) => {
-                let _ = stderr().write(err.as_bytes());
-                let _ = stderr().write(b"\n\n");
-                print_failed(&command, &name);
-                return Err(Error::from("Execution has failed".to_string()));
-            }
-            Ok(app) => {
-                for (recipe, status) in app.recipes {
-                    match status {
-                        RecipeStatus::Cached => print_cached(&command, &recipe.name),
-                        RecipeStatus::Done => print_success(&command, &recipe.name),
-                        RecipeStatus::Failed(err) => {
-                            let _ = stderr().write(err.as_bytes());
-                            let _ = stderr().write(b"\n\n");
-                            print_failed(&command, &recipe.name)
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-            }
-            Err(e) => return Err(e),
-        }
-        return publish_packages(&recipes, &config.repo_dir);
+        let outcome = run_tui_cook(config.clone(), recipes.clone())?;
+        return finalize_cook_outcome(&command, outcome, &recipes, &config.repo_dir);
     }
     if command.is_tree() {
         return handle_tree(&recipes, command.to_tree(), &config);
@@ -292,9 +267,15 @@ fn main_inner() -> Result<()> {
     }
 
     let verbose = config.cook.verbose;
+    let mut results: Vec<(CookRecipe, RecipeStatus)> = Vec::with_capacity(recipes.len());
     for recipe in &recipes {
         match repo_inner(&config, &command, recipe) {
             Ok(cached) => {
+                let status = if cached {
+                    RecipeStatus::Cached
+                } else {
+                    RecipeStatus::Done
+                };
                 if !command.is_informational() {
                     if cached {
                         print_cached(&command, &recipe.name);
@@ -302,6 +283,7 @@ fn main_inner() -> Result<()> {
                         print_success(&command, &recipe.name);
                     }
                 }
+                results.push((recipe.clone(), status));
             }
             Err(e) => {
                 if config.cook.nonstop {
@@ -316,12 +298,13 @@ fn main_inner() -> Result<()> {
                 if !config.cook.nonstop {
                     return Err(e);
                 }
+                results.push((recipe.clone(), RecipeStatus::Skipped(e.to_string())));
             }
         }
     }
 
     if command == CliCommand::Cook {
-        return publish_packages(&recipes, &config.repo_dir);
+        return finalize_cook_results(&results, &recipes, &config.repo_dir, config.cook.nonstop);
     }
 
     if verbose && recipes.len() > 1 {
@@ -332,6 +315,60 @@ fn main_inner() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn finalize_cook_outcome(
+    command: &CliCommand,
+    outcome: TuiOutcome,
+    recipes: &Vec<CookRecipe>,
+    repo_dir: &PathBuf,
+) -> Result<()> {
+    match outcome {
+        TuiOutcome::Aborted { failed, log } => {
+            let _ = stderr().write(log.as_bytes());
+            let _ = stderr().write(b"\n\n");
+            print_failed(command, &failed);
+            Err(Error::from("Execution has failed".to_string()))
+        }
+        TuiOutcome::Completed(statuses) => {
+            for (recipe, status) in &statuses {
+                match status {
+                    RecipeStatus::Cached => print_cached(command, &recipe.name),
+                    RecipeStatus::Done => print_success(command, &recipe.name),
+                    RecipeStatus::Failed(err) | RecipeStatus::Skipped(err) => {
+                        let _ = stderr().write(err.as_bytes());
+                        let _ = stderr().write(b"\n\n");
+                        print_failed(command, &recipe.name);
+                    }
+                    RecipeStatus::Pending
+                    | RecipeStatus::Fetching
+                    | RecipeStatus::Fetched
+                    | RecipeStatus::Cooking => {
+                        print_failed(command, &recipe.name);
+                    }
+                }
+            }
+            finalize_cook_results(&statuses, recipes, repo_dir, false)
+        }
+    }
+}
+
+fn finalize_cook_results(
+    statuses: &[(CookRecipe, RecipeStatus)],
+    recipes: &Vec<CookRecipe>,
+    repo_dir: &PathBuf,
+    publish_on_nonstop: bool,
+) -> Result<()> {
+    let had_failure = statuses
+        .iter()
+        .any(|(_, status)| !matches!(status, RecipeStatus::Cached | RecipeStatus::Done));
+    if had_failure {
+        if publish_on_nonstop {
+            let _ = publish_packages(recipes, repo_dir);
+        }
+        return Err(Error::from("Execution has failed".to_string()));
+    }
+    publish_packages(recipes, repo_dir)
 }
 
 fn print_failed(command: &CliCommand, recipe: &PackageName) {
@@ -396,8 +433,8 @@ fn repo_inner(config: &CliConfig, command: &CliCommand, recipe: &CookRecipe) -> 
                 while let Ok(update) = status_rx.recv() {
                     match &update {
                         StatusUpdate::CookThreadFinished => break,
-                        StatusUpdate::FailCook(r, _) => {
-                            let (logs, line) = app.get_recipe_log(&r.name);
+                        StatusUpdate::DumpLog(name) => {
+                            let (logs, line) = app.get_recipe_log(name);
                             if let Some(logs) = logs {
                                 println!("{}", join_logs(logs, line));
                             }
@@ -420,7 +457,7 @@ fn repo_inner(config: &CliConfig, command: &CliCommand, recipe: &CookRecipe) -> 
                     .unwrap_or_default();
                 if dump_fail_logs && result.is_err() {
                     status_tx
-                        .send(StatusUpdate::FailCook(recipe.clone(), "".into()))
+                        .send(StatusUpdate::DumpLog(recipe.name.clone()))
                         .unwrap_or_default();
                 }
             }
