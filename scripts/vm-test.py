@@ -1314,6 +1314,41 @@ def test_linux_python(vm, args):
     return True, "; ".join(report)
 
 
+def test_linux_net(vm, args):
+    """Linux layer LC5: as `user`, `linux-run` runs Debian's dash on the LC5 fixture (hash-checked in its recipe stage first) twice. Without the network grant, curl and Python's urllib fail to reach https://example.com/ and a connect to an Internet address fails with ENETUNREACH; with `linux-run --network`, both fetch the page over HTTPS and print its title, and a non-blocking connect reports SO_ERROR 0. Both runs also check eventfd and socket options. Each run's stdout, stderr and status must equal what Linux gave in Podman over the same root."""
+    stage = ROOT / "recipes/tests/linux-lc5-fixtures/target" / f"{args.arch}-unknown-redox" / "stage/usr/share/linux-lc5"
+    sums = subprocess.run(["sha256sum", "-c", "--ignore-missing", "SHA256SUMS"], cwd=stage, capture_output=True, text=True)
+    if sums.returncode != 0:
+        return False, f"fixture hashes in {stage} do not match: {sums.stdout.strip()} {sums.stderr.strip()}"
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    d = "/usr/share/linux-lc5"
+    same = lambda a, b: f"[ \"$(cat {a}; echo x)\" = \"$(cat {b}; echo x)\" ]"
+    problems, report, log = [], [], []
+    for mode, flag in (("offline", ""), ("online", "--network ")):
+        status, out = guest_run(vm, mode[:3], f"cd /tmp && linux-run {flag}/bin/dash -c "
+                                f"\"mkdir /tmp/f && tar -xf - -C /tmp/f && /bin/dash /tmp/f/lc5.sh {mode}\" "
+                                f"<{d}/fixtures.tar >/tmp/{mode}.out 2>/tmp/{mode}.err; echo $? >/tmp/{mode}.st; "
+                                f"{same(f'/tmp/{mode}.out', f'{d}/{mode}.stdout')} && o=same || o=differs; "
+                                f"{same(f'/tmp/{mode}.err', f'{d}/{mode}.stderr')} && e=same || e=differs; "
+                                f"{same(f'/tmp/{mode}.st', f'{d}/{mode}.status')} && s=same || s=differs; "
+                                f"echo {mode}-result $o $e $s; echo ==out; cat /tmp/{mode}.out; echo ==err; head -c 3000 /tmp/{mode}.err; "
+                                f"echo ==st; cat /tmp/{mode}.st", 600)
+        log.append(f"[{mode}] exit {status}\n{out}\n")
+        found = re.search(rf"{mode}-result (same|differs) (same|differs) (same|differs)", out)
+        verdict = found.groups() if found else ("none", "none", "none")
+        if verdict != ("same", "same", "same"):
+            problems.append(f"{mode}: stdout {verdict[0]}, stderr {verdict[1]}, status {verdict[2]}")
+        else:
+            report.append(f"{mode} output equals Linux's")
+    (vm.out / "linux-net.txt").write_text("".join(log))
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'linux-net.txt'}"
+    return True, "; ".join(report)
+
+
 def test_sudo_notty(vm, args):
     """Issue 10: as `user` on the serial console, `sudo true` with standard input, output and error off the terminal does not panic and exits 0, since `user`'s password is empty (config/dev-accounts.toml)."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -4492,6 +4527,7 @@ TESTS["linux-hello"] = test_linux_hello
 TESTS["linux-busybox"] = test_linux_busybox
 TESTS["linux-dynamic"] = test_linux_dynamic
 TESTS["linux-python"] = test_linux_python
+TESTS["linux-net"] = test_linux_net
 TESTS["dso-atexit"] = test_dso_atexit
 TESTS["mesa-cpu"] = test_mesa_cpu
 TESTS["gtk-window"] = test_gtk_window

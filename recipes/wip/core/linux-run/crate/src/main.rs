@@ -50,7 +50,7 @@ pub fn fatal(why: &str) -> ! {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: linux-run [--native] [--argv0 NAME] [--] PROGRAM [ARGUMENT...]");
+    eprintln!("usage: linux-run [--native | --network] [--argv0 NAME] [--] PROGRAM [ARGUMENT...]");
     unsafe { libc::_exit(2) }
 }
 
@@ -67,6 +67,7 @@ fn main() {
         .collect();
     let mut argv0 = None;
     let mut native = false;
+    let mut network = false;
     let mut sigpipe_ignored = false;
     loop {
         match args.first().map(|a| a.as_slice()) {
@@ -82,6 +83,10 @@ fn main() {
                 native = true;
                 args.remove(0);
             }
+            Some(b"--network") => {
+                network = true;
+                args.remove(0);
+            }
             Some(b"--") => {
                 args.remove(0);
                 break;
@@ -91,7 +96,7 @@ fn main() {
             None => usage(),
         }
     }
-    if args.is_empty() {
+    if args.is_empty() || (native && network) {
         usage();
     }
     let program = args.remove(0);
@@ -131,7 +136,7 @@ fn main() {
 
     let new_session = !native && !session::inherited();
     if new_session {
-        if let Err(why) = session::start() {
+        if let Err(why) = session::start(network) {
             fatal(&format!("cannot start a Linux session: {why}"));
         }
     }

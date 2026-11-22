@@ -136,7 +136,13 @@ pub fn epoll_wait(thread: &Thread, epfd: u64, out: u64, max: u64, timeout: i64, 
             ep.list
                 .iter()
                 .filter(|(_, i)| !i.disabled)
-                .map(|(&fd, i)| libc::pollfd { fd, events: poll_events(i.events), revents: 0 })
+                .map(|(&fd, i)| {
+                    let mut events = poll_events(i.events);
+                    if crate::net::connecting(fd) {
+                        events &= !libc::POLLIN;
+                    }
+                    libc::pollfd { fd, events, revents: 0 }
+                })
                 .collect()
         };
         let wait = slice_ms(deadline, 100);
@@ -161,7 +167,8 @@ pub fn epoll_wait(thread: &Thread, epfd: u64, out: u64, max: u64, timeout: i64, 
                     ep.list.remove(&p.fd);
                     continue;
                 }
-                let mut ready = p.revents as u32 & READINESS;
+                let revents = crate::net::settle(p.fd, p.events, p.revents);
+                let mut ready = revents as u32 & READINESS;
                 if p.revents & libc::POLLHUP != 0 && i.events & EPOLLRDHUP != 0 {
                     ready |= EPOLLRDHUP;
                 }
@@ -202,7 +209,40 @@ pub fn poll(thread: &Thread, fds: u64, n: u64, timeout: i64, mask: u64) -> i64 {
         return -EFAULT;
     }
     signal::with_mask(thread, mask, || {
-        ret(unsafe { libc::poll(fds as *mut libc::pollfd, n as libc::nfds_t, timeout.clamp(-1, i32::MAX as i64) as i32) } as isize)
+        let user = unsafe { core::slice::from_raw_parts_mut(fds as *mut libc::pollfd, n as usize) };
+        if !user.iter().any(|p| crate::net::connecting(p.fd)) {
+            return ret(unsafe { libc::poll(fds as *mut libc::pollfd, n as libc::nfds_t, timeout.clamp(-1, i32::MAX as i64) as i32) } as isize);
+        }
+        let deadline = (timeout >= 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout as u64));
+        loop {
+            let mut copy: Vec<libc::pollfd> = user
+                .iter()
+                .map(|p| {
+                    let events = if crate::net::connecting(p.fd) { p.events & !libc::POLLIN } else { p.events };
+                    libc::pollfd { fd: p.fd, events, revents: 0 }
+                })
+                .collect();
+            let r = unsafe { libc::poll(copy.as_mut_ptr(), copy.len() as libc::nfds_t, slice_ms(deadline, 50)) };
+            if r < 0 {
+                return -last_errno();
+            }
+            let mut count = 0;
+            for (u, c) in user.iter_mut().zip(&copy) {
+                u.revents = crate::net::settle(c.fd, u.events, c.revents);
+                if u.revents != 0 {
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                return count;
+            }
+            if signal::pending_for(thread) {
+                return -EINTR;
+            }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return 0;
+            }
+        }
     })
 }
 

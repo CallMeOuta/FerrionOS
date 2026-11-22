@@ -6,6 +6,7 @@ use crate::{errno::*, mem::user_ok, session};
 
 const AF_INET: u64 = 2;
 const SOCK_STREAM: u64 = 1;
+const SOCK_DGRAM: u64 = 2;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_PEEK: u64 = 0x2;
@@ -23,6 +24,9 @@ const ENOPROTOOPT: i64 = 92;
 const EPROTONOSUPPORT: i64 = 93;
 const LOOPBACK: u32 = 0x7f00_0001;
 const EMSGSIZE: i64 = 90;
+const EDESTADDRREQ: i64 = 89;
+const ETIMEDOUT: i64 = 110;
+const CONNECT_LIMIT_MS: u128 = 75_000;
 
 type Addr = (u32, u16);
 
@@ -33,6 +37,134 @@ struct Sock {
     listening: bool,
     bound: Option<(i32, CString)>,
     options: BTreeMap<(u64, u64), Vec<u8>>,
+    dgram: bool,
+    native: bool,
+    pending: bool,
+    error: i64,
+}
+
+enum Conn {
+    Pending,
+    Done,
+    Failed(i64),
+}
+
+fn granted() -> bool {
+    session::FACTS.network
+}
+
+fn loopback(addr: u32) -> bool {
+    addr == 0 || addr >> 24 == 127
+}
+
+fn sockaddr_in(a: Addr) -> libc::sockaddr_in {
+    let mut s: libc::sockaddr_in = unsafe { core::mem::zeroed() };
+    s.sin_family = libc::AF_INET as libc::sa_family_t;
+    s.sin_port = a.1.to_be();
+    s.sin_addr.s_addr = a.0.to_be();
+    s
+}
+
+fn from_sockaddr_in(s: &libc::sockaddr_in) -> Addr {
+    (u32::from_be(s.sin_addr.s_addr), u16::from_be(s.sin_port))
+}
+
+fn native_errno() -> i64 {
+    match last_errno() {
+        ENOENT | ENODEV | EACCES | EPERM => ENETUNREACH,
+        e => e,
+    }
+}
+
+fn native_socket(kind: i32) -> Result<i32, i64> {
+    let n = unsafe { libc::socket(libc::AF_INET, kind, 0) };
+    if n < 0 { Err(native_errno()) } else { Ok(n) }
+}
+
+fn keep_flags<T>(fd: i32, f: impl FnOnce() -> T) -> T {
+    let (fd_flags, fl) = unsafe { (libc::fcntl(fd, libc::F_GETFD), libc::fcntl(fd, libc::F_GETFL)) };
+    let r = f();
+    unsafe {
+        if fl >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, fl & libc::O_NONBLOCK);
+        }
+        if fd_flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFD, fd_flags & libc::FD_CLOEXEC);
+        }
+    }
+    r
+}
+
+fn replace(fd: i32, n: i32) -> Result<(), i64> {
+    let r = keep_flags(fd, || unsafe { libc::dup2(n, fd) });
+    let e = last_errno();
+    unsafe { libc::close(n) };
+    if r != fd { Err(e) } else { Ok(()) }
+}
+
+fn native_name(fd: i32, peer: bool) -> Option<Addr> {
+    let mut a: libc::sockaddr_in = unsafe { core::mem::zeroed() };
+    let mut len = core::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let p = &mut a as *mut _ as *mut libc::sockaddr;
+    let r = unsafe { if peer { libc::getpeername(fd, p, &mut len) } else { libc::getsockname(fd, p, &mut len) } };
+    (r == 0).then(|| from_sockaddr_in(&a))
+}
+
+fn check(fd: i32, s: &mut Sock) -> Conn {
+    if !s.pending {
+        return Conn::Done;
+    }
+    let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+    if unsafe { libc::poll(&mut p, 1, 0) } > 0 && p.revents & libc::POLLOUT != 0 {
+        s.pending = false;
+        return Conn::Done;
+    }
+    if native_name(fd, true).is_none_or(|a| a == (0, 0)) {
+        s.pending = false;
+        s.peer = None;
+        s.error = ECONNREFUSED;
+        return Conn::Failed(ECONNREFUSED);
+    }
+    Conn::Pending
+}
+
+fn wait_connected(fd: i32, s: &Mutex<Sock>) -> i64 {
+    let start = std::time::Instant::now();
+    loop {
+        let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+        unsafe { libc::poll(&mut p, 1, 50) };
+        let mut g = s.lock().unwrap();
+        match check(fd, &mut g) {
+            Conn::Done => return 0,
+            Conn::Failed(e) => {
+                g.error = 0;
+                return -e;
+            }
+            Conn::Pending if start.elapsed().as_millis() >= CONNECT_LIMIT_MS => {
+                g.pending = false;
+                g.peer = None;
+                return -ETIMEDOUT;
+            }
+            Conn::Pending => {}
+        }
+    }
+}
+
+pub fn connecting(fd: i32) -> bool {
+    sock(fd as u64).is_some_and(|s| s.lock().unwrap().pending)
+}
+
+pub fn settle(fd: i32, events: i16, revents: i16) -> i16 {
+    let Some(s) = sock(fd as u64) else { return revents };
+    let mut s = s.lock().unwrap();
+    if !s.pending {
+        return revents;
+    }
+    match check(fd, &mut s) {
+        Conn::Pending => revents & !(libc::POLLIN | libc::POLLRDNORM),
+        Conn::Done => revents | (events & libc::POLLOUT),
+        Conn::Failed(_) => libc::POLLERR | libc::POLLHUP | (events & libc::POLLOUT),
+    }
 }
 
 static SOCKS: Mutex<BTreeMap<i32, Arc<Mutex<Sock>>>> = Mutex::new(BTreeMap::new());
@@ -161,14 +293,24 @@ pub fn socket(domain: u64, kind: u64, protocol: u64) -> i64 {
     if domain != AF_INET || !session::active() {
         return -EAFNOSUPPORT;
     }
-    if kind & 0xf != SOCK_STREAM || kind & !(0xf | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+    let dgram = kind & 0xf == SOCK_DGRAM;
+    if !(dgram || kind & 0xf == SOCK_STREAM) || kind & !(0xf | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
         return -EPROTONOSUPPORT;
     }
-    if protocol != 0 && protocol != 6 {
+    if protocol != 0 && protocol != if dgram { 17 } else { 6 } {
         return -EPROTONOSUPPORT;
     }
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    let fd = crate::files::new_fd(ret(fd as isize));
+    let native = dgram && granted();
+    let fd = if native {
+        match native_socket(libc::SOCK_DGRAM) {
+            Ok(n) => n as i64,
+            Err(e) => return -e,
+        }
+    } else {
+        let unix = if dgram { libc::SOCK_DGRAM } else { libc::SOCK_STREAM };
+        ret(unsafe { libc::socket(libc::AF_UNIX, unix, 0) } as isize)
+    };
+    let fd = crate::files::new_fd(fd);
     if fd < 0 {
         return fd;
     }
@@ -180,7 +322,7 @@ pub fn socket(domain: u64, kind: u64, protocol: u64) -> i64 {
             libc::fcntl(fd as i32, libc::F_SETFL, libc::O_NONBLOCK);
         }
     }
-    SOCKS.lock().unwrap().insert(fd as i32, Arc::new(Mutex::new(Sock::default())));
+    SOCKS.lock().unwrap().insert(fd as i32, Arc::new(Mutex::new(Sock { dgram, native, ..Default::default() })));
     fd
 }
 
@@ -216,16 +358,47 @@ pub fn bind(fd: u64, p: u64, len: u64) -> i64 {
     if family != AF_INET {
         return -EAFNOSUPPORT;
     }
-    if addr != 0 && addr >> 24 != 127 {
+    if !loopback(addr) {
         return -EADDRNOTAVAIL;
     }
     let mut s = s.lock().unwrap();
+    if s.dgram {
+        return bind_dgram(fd as i32, &mut s, addr, port);
+    }
     bind_port(fd as i32, &mut s, addr, port)
+}
+
+fn bind_dgram(fd: i32, s: &mut Sock, addr: u32, port: u16) -> i64 {
+    if s.local.is_some() {
+        return -EINVAL;
+    }
+    if port != 0 && port < 1024 && unsafe { libc::geteuid() } != 0 {
+        return -EACCES;
+    }
+    if !s.native {
+        s.local = Some((addr, if port == 0 { ephemeral() } else { port }));
+        return 0;
+    }
+    if addr != 0 {
+        return -EADDRNOTAVAIL;
+    }
+    let sa = sockaddr_in((0, port));
+    let r = keep_flags(fd, || unsafe {
+        libc::bind(fd, &sa as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_in>() as u32)
+    });
+    if r != 0 {
+        return -native_errno();
+    }
+    s.local = Some(native_name(fd, false).unwrap_or((0, port)));
+    0
 }
 
 pub fn listen(fd: u64, _backlog: u64) -> i64 {
     let s = sock_or_err!(fd);
     let mut s = s.lock().unwrap();
+    if s.dgram || s.native {
+        return -EOPNOTSUPP;
+    }
     if s.peer.is_some() {
         return -EINVAL;
     }
@@ -294,20 +467,33 @@ pub fn connect(fd: u64, p: u64, len: u64) -> i64 {
         Ok(a) => a,
         Err(e) => return -e,
     };
+    if s.lock().unwrap().dgram {
+        return connect_dgram(fd as i32, &s, family, (addr, port));
+    }
     if family != AF_INET {
         return -EAFNOSUPPORT;
     }
     {
-        let s = s.lock().unwrap();
-        if s.peer.is_some() {
+        let mut g = s.lock().unwrap();
+        if g.pending {
+            return match check(fd as i32, &mut g) {
+                Conn::Pending => -EALREADY,
+                Conn::Done => -EISCONN,
+                Conn::Failed(e) => {
+                    g.error = 0;
+                    -e
+                }
+            };
+        }
+        if g.peer.is_some() {
             return -EISCONN;
         }
-        if s.listening {
+        if g.listening {
             return -EINVAL;
         }
     }
-    if addr >> 24 != 127 && addr != 0 {
-        return -ENETUNREACH;
+    if !loopback(addr) {
+        return connect_native(fd as i32, &s, (addr, port));
     }
     let target = format!("{}/{port}", session::INET_LISTEN);
     if port == 0 || !exists(&target) {
@@ -340,6 +526,85 @@ pub fn connect(fd: u64, p: u64, len: u64) -> i64 {
     0
 }
 
+const EALREADY: i64 = 114;
+
+fn connect_native(fd: i32, s: &Mutex<Sock>, to: Addr) -> i64 {
+    if !granted() {
+        return -ENETUNREACH;
+    }
+    let nonblock = unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0;
+    let n = match native_socket(libc::SOCK_STREAM) {
+        Ok(n) => n,
+        Err(e) => return -e,
+    };
+    let sa = sockaddr_in(to);
+    if unsafe { libc::connect(n, &sa as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_in>() as u32) } != 0 {
+        let e = native_errno();
+        unsafe { libc::close(n) };
+        return -e;
+    }
+    if let Err(e) = replace(fd, n) {
+        return -e;
+    }
+    {
+        let mut g = s.lock().unwrap();
+        if let Some((pid, path)) = g.bound.take() {
+            if pid == crate::syscall::pid() {
+                unsafe { libc::unlink(path.as_ptr()) };
+            }
+        }
+        g.native = true;
+        g.local = None;
+        g.peer = Some(to);
+        g.pending = true;
+        for name in [20u64, 21] {
+            if let Some(v) = g.options.get(&(1, name)) {
+                unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, name as i32, v.as_ptr().cast(), v.len() as u32) };
+            }
+        }
+    }
+    if nonblock {
+        return -EINPROGRESS;
+    }
+    wait_connected(fd, s)
+}
+
+fn connect_dgram(fd: i32, s: &Mutex<Sock>, family: u64, to: Addr) -> i64 {
+    let mut g = s.lock().unwrap();
+    if family == 0 {
+        if g.native {
+            let mut sa: libc::sockaddr_in = unsafe { core::mem::zeroed() };
+            sa.sin_family = libc::AF_UNSPEC as libc::sa_family_t;
+            keep_flags(fd, || unsafe {
+                libc::connect(fd, &sa as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_in>() as u32)
+            });
+        }
+        g.peer = None;
+        return 0;
+    }
+    if family != AF_INET {
+        return -EAFNOSUPPORT;
+    }
+    if loopback(to.0) {
+        return -ECONNREFUSED;
+    }
+    if !granted() || !g.native {
+        return -ENETUNREACH;
+    }
+    let sa = sockaddr_in(to);
+    let r = keep_flags(fd, || unsafe {
+        libc::connect(fd, &sa as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_in>() as u32)
+    });
+    if r != 0 {
+        return -native_errno();
+    }
+    g.peer = Some(to);
+    if let Some(a) = native_name(fd, false) {
+        g.local = Some(a);
+    }
+    0
+}
+
 pub fn name(fd: u64, addr: u64, len: u64, peer: bool) -> i64 {
     let s = sock_or_err!(fd);
     let s = s.lock().unwrap();
@@ -348,6 +613,8 @@ pub fn name(fd: u64, addr: u64, len: u64, peer: bool) -> i64 {
             Some(a) => a,
             None => return -ENOTCONN,
         }
+    } else if s.native && !s.dgram {
+        native_name(fd as i32, false).unwrap_or((0, 0))
     } else {
         s.local.unwrap_or((0, 0))
     };
@@ -414,12 +681,76 @@ fn iovecs(iov: u64, n: u64) -> Result<Vec<(u64, u64)>, i64> {
     Ok(out)
 }
 
-pub fn sendto(fd: u64, buf: u64, len: u64, flags: u64, _dest: u64, _dest_len: u64) -> i64 {
-    let _s = sock_or_err!(fd);
+fn send_dgram(fd: i32, s: &Mutex<Sock>, buf: &[u8], flags: u64, dest: u64, dest_len: u64) -> i64 {
+    if flags & !(MSG_DONTWAIT | MSG_NOSIGNAL) != 0 {
+        return -EOPNOTSUPP;
+    }
+    let (native, peer) = {
+        let g = s.lock().unwrap();
+        (g.native, g.peer)
+    };
+    let to = if dest == 0 {
+        match peer {
+            Some(_) => None,
+            None => return -EDESTADDRREQ,
+        }
+    } else {
+        match read_addr(dest, dest_len) {
+            Ok((AF_INET, a)) => Some(a),
+            Ok(_) => return -EAFNOSUPPORT,
+            Err(e) => return -e,
+        }
+    };
+    if let Some(a) = to {
+        if loopback(a.0) {
+            return -ECONNREFUSED;
+        }
+        if !granted() || !native {
+            return -ENETUNREACH;
+        }
+    }
+    if flags & MSG_DONTWAIT != 0 && would_block(fd, libc::POLLOUT) {
+        return -EAGAIN;
+    }
+    match to {
+        None => ret(unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) }),
+        Some(a) => {
+            let sa = sockaddr_in(a);
+            let r = keep_flags(fd, || unsafe {
+                libc::sendto(fd, buf.as_ptr().cast(), buf.len(), 0, &sa as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_in>() as u32)
+            });
+            if r < 0 { -native_errno() } else { r as i64 }
+        }
+    }
+}
+
+fn recv_dgram(fd: i32, s: &Mutex<Sock>, buf: &mut [u8], flags: u64) -> Result<(i64, Option<Addr>), i64> {
+    if flags & !(MSG_DONTWAIT | MSG_WAITALL | MSG_PEEK) != 0 || flags & MSG_PEEK != 0 {
+        return Err(EOPNOTSUPP);
+    }
+    if flags & MSG_DONTWAIT != 0 && would_block(fd, libc::POLLIN) {
+        return Err(EAGAIN);
+    }
+    let peer = s.lock().unwrap().peer;
+    if peer.is_some() || !s.lock().unwrap().native {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        return if n < 0 { Err(last_errno()) } else { Ok((n as i64, peer)) };
+    }
+    let mut sa: libc::sockaddr_in = unsafe { core::mem::zeroed() };
+    let mut len = core::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let n = unsafe { libc::recvfrom(fd, buf.as_mut_ptr().cast(), buf.len(), 0, &mut sa as *mut _ as *mut libc::sockaddr, &mut len) };
+    if n < 0 { Err(last_errno()) } else { Ok((n as i64, Some(from_sockaddr_in(&sa)))) }
+}
+
+pub fn sendto(fd: u64, buf: u64, len: u64, flags: u64, dest: u64, dest_len: u64) -> i64 {
+    let s = sock_or_err!(fd);
     if len != 0 && !user_ok(buf, len) {
         return -EFAULT;
     }
     let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
+    if s.lock().unwrap().dgram {
+        return send_dgram(fd as i32, &s, bytes, flags, dest, dest_len);
+    }
     send_bytes(fd as i32, bytes, flags)
 }
 
@@ -429,6 +760,23 @@ pub fn recvfrom(fd: u64, buf: u64, len: u64, flags: u64, src: u64, src_len: u64)
         return -EFAULT;
     }
     let bytes = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+    if s.lock().unwrap().dgram {
+        return match recv_dgram(fd as i32, &s, bytes, flags) {
+            Ok((n, from)) => {
+                if let (Some(a), true) = (from, src != 0) {
+                    let r = write_addr(src, src_len, a);
+                    if r < 0 {
+                        return r;
+                    }
+                }
+                n
+            }
+            Err(e) => -e,
+        };
+    }
+    if flags & MSG_PEEK != 0 && s.lock().unwrap().native {
+        return -EOPNOTSUPP;
+    }
     let n = recv_bytes(fd as i32, bytes, flags);
     if n >= 0 && src != 0 {
         let peer = s.lock().unwrap().peer;
@@ -444,6 +792,7 @@ pub fn recvfrom(fd: u64, buf: u64, len: u64, flags: u64, src: u64, src_len: u64)
 
 struct Msghdr {
     name: u64,
+    name_len: u64,
     iov: Vec<(u64, u64)>,
     control_len: u64,
 }
@@ -453,10 +802,10 @@ fn msghdr(p: u64) -> Result<Msghdr, i64> {
         return Err(EFAULT);
     }
     let w = unsafe { *(p as *const [u64; 7]) };
-    Ok(Msghdr { name: w[0], iov: iovecs(w[2], w[3])?, control_len: w[5] })
+    Ok(Msghdr { name: w[0], name_len: w[1] & 0xffff_ffff, iov: iovecs(w[2], w[3])?, control_len: w[5] })
 }
 
-fn sendmsg_one(fd: u64, p: u64, flags: u64) -> i64 {
+fn sendmsg_one(fd: u64, s: &Mutex<Sock>, p: u64, flags: u64) -> i64 {
     let m = match msghdr(p) {
         Ok(m) => m,
         Err(e) => return -e,
@@ -468,12 +817,15 @@ fn sendmsg_one(fd: u64, p: u64, flags: u64) -> i64 {
     for (b, l) in m.iov {
         all.extend_from_slice(unsafe { core::slice::from_raw_parts(b as *const u8, l as usize) });
     }
+    if s.lock().unwrap().dgram {
+        return send_dgram(fd as i32, s, &all, flags, m.name, m.name_len);
+    }
     send_bytes(fd as i32, &all, flags)
 }
 
 pub fn sendmsg(fd: u64, p: u64, flags: u64) -> i64 {
-    let _s = sock_or_err!(fd);
-    sendmsg_one(fd, p, flags)
+    let s = sock_or_err!(fd);
+    sendmsg_one(fd, &s, p, flags)
 }
 
 pub fn recvmsg(fd: u64, p: u64, flags: u64) -> i64 {
@@ -484,7 +836,18 @@ pub fn recvmsg(fd: u64, p: u64, flags: u64) -> i64 {
     };
     let total: u64 = m.iov.iter().map(|&(_, l)| l).sum();
     let mut buf = vec![0u8; total.min(1 << 24) as usize];
-    let n = recv_bytes(fd as i32, &mut buf, flags);
+    let dgram = s.lock().unwrap().dgram;
+    let (n, from) = if dgram {
+        match recv_dgram(fd as i32, &s, &mut buf, flags) {
+            Ok(r) => r,
+            Err(e) => return -e,
+        }
+    } else {
+        if flags & MSG_PEEK != 0 && s.lock().unwrap().native {
+            return -EOPNOTSUPP;
+        }
+        (recv_bytes(fd as i32, &mut buf, flags), s.lock().unwrap().peer)
+    };
     if n < 0 {
         return n;
     }
@@ -502,8 +865,7 @@ pub fn recvmsg(fd: u64, p: u64, flags: u64) -> i64 {
         *((p + 48) as *mut i32) = 0;
     }
     if m.name != 0 {
-        let peer = s.lock().unwrap().peer;
-        if let Some(peer) = peer {
+        if let Some(peer) = from {
             let r = write_addr(m.name, p + 8, peer);
             if r < 0 {
                 return r;
@@ -516,13 +878,13 @@ pub fn recvmsg(fd: u64, p: u64, flags: u64) -> i64 {
 }
 
 pub fn sendmmsg(fd: u64, v: u64, n: u64, flags: u64) -> i64 {
-    let _s = sock_or_err!(fd);
+    let s = sock_or_err!(fd);
     let n = n.min(1024);
     if n != 0 && !user_ok(v, 64 * n) {
         return -EFAULT;
     }
     for i in 0..n {
-        let r = sendmsg_one(fd, v + 64 * i, flags);
+        let r = sendmsg_one(fd, &s, v + 64 * i, flags);
         if r < 0 {
             return if i == 0 { r } else { i as i64 };
         }
@@ -544,9 +906,9 @@ fn known_option(level: u64, name: u64) -> bool {
     const IPPROTO_IP: u64 = 0;
     const IPPROTO_TCP: u64 = 6;
     match level {
-        SOL_SOCKET => matches!(name, 2 | 6 | 7 | 8 | 9 | 10 | 12 | 13 | 15 | 20 | 21),
+        SOL_SOCKET => matches!(name, 2 | 7 | 8 | 9 | 20 | 21),
         IPPROTO_TCP => matches!(name, 1 | 4 | 5 | 6),
-        IPPROTO_IP => matches!(name, 1 | 2),
+        IPPROTO_IP => matches!(name, 2 | 11),
         _ => false,
     }
 }
@@ -563,24 +925,40 @@ pub fn setsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
         return -EINVAL;
     }
     let bytes = unsafe { core::slice::from_raw_parts(val as *const u8, len as usize) }.to_vec();
-    s.lock().unwrap().options.insert((level, name), bytes);
+    let mut s = s.lock().unwrap();
+    if level == 1 && (name == 20 || name == 21) {
+        if len < 16 {
+            return -EINVAL;
+        }
+        if s.native && unsafe { libc::setsockopt(fd as i32, libc::SOL_SOCKET, name as i32, bytes.as_ptr().cast(), len as u32) } != 0 {
+            return -native_errno();
+        }
+    }
+    s.options.insert((level, name), bytes);
     0
 }
 
 pub fn getsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
     let s = sock_or_err!(fd);
-    let s = s.lock().unwrap();
+    let mut s = s.lock().unwrap();
     let int = |v: i32| v.to_ne_bytes().to_vec();
     let value = match (level, name) {
-        (1, 3) => int(SOCK_STREAM as i32),
-        (1, 4) => int(0),
+        (1, 3) => int(if s.dgram { SOCK_DGRAM } else { SOCK_STREAM } as i32),
+        (1, 4) => {
+            let e = match check(fd as i32, &mut s) {
+                Conn::Failed(e) => e,
+                _ => s.error,
+            };
+            s.error = 0;
+            int(e as i32)
+        }
         (1, 30) => int(s.listening as i32),
-        (1, 38) => int(6),
+        (1, 38) => int(if s.dgram { 17 } else { 6 }),
         (1, 39) => int(AF_INET as i32),
         _ if known_option(level, name) => s.options.get(&(level, name)).cloned().unwrap_or_else(|| match (level, name) {
             (1, 7) => int(16384),
             (1, 8) => int(131072),
-            (1, 13) | (1, 20) | (1, 21) => vec![0; if name == 13 { 8 } else { 16 }],
+            (1, 20) | (1, 21) => vec![0; 16],
             (0, 2) => int(64),
             _ => int(0),
         }),

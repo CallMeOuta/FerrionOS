@@ -1,0 +1,9 @@
+curl status 6
+curl said curl: (6) Could not resolve host: example.com
+urllib error URLError <urlopen error [Errno -3] Temporary failure in name resolution>
+eventfd 7
+eventfd empty 11
+TCP_KEEPIDLE 30 SO_KEEPALIVE True
+unknown option 92
+connect error 101 Network is unreachable
+done

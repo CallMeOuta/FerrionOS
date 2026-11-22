@@ -265,6 +265,25 @@ fn statx(dir: u64, p: u64, flags: u64, _mask: u64, out: u64) -> i64 {
     0
 }
 
+fn eventfd(initval: u64, flags: u64) -> i64 {
+    const EFD_SEMAPHORE: u64 = 1;
+    const EFD_NONBLOCK: u64 = 0x800;
+    const EFD_CLOEXEC: u64 = 0x80000;
+    if flags & !(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC) != 0 || initval > u32::MAX as u64 {
+        return -EINVAL;
+    }
+    let mut o = libc::O_RDWR;
+    if flags & EFD_NONBLOCK != 0 {
+        o |= libc::O_NONBLOCK;
+    }
+    if flags & EFD_CLOEXEC != 0 {
+        o |= libc::O_CLOEXEC;
+    }
+    let path = CString::new(format!("/scheme/eventfd/{initval}/{}", flags & EFD_SEMAPHORE)).unwrap();
+    let fd = unsafe { libc::open(path.as_ptr(), o) };
+    crate::files::new_fd(if fd < 0 { -last_errno() } else { fd as i64 })
+}
+
 /// statfs and fstatfs: Linux's structure from relibc's statvfs.
 fn statfs(fd: Option<i32>, p: u64, out: u64) -> i64 {
     /// f_type: a value no Linux file system uses ("FrOS"), for RedoxFS and the other schemes.
@@ -1067,6 +1086,8 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         137 => statfs(None, a, b),
         138 => statfs(Some(a as i32), 0, b),
         188..=199 => xattr(f.rax, a),
+        284 => eventfd(a, 0),
+        290 => eventfd(a, b),
         41 => crate::net::socket(a, b, c),
         42 => crate::net::connect(a, b, c),
         43 => crate::net::accept(a, b, c, 0),

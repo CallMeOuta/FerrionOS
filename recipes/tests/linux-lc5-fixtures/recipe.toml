@@ -1,0 +1,12 @@
+[package]
+description = "curl and Python urllib fetching a page over HTTPS, with Linux's output online and offline"
+
+[build]
+template = "custom"
+script = """
+dest="${COOKBOOK_STAGE}/usr/share/linux-lc5"
+mkdir -pv "${dest}"
+cd "${COOKBOOK_RECIPE}/files"
+sha256sum -c SHA256SUMS
+cp -v fixtures.tar online.stdout online.stderr online.status offline.stdout offline.stderr offline.status SHA256SUMS "${dest}/"
+"""

@@ -44,6 +44,8 @@ const SCHEMES: &[&str] = &[
     "eventfd", "timerfd",
 ];
 
+const NETWORK_SCHEMES: &[&str] = &["tcp", "udp"];
+
 /// Linux paths answered from the memory file system or a native scheme, longest first within a
 /// prefix. A path equal to the Linux name or below it is mapped.
 const MOUNTS: &[(&str, &str)] = &[
@@ -57,6 +59,7 @@ const MOUNTS: &[(&str, &str)] = &[
     ("/etc/hostname", "/scheme/linux-mem/etc/hostname"),
     ("/etc/hosts", "/scheme/linux-mem/etc/hosts"),
     ("/etc/nsswitch.conf", "/scheme/linux-mem/etc/nsswitch.conf"),
+    ("/etc/resolv.conf", "/scheme/linux-mem/etc/resolv.conf"),
     ("/dev/null", "/scheme/null"),
     ("/dev/zero", "/scheme/zero"),
     ("/dev/random", "/scheme/rand"),
@@ -70,6 +73,7 @@ pub struct Facts {
     /// Free memory when the session started; sysinfo reports it.
     pub memory_free: u64,
     pub hostname: Vec<u8>,
+    pub network: bool,
 }
 
 static IN_SESSION: OnceLock<bool> = OnceLock::new();
@@ -91,6 +95,7 @@ pub static FACTS: LazyLock<Facts> = LazyLock::new(|| {
         memory: value("memory "),
         memory_free: value("memory-free "),
         hostname,
+        network: value("network ") == 1,
     }
 });
 
@@ -300,10 +305,37 @@ fn name_of(id: u32, group: bool) -> Option<String> {
     }
 }
 
+fn native_resolver() -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string("/etc/resolv.conf") {
+        let kept: String = text
+            .lines()
+            .filter(|l| ["nameserver ", "search ", "domain ", "options "].iter().any(|k| l.starts_with(k)))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        if !kept.is_empty() {
+            return Some(kept);
+        }
+    }
+    let dns = std::fs::read_to_string("/etc/net/dns").ok()?;
+    let dns = dns.trim();
+    (!dns.is_empty() && dns.parse::<std::net::IpAddr>().is_ok()).then(|| format!("nameserver {dns}\n"))
+}
+
+fn native_hosts() -> String {
+    std::fs::read_to_string("/etc/hosts")
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.split_whitespace().skip(1).any(|n| n == "localhost"))
+        .filter(|l| l.split_whitespace().next().is_some_and(|a| a.parse::<std::net::IpAddr>().is_ok()))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
 /// Starts a session for this process (the launcher). Afterwards this process names only the
 /// session's schemes, its working directory is `/` of the root, and it holds no descriptor past
 /// 2 other than the session handle.
-pub fn start() -> Result<(), String> {
+pub fn start(network: bool) -> Result<(), String> {
     // What the session needs from the caller's view, read before leaving it.
     let runtime = std::fs::read(crate::syscall::LINUX_RUN)
         .map_err(|e| format!("cannot read {}: {e}", crate::syscall::LINUX_RUN))?;
@@ -316,6 +348,8 @@ pub fn start() -> Result<(), String> {
         .filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_graphic()))
         .unwrap_or_else(|| "localhost".to_string());
     let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }.max(1) as u64;
+    let resolver = if network { native_resolver() } else { None };
+    let hosts = if network { native_hosts() } else { String::new() };
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(0) as u64;
     let memory = unsafe { libc::sysconf(crate::ffi::SC_PHYS_PAGES) }.max(0) as u64 * page;
     let memory_free = unsafe { libc::sysconf(crate::ffi::SC_AVPHYS_PAGES) }.max(0) as u64 * page;
@@ -349,8 +383,10 @@ pub fn start() -> Result<(), String> {
     let mem = open_fs("memory")?;
 
     // The namespace: the caller's own schemes that a session names, then the two file systems.
+    let granted: &[&str] = if network { NETWORK_SCHEMES } else { &[] };
     let iov: Vec<libc::iovec> = SCHEMES
         .iter()
+        .chain(granted)
         .map(|s| libc::iovec { iov_base: s.as_ptr() as *mut _, iov_len: s.len() })
         .collect();
     let ns = raw(unsafe { redox_mkns_v1(iov.as_ptr(), iov.len(), 0) })
@@ -408,17 +444,20 @@ pub fn start() -> Result<(), String> {
     write_file(&format!("{MEM}/etc/hostname"), format!("{hostname}\n").as_bytes(), 0o644)?;
     write_file(
         &format!("{MEM}/etc/hosts"),
-        format!("127.0.0.1\tlocalhost\n127.0.1.1\t{hostname}\n::1\tlocalhost\n").as_bytes(),
+        format!("127.0.0.1\tlocalhost\n127.0.1.1\t{hostname}\n::1\tlocalhost\n{hosts}").as_bytes(),
         0o644,
     )?;
     write_file(
         &format!("{MEM}/etc/nsswitch.conf"),
-        b"passwd: files\ngroup: files\nshadow: files\nhosts: files\n",
+        b"passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n",
         0o644,
     )?;
+    if let Some(resolver) = resolver {
+        write_file(&format!("{MEM}/etc/resolv.conf"), resolver.as_bytes(), 0o644)?;
+    }
     write_file(
         &format!("{MEM}/run/ferrion-facts"),
-        format!("cpus {cpus}\nmemory {memory}\nmemory-free {memory_free}\n").as_bytes(),
+        format!("cpus {cpus}\nmemory {memory}\nmemory-free {memory_free}\nnetwork {}\n", network as u8).as_bytes(),
         0o444,
     )?;
     write_file(RUNTIME, &runtime, 0o555)?;

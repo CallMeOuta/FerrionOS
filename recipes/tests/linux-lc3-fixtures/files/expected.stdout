@@ -6,21 +6,21 @@ no DISPLAY
 no X11 socket directory
 no 32-bit dynamic linker
 /usr refused a write
-79
+130
+sasl2
 ossl-modules
 libzstd.so.1
-libzstd.so.1
 a/b/c/file
-1198 644 user
+2070 644 user
 a
 a3
 link
 listing
 c
 a/b/c
-e487dc0c2be24c0f
-523c1fb6
-1198
+15f43eb203eae8ba
+7793aa7e
+2070
 user
 Linux
 3893
@@ -29,7 +29,7 @@ b
 0000000   h   e   l   l   o  \n
 y
 5
-ossl-modules
+sasl2
 42
 ABC
      1	a
@@ -52,7 +52,7 @@ b
 7
 ./a/b/c/file
 ./a3/b/c/file
-75
+124
 a
 x
 x/a

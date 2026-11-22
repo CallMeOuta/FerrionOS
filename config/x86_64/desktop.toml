@@ -70,12 +70,13 @@ linux-hello-fixtures = {}
 linux-busybox-fixtures = {}
 # LC3 and LC4: the pinned Debian root (a read-only RedoxFS image) and linux-sessiond, a root service
 # that serves it and a memory file system to each Linux session (widened access: see its recipe).
-# linux-lc3-fixtures and linux-lc4-fixtures hold programs, scripts and Linux's output for them;
-# scripts/vm-test.py linux-dynamic and linux-python run them.
+# linux-lc3-fixtures, linux-lc4-fixtures and linux-lc5-fixtures hold programs, scripts and Linux's
+# output for them; scripts/vm-test.py linux-dynamic, linux-python and linux-net run them.
 linux-root = {}
 linux-sessiond = {}
 linux-lc3-fixtures = {}
 linux-lc4-fixtures = {}
+linux-lc5-fixtures = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
 # ferrion-run check uses to show that a profile alone withholds the network.
