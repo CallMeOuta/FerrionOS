@@ -679,7 +679,7 @@ fn parse_args(args: Vec<String>) -> Result<(CliConfig, CliCommand, Vec<CookRecip
             &binary_names,
             &mut recipe_name_rules,
             &config,
-        );
+        )?;
 
         macro_rules! filter_recipes {
             ($rules:expr, $pat:pat) => {
@@ -800,7 +800,7 @@ fn apply_special_rules(
     }
 
     if recipes.iter().any(|r| r.rule == "binary") {
-        let (_, repository) = fetch_repo::get_binary_repo();
+        let (_, repository) = fetch_repo::try_get_binary_repo()?;
         for recipe in recipes.iter_mut() {
             if recipe.rule == "binary" && !repository.packages.contains_key(recipe.name.as_str()) {
                 if config.cook.verbose {
@@ -825,7 +825,7 @@ fn apply_special_rules_by_names(
     binary_names: &HashSet<PackageName>,
     recipes: &mut BTreeMap<PackageName, RecipeRule>,
     config: &CliConfig,
-) {
+) -> Result<()> {
     for (recipe, rule) in recipes.iter_mut() {
         if let Some(&special_rule) = special_rules.get(recipe.without_prefix()) {
             if recipe.is_host() && special_rule == RecipeRule::Binary {
@@ -848,7 +848,7 @@ fn apply_special_rules_by_names(
     }
 
     if recipes.values().any(|&r| r == RecipeRule::Binary) {
-        let (_, repository) = fetch_repo::get_binary_repo();
+        let (_, repository) = fetch_repo::try_get_binary_repo()?;
         for (name, rule) in recipes.iter_mut() {
             if *rule == RecipeRule::Binary && !repository.packages.contains_key(name.as_str()) {
                 if config.cook.verbose {
@@ -858,6 +858,7 @@ fn apply_special_rules_by_names(
             }
         }
     }
+    Ok(())
 }
 
 fn handle_fetch(

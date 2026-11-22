@@ -13,8 +13,18 @@ use pkg::{
     net_backend::{CurlBackend, DownloadBackend},
 };
 
+pub enum BinaryRepo {
+    Fresh(Repository),
+    Cached(Repository),
+    Unavailable(String),
+}
+
 thread_local! {
-static BINARY_REPO: RefCell<Option<(RepoManager, Repository)>> = const { RefCell::new(None) };
+static BINARY_REPO: RefCell<Option<(RepoManager, BinaryRepo)>> = const { RefCell::new(None) };
+}
+
+fn repo_cache_path(repo_path: &Path, remote: &str, target: &str) -> PathBuf {
+    repo_path.join(format!("repo_{remote}_{target}.toml"))
 }
 
 fn load_cached_repo(path: &Path) -> Option<Repository> {
@@ -32,7 +42,7 @@ fn load_cached_repo(path: &Path) -> Option<Repository> {
     Repository::from_toml(&toml_str).ok()
 }
 
-fn init_binary_repo() -> (RepoManager, Repository) {
+fn init_binary_repo() -> (RepoManager, BinaryRepo) {
     let callback = Rc::new(RefCell::new(SilentCallback::new()));
     let download_backend = CurlBackend::new().expect("Curl not found");
     let mut repo = RepoManager::new(callback, Box::new(download_backend));
@@ -43,41 +53,77 @@ fn init_binary_repo() -> (RepoManager, Repository) {
 
     let repo_path = PathBuf::from("build/remotes");
     repo.set_download_path(repo_path.clone());
-    repo.sync_keys().expect("Unable to sync keys");
+    let offline = crate::config::get_config().cook.offline;
+    let cache_path = repo_cache_path(&repo_path, &repo.remotes[0], target);
 
-    let repo_toml =
-        load_cached_repo(&repo_path.join(format!("repo_{}_{target}.toml", repo.remotes[0])))
-            .unwrap_or_else(|| {
-                download_repo(&repo, repo_path)
-                .map_err(|e| {
-                    eprintln!(
-                        "Unable to load server repo.toml, all recipes will build from source: {e}"
-                    );
-                    e
-                })
-                .unwrap_or_default()
-            });
+    let state = if let Some(cached) = load_cached_repo(&cache_path) {
+        if !offline {
+            if let Err(e) = repo.sync_keys() {
+                eprintln!("Unable to sync keys: {e}");
+            }
+        }
+        BinaryRepo::Cached(cached)
+    } else if offline {
+        BinaryRepo::Unavailable(format!(
+            "offline binary repository cache missing: {}",
+            cache_path.display()
+        ))
+    } else if let Err(e) = repo.sync_keys() {
+        BinaryRepo::Unavailable(format!("Unable to sync keys: {e}"))
+    } else {
+        match download_repo(&repo, &cache_path) {
+            Ok(fresh) => BinaryRepo::Fresh(fresh),
+            Err(e) => BinaryRepo::Unavailable(format!(
+                "Unable to load server repo.toml, all recipes will build from source: {e}"
+            )),
+        }
+    };
     repo.callback = Rc::new(RefCell::new(PlainCallback::new()));
-    (repo, repo_toml)
+    (repo, state)
 }
 
-fn download_repo(repo: &RepoManager, repo_path: PathBuf) -> crate::Result<Repository> {
+fn download_repo(repo: &RepoManager, cache_path: &Path) -> crate::Result<Repository> {
     let (toml_str, _) = repo.get_package_toml(&PackageName::new("repo").unwrap())?;
     let repo = Repository::from_toml(&toml_str)?;
-    let target = redoxer::target();
-    fs::serialize_and_write(&repo_path.join(format!("{target}_repo.toml")), &repo)?;
+    fs::serialize_and_write(cache_path, &repo)?;
     Ok(repo)
 }
 
-pub fn get_binary_repo() -> (RepoManager, Repository) {
+pub fn try_get_binary_repo() -> crate::Result<(RepoManager, Repository)> {
     BINARY_REPO.with(|cell| {
         let mut opt = cell.borrow_mut();
         if opt.is_none() {
             *opt = Some(init_binary_repo());
         }
-        let (repo, repo_toml) = opt.as_ref().unwrap();
-        ((*repo).clone(), repo_toml.clone())
+        let (repo, state) = opt.as_ref().unwrap();
+        match state {
+            BinaryRepo::Fresh(repo_toml) | BinaryRepo::Cached(repo_toml) => {
+                Ok(((*repo).clone(), repo_toml.clone()))
+            }
+            BinaryRepo::Unavailable(reason) => {
+                if crate::config::get_config().cook.offline {
+                    Err(crate::Error::Other(reason.clone()))
+                } else {
+                    eprintln!("{reason}");
+                    Ok(((*repo).clone(), Repository::default()))
+                }
+            }
+        }
     })
+}
+
+pub fn get_binary_repo() -> (RepoManager, Repository) {
+    match try_get_binary_repo() {
+        Ok(pair) => pair,
+        Err(reason) => {
+            eprintln!("{reason}");
+            BINARY_REPO.with(|cell| {
+                let opt = cell.borrow();
+                let (repo, _) = opt.as_ref().unwrap();
+                ((*repo).clone(), Repository::default())
+            })
+        }
+    }
 }
 pub fn get_binary_pubkey() -> PathBuf {
     BINARY_REPO.with(|cell| {
