@@ -105,6 +105,28 @@ pub fn mprotect(
     AddrSpace::current()?.mprotect(span, flags, token)
 }
 
+pub fn madvise(
+    address: usize,
+    size: usize,
+    flags: usize,
+    token: &mut CleanLockToken,
+) -> Result<()> {
+    if flags != 0 || !address.is_multiple_of(PAGE_SIZE) {
+        return Err(Error::new(EINVAL));
+    }
+    if size == 0 {
+        return Ok(());
+    }
+    let aligned_size = size
+        .checked_add(PAGE_SIZE - 1)
+        .map(|n| n & !(PAGE_SIZE - 1))
+        .ok_or(Error::new(EINVAL))?;
+    let span = PageSpan::validate_nonempty(VirtualAddress::new(address), aligned_size)
+        .ok_or(Error::new(EINVAL))?;
+
+    AddrSpace::current()?.discard_pages(span, token)
+}
+
 const KERNEL_METADATA_BASE: usize = crate::USER_END_OFFSET - syscall::KERNEL_METADATA_SIZE;
 const KERNEL_METADATA_PAGE_COUNT: usize = syscall::KERNEL_METADATA_SIZE / PAGE_SIZE + {
     if syscall::KERNEL_METADATA_SIZE.is_multiple_of(PAGE_SIZE) {

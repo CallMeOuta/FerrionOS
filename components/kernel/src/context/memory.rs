@@ -3228,3 +3228,85 @@ impl TlbShootdownActions {
         this
     }
 }
+
+fn discard_present_pages_in_span(
+    mapper: &mut PageMapper,
+    flusher: &mut Flusher,
+    span: PageSpan,
+) {
+    if span.is_empty() {
+        return;
+    }
+    unsafe {
+        mapper.unmap_range(
+            span.base.start_address(),
+            span.end().start_address(),
+            |_, phys, lvl, _| {
+                assert_eq!(lvl, 0);
+                flusher.queue(Frame::containing(phys), None, TlbShootdownActions::FREE);
+            },
+            None::<fn(rmm::PhysicalAddress)>,
+        );
+    }
+}
+
+impl AddrSpaceWrapper {
+    pub fn discard_pages(
+        &self,
+        requested_span: PageSpan,
+        token: &mut CleanLockToken,
+    ) -> Result<()> {
+        let mut token = token.token();
+        let mut guard = self.acquire_write(token.downgrade());
+        let guard = &mut *guard;
+
+        let mut covered_pages: usize = 0;
+        for (grant_base, grant_info) in guard.grants.conflicts(requested_span) {
+            if grant_info.is_pinned() {
+                return Err(Error::new(EBUSY));
+            }
+            match grant_info.provider {
+                Provider::Allocated {
+                    cow_file_ref: None,
+                    phys_contiguous: false,
+                }
+                | Provider::AllocatedShared { .. }
+                | Provider::External { .. }
+                | Provider::FmapBorrowed { .. } => {}
+                Provider::Allocated { .. } | Provider::PhysBorrowed { .. } => {
+                    return Err(Error::new(EINVAL));
+                }
+            }
+            let grant_span = PageSpan::new(grant_base, grant_info.page_count);
+            covered_pages = covered_pages
+                .checked_add(grant_span.intersection(requested_span).count)
+                .expect("discard covered pages overflow");
+        }
+        let has_hole = covered_pages < requested_span.count;
+
+        let mapper = &mut guard.table.utable;
+        let mut flusher = Flusher::with_cpu_set(&self.used_by, &self.tlb_ack);
+
+        for (grant_base, grant_info) in guard.grants.conflicts(requested_span) {
+            if !matches!(
+                grant_info.provider,
+                Provider::Allocated {
+                    cow_file_ref: None,
+                    phys_contiguous: false,
+                }
+            ) {
+                continue;
+            }
+            assert!(grant_info.mapped);
+            let grant_span = PageSpan::new(grant_base, grant_info.page_count);
+            let intersection = grant_span.intersection(requested_span);
+            discard_present_pages_in_span(mapper, &mut flusher, intersection);
+        }
+
+        drop(flusher);
+        if has_hole {
+            return Err(Error::new(ENOMEM));
+        }
+        Ok(())
+    }
+}

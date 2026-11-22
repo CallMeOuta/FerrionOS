@@ -40,5 +40,6 @@ pub const SYS_FSYNC: usize = SYS_CLASS_FILE | 118;
 pub const SYS_CLOCK_GETTIME: usize = 265;
 pub const SYS_FUTEX: usize = 240;
 pub const SYS_MPROTECT: usize = 125;
+pub const SYS_MADVISE: usize = 219;
 pub const SYS_NANOSLEEP: usize = 162;
 pub const SYS_YIELD: usize = 158;
