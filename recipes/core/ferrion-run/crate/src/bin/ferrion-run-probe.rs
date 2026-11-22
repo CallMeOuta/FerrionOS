@@ -68,6 +68,7 @@ mod probe {
             ["hold-filetable", program, ref rest @ ..] => hold_filetable(program, rest),
             ["fill", path, kib] => fill_file(path, kib.parse().unwrap_or(0)),
             ["fill-disk", path, reserve] => fill_disk(path, reserve),
+            ["rename-onto-dir", from, to] => rename_onto_dir(from, to),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
@@ -138,6 +139,19 @@ mod probe {
         let _ = std::fs::remove_file(reserve);
         println!("FILLED {total_kib}");
         0
+    }
+
+    fn rename_onto_dir(from: &str, to: &str) -> i32 {
+        match std::fs::rename(from, to) {
+            Ok(()) => {
+                println!("RENAME OK");
+                0
+            }
+            Err(e) => {
+                println!("RENAME ERR {}", e.raw_os_error().unwrap_or(-1));
+                0
+            }
+        }
     }
 
     fn hold_socket(address: &str, rest: &[&str]) -> i32 {

@@ -381,6 +381,77 @@ fn remove_path(path: &str) {
     }
 }
 
+enum Dest {
+    Absent,
+    LowerFile,
+    LowerDir {
+        empty: bool,
+    },
+    Upper {
+        kind: Kind,
+        empty: bool,
+        lower_dir: bool,
+    },
+}
+
+struct RenamePlan {
+    copy_up_old: bool,
+    whiteout_old: bool,
+    opaque_new: bool,
+}
+
+fn rename_rule(
+    src_kind: Kind,
+    src_in_lower: bool,
+    src_in_upper: bool,
+    dest: Dest,
+) -> std::result::Result<RenamePlan, i32> {
+    let src_is_dir = src_kind == Kind::Dir;
+    if src_is_dir && src_in_lower {
+        return Err(EXDEV);
+    }
+    let opaque_new = match dest {
+        Dest::Absent => false,
+        Dest::LowerFile => {
+            if src_is_dir {
+                return Err(ENOTDIR);
+            }
+            false
+        }
+        Dest::LowerDir { empty } => {
+            if !src_is_dir {
+                return Err(EISDIR);
+            }
+            if !empty {
+                return Err(ENOTEMPTY);
+            }
+            true
+        }
+        Dest::Upper {
+            kind,
+            empty,
+            lower_dir,
+        } => {
+            let dst_is_dir = kind == Kind::Dir;
+            if src_is_dir && !dst_is_dir {
+                return Err(ENOTDIR);
+            }
+            if !src_is_dir && dst_is_dir {
+                return Err(EISDIR);
+            }
+            if dst_is_dir && !empty {
+                return Err(ENOTEMPTY);
+            }
+            src_is_dir && lower_dir
+        }
+    };
+    Ok(RenamePlan {
+        copy_up_old: !src_in_upper,
+        whiteout_old: src_in_lower,
+        opaque_new,
+    })
+}
+
 fn save_overlay(layer: &str, overlay: &Overlay) -> Result<()> {
     let state = parent(layer);
     let tmp = join(state, ".whiteouts.new");
@@ -1119,46 +1190,74 @@ impl Proxy {
                 &old_rel,
             )
         };
-        let Located::Real(real, _) = located else {
+        let Located::Real(real, old_upper) = located else {
             return Err(err(ENOENT));
         };
-        let is_dir = lkind(&real)? == Kind::Dir;
-        let (lower_had_old, lower_has_new, new_lower_dir) = {
-            let (ov, lower, _) = self.overlay_parts(session, grant)?;
-            let new_lower = join(&lower, &new_rel);
-            (
-                !ov.lower_hidden(&old_rel) && exists(&join(&lower, &old_rel)),
-                !ov.lower_hidden(&new_rel) && exists(&new_lower),
-                !ov.lower_hidden(&new_rel) && lkind(&new_lower).is_ok_and(|k| k == Kind::Dir),
-            )
+        if old_rel == new_rel {
+            return Ok(());
+        }
+        let src_kind = lkind(&real)?;
+        let (lower_had_old, new_located, new_lower_dir) = {
+            let s = self.sessions.get(&session).ok_or(err(EBADF))?;
+            let scope = s.scope.as_ref().ok_or(err(EBADF))?;
+            let ov = s.overlays[grant].as_ref().ok_or(err(EINVAL))?;
+            let lower = &scope.grants[grant].real;
+            let lower_had_old = !ov.lower_hidden(&old_rel) && exists(&join(lower, &old_rel));
+            let new_located = locate(scope, &s.overlays, grant, &new_rel);
+            let new_lower = join(lower, &new_rel);
+            let new_lower_dir =
+                !ov.lower_hidden(&new_rel) && lkind(&new_lower).is_ok_and(|k| k == Kind::Dir);
+            (lower_had_old, new_located, new_lower_dir)
         };
-        if is_dir && lower_had_old {
-            return Err(err(EXDEV));
+        let dest = match new_located {
+            Located::Missing => Dest::Absent,
+            Located::Real(dst_real, false) => match lkind(&dst_real)? {
+                Kind::Dir => Dest::LowerDir {
+                    empty: self.merged(session, grant, &new_rel)?.is_empty(),
+                },
+                Kind::File | Kind::Symlink => Dest::LowerFile,
+            },
+            Located::Real(dst_real, true) => {
+                let kind = lkind(&dst_real)?;
+                let empty = if kind == Kind::Dir {
+                    self.merged(session, grant, &new_rel)?.is_empty()
+                } else {
+                    true
+                };
+                Dest::Upper {
+                    kind,
+                    empty,
+                    lower_dir: new_lower_dir,
+                }
+            }
+        };
+        let plan = rename_rule(src_kind, lower_had_old, old_upper, dest).map_err(err)?;
+        if plan.copy_up_old {
+            self.copy_up(session, grant, &old_rel)?;
         }
-        if new_lower_dir && !self.merged(session, grant, &new_rel)?.is_empty() {
-            return Err(err(ENOTEMPTY));
-        }
-        self.copy_up(session, grant, &old_rel)?;
         self.copy_up_dirs(session, grant, rel_parent(&new_rel))?;
         let (ov, _, layer) = self.overlay_parts(session, grant)?;
         let (from, to) = (join(&layer, &old_rel), join(&layer, &new_rel));
-        if is_dir && lower_has_new && !new_lower_dir {
-            return Err(err(ENOTDIR));
-        }
         let (a, b) = (cpath(&from)?, cpath(&to)?);
         let mut next_ov = ov.clone();
-        next_ov.moved(&old_rel, &new_rel);
-        next_ov.removed(&old_rel, lower_had_old).map_err(err)?;
-        next_ov.created(&new_rel, is_dir).map_err(err)?;
-        if new_lower_dir {
-            next_ov.mark_opaque(&new_rel);
-        }
+        next_ov
+            .rename(
+                &old_rel,
+                &new_rel,
+                src_kind == Kind::Dir,
+                plan.whiteout_old,
+                plan.opaque_new,
+            )
+            .map_err(err)?;
         check(unsafe { libc::rename(a.as_ptr(), b.as_ptr()) })?;
         if let Err(e) = save_overlay(&layer, &next_ov) {
             let _ = unsafe { libc::rename(b.as_ptr(), a.as_ptr()) };
             return Err(e);
         }
         *ov = next_ov;
+        if plan.opaque_new {
+            assert_eq!(lkind(&to)?, Kind::Dir);
+        }
         assert_eq!(ov.has_upper(&new_rel), exists(&to));
         ov.check_invariants();
         Ok(())

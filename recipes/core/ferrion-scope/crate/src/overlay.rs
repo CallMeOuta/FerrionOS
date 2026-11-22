@@ -65,6 +65,8 @@ impl Overlay {
 
     pub fn check_invariants(&self) {
         assert!(self.whiteouts.is_disjoint(&self.upper));
+        assert!(self.opaque.is_subset(&self.upper));
+        assert!(self.opaque.is_disjoint(&self.whiteouts));
         assert!(self.upper.len() <= MAX_ENTRIES);
         assert!(self.whiteouts.len() <= MAX_ENTRIES);
     }
@@ -148,7 +150,39 @@ impl Overlay {
             self.whiteouts.remove(&dst);
             self.upper.insert(dst);
         }
+        let moved_opaque: Vec<String> = self
+            .opaque
+            .iter()
+            .filter(|p| p.as_str() == from || under(p, from))
+            .cloned()
+            .collect();
+        for p in moved_opaque {
+            self.opaque.remove(&p);
+            let dst = format!("{to}{}", &p[from.len()..]);
+            self.opaque.insert(dst);
+        }
         self.check_invariants();
+    }
+
+    pub fn rename(
+        &mut self,
+        from: &str,
+        to: &str,
+        is_dir: bool,
+        whiteout_old: bool,
+        opaque_new: bool,
+    ) -> Result<(), i32> {
+        if opaque_new {
+            assert!(is_dir);
+        }
+        self.moved(from, to);
+        self.removed(from, whiteout_old)?;
+        self.created(to, is_dir)?;
+        if opaque_new {
+            self.mark_opaque(to);
+        }
+        self.check_invariants();
+        Ok(())
     }
 
     pub fn encode(&self) -> Vec<u8> {

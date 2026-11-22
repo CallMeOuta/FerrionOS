@@ -6809,6 +6809,18 @@ def test_agent_clone(vm, args):
     if stale != "REFUSED" or left.split()[-1:] != ["0"]:
         problems.append(f"route clone-stale {stale} under ferrion-run --clone, {left.split()[-1:]} files written outside the folder")
 
+    run("clrn0", "rm -rf /home/user/cl-rn-a /home/user/cl-rn-b && mkdir -p /home/user/cl-rn-a/d /home/user/cl-rn-b/d && echo keep > /home/user/cl-rn-a/f && echo keep > /home/user/cl-rn-b/f")
+    _, rn_direct = run("clrn1", "ferrion-run-probe rename-onto-dir /home/user/cl-rn-b/f /home/user/cl-rn-b/d")
+    _, rn_clone = run("clrn2", "ferrion-run --clone /home/user/cl-rn-a ferrion-run-probe rename-onto-dir /home/user/cl-rn-a/f /home/user/cl-rn-a/d")
+    rn_sess = re.search(r"session (\d+-\d+) keeps", rn_clone)
+    if rn_sess:
+        run("clrn3", f"ferrion-run apply {rn_sess.group(1)}")
+    _, rn_dir = run("clrn4", "test -d /home/user/cl-rn-a/d && test -f /home/user/cl-rn-a/f && echo RN_INTACT")
+    rn_direct_line = re.search(r"RENAME (?:OK|ERR \d+)", rn_direct)
+    rn_clone_line = re.search(r"RENAME (?:OK|ERR \d+)", rn_clone)
+    if not rn_direct_line or not rn_clone_line or rn_direct_line.group(0) != rn_clone_line.group(0) or "RN_INTACT" not in rn_dir:
+        problems.append(f"rename file onto lower dir: direct={rn_direct_line.group(0) if rn_direct_line else None} clone={rn_clone_line.group(0) if rn_clone_line else None} intact={'RN_INTACT' in rn_dir}")
+
     run("clen0", "rm -rf /home/user/cl-enospc /home/user/.ballast /home/user/.reserve && mkdir -p /home/user/cl-enospc && ferrion-run-probe fill /home/user/cl-enospc/big.bin 2048")
     _, big_before = run("clen1", "sha256sum /home/user/cl-enospc/big.bin")
     big_before_hash = re.search(r"([0-9a-f]{64})", big_before)
