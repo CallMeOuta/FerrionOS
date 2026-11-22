@@ -1,10 +1,32 @@
-FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Adapt the Orbital software EGL platform. Carries code from the upstream platform fork at 9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
+FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Adapt the Orbital software EGL platform with an explicit surface kind enum (REDOX_SURF_WINDOW, REDOX_SURF_PBUFFER). Carries code from the upstream platform fork at 9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
 Source: https://gitlab.redox-os.org/redox-os/mesa.git, d6695f16..9850ea1ad7d687240757ebf9a73760ceb4ba28a9.
 See PORTING.md for the original commits and obsolete hunks.
 
+--- a/src/egl/drivers/dri2/egl_dri2.h
++++ b/src/egl/drivers/dri2/egl_dri2.h
+@@ -299,11 +299,19 @@
+    struct dri_context *dri_context;
+ };
+ 
++#ifdef HAVE_REDOX_PLATFORM
++enum redox_surf_kind {
++   REDOX_SURF_WINDOW = 1,
++   REDOX_SURF_PBUFFER = 2,
++};
++#endif
++
+ struct dri2_egl_surface {
+    _EGLSurface base;
+    struct dri_drawable *dri_drawable;
+ 
+ #ifdef HAVE_REDOX_PLATFORM
++   enum redox_surf_kind orb_kind;
+    void *orb_window;
+    void *orb_surface;
+ #endif
 --- /dev/null
 +++ b/src/egl/drivers/dri2/platform_redox.c
-@@ -0,0 +1,526 @@
+@@ -0,0 +1,574 @@
 +/*
 + * Mesa 3-D graphics library
 + *
@@ -32,6 +54,7 @@ See PORTING.md for the original commits and obsolete hunks.
 + * DEALINGS IN THE SOFTWARE.
 + */
 +
++#include <assert.h>
 +#include <dlfcn.h>
 +#include <fcntl.h>
 +#include <stdio.h>
@@ -50,6 +73,29 @@ See PORTING.md for the original commits and obsolete hunks.
 +#include "loader.h"
 +#include "dri_util.h"
 +#include "dri_screen.h"
++
++enum {
++    REDOX_MAX_DAMAGE_RECTS = 1024,
++};
++
++static void
++redox_assert_surface_invariants(const struct dri2_egl_surface *dri2_surf)
++{
++    assert(dri2_surf != NULL);
++    switch (dri2_surf->orb_kind) {
++    case REDOX_SURF_WINDOW:
++        assert(dri2_surf->orb_window != NULL);
++        assert(dri2_surf->orb_surface == NULL);
++        break;
++    case REDOX_SURF_PBUFFER:
++        assert(dri2_surf->orb_surface != NULL);
++        assert(dri2_surf->orb_window == NULL);
++        break;
++    default:
++        assert(!"invalid redox surface kind");
++        break;
++    }
++}
 +
 +static void
 +redox_free_images(struct dri2_egl_surface *dri2_surf)
@@ -122,6 +168,8 @@ See PORTING.md for the original commits and obsolete hunks.
 +        _eglError(EGL_BAD_ALLOC, "Failed to create orbital surface");
 +        goto cleanup_surface;
 +    }
++    dri2_surf->orb_kind = REDOX_SURF_PBUFFER;
++    redox_assert_surface_invariants(dri2_surf);
 +
 +    config = dri2_get_dri_config(dri2_conf, type, dri2_surf->base.GLColorspace);
 +    if (!config) {
@@ -154,13 +202,16 @@ See PORTING.md for the original commits and obsolete hunks.
 +    redox_free_images(dri2_surf);
 +    driDestroyDrawable(dri2_surf->dri_drawable);
 +
-+    if (dri2_surf->orb_window) {
++    redox_assert_surface_invariants(dri2_surf);
++    switch (dri2_surf->orb_kind) {
++    case REDOX_SURF_WINDOW:
 +        orb_window_destroy(dri2_surf->orb_window);
 +        dri2_surf->orb_window = NULL;
-+    }
-+    if (dri2_surf->orb_surface) {
++        break;
++    case REDOX_SURF_PBUFFER:
 +        orb_surface_destroy(dri2_surf->orb_surface);
 +        dri2_surf->orb_surface = NULL;
++        break;
 +    }
 +
 +    dri2_fini_surface(surf);
@@ -213,6 +264,8 @@ See PORTING.md for the original commits and obsolete hunks.
 +        _eglError(EGL_BAD_NATIVE_WINDOW, "Unable to create Orbital window");
 +        goto cleanup_surface;
 +    }
++    dri2_surf->orb_kind = REDOX_SURF_WINDOW;
++    redox_assert_surface_invariants(dri2_surf);
 +    dri2_surf->base.Width = orb_window_width(dri2_surf->orb_window);
 +    dri2_surf->base.Height = orb_window_height(dri2_surf->orb_window);
 +
@@ -255,7 +308,9 @@ See PORTING.md for the original commits and obsolete hunks.
 +    char *dst_base = NULL;
 +    int dst_width = 0, dst_height = 0;
 +
-+    if (dri2_surf->orb_window) {
++    redox_assert_surface_invariants(dri2_surf);
++    switch (dri2_surf->orb_kind) {
++    case REDOX_SURF_WINDOW:
 +        dst_base = (char *)orb_window_data(dri2_surf->orb_window);
 +        if (!dst_base) {
 +            _eglLog(_EGL_WARNING, "redox_swrast_put_image: orb_window_data() returned NULL!");
@@ -263,14 +318,16 @@ See PORTING.md for the original commits and obsolete hunks.
 +        }
 +        dst_width = orb_window_width(dri2_surf->orb_window);
 +        dst_height = orb_window_height(dri2_surf->orb_window);
-+    } else if (dri2_surf->orb_surface) {
++        break;
++    case REDOX_SURF_PBUFFER:
 +        dst_base = (char *)orb_surface_data(dri2_surf->orb_surface);
 +        if (!dst_base) {
-+            _eglLog(_EGL_WARNING, "redox_swrast_put_image: orb_window_data() returned NULL!");
++            _eglLog(_EGL_WARNING, "redox_swrast_put_image: orb_surface_data() returned NULL!");
 +            return;
 +        }
 +        dst_width = orb_surface_width(dri2_surf->orb_surface);
 +        dst_height = orb_surface_height(dri2_surf->orb_surface);
++        break;
 +    }
 +
 +    if (!dst_base || dst_width <= 0 || dst_height <= 0) {
@@ -311,21 +368,29 @@ See PORTING.md for the original commits and obsolete hunks.
 +{
 +    struct dri2_egl_surface *dri2_surf = loaderPrivate;
 +
-+    if (!dri2_surf->orb_window) {
-+        *x = *y = *w = *h = 0;
-+        return;
++    redox_assert_surface_invariants(dri2_surf);
++    switch (dri2_surf->orb_kind) {
++    case REDOX_SURF_WINDOW: {
++        int cur_w = orb_window_width(dri2_surf->orb_window);
++        int cur_h = orb_window_height(dri2_surf->orb_window);
++
++        dri2_surf->base.Width = cur_w;
++        dri2_surf->base.Height = cur_h;
++
++        *x = orb_window_x(dri2_surf->orb_window);
++        *y = orb_window_y(dri2_surf->orb_window);
++        *w = cur_w;
++        *h = cur_h;
++        break;
 +    }
-+
-+    int cur_w = orb_window_width(dri2_surf->orb_window);
-+    int cur_h = orb_window_height(dri2_surf->orb_window);
-+
-+    dri2_surf->base.Width = cur_w;
-+    dri2_surf->base.Height = cur_h;
-+
-+    *x = orb_window_x(dri2_surf->orb_window);
-+    *y = orb_window_y(dri2_surf->orb_window);
-+    *w = cur_w;
-+    *h = cur_h;
++    case REDOX_SURF_PBUFFER:
++        assert(dri2_surf->base.Width > 0 && dri2_surf->base.Height > 0);
++        *x = 0;
++        *y = 0;
++        *w = dri2_surf->base.Width;
++        *h = dri2_surf->base.Height;
++        break;
++    }
 +}
 +
 +static EGLBoolean
@@ -333,15 +398,20 @@ See PORTING.md for the original commits and obsolete hunks.
 +                               const EGLint *rects, EGLint n_rects)
 +{
 +    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
-+    void *orb_window = dri2_surf->orb_window;
++    redox_assert_surface_invariants(dri2_surf);
 +
 +    driSwapBuffers(dri2_surf->dri_drawable, n_rects, rects);
 +
-+    if (!orb_window) {
++    switch (dri2_surf->orb_kind) {
++    case REDOX_SURF_PBUFFER:
 +        return EGL_TRUE;
++    case REDOX_SURF_WINDOW:
++        break;
 +    }
 +
-+    if (n_rects <= 0 || !rects) {
++    void *orb_window = dri2_surf->orb_window;
++
++    if (n_rects <= 0 || !rects || n_rects > REDOX_MAX_DAMAGE_RECTS) {
 +        orb_window_sync(orb_window);
 +        return EGL_TRUE;
 +    }

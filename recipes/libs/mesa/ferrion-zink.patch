@@ -2,15 +2,15 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
 
 --- a/src/egl/drivers/dri2/platform_redox.c
 +++ b/src/egl/drivers/dri2/platform_redox.c
-@@ -25,6 +25,7 @@
-  * DEALINGS IN THE SOFTWARE.
+@@ -26,6 +26,7 @@
   */
  
+ #include <assert.h>
 +#include <dirent.h>
  #include <dlfcn.h>
  #include <fcntl.h>
  #include <stdio.h>
-@@ -32,6 +33,7 @@
+@@ -33,6 +34,7 @@
  #include <string.h>
  #include <unistd.h>
  #include "util/libdrm.h"
@@ -18,7 +18,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  #include <sys/stat.h>
  #include <sys/types.h>
  
-@@ -231,8 +233,8 @@
+@@ -262,8 +264,8 @@
  
  
  static void
@@ -29,7 +29,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  {
      struct dri2_egl_surface *dri2_surf = loaderPrivate;
  
-@@ -271,7 +273,7 @@
+@@ -306,7 +308,7 @@
      }
  
      const int bpp = 4;
@@ -38,21 +38,21 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
      int copy_width_bytes = w * bpp;
      int dst_stride_bytes = dst_width * bpp;
      int x_offset_bytes = x * bpp;
-@@ -296,6 +298,13 @@
-         src_line += src_stride_bytes;
-         dst_line += dst_stride_bytes;
-     }
-+}
-+
-+static void
+@@ -334,6 +336,13 @@
+ }
+ 
+ static void
 +redox_swrast_put_image(struct dri_drawable *draw, int op, int x, int y, int w,
 +                        int h, char *data, void *loaderPrivate)
 +{
 +    redox_swrast_put_image2(draw, op, x, y, w, h, w * 4, data, loaderPrivate);
- }
- 
- static void
-@@ -390,6 +399,26 @@
++}
++
++static void
+ redox_swrast_get_drawable_info(struct dri_drawable *draw, int *x, int *y, int *w, int *h,
+                                void *loaderPrivate)
+ {
+@@ -438,6 +447,32 @@
  static const __DRIswrastLoaderExtension swrast_loader_extension = {
      .getDrawableInfo = redox_swrast_get_drawable_info,
      .putImage = redox_swrast_put_image,
@@ -64,12 +64,18 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
 +                               void *loaderPrivate)
 +{
 +    struct dri2_egl_surface *dri2_surf = loaderPrivate;
-+    if (dri2_surf->orb_window) {
++    redox_assert_surface_invariants(dri2_surf);
++    switch (dri2_surf->orb_kind) {
++    case REDOX_SURF_WINDOW: {
 +        int x, y;
 +        redox_swrast_get_drawable_info(draw, &x, &y, w, h, loaderPrivate);
-+    } else {
++        break;
++    }
++    case REDOX_SURF_PBUFFER:
++        assert(dri2_surf->base.Width > 0 && dri2_surf->base.Height > 0);
 +        *w = dri2_surf->base.Width;
 +        *h = dri2_surf->base.Height;
++        break;
 +    }
 +}
 +
@@ -79,7 +85,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  };
  
  static const struct dri_loader_funcs redox_swrast_loader_funcs = {
-@@ -397,8 +426,45 @@
+@@ -445,8 +480,45 @@
      .image_lookup = &image_lookup_extension,
  };
  
@@ -89,8 +95,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
 +    .image_lookup = &image_lookup_extension,
 +};
 +
- static bool
--redox_probe_device_sw(_EGLDisplay *disp)
++static bool
 +redox_render_scheme_exists(void)
 +{
 +    DIR *dir = opendir("/scheme");
@@ -108,7 +113,8 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
 +    return found;
 +}
 +
-+static bool
+ static bool
+-redox_probe_device_sw(_EGLDisplay *disp)
 +redox_want_zink(_EGLDisplay *disp)
 +{
 +    const char *override = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
@@ -126,7 +132,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  {
      struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
      struct _egl_device *device = _eglFindDevice(dri2_dpy->fd_render_gpu, true);
-@@ -412,12 +478,14 @@
+@@ -460,12 +532,14 @@
      disp->Device = device;
      assert(disp->Device);
  
@@ -143,7 +149,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  
      return true;
  }
-@@ -488,7 +556,9 @@
+@@ -536,7 +610,9 @@
      bool driver_loaded = false;
      struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
  
@@ -154,7 +160,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  
      if (!driver_loaded) {
         err = "DRI2: failed to load driver";
-@@ -498,8 +568,16 @@
+@@ -546,8 +622,16 @@
      dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
  
      if (!dri2_create_screen(disp)) {

@@ -13,6 +13,7 @@
 #define EGL_PLATFORM_REDOX_EXT 0x31D9
 #define WIDTH 256
 #define HEIGHT 256
+#define PBUFFER_SIZE 64
 
 static const int corners[3][2] = {{258, 258}, {1794, 390}, {774, 1764}};
 static const unsigned char background[4] = {15, 14, 12, 255};
@@ -156,7 +157,97 @@ static int egl_dispatch(int require_current)
     return result;
 }
 
+static int pbuffer_clear_check(void)
+{
+    static const unsigned char expected[4] = {0x22, 0x88, 0xcc, 0xff};
+    EGLDisplay display = eglGetPlatformDisplay(EGL_PLATFORM_REDOX_EXT, EGL_DEFAULT_DISPLAY, NULL);
+    if (display == EGL_NO_DISPLAY || !eglInitialize(display, NULL, NULL)) {
+        fprintf(stderr, "GPU_ERROR pbuffer EGL initialize: %#x\n", eglGetError());
+        return 1;
+    }
+    const EGLint config_attrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_NONE
+    };
+    EGLConfig config;
+    EGLint count = 0;
+    if (!eglBindAPI(EGL_OPENGL_API) || !eglChooseConfig(display, config_attrs, &config, 1, &count) || count != 1) {
+        fprintf(stderr, "GPU_ERROR pbuffer config: %#x\n", eglGetError());
+        eglTerminate(display);
+        return 1;
+    }
+    const EGLint pbuffer_attrs[] = {
+        EGL_WIDTH, PBUFFER_SIZE,
+        EGL_HEIGHT, PBUFFER_SIZE,
+        EGL_NONE
+    };
+    EGLSurface surface = eglCreatePbufferSurface(display, config, pbuffer_attrs);
+    EGLContext context = surface != EGL_NO_SURFACE
+        ? eglCreateContext(display, config, EGL_NO_CONTEXT, NULL)
+        : EGL_NO_CONTEXT;
+    if (surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
+        !eglMakeCurrent(display, surface, surface, context)) {
+        fprintf(stderr, "GPU_ERROR pbuffer context/surface: %#x\n", eglGetError());
+        if (context != EGL_NO_CONTEXT)
+            eglDestroyContext(display, context);
+        if (surface != EGL_NO_SURFACE)
+            eglDestroySurface(display, surface);
+        eglTerminate(display);
+        return 1;
+    }
+    const char *renderer = (const char *)glGetString(GL_RENDERER);
+    printf("GPU_PBUFFER renderer=\"%s\"\n", renderer ? renderer : "");
+
+    glViewport(0, 0, PBUFFER_SIZE, PBUFFER_SIZE);
+    glDisable(GL_DITHER);
+    glClearColor(expected[0] / 255.0f, expected[1] / 255.0f, expected[2] / 255.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
+
+    static unsigned char pixels[PBUFFER_SIZE * PBUFFER_SIZE * 4];
+    memset(pixels, 0, sizeof(pixels));
+    glReadPixels(0, 0, PBUFFER_SIZE, PBUFFER_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    GLenum err = glGetError();
+    unsigned mismatches = 0;
+    for (unsigned i = 0; i < PBUFFER_SIZE * PBUFFER_SIZE; ++i) {
+        if (memcmp(pixels + 4 * i, expected, 4) != 0)
+            ++mismatches;
+    }
+    printf("GPU_PBUFFER_READ err=%#x mismatches=%u first=%u,%u,%u,%u\n",
+           err, mismatches, pixels[0], pixels[1], pixels[2], pixels[3]);
+
+    EGLBoolean swapped = eglSwapBuffers(display, surface);
+    memset(pixels, 0, sizeof(pixels));
+    glReadPixels(0, 0, PBUFFER_SIZE, PBUFFER_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    GLenum err_after = glGetError();
+    unsigned mismatches_after = 0;
+    for (unsigned i = 0; i < PBUFFER_SIZE * PBUFFER_SIZE; ++i) {
+        if (memcmp(pixels + 4 * i, expected, 4) != 0)
+            ++mismatches_after;
+    }
+    printf("GPU_PBUFFER_AFTER_SWAP swapped=%d err=%#x mismatches=%u\n",
+           (int)swapped, err_after, mismatches_after);
+
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglDestroySurface(display, surface);
+    eglTerminate(display);
+
+    if (err != GL_NO_ERROR || mismatches != 0 || !swapped ||
+        err_after != GL_NO_ERROR || mismatches_after != 0) {
+        return 1;
+    }
+    puts("GPU_PBUFFER_OK");
+    return 0;
+}
+
 int sdl_lifecycle(void);
+int sdl_recreate(void);
 int vulkan_cpu(void);
 int vulkan_exact(void);
 int gl_exact(void);
@@ -168,6 +259,12 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "sdl-lifecycle") == 0) {
         return sdl_lifecycle();
+    }
+    if (argc == 2 && strcmp(argv[1], "sdl-recreate") == 0) {
+        return sdl_recreate();
+    }
+    if (argc == 2 && strcmp(argv[1], "pbuffer-sw") == 0) {
+        return pbuffer_clear_check();
     }
     if (argc == 2 && strcmp(argv[1], "mesa-cpu") == 0) {
         int gl = egl_dispatch(1);
@@ -182,6 +279,6 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "gl-exact") == 0) {
         return gl_exact();
     }
-    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle|mesa-cpu|vk-exact|gl-exact\n", stderr);
+    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle|sdl-recreate|pbuffer-sw|mesa-cpu|vk-exact|gl-exact\n", stderr);
     return 2;
 }
