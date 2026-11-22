@@ -1,4 +1,3 @@
-# Minimal test image for shared-file mapping coherence and backing reuse.
 include = ["minimal.toml"]
 
 [packages]

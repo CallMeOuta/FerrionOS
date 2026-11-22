@@ -193,15 +193,12 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
                       ('; '.join(differences) if differences else f'{len(points)} probes match'), flush=True)
                 if differences:
                     problems.append(f'{name} window-{role}: ' + '; '.join(differences))
-            # Capture complete records from files: compositor output must not
-            # interleave with client logs on the shared serial console.
             counts = run("for log in ferrion-wm dd2-files dd2-editor dd2-terminal; do "
                          "printf 'DD2_LOG_LINES=%s:%s\\n' \"$log\" \"$(wc -l < /tmp/$log.log)\"; done")
             marks = {name: int(count) for name, count in re.findall(
                 r'(?m)^DD2_LOG_LINES=([\w-]+):\s*(\d+)', counts)}
             if len(marks) != 4:
                 raise RuntimeError('missing timing log boundary')
-            # Keep the pointer away from fixture probes. Each input passes through QEMU's device.
             for step in range(100):
                 qmp('input-send-event', {'events': [
                     {'type': 'abs', 'data': {'axis': 'x', 'value': 1000 + step * 100}},
@@ -210,7 +207,6 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
                     vm.command('sendkey a')
                 time.sleep(.05)
             time.sleep(.5)
-            # Read client feedback logs after injection; select only this output-frame range.
             text = run(f"tail -n +{marks['ferrion-wm'] + 1} /tmp/ferrion-wm.log")
             for role in ROLES:
                 client_log = run(f"tail -n +{marks['dd2-' + role] + 1} /tmp/dd2-{role}.log")

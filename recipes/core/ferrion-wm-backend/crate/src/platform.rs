@@ -56,8 +56,6 @@ impl Backend {
         Self::open_with_wakeup(|| {})
     }
 
-    /// Wake the consumer after publishing an event or a terminal reader error.
-    /// The callback must not block; a calloop ping is one suitable implementation.
     pub fn open_with_wakeup(wakeup: impl Fn() + Send + Sync + 'static) -> io::Result<Self> {
         let epoch = Instant::now();
         let input = Arc::new(ConsumerHandle::new_vt()?);
@@ -131,16 +129,12 @@ impl Backend {
         }
     }
 
-    /// Hardware plane capacity in pixels. Cursor images are never scaled silently.
     pub fn cursor_size(&self) -> io::Result<(u32, u32)> {
         let cursor = self.shared.cursor.lock().unwrap();
         let cursor = cursor.as_ref().ok_or_else(|| io::Error::other("display change pending"))?;
         Ok((cursor.buffer.size().0, cursor.buffer.size().1))
     }
 
-    /// Install tightly packed premultiplied ARGB8888 pixels, or hide the plane.
-    /// This shares the cursor lock with motion, so a shape change cannot race an
-    /// input move. The frame renderer and its presentation never take this lock.
     pub fn set_cursor(&mut self, pixels: Option<&[u8]>, size: (u32, u32), hotspot: (i32, i32)) -> io::Result<()> {
         self.check_failure()?;
         let mut cursor = self.shared.cursor.lock().unwrap();

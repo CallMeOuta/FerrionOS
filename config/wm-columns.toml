@@ -1,4 +1,3 @@
-# DD2 development compositor on its own inputd virtual terminal.
 include = ["desktop-minimal.toml"]
 
 [general]
@@ -13,9 +12,6 @@ bash = {}
 mesa = {}
 libffi = {}
 
-# Test-only access: the root compositor inherits init's input/display schemes.
-# Its test command receives the unrestricted compositor IPC and Wayland socket.
-# No account, group or login scheme changes; this configuration is not a release session.
 [[files]]
 path = "/usr/lib/init.d/20_orbital"
 data = """

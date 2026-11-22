@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Retain shared storage for the window; write only released buffer slots.
 use std::{
     fs::File,
     io,
@@ -39,7 +38,6 @@ impl Storage {
     }
     pub fn write(&mut self, offset: usize, bytes: &[u8]) {
         assert!(offset <= self.len && bytes.len() <= self.len - offset);
-        // The release event guarantees that the compositor no longer reads this slot.
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.address.add(offset), bytes.len());
         }

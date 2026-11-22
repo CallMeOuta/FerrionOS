@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Exercise shared mappings while fresh backing files reuse descriptors and pages.
 use std::{
     fs::File,
     io::{self, Write},

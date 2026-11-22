@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Three ordinary xdg-shell clients for the DD2 layout check. Their rectangles
-// are managed by the compositor; no fixture image is pasted onto the display.
 mod shm_storage;
 use std::{error::Error, time::Duration};
 use wayland_client::{
@@ -62,13 +60,11 @@ fn pixels(role: &str, width: i32, height: i32, key: u64) -> Vec<u8> {
             } else {
                 0x0f0e0c
             };
-            // Client decorations have the same three round controls in each size.
             for (cx, color) in [(17, 0xd35f5f), (35, 0xd0a44f), (53, 0x58a56e)] {
                 if (x - cx) * (x - cx) + (y - 15) * (y - 15) <= 25 {
                     rgb = color;
                 }
             }
-            // A keyboard-visible patch away from the layout's color samples.
             if x >= 200 && x < 232 && y >= 50 && y < 82 {
                 rgb = if key % 2 == 0 { 0x3a9fd8 } else { 0xe68e0d };
             }
@@ -95,11 +91,7 @@ impl State {
         if bytes.len() > SLOT_BYTES {
             return Err("window exceeds probe buffer capacity".into());
         }
-        // Reuse three slots, writing only after wl_buffer.release. Keeping one
-        // pool per window also avoids allocation churn in the timing series.
         let (pool, file) = self.pool.as_mut().unwrap();
-        // Ordinary file writes and shared mappings disagree on the current OS;
-        // shm-reuse-probe keeps that failure independently reproducible.
         file.write(slot * SLOT_BYTES, &bytes);
         if self.buffers.get(slot).is_none_or(|b| b.2 != self.size) {
             let buffer = pool.create_buffer(
