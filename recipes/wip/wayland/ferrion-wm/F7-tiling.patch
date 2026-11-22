@@ -27,13 +27,14 @@ tests remain, with the config snapshots adapted to the production fields.
  niri-config/src/binds.rs        |  29 ++++++++-
  niri-ipc/src/lib.rs             |  78 ++++++++++++++++++++++-
  src/input/mod.rs                |  24 ++++++-
- src/layout/floating.rs          |   5 +-
- src/layout/floating/stacking.rs |  93 ++++++++++++++++++++++++++-
+ src/layout/floating.rs          |  70 ++++++++++++++++++---
+ src/layout/floating/stacking.rs | 108 +++++++++++++++++++++++++++++++-
  src/layout/free.rs              |  26 +++++++-
- src/layout/mod.rs               |  26 +++++++-
+ src/layout/mod.rs               |  27 +++++++-
+ src/layout/tile.rs              |  20 +++++-
  src/layout/workspace.rs         |  31 ++++++++-
- src/layout/workspace/free.rs    | 107 +++++++++++++++++++++++++++++++-
- 9 files changed, 402 insertions(+), 17 deletions(-)
+ src/layout/workspace/free.rs    | 107 ++++++++++++++++++++++++++++++-
+ 10 files changed, 496 insertions(+), 24 deletions(-)
 
 diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
 index acfb3290..10cafcf0 100644
@@ -233,7 +234,7 @@ index ee199c7c..7e56e0f0 100644
                  self.niri.layout.set_window_floating(None, true);
                  // FIXME: granular
 diff --git a/src/layout/floating.rs b/src/layout/floating.rs
-index 2bc7d837..d24202ba 100644
+index 2bc7d837..625e7fbe 100644
 --- a/src/layout/floating.rs
 +++ b/src/layout/floating.rs
 @@ -1,4 +1,4 @@
@@ -242,25 +243,147 @@ index 2bc7d837..d24202ba 100644
  use std::cmp::max;
  use std::iter::zip;
  use std::rc::Rc;
-@@ -100,6 +100,8 @@ struct Data {
-     working_area: Rectangle<f64, Logical>,
- 
-     visibility: stacking::Visibility,
+@@ -238,6 +238,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
+         scale: f64,
+         options: Rc<Options>,
+     ) {
++        let area_changed = self.working_area != working_area;
+         for (tile, data) in zip(&mut self.tiles, &mut self.data) {
+             tile.update_config(view_size, scale, options.clone());
+             data.update(tile);
+@@ -248,6 +249,17 @@ impl<W: LayoutElement> FloatingSpace<W> {
+         self.working_area = working_area;
+         self.scale = scale;
+         self.options = options;
 +
-+    tiled: Option<stacking::Tiled>,
- }
++        if area_changed {
++            let ids: Vec<W::Id> = self
++                .tiles
++                .iter()
++                .map(|tile| tile.window().id().clone())
++                .collect();
++            for id in ids {
++                self.transition_geometry(&id, stacking::GeomEvent::WorkingAreaChanged);
++            }
++        }
+     }
  
- impl Data {
-@@ -114,6 +116,7 @@ impl Data {
-             size: Size::default(),
-             working_area,
-             visibility: stacking::Visibility::Shown,
-+            tiled: None,
+     pub fn update_shaders(&mut self) {
+@@ -755,9 +767,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
+     }
+ 
+     pub fn set_window_width(&mut self, id: Option<&W::Id>, change: SizeChange, animate: bool) {
+-        let Some(id) = id.or(self.active.as_id()) else {
++        let Some(id) = id.or(self.active.as_id()).cloned() else {
+             return;
          };
-         rv.update(tile);
-         rv.set_logical_pos(logical_pos);
++        self.transition_geometry(&id, stacking::GeomEvent::UserMovedOrResized);
++        self.set_window_width_raw(&id, change, animate);
++    }
++
++    pub(super) fn set_window_width_raw(&mut self, id: &W::Id, change: SizeChange, animate: bool) {
+         let idx = self.idx_of(id).unwrap();
+ 
+         let tile = &mut self.tiles[idx];
+@@ -802,9 +819,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
+     }
+ 
+     pub fn set_window_height(&mut self, id: Option<&W::Id>, change: SizeChange, animate: bool) {
+-        let Some(id) = id.or(self.active.as_id()) else {
++        let Some(id) = id.or(self.active.as_id()).cloned() else {
+             return;
+         };
++        self.transition_geometry(&id, stacking::GeomEvent::UserMovedOrResized);
++        self.set_window_height_raw(&id, change, animate);
++    }
++
++    pub(super) fn set_window_height_raw(&mut self, id: &W::Id, change: SizeChange, animate: bool) {
+         let idx = self.idx_of(id).unwrap();
+ 
+         let tile = &mut self.tiles[idx];
+@@ -945,10 +967,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
+     }
+ 
+     fn move_by(&mut self, amount: Point<f64, Logical>) {
+-        let Some(active_id) = self.active.as_id() else {
++        let Some(active_id) = self.active.as_id().cloned() else {
+             return;
+         };
+-        let idx = self.idx_of(active_id).unwrap();
++        self.transition_geometry(&active_id, stacking::GeomEvent::UserMovedOrResized);
++        let idx = self.idx_of(&active_id).unwrap();
+ 
+         let new_pos = self.data[idx].logical_pos + amount;
+         self.move_to(idx, new_pos, true)
+@@ -977,10 +1000,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
+         y: PositionChange,
+         animate: bool,
+     ) {
+-        let Some(id) = id.or(self.active.as_id()) else {
++        let Some(id) = id.or(self.active.as_id()).cloned() else {
+             return;
+         };
+-        let idx = self.idx_of(id).unwrap();
++        self.transition_geometry(&id, stacking::GeomEvent::UserMovedOrResized);
++        let idx = self.idx_of(&id).unwrap();
+ 
+         let mut pos = self.data[idx].logical_pos;
+ 
+@@ -1024,6 +1048,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
+         let Some(id) = id.or(self.active.as_id()).cloned() else {
+             return;
+         };
++        self.transition_geometry(&id, stacking::GeomEvent::UserMovedOrResized);
+         let idx = self.idx_of(&id).unwrap();
+ 
+         let new_pos = center_preferring_top_left_in_area(self.working_area, self.data[idx].size);
+@@ -1123,6 +1148,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
+             return false;
+         }
+ 
++        self.transition_geometry(&window, stacking::GeomEvent::UserMovedOrResized);
++
+         let tile = self
+             .tiles
+             .iter_mut()
+@@ -1407,6 +1434,35 @@ impl<W: LayoutElement> FloatingSpace<W> {
+         }
+ 
+         for (tile, data) in zip(&self.tiles, &self.data) {
++            if let crate::layout::tile::FreeGeometry::Tiled { target, .. } = tile.free_geometry {
++                if tile.window().requested_size().is_none() {
++                    let min_size = tile.window().min_size();
++                    let max_size = tile.window().max_size();
++                    let unconstrained = min_size.w == 0
++                        && min_size.h == 0
++                        && max_size.w == 0
++                        && max_size.h == 0;
++                    if unconstrained {
++                        let expected = self.tile_rect(target, data.size);
++                        let mut clamped = *data;
++                        clamped.set_logical_pos(expected.loc);
++                        approx::assert_abs_diff_eq!(
++                            data.logical_pos.x,
++                            clamped.logical_pos.x,
++                            epsilon = 1.5
++                        );
++                        approx::assert_abs_diff_eq!(
++                            data.logical_pos.y,
++                            clamped.logical_pos.y,
++                            epsilon = 1.5
++                        );
++                        if target != niri_ipc::WindowTile::Center {
++                            approx::assert_abs_diff_eq!(data.size.w, expected.size.w, epsilon = 1.5);
++                            approx::assert_abs_diff_eq!(data.size.h, expected.size.h, epsilon = 1.5);
++                        }
++                    }
++                }
++            }
+             if !self.workspace_is_free {
+                 assert_eq!(
+                     data.visibility,
 diff --git a/src/layout/floating/stacking.rs b/src/layout/floating/stacking.rs
-index e2858841..ae1e3daf 100644
+index e2858841..92edc876 100644
 --- a/src/layout/floating/stacking.rs
 +++ b/src/layout/floating/stacking.rs
 @@ -3,11 +3,13 @@
@@ -272,32 +395,29 @@ index e2858841..ae1e3daf 100644
 +use smithay::utils::{Logical, Point, Rectangle, Size};
  
  use super::FloatingSpace;
- use crate::layout::tile::Tile;
--use crate::layout::LayoutElement;
-+use crate::layout::{LayoutElement, SizeFrac};
+-use crate::layout::tile::Tile;
++use crate::layout::tile::{FreeGeometry, Tile, TileRestore};
+ use crate::layout::LayoutElement;
 +use crate::utils::center_preferring_top_left_in_area;
  
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub(super) enum Visibility {
-@@ -39,6 +41,17 @@ pub(super) enum MinimizeEvent<Id> {
+@@ -39,6 +41,14 @@ pub(super) enum MinimizeEvent<Id> {
      LeaveFree,
  }
  
-+#[derive(Debug, Clone, Copy, PartialEq)]
-+pub(super) struct Tiled {
-+    /// Where the window is tiled.
-+    target: WindowTile,
-+    /// Its position before, relative to the working area.
-+    pos: Point<f64, SizeFrac>,
-+    /// Its window size before.
-+    size: Size<i32, Logical>,
-+}
 +
++pub(super) enum GeomEvent {
++    Tile(WindowTile),
++    Untile,
++    UserMovedOrResized,
++    WorkingAreaChanged,
++}
 +
  impl<W: LayoutElement> FloatingSpace<W> {
      pub fn is_free_mode(&self) -> bool {
          self.workspace_is_free
-@@ -145,4 +158,80 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -145,4 +155,98 @@ impl<W: LayoutElement> FloatingSpace<W> {
      pub fn unpark_all(&mut self) {
          self.apply_minimize(MinimizeEvent::LeaveFree);
      }
@@ -327,55 +447,73 @@ index e2858841..ae1e3daf 100644
 +        Rectangle::new(area.loc + Point::from((x, y)), Size::from((tile_w, tile_h)))
 +    }
 +
-+    /// Where a window is tiled, if it is.
 +    pub fn tile_of(&self, id: &W::Id) -> Option<WindowTile> {
 +        let idx = self.idx_of(id)?;
-+        self.data[idx].tiled.map(|tiled| tiled.target)
++        match self.tiles[idx].free_geometry {
++            FreeGeometry::Placed => None,
++            FreeGeometry::Tiled { target, .. } => Some(target),
++        }
 +    }
 +
-+    /// Tiles a window, and the first time remembers the place and size it had.
-+    pub fn tile_window(&mut self, id: &W::Id, target: WindowTile) {
-+        let Some(idx) = self.idx_of(id) else {
-+            return;
-+        };
-+
-+        let data = self.data[idx];
-+        let win = self.tiles[idx].window();
-+        let tiled = match data.tiled {
-+            Some(tiled) => Tiled { target, ..tiled },
-+            None => Tiled {
-+                target,
-+                pos: data.pos,
-+                size: win.expected_size().unwrap_or_else(|| win.size()),
-+            },
-+        };
-+        self.data[idx].tiled = Some(tiled);
-+
-+        let rect = self.tile_rect(target, data.size);
++    fn apply_tile_target(&mut self, idx: usize, id: &W::Id, target: WindowTile, animate: bool) {
++        let rect = self.tile_rect(target, self.data[idx].size);
 +        if target != WindowTile::Center {
 +            let area = self.working_area.size;
 +            let width = rect.size.w / f64::max(area.w, 1.) * 100.;
 +            let height = rect.size.h / f64::max(area.h, 1.) * 100.;
-+            self.set_window_width(Some(id), SizeChange::SetProportion(width), true);
-+            self.set_window_height(Some(id), SizeChange::SetProportion(height), true);
++            self.set_window_width_raw(id, SizeChange::SetProportion(width), animate);
++            self.set_window_height_raw(id, SizeChange::SetProportion(height), animate);
 +        }
-+        self.move_to(idx, rect.loc, true);
++        self.move_to(idx, rect.loc, animate);
 +    }
 +
-+    /// Returns a tiled window to the place and size it had.
-+    pub fn untile_window(&mut self, id: &W::Id) {
++    pub(super) fn transition_geometry(&mut self, id: &W::Id, event: GeomEvent) {
 +        let Some(idx) = self.idx_of(id) else {
 +            return;
 +        };
-+        let Some(tiled) = self.data[idx].tiled.take() else {
-+            return;
-+        };
++        match event {
++            GeomEvent::Tile(target) => {
++                let restore = match self.tiles[idx].free_geometry {
++                    FreeGeometry::Tiled { restore, .. } => restore,
++                    FreeGeometry::Placed => {
++                        let win = self.tiles[idx].window();
++                        TileRestore {
++                            pos: self.data[idx].pos,
++                            size: win.expected_size().unwrap_or_else(|| win.size()),
++                        }
++                    }
++                };
++                self.tiles[idx].free_geometry = FreeGeometry::Tiled { target, restore };
++                self.apply_tile_target(idx, id, target, true);
++            }
++            GeomEvent::Untile => {
++                let FreeGeometry::Tiled { restore, .. } = self.tiles[idx].free_geometry else {
++                    return;
++                };
++                self.tiles[idx].free_geometry = FreeGeometry::Placed;
++                self.tiles[idx]
++                    .window_mut()
++                    .request_size_once(restore.size, true);
++                let pos = self.scale_by_working_area(restore.pos);
++                self.move_to(idx, pos, true);
++            }
++            GeomEvent::UserMovedOrResized => {
++                self.tiles[idx].free_geometry = FreeGeometry::Placed;
++            }
++            GeomEvent::WorkingAreaChanged => {
++                if let FreeGeometry::Tiled { target, .. } = self.tiles[idx].free_geometry {
++                    self.apply_tile_target(idx, id, target, false);
++                }
++            }
++        }
++    }
 +
-+        self.tiles[idx]
-+            .window_mut()
-+            .request_size_once(tiled.size, true);
-+        let pos = self.scale_by_working_area(tiled.pos);
-+        self.move_to(idx, pos, true);
++    pub fn tile_window(&mut self, id: &W::Id, target: WindowTile) {
++        self.transition_geometry(id, GeomEvent::Tile(target));
++    }
++
++    pub fn untile_window(&mut self, id: &W::Id) {
++        self.transition_geometry(id, GeomEvent::Untile);
 +    }
  }
 diff --git a/src/layout/free.rs b/src/layout/free.rs
@@ -423,7 +561,7 @@ index d223d814..707ec7df 100644
      pub fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
          if let Some(ws) = self.active_workspace_mut() {
 diff --git a/src/layout/mod.rs b/src/layout/mod.rs
-index edbef60c..b88f5dc1 100644
+index edbef60c..41926353 100644
 --- a/src/layout/mod.rs
 +++ b/src/layout/mod.rs
 @@ -1,4 +1,5 @@
@@ -458,7 +596,15 @@ index edbef60c..b88f5dc1 100644
                      let border_width = move_.tile.effective_border_width().unwrap_or(0.);
                      let corner_radius = move_
                          .tile
-@@ -4380,6 +4392,18 @@ impl<W: LayoutElement> Layout<W> {
+@@ -4339,6 +4351,7 @@ impl<W: LayoutElement> Layout<W> {
+                     InsertPosition::Floating => {
+                         let mut tile = move_.tile;
+                         tile.floating_pos = None;
++                        tile.free_geometry = crate::layout::tile::FreeGeometry::Placed;
+ 
+                         match insert_ws {
+                             InsertWorkspace::Existing(_) => {
+@@ -4380,6 +4393,18 @@ impl<W: LayoutElement> Layout<W> {
                              true,
                              None,
                          );
@@ -477,6 +623,58 @@ index edbef60c..b88f5dc1 100644
                      }
                  }
  
+diff --git a/src/layout/tile.rs b/src/layout/tile.rs
+index 2ff84fa2..d43a4d62 100644
+--- a/src/layout/tile.rs
++++ b/src/layout/tile.rs
+@@ -3,7 +3,7 @@ use std::rc::Rc;
+ 
+ use niri_config::utils::MergeWith as _;
+ use niri_config::{Color, CornerRadius, GradientInterpolation};
+-use niri_ipc::WindowLayout;
++use niri_ipc::{WindowLayout, WindowTile};
+ use smithay::backend::renderer::element::{Element, Kind};
+ use smithay::backend::renderer::gles::GlesRenderer;
+ use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
+@@ -36,6 +36,22 @@ use crate::utils::{
+ };
+ 
+ /// Toplevel window with decorations.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub(super) struct TileRestore {
++    pub(super) pos: Point<f64, SizeFrac>,
++    pub(super) size: Size<i32, Logical>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Default)]
++pub(super) enum FreeGeometry {
++    #[default]
++    Placed,
++    Tiled {
++        target: WindowTile,
++        restore: TileRestore,
++    },
++}
++
+ #[derive(Debug)]
+ pub struct Tile<W: LayoutElement> {
+     /// The toplevel window itself.
+@@ -74,6 +90,7 @@ pub struct Tile<W: LayoutElement> {
+     /// This is generally the last position the tile had when it was floating. It can be unknown if
+     /// the window starts out in the tiling layout.
+     pub(super) floating_pos: Option<Point<f64, SizeFrac>>,
++    pub(super) free_geometry: FreeGeometry,
+ 
+     /// Currently selected preset width index when this tile is floating.
+     pub(super) floating_preset_width_idx: Option<usize>,
+@@ -203,6 +220,7 @@ impl<W: LayoutElement> Tile<W> {
+             restore_to_floating: false,
+             floating_window_size: None,
+             floating_pos: None,
++            free_geometry: FreeGeometry::Placed,
+             floating_preset_width_idx: None,
+             floating_preset_height_idx: None,
+             open_animation: None,
 diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
 index b2937cd9..10d41d2d 100644
 --- a/src/layout/workspace.rs
