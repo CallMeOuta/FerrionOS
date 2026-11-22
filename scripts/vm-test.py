@@ -4566,7 +4566,7 @@ def test_mesa_cpu(vm, args):
     return True, "Mesa CPU versions and both exact frames checked"
 
 
-GL_EXACT_VENUS_TRACE = ("virtio_gpu_cmd_submit_3d",)
+GL_EXACT_VENUS_TRACE = ("virtio_gpu_cmd_ctx_submit",)
 
 
 def test_gl_exact(vm, args):
@@ -4597,10 +4597,10 @@ def test_gl_exact(vm, args):
         low = renderer.lower()
         if "venus" not in low or "llvmpipe" in low:
             return False, f"renderer does not name Zink on Venus ({renderer!r}); see gl-exact.txt"
-        submits = [line for line in vm.trace() if "virtio_gpu_cmd_submit_3d" in line]
+        submits = [line for line in vm.trace() if "virtio_gpu_cmd_ctx_submit" in line]
         (vm.out / "gl-exact-trace.txt").write_text("\n".join(submits) + ("\n" if submits else ""))
         if not submits:
-            return False, "QEMU trace has no virtio_gpu_cmd_submit_3d lines; see gl-exact-trace.txt"
+            return False, "QEMU trace has no virtio_gpu_cmd_ctx_submit lines; see gl-exact-trace.txt"
     expected = "GPU_PIXELS api=gl-exact triangle=17540 mismatches=0 hash=47972063c7a47bfb"
     if expected not in output:
         return False, "missing exact gl-exact pixels; see gl-exact.txt"
