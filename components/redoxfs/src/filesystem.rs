@@ -184,12 +184,23 @@ impl<D: Disk> FileSystem<D> {
 
         // Zero the whole header ring first, so no header left by an older
         // volume on this disk can carry a higher generation than the new one
+        let mut old_headers = Vec::new();
+        for slot in 0..HEADER_RING {
+            let mut old = Header::default();
+            unsafe { disk.read_at(block_offset + slot, &mut old)? };
+            if old.valid() {
+                old_headers.push((old.generation(), slot));
+            }
+        }
+        old_headers.sort_unstable();
         let zero = [0; BLOCK_SIZE as usize];
-        for block in block_offset..block_offset + HEADER_RING {
-            let count = unsafe { disk.write_at(block, &zero)? };
+        let slots = old_headers.iter().map(|&(_, slot)| slot).chain(0..HEADER_RING);
+        for slot in slots {
+            let count = unsafe { disk.write_at(block_offset + slot, &zero)? };
             if count != zero.len() {
                 return Err(Error::new(syscall::error::EIO));
             }
+            disk.flush()?;
         }
 
         let mut header = Header::new(fs_blocks * BLOCK_SIZE);
@@ -220,15 +231,6 @@ impl<D: Disk> FileSystem<D> {
             read_only: false,
         };
 
-        // Write header generation zero
-        let count = unsafe { fs.disk.write_at(fs.block, &fs.header)? };
-        if count != core::mem::size_of_val(&fs.header) {
-            // Wrote wrong number of bytes
-            #[cfg(feature = "log")]
-            log::error!("CREATE: WRONG NUMBER OF BYTES");
-            return Err(Error::new(syscall::error::EIO));
-        }
-
         // Set tree and alloc pointers and write header generation one
         fs.tx(|tx| unsafe {
             let tree = BlockData::new(
@@ -247,15 +249,11 @@ impl<D: Disk> FileSystem<D> {
             tx.header.tree = tx.write_block(tree)?;
             tx.header.alloc = tx.write_block(alloc)?;
             tx.header_changed = true;
+            for index in HEADER_RING + 4..fs_blocks {
+                tx.allocator
+                    .deallocate(BlockAddr::new(index, BlockMeta::default()));
+            }
 
-            Ok(())
-        })?;
-
-        unsafe {
-            fs.reset_allocator()?;
-        }
-
-        fs.tx(|tx| unsafe {
             let mut root = BlockData::new(
                 BlockAddr::new(HEADER_RING + 3, BlockMeta::default()),
                 Node::new(Node::MODE_DIR | 0o755, 0, 0, ctime, ctime_nsec),
@@ -265,6 +263,10 @@ impl<D: Disk> FileSystem<D> {
             assert_eq!(tx.insert_tree(root_ptr)?.id(), 1);
             Ok(())
         })?;
+
+        unsafe {
+            fs.reset_allocator()?;
+        }
 
         fs.cleanup()?;
 
