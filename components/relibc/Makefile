@@ -147,6 +147,8 @@ $(BUILD)/$(PROFILE)/libc.so: $(BUILD)/$(PROFILE)/ld_so.o $(BUILD)/$(PROFILE)/lib
 		-Wl,--gc-sections \
 		-Wl,--dynamic-list=dynlst.txt \
 		-Wl,-z,pack-relative-relocs \
+		-Wl,-z,relro \
+		-Wl,-z,now \
 		-Wl,--sort-common \
 		-Wl,--whole-archive $^ -Wl,--no-whole-archive \
 		-Wl,-soname,libc.so.6 \

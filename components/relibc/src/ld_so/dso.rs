@@ -158,6 +158,7 @@ pub(super) struct Dynamic<'data> {
     symbols: &'data [Sym],
     explicit_addend: bool,
     pltrelsz: usize,
+    bind_now: bool,
 }
 
 impl<'data> Dynamic<'data> {
@@ -986,6 +987,7 @@ impl DSO {
         let mut hash_table = None;
         let mut explicit_addend = None;
         let mut pltrelsz = None;
+        let mut bind_now = false;
         let mut debug = None;
         let mut symtab_ptr = None;
         let (mut rel_ptr, mut rel_len) = (None, None);
@@ -1128,6 +1130,18 @@ impl DSO {
                     assert_eq!(val_usize, size_of::<Sym>());
                 }
 
+                elf::DT_BIND_NOW => bind_now = true,
+                elf::DT_FLAGS => {
+                    if (val as u32) & elf::DF_BIND_NOW != 0 {
+                        bind_now = true;
+                    }
+                }
+                elf::DT_FLAGS_1 => {
+                    if (val as u32) & elf::DF_1_NOW != 0 {
+                        bind_now = true;
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -1228,6 +1242,7 @@ impl DSO {
                 relr,
                 explicit_addend: explicit_addend.unwrap_or_default(),
                 pltrelsz: pltrelsz.unwrap_or_default(),
+                bind_now,
             },
             debug,
         ))
@@ -1413,11 +1428,16 @@ impl DSO {
 
         let jmprel = self.dynamic.jmprel;
         let pltrelsz = self.dynamic.pltrelsz;
+        if jmprel == 0 || pltrelsz == 0 {
+            return Ok(());
+        }
 
-        unsafe {
-            got.add(1).write(core::ptr::addr_of!(*self) as usize);
-            got.add(2)
-                .write(__plt_resolve_trampoline as *const () as usize);
+        if resolve == Resolve::Lazy {
+            unsafe {
+                got.add(1).write(core::ptr::addr_of!(*self) as usize);
+                got.add(2)
+                    .write(__plt_resolve_trampoline as *const () as usize);
+            }
         }
 
         let relsz = if self.dynamic.explicit_addend {
@@ -1494,6 +1514,23 @@ impl DSO {
         Ok(())
     }
 
+    fn protect_relro(&self, phdrs: &[ProgramHeader]) {
+        const MAX_RELRO_PHDRS: usize = 256;
+        assert!(
+            phdrs.len() <= MAX_RELRO_PHDRS,
+            "[ld.so]: program header count exceeds bound"
+        );
+        let base = if self.pie { self.base as usize } else { 0 };
+        for ph in phdrs
+            .iter()
+            .filter(|ph| ph.p_type(NativeEndian) == elf::PT_GNU_RELRO)
+        {
+            let p_vaddr = usize::try_from(ph.p_vaddr(NativeEndian)).expect("always within bounds");
+            let p_memsz = usize::try_from(ph.p_memsz(NativeEndian)).expect("always within bounds");
+            protect_relro_range(base, p_vaddr, p_memsz);
+        }
+    }
+
     pub fn relocate(&self, ph: Option<&[ProgramHeader]>, resolve: Resolve) -> object::Result<()> {
         let global_scope = GLOBAL_SCOPE.read();
 
@@ -1510,12 +1547,22 @@ impl DSO {
             self.static_relocate(&global_scope, reloc)?;
         }
 
+        let effective_resolve = if self.dynamic.bind_now {
+            Resolve::Now
+        } else {
+            resolve
+        };
+
         // ld.so is itself PIE and uses lazy PLT relocations internally,
         // so its own PLT entries must be adjusted by the load base before
         // use.
-        self.lazy_relocate(&global_scope, resolve)?;
+        self.lazy_relocate(&global_scope, effective_resolve)?;
 
         if self.is_me {
+            if !self.phdrs.is_null() && self.phnum > 0 {
+                let my_phdrs = unsafe { slice::from_raw_parts(self.phdrs, self.phnum) };
+                self.protect_relro(my_phdrs);
+            }
             return Ok(());
         }
 
@@ -1560,7 +1607,34 @@ impl DSO {
             }
         }
 
+        self.protect_relro(ph);
+
         Ok(())
+    }
+}
+
+pub(super) fn protect_relro_range(base: usize, p_vaddr: usize, p_memsz: usize) {
+    if p_memsz == 0 {
+        return;
+    }
+    let page_size = Sys::getpagesize();
+    assert!(
+        page_size != 0 && page_size.is_power_of_two(),
+        "[ld.so]: invalid page size"
+    );
+    let relro_start = base
+        .checked_add(p_vaddr)
+        .expect("[ld.so]: PT_GNU_RELRO start overflow");
+    let relro_end = relro_start
+        .checked_add(p_memsz)
+        .expect("[ld.so]: PT_GNU_RELRO end overflow");
+    let start = relro_start & !(page_size - 1);
+    let end = relro_end & !(page_size - 1);
+    if end > start {
+        unsafe {
+            Sys::mprotect(start as *mut c_void, end - start, sys_mman::PROT_READ)
+                .expect("[ld.so]: mprotect PT_GNU_RELRO failed");
+        }
     }
 }
 

@@ -42,13 +42,15 @@ fn static_init(
 ) {
     const SIZEOF_PHDR64: usize = mem::size_of::<ProgramHeader64<Endianness>>();
     const SIZEOF_PHDR32: usize = mem::size_of::<ProgramHeader32<Endianness>>();
+    const MAX_STATIC_AUXV_ENTRIES: usize = 1024;
+    const MAX_STATIC_PHDRS: usize = 256;
 
     let mut phdr_opt = None;
     let mut phent_opt = None;
     let mut phnum_opt = None;
 
     let mut auxv = sp.auxv();
-    loop {
+    for _ in 0..MAX_STATIC_AUXV_ENTRIES {
         let (kind, value) = unsafe { *auxv };
         if kind == AT_NULL {
             break;
@@ -67,6 +69,11 @@ fn static_init(
     let phdr = phdr_opt.expect("failed to find AT_PHDR");
     let phent = phent_opt.expect("failed to find AT_PHENT");
     let phnum = phnum_opt.expect("failed to find AT_PHNUM");
+    assert!(phnum <= MAX_STATIC_PHDRS, "AT_PHNUM exceeds bound");
+
+    let mut pt_phdr_vaddr = None;
+    let mut tls_phdr = None;
+    let mut relro_phdr = None;
 
     for i in 0..phnum {
         let ph_addr = phdr + phent * i;
@@ -96,36 +103,56 @@ fn static_init(
             _ => panic!("unknown AT_PHENT size {}", phent),
         };
 
-        let page_size = Sys::getpagesize();
-        let voff = p_vaddr % page_size;
-        // let vaddr = ph.p_vaddr as usize - voff;
-        let vsize = (p_memsz + voff).div_ceil(page_size) * page_size;
-
-        if p_type == elf::PT_TLS {
-            let valign = if p_align > 0 {
-                p_memsz.div_ceil(p_align) * p_align
-            } else {
-                p_memsz
-            };
-
-            unsafe {
-                STATIC_TCB_MASTER.ptr = p_vaddr as *const u8;
-                STATIC_TCB_MASTER.image_size = p_filesz;
-                STATIC_TCB_MASTER.offset = valign;
-
-                let tcb = Tcb::new(vsize).expect("failed to allocate TCB");
-                tcb.masters_ptr = ptr::addr_of_mut!(STATIC_TCB_MASTER);
-                tcb.masters_len = mem::size_of::<Master>();
-                tcb.copy_masters().expect("failed to copy TLS master data");
-                tcb.activate(
-                    #[cfg(target_os = "redox")]
-                    Some(thr_fd),
-                );
+        match p_type {
+            elf::PT_PHDR if pt_phdr_vaddr.is_none() => {
+                pt_phdr_vaddr = Some(p_vaddr);
             }
-
-            //TODO: Warning on multiple TLS sections?
-            return;
+            elf::PT_TLS if tls_phdr.is_none() => {
+                tls_phdr = Some((p_align, p_filesz, p_memsz, p_vaddr));
+            }
+            elf::PT_GNU_RELRO if relro_phdr.is_none() => {
+                relro_phdr = Some((p_vaddr, p_memsz));
+            }
+            _ => (),
         }
+    }
+
+    let load_base = pt_phdr_vaddr.map_or(0, |vaddr| {
+        phdr.checked_sub(vaddr)
+            .expect("PT_PHDR vaddr exceeds AT_PHDR")
+    });
+
+    if let Some((p_align, p_filesz, p_memsz, p_vaddr)) = tls_phdr {
+        let page_size = Sys::getpagesize();
+        let tls_addr = load_base
+            .checked_add(p_vaddr)
+            .expect("PT_TLS vaddr overflow");
+        let voff = tls_addr % page_size;
+        let vsize = (p_memsz + voff).div_ceil(page_size) * page_size;
+        let valign = if p_align > 0 {
+            p_memsz.div_ceil(p_align) * p_align
+        } else {
+            p_memsz
+        };
+
+        unsafe {
+            STATIC_TCB_MASTER.ptr = tls_addr as *const u8;
+            STATIC_TCB_MASTER.image_size = p_filesz;
+            STATIC_TCB_MASTER.offset = valign;
+
+            let tcb = Tcb::new(vsize).expect("failed to allocate TCB");
+            tcb.masters_ptr = ptr::addr_of_mut!(STATIC_TCB_MASTER);
+            tcb.masters_len = mem::size_of::<Master>();
+            tcb.copy_masters().expect("failed to copy TLS master data");
+            tcb.activate(
+                #[cfg(target_os = "redox")]
+                Some(thr_fd),
+            );
+        }
+    }
+
+    if let Some((p_vaddr, p_memsz)) = relro_phdr {
+        dso::protect_relro_range(load_base, p_vaddr, p_memsz);
     }
 }
 
