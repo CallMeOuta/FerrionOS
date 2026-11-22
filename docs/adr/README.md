@@ -27,3 +27,7 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0021](0021-gpu-reference-guest.md) | The GPU reference guest runs pinned Linux packages only inside QEMU |
 | [0022](0022-toolchain-recipes.md) | How the toolchain and language recipes cross-compile |
 | [0023](0023-porting-recipes.md) | Choices the port recipes make about building and packaging |
+| [0024](0024-tigerstyle.md) | Code FerrionOS owns follows TigerStyle: stated bounds, asserted invariants, no unbounded growth |
+| [0025](0025-tests-without-unit-tests.md) | Changes are proven by VM checks, differential tests and simulation, not unit tests |
+| [0026](0026-measured-targets.md) | Work is stated as a measured target |
+| [0027](0027-monorepo.md) | The kernel, relibc, base and RedoxFS move into this repository |
