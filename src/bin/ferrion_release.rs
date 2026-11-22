@@ -19,9 +19,13 @@ use ferrion_update::format::{
 };
 use ferrion_update::pkgar::verify_pkgar;
 use ferrion_update::{
-    FORMAT_VERSION, MAX_FIXES_IN_INDEX, MAX_MIRRORS, MAX_OBJECT_BYTES, MAX_PACKAGES_IN_INDEX,
-    SIGNATURE_BYTES,
+    FORMAT_VERSION, MAX_FIXES_IN_INDEX, MAX_FRESH_DAYS, MAX_INDEX_BYTES, MAX_MIRRORS,
+    MAX_NEEDS_PER_PACKAGE, MAX_OBJECT_BYTES, MAX_PACKAGES_IN_INDEX, MAX_RELEASES_IN_ROOT,
+    MAX_ROOT_BYTES, MAX_STRING_LEN, MAX_URL_LEN, SIGNATURE_BYTES,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const ED25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
@@ -386,6 +390,168 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_fresh_days(days: u32) -> Result<(), String> {
+    if days == 0 || days > MAX_FRESH_DAYS {
+        return Err(format!(
+            "--fresh-days {days} out of range 1..={MAX_FRESH_DAYS}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fix(fix: &str) -> Result<(), String> {
+    if fix.is_empty() || fix.len() > MAX_STRING_LEN {
+        return Err(format!(
+            "--fix length {} out of range 1..={MAX_STRING_LEN}",
+            fix.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mirror_url(url: &str) -> Result<(), String> {
+    if url.is_empty() || url.len() > MAX_URL_LEN {
+        return Err(format!(
+            "--mirror url length {} out of range 1..={MAX_URL_LEN}",
+            url.len()
+        ));
+    }
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!(
+            "--mirror url must start with http:// or https://: {url}"
+        ));
+    }
+    Ok(())
+}
+
+fn stage_sibling(target: &Path, seq: u64) -> Result<PathBuf, String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("target {} has no parent directory", target.display()))?;
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("target {} has invalid filename", target.display()))?;
+    Ok(parent.join(format!(".{name}.stage-{}-{seq}", std::process::id())))
+}
+
+struct StagedDocument {
+    target: PathBuf,
+    sig_target: PathBuf,
+    tmp_doc: PathBuf,
+    tmp_sig: PathBuf,
+    bytes: Vec<u8>,
+    cleanup: bool,
+}
+
+impl Drop for StagedDocument {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = fs::remove_file(&self.tmp_doc);
+            let _ = fs::remove_file(&self.tmp_sig);
+        }
+    }
+}
+
+struct SignedDocument {
+    staged: StagedDocument,
+    sig: Vec<u8>,
+}
+
+struct VerifiedDocument {
+    staged: StagedDocument,
+}
+
+impl StagedDocument {
+    fn render(
+        target: PathBuf,
+        sig_target: PathBuf,
+        bytes: Vec<u8>,
+        max_bytes: usize,
+        label: &str,
+    ) -> Result<Self, String> {
+        if bytes.len() > max_bytes {
+            return Err(format!(
+                "rendered {label} is {} bytes, exceeds maximum {max_bytes}",
+                bytes.len()
+            ));
+        }
+        assert!(bytes.len() <= max_bytes);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("creating dir {}: {e}", parent.display()))?;
+        }
+        let seq = STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_doc = stage_sibling(&target, seq)?;
+        let tmp_sig = stage_sibling(&sig_target, seq)?;
+        let staged = Self {
+            target,
+            sig_target,
+            tmp_doc,
+            tmp_sig,
+            bytes,
+            cleanup: true,
+        };
+        fs::write(&staged.tmp_doc, &staged.bytes)
+            .map_err(|e| format!("writing {}: {e}", staged.tmp_doc.display()))?;
+        Ok(staged)
+    }
+
+    fn sign(self, signer: &Signer) -> Result<SignedDocument, String> {
+        let sig = signer.sign_file(&self.tmp_doc, &self.tmp_sig)?;
+        Ok(SignedDocument { staged: self, sig })
+    }
+}
+
+impl SignedDocument {
+    fn verify_index(
+        self,
+        hash: &Blake3Hash,
+        pubkey: &PublicKey,
+        release: ReleaseNumber,
+        via: Option<ReleaseNumber>,
+    ) -> Result<VerifiedDocument, String> {
+        verify_index_bytes(&self.staged.bytes, &self.sig, hash, pubkey, release, via)
+            .map_err(|e| format!("self-verification of index.toml failed: {e}"))?;
+        Ok(VerifiedDocument {
+            staged: self.staged,
+        })
+    }
+
+    fn verify_root(
+        self,
+        pubkey: &PublicKey,
+        via: Option<ReleaseNumber>,
+    ) -> Result<VerifiedDocument, String> {
+        verify_root_bytes(&self.staged.bytes, &self.sig, pubkey, via)
+            .map_err(|e| format!("self-verification of root.toml failed: {e}"))?;
+        Ok(VerifiedDocument {
+            staged: self.staged,
+        })
+    }
+}
+
+impl VerifiedDocument {
+    fn publish(mut self) -> Result<(), String> {
+        fs::rename(&self.staged.tmp_sig, &self.staged.sig_target).map_err(|e| {
+            format!(
+                "renaming {} to {}: {e}",
+                self.staged.tmp_sig.display(),
+                self.staged.sig_target.display()
+            )
+        })?;
+        fs::rename(&self.staged.tmp_doc, &self.staged.target).map_err(|e| {
+            format!(
+                "renaming {} to {}: {e}",
+                self.staged.tmp_doc.display(),
+                self.staged.target.display()
+            )
+        })?;
+        self.staged.cleanup = false;
+        Ok(())
+    }
+}
+
 fn resolve_repo_target_dir(repo: &Path, arch: Arch) -> PathBuf {
     let candidate = repo.join(arch.target_triple());
     if candidate.is_dir() {
@@ -446,13 +612,20 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
                 fresh_days = raw
                     .parse::<u32>()
                     .map_err(|_| format!("invalid --fresh-days {raw:?}"))?;
+                validate_fresh_days(fresh_days)?;
             }
             "--security" => security = true,
             "--via" => via = Some(next_value(args, &mut i, "--via")?.parse::<ReleaseNumber>()?),
-            "--fix" => fixes.push(next_value(args, &mut i, "--fix")?),
-            "--mirror" => mirrors.push(MirrorEntry {
-                url: next_value(args, &mut i, "--mirror")?,
-            }),
+            "--fix" => {
+                let fix = next_value(args, &mut i, "--fix")?;
+                validate_fix(&fix)?;
+                fixes.push(fix);
+            }
+            "--mirror" => {
+                let url = next_value(args, &mut i, "--mirror")?;
+                validate_mirror_url(&url)?;
+                mirrors.push(MirrorEntry { url });
+            }
             "--next-key" => {
                 next_key = Some(next_value(args, &mut i, "--next-key")?.parse::<PublicKey>()?)
             }
@@ -671,6 +844,12 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
                 }
                 needs.sort();
                 needs.dedup();
+                if needs.len() > MAX_NEEDS_PER_PACKAGE {
+                    return Err(format!(
+                        "package {name} has {} dependencies, exceeds maximum {MAX_NEEDS_PER_PACKAGE}",
+                        needs.len()
+                    ));
+                }
             }
         }
 
@@ -718,9 +897,8 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         fixes,
         package: packages,
     };
-    let index_text = render_index_toml(&index);
-    let index_bytes = index_text.as_bytes();
-    let index_hash = Blake3Hash::hash_bytes(index_bytes);
+    let index_bytes = render_index_toml(&index).into_bytes();
+    let index_hash = Blake3Hash::hash_bytes(&index_bytes);
 
     let snap_dir = out_dir
         .join("snap")
@@ -728,10 +906,15 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         .join(arch.as_str());
     let index_path = snap_dir.join("index.toml");
     let index_sig_path = snap_dir.join("index.toml.sig");
-    write_atomic(&index_path, index_bytes)?;
-    let index_sig = signer.sign_file(&index_path, &index_sig_path)?;
-    verify_index_bytes(index_bytes, &index_sig, &index_hash, &pubkey, release, via)
-        .map_err(|e| format!("self-verification of index.toml failed: {e}"))?;
+    let verified_index = StagedDocument::render(
+        index_path,
+        index_sig_path,
+        index_bytes,
+        MAX_INDEX_BYTES,
+        "index.toml",
+    )?
+    .sign(&signer)?
+    .verify_index(&index_hash, &pubkey, release, via)?;
 
     let mut channels = prev_root
         .as_ref()
@@ -762,6 +945,12 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     entry.floor = floor;
     entry.security = security;
     entry.via = via;
+    if releases.len() > MAX_RELEASES_IN_ROOT {
+        return Err(format!(
+            "root.toml has {} releases, exceeds maximum {MAX_RELEASES_IN_ROOT}",
+            releases.len()
+        ));
+    }
 
     let keys = match next_key {
         Some(nk) => Some(KeysSection { next: Some(nk) }),
@@ -786,14 +975,21 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         keys,
         mirrors: final_mirrors,
     };
-    let root_text = render_root_toml(&root);
-    let root_bytes = root_text.as_bytes();
+    let root_bytes = render_root_toml(&root).into_bytes();
     let root_path = out_dir.join("root.toml");
     let root_sig_path = out_dir.join("root.toml.sig");
-    write_atomic(&root_path, root_bytes)?;
-    let root_sig = signer.sign_file(&root_path, &root_sig_path)?;
-    verify_root_bytes(root_bytes, &root_sig, &pubkey, via)
-        .map_err(|e| format!("self-verification of root.toml failed: {e}"))?;
+    let verified_root = StagedDocument::render(
+        root_path,
+        root_sig_path,
+        root_bytes,
+        MAX_ROOT_BYTES,
+        "root.toml",
+    )?
+    .sign(&signer)?
+    .verify_root(&pubkey, via)?;
+
+    verified_index.publish()?;
+    verified_root.publish()?;
 
     println!(
         "ferrion-release: signed release {release} (serial {serial}, arch {arch}, {} packages, key {pubkey})",
@@ -831,10 +1027,11 @@ fn cmd_sign_root(args: &[String]) -> Result<(), String> {
             }
             "--fresh-days" => {
                 let raw = next_value(args, &mut i, "--fresh-days")?;
-                fresh_days = Some(
-                    raw.parse::<u32>()
-                        .map_err(|_| format!("invalid --fresh-days {raw:?}"))?,
-                );
+                let parsed = raw
+                    .parse::<u32>()
+                    .map_err(|_| format!("invalid --fresh-days {raw:?}"))?;
+                validate_fresh_days(parsed)?;
+                fresh_days = Some(parsed);
             }
             "--channel" => channel_specs.push(next_value(args, &mut i, "--channel")?),
             "--withdraw" => {
@@ -898,14 +1095,19 @@ fn cmd_sign_root(args: &[String]) -> Result<(), String> {
     let signer = Signer::resolve(key, dev_key_dir)?;
     let pubkey = signer.public_key()?;
 
-    let root_text = render_root_toml(&root);
-    let root_bytes = root_text.as_bytes();
+    let root_bytes = render_root_toml(&root).into_bytes();
     let root_path = out_dir.join("root.toml");
     let root_sig_path = out_dir.join("root.toml.sig");
-    write_atomic(&root_path, root_bytes)?;
-    let root_sig = signer.sign_file(&root_path, &root_sig_path)?;
-    verify_root_bytes(root_bytes, &root_sig, &pubkey, None)
-        .map_err(|e| format!("self-verification of root.toml failed: {e}"))?;
+    let verified_root = StagedDocument::render(
+        root_path,
+        root_sig_path,
+        root_bytes,
+        MAX_ROOT_BYTES,
+        "root.toml",
+    )?
+    .sign(&signer)?
+    .verify_root(&pubkey, None)?;
+    verified_root.publish()?;
 
     println!("ferrion-release: signed root.toml serial {serial} with {pubkey}");
     Ok(())
