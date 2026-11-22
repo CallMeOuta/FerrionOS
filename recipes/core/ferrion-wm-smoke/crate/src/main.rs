@@ -76,7 +76,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut target = renderer.bind(&mut image)?;
                 smithay::desktop::space::render_output::<_, WaylandSurfaceRenderElement<PixmanRenderer>, _, _>(&output, &mut renderer, &mut target, 1.0, 0, [&state.space], &[], &mut damage, [15.0 / 255.0, 14.0 / 255.0, 12.0 / 255.0, 1.0])?;
             }
-            let presentation = backend.present()?;
+            let presentation = match backend.present() {
+                Ok(presentation) => presentation,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error.into()),
+            };
             let handed = Instant::now();
             let presented_ns = monotonic_ns()?;
             scheduler.record_render(handed.duration_since(started));
