@@ -1,0 +1,1725 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 33dd038..527342b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -103,13 +103,11 @@ features = [
+     "backend_session_libseat",
+     "backend_vulkan",
+     "backend_winit",
+-    "backend_x11",
+     "desktop",
+     "renderer_glow",
+     "renderer_multi",
+     "renderer_pixman",
+     "wayland_frontend",
+-    "xwayland",
+ ]
+ 
+ [dependencies.smithay-egui]
+@@ -119,13 +117,15 @@ optional = true
+ 
+ [features]
+ debug = ["egui", "egui_plot", "smithay-egui", "anyhow/backtrace"]
+-default = ["libdisplay-info", "libinput", "systemd", "udev"]
++default = ["libdisplay-info", "libinput", "systemd", "udev", "x11-backend", "xwayland"]
+ libdisplay-info = ["dep:libdisplay-info", "cosmic-comp-config/libdisplay-info"]
+ libinput = ["cosmic-comp-config/input", "smithay/backend_libinput", "udev"]
+ systemd = ["libsystemd", "logind-zbus"]
+ udev = ["smithay/backend_udev"]
+ profile-with-tracy = ["profiling/profile-with-tracy", "tracy-client/default"]
+ profile-with-tracy-gpu = ["profile-with-tracy", "smithay/tracy_gpu_profiling"]
++x11-backend = ["smithay/backend_x11"]
++xwayland = ["smithay/xwayland"]
+ 
+ [profile.dev.package.tiny-skia]
+ opt-level = 2
+diff --git a/src/backend/kms/mod.rs b/src/backend/kms/mod.rs
+index 71549ff..489be1c 100644
+--- a/src/backend/kms/mod.rs
++++ b/src/backend/kms/mod.rs
+@@ -183,8 +183,12 @@ pub fn init_backend(
+     }
+ 
+     // start x11
++    #[cfg(feature = "xwayland")]
+     let primary = *state.backend.kms().primary_node.read().unwrap();
++    #[cfg(feature = "xwayland")]
+     state.launch_xwayland(primary);
++    #[cfg(not(feature = "xwayland"))]
++    state.notify_ready();
+ 
+     Ok(())
+ }
+diff --git a/src/backend/mod.rs b/src/backend/mod.rs
+index 58526b2..d4dad3b 100644
+--- a/src/backend/mod.rs
++++ b/src/backend/mod.rs
+@@ -7,12 +7,14 @@ use cosmic_comp_config::NumlockState;
+ use cosmic_config::CosmicConfigEntry;
+ use cosmic_settings_daemon_config::greeter;
+ use smithay::reexports::{calloop::EventLoop, wayland_server::DisplayHandle};
++#[cfg(feature = "x11-backend")]
+ use tracing::{info, warn};
+ 
+ pub mod render;
+ 
+ pub mod kms;
+ pub mod winit;
++#[cfg(feature = "x11-backend")]
+ pub mod x11;
+ // TODO
+ // pub mod wayland; // tbd in smithay
+@@ -23,7 +25,10 @@ pub fn init_backend_auto(
+     state: &mut State,
+ ) -> Result<()> {
+     let res = match std::env::var("COSMIC_BACKEND") {
++        #[cfg(feature = "x11-backend")]
+         Ok(x) if x == "x11" => x11::init_backend(dh, event_loop, state),
++        #[cfg(not(feature = "x11-backend"))]
++        Ok(x) if x == "x11" => winit::init_backend(dh, event_loop, state),
+         Ok(x) if x == "winit" => winit::init_backend(dh, event_loop, state),
+         Ok(x) if x == "kms" => kms::init_backend(dh, event_loop, state),
+         Ok(_) => unimplemented!("There is no backend with this identifier"),
+@@ -31,6 +36,7 @@ pub fn init_backend_auto(
+             if std::env::var_os("DISPLAY").is_some()
+                 || std::env::var_os("WAYLAND_DISPLAY").is_some()
+             {
++                #[cfg(feature = "x11-backend")]
+                 match x11::init_backend(dh, event_loop, state) {
+                     Ok(_) => Ok(()),
+                     Err(err) => {
+@@ -39,6 +45,8 @@ pub fn init_backend_auto(
+                         winit::init_backend(dh, event_loop, state)
+                     }
+                 }
++                #[cfg(not(feature = "x11-backend"))]
++                winit::init_backend(dh, event_loop, state)
+             } else {
+                 kms::init_backend(dh, event_loop, state)
+             }
+diff --git a/src/backend/render/mod.rs b/src/backend/render/mod.rs
+index 0e22c8e..db497ae 100644
+--- a/src/backend/render/mod.rs
++++ b/src/backend/render/mod.rs
+@@ -871,6 +871,7 @@ where
+                     .map(Into::into),
+                 );
+             }
++            #[cfg(feature = "xwayland")]
+             Stage::OverrideRedirect { surface, location } => {
+                 elements.extend(surface.wl_surface().into_iter().flat_map(|surface| {
+                     render_elements_from_surface_tree::<_, WorkspaceRenderElement<_>>(
+diff --git a/src/backend/winit.rs b/src/backend/winit.rs
+index a8bb75a..341dc1b 100644
+--- a/src/backend/winit.rs
++++ b/src/backend/winit.rs
+@@ -257,7 +257,10 @@ pub fn init_backend(
+         }
+         state.common.refresh();
+     }
++    #[cfg(feature = "xwayland")]
+     state.launch_xwayland(None);
++    #[cfg(not(feature = "xwayland"))]
++    state.notify_ready();
+ 
+     Ok(())
+ }
+diff --git a/src/backend/x11.rs b/src/backend/x11.rs
+index 18ddb8a..75ef488 100644
+--- a/src/backend/x11.rs
++++ b/src/backend/x11.rs
+@@ -384,7 +384,10 @@ pub fn init_backend(
+         }
+         state.common.refresh();
+     }
++    #[cfg(feature = "xwayland")]
+     state.launch_xwayland(None);
++    #[cfg(not(feature = "xwayland"))]
++    state.notify_ready();
+ 
+     event_loop
+         .handle()
+diff --git a/src/config/mod.rs b/src/config/mod.rs
+index f46be46..72b5dc6 100644
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -193,6 +193,7 @@ impl Config {
+             fn handle_new_toolkit_config(config: CosmicTk, state: &mut State) {
+                 if cosmic::icon_theme::default() != config.icon_theme {
+                     cosmic::icon_theme::set_default(config.icon_theme.clone());
++                    #[cfg(feature = "xwayland")]
+                     state.common.update_xwayland_settings();
+                 }
+ 
+@@ -908,6 +909,7 @@ fn config_changed(config: cosmic_config::Config, keys: Vec<String>, state: &mut
+                 let new = get_config::<XwaylandDescaling>(&config, "descale_xwayland");
+                 if new != state.common.config.cosmic_conf.descale_xwayland {
+                     state.common.config.cosmic_conf.descale_xwayland = new;
++                    #[cfg(feature = "xwayland")]
+                     state.common.update_xwayland_settings();
+                 }
+             }
+@@ -915,6 +917,7 @@ fn config_changed(config: cosmic_config::Config, keys: Vec<String>, state: &mut
+                 let new = get_config::<XwaylandEavesdropping>(&config, "xwayland_eavesdropping");
+                 if new != state.common.config.cosmic_conf.xwayland_eavesdropping {
+                     state.common.config.cosmic_conf.xwayland_eavesdropping = new;
++                    #[cfg(feature = "xwayland")]
+                     state
+                         .common
+                         .xwayland_reset_eavesdropping(SERIAL_COUNTER.next_serial());
+diff --git a/src/dbus/mod.rs b/src/dbus/mod.rs
+index dcb7f25..cde1e4a 100644
+--- a/src/dbus/mod.rs
++++ b/src/dbus/mod.rs
+@@ -89,16 +89,17 @@ pub fn ready(common: &Common) -> Result<()> {
+     let conn = Connection::session()?;
+     let proxy = DBusProxy::new(&conn)?;
+ 
++    #[cfg(feature = "xwayland")]
++    let display = common
++        .xwayland_state
++        .as_ref()
++        .map(|s| format!(":{}", s.display))
++        .unwrap_or_default();
++    #[cfg(not(feature = "xwayland"))]
++    let display = String::new();
+     proxy.update_activation_environment(HashMap::from([
+         ("WAYLAND_DISPLAY", common.socket.to_str().unwrap()),
+-        (
+-            "DISPLAY",
+-            &common
+-                .xwayland_state
+-                .as_ref()
+-                .map(|s| format!(":{}", s.display))
+-                .unwrap_or_default(),
+-        ),
++        ("DISPLAY", &display),
+     ]))?;
+ 
+     Ok(())
+diff --git a/src/debug.rs b/src/debug.rs
+index f167213..6bd36e1 100644
+--- a/src/debug.rs
++++ b/src/debug.rs
+@@ -277,6 +277,7 @@ fn format_pointer_focus(focus: Option<PointerFocusTarget>) -> String {
+                     "Window {} ({})",
+                     match window.0.underlying_surface() {
+                         WindowSurface::Wayland(_) => surface.id().protocol_id(),
++                        #[cfg(feature = "xwayland")]
+                         WindowSurface::X11(x) => x.window_id(),
+                     },
+                     window.title()
+@@ -287,6 +288,7 @@ fn format_pointer_focus(focus: Option<PointerFocusTarget>) -> String {
+             }
+             _ => format!("Surface {}", surface.id().protocol_id()),
+         },
++        #[cfg(feature = "xwayland")]
+         Some(X11Surface { surface, toplevel }) => match toplevel {
+             Some(window) => {
+                 format!("Window {} ({})", surface.window_id(), window.title())
+@@ -297,6 +299,7 @@ fn format_pointer_focus(focus: Option<PointerFocusTarget>) -> String {
+             "Stack SSD {} ({})",
+             match stack.active().0.underlying_surface() {
+                 WindowSurface::Wayland(t) => t.wl_surface().id().protocol_id(),
++                #[cfg(feature = "xwayland")]
+                 WindowSurface::X11(x) => x.window_id(),
+             },
+             stack.active().title()
+@@ -305,6 +308,7 @@ fn format_pointer_focus(focus: Option<PointerFocusTarget>) -> String {
+             "Window SSD {} ({})",
+             match window.surface().0.underlying_surface() {
+                 WindowSurface::Wayland(t) => t.wl_surface().id().protocol_id(),
++                #[cfg(feature = "xwayland")]
+                 WindowSurface::X11(x) => x.window_id(),
+             },
+             window.surface().title()
+@@ -324,6 +328,7 @@ fn format_keyboard_focus(focus: Option<KeyboardFocusTarget>) -> String {
+                 "Stacked Window {} ({})",
+                 match x.active_window().0.underlying_surface() {
+                     WindowSurface::Wayland(t) => t.wl_surface().id().protocol_id(),
++                    #[cfg(feature = "xwayland")]
+                     WindowSurface::X11(x) => x.window_id(),
+                 },
+                 x.active_window().title()
+@@ -332,6 +337,7 @@ fn format_keyboard_focus(focus: Option<KeyboardFocusTarget>) -> String {
+                 "Window {} ({})",
+                 match x.active_window().0.underlying_surface() {
+                     WindowSurface::Wayland(t) => t.wl_surface().id().protocol_id(),
++                    #[cfg(feature = "xwayland")]
+                     WindowSurface::X11(x) => x.window_id(),
+                 },
+                 x.active_window().title()
+@@ -342,6 +348,7 @@ fn format_keyboard_focus(focus: Option<KeyboardFocusTarget>) -> String {
+             "Fullscreen {} ({})",
+             match x.0.underlying_surface() {
+                 WindowSurface::Wayland(t) => t.wl_surface().id().protocol_id(),
++                #[cfg(feature = "xwayland")]
+                 WindowSurface::X11(x) => x.window_id(),
+             },
+             x.title()
+diff --git a/src/input/actions.rs b/src/input/actions.rs
+index 4cecbe2..93c4fb7 100644
+--- a/src/input/actions.rs
++++ b/src/input/actions.rs
+@@ -1042,12 +1042,15 @@ impl State {
+             .insert_if_missing(move || ActivationContext::Workspace(handle));
+ 
+         let wayland_display = self.common.socket.clone();
++        #[cfg(feature = "xwayland")]
+         let display = self
+             .common
+             .xwayland_state
+             .as_ref()
+             .map(|s| format!(":{}", s.display))
+             .unwrap_or_default();
++        #[cfg(not(feature = "xwayland"))]
++        let display = String::new();
+ 
+         let mut cmd = std::process::Command::new("/bin/sh");
+ 
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index 17354b7..bcea14b 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: GPL-3.0-only
+ 
++#[cfg(feature = "xwayland")]
++use crate::wayland::handlers::xwayland_keyboard_grab::XWaylandGrabSeat;
+ use crate::{
+     backend::render::ElementFilter,
+     config::{
+@@ -24,9 +26,7 @@ use crate::{
+         zoom::ZoomState,
+     },
+     utils::{prelude::*, quirks::workspace_overview_is_open},
+-    wayland::handlers::{
+-        image_copy_capture::SessionHolder, xwayland_keyboard_grab::XWaylandGrabSeat,
+-    },
++    wayland::handlers::image_copy_capture::SessionHolder,
+ };
+ use calloop::{
+     RegistrationToken,
+@@ -236,7 +236,9 @@ impl State {
+                                         .unwrap() = Some(serial);
+                                 }
+ 
++                                #[cfg(feature = "xwayland")]
+                                 let current_focus = seat.get_keyboard().unwrap().current_focus();
++                                #[cfg(feature = "xwayland")]
+                                 let shortcuts_inhibited = current_focus.as_ref().is_some_and(|f| {
+                                     f.wl_surface()
+                                         .map(|surface| {
+@@ -247,12 +249,14 @@ impl State {
+                                         })
+                                         .unwrap_or(false)
+                                 });
++                                #[cfg(feature = "xwayland")]
+                                 let sym = handle.modified_sym();
+ 
+                                 let result = Self::filter_keyboard_input(
+                                     data, &event, &seat, modifiers, handle, serial,
+                                 );
+ 
++                                #[cfg(feature = "xwayland")]
+                                 if (matches!(result, FilterResult::Forward)
+                                     && !seat.get_keyboard().unwrap().is_grabbed()
+                                     && !shortcuts_inhibited
+@@ -515,6 +519,7 @@ impl State {
+                                         return;
+                                     }
+                                 }
++                                #[cfg(feature = "xwayland")]
+                                 PointerFocusTarget::X11Surface { surface, .. } => {
+                                     if surface
+                                         .surface_under(
+@@ -695,10 +700,13 @@ impl State {
+                 let shortcuts_inhibited = current_focus.as_ref().is_some_and(|f| {
+                     f.wl_surface()
+                         .map(|surface| {
+-                            seat.keyboard_shortcuts_inhibitor_for_surface(&surface)
++                            let inhibited = seat
++                                .keyboard_shortcuts_inhibitor_for_surface(&surface)
+                                 .map(|inhibitor| inhibitor.is_active())
+-                                .unwrap_or(false)
+-                                || seat.has_active_xwayland_grab(&surface)
++                                .unwrap_or(false);
++                            #[cfg(feature = "xwayland")]
++                            let inhibited = inhibited || seat.has_active_xwayland_grab(&surface);
++                            inhibited
+                         })
+                         .unwrap_or(false)
+                 });
+@@ -864,6 +872,7 @@ impl State {
+                     std::mem::drop(shell);
+                 };
+ 
++                #[cfg(feature = "xwayland")]
+                 if pass_event
+                     && !matches!(current_focus, Some(KeyboardFocusTarget::LockSurface(_)))
+                     && !shortcuts_inhibited
+@@ -1610,10 +1619,13 @@ impl State {
+         let shortcuts_inhibited = current_focus.as_ref().is_some_and(|f| {
+             f.wl_surface()
+                 .map(|surface| {
+-                    seat.keyboard_shortcuts_inhibitor_for_surface(&surface)
++                    let inhibited = seat
++                        .keyboard_shortcuts_inhibitor_for_surface(&surface)
+                         .map(|inhibitor| inhibitor.is_active())
+-                        .unwrap_or(false)
+-                        || seat.has_active_xwayland_grab(&surface)
++                        .unwrap_or(false);
++                    #[cfg(feature = "xwayland")]
++                    let inhibited = inhibited || seat.has_active_xwayland_grab(&surface);
++                    inhibited
+                 })
+                 .unwrap_or(false)
+         });
+@@ -2113,6 +2125,7 @@ impl State {
+                             }));
+                         }
+                     }
++                    #[cfg(feature = "xwayland")]
+                     Stage::OverrideRedirect { .. } => {
+                         // Override redirect windows take a grab on their own via
+                         // the Xwayland keyboard grab protocol. Don't focus them via click.
+@@ -2268,6 +2281,7 @@ impl State {
+                             ))));
+                         }
+                     }
++                    #[cfg(feature = "xwayland")]
+                     Stage::OverrideRedirect { surface, location } => {
+                         if let Some((_, surface_loc)) = surface.surface_under(
+                             global_pos.as_logical(),
+diff --git a/src/lib.rs b/src/lib.rs
+index 0fbb38d..6af89e6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -44,6 +44,7 @@ pub mod systemd;
+ pub mod theme;
+ pub mod utils;
+ pub mod wayland;
++#[cfg(feature = "xwayland")]
+ pub mod xwayland;
+ 
+ #[cfg(feature = "profile-with-tracy")]
+@@ -312,6 +313,7 @@ fn refresh(state: &mut State) {
+     state.common.refresh();
+     state::Common::refresh_focus(state);
+     OverlapNotifyState::refresh(state);
++    #[cfg(feature = "xwayland")]
+     state.common.update_x11_stacking_order();
+     state.last_refresh = LastRefresh::At(Instant::now());
+ }
+diff --git a/src/session.rs b/src/session.rs
+index 60e47a5..a0684e4 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -66,6 +66,7 @@ pub fn get_env(common: &Common) -> Result<HashMap<String, String>> {
+             .into_string()
+             .map_err(|_| anyhow!("wayland socket is no valid utf-8 string?"))?,
+     );
++    #[cfg(feature = "xwayland")]
+     if let Some(display) = common.xwayland_state.as_ref().map(|s| s.display) {
+         env.insert(String::from("DISPLAY"), format!(":{}", display));
+     }
+diff --git a/src/shell/element/mod.rs b/src/shell/element/mod.rs
+index 812d572..d4b275c 100644
+--- a/src/shell/element/mod.rs
++++ b/src/shell/element/mod.rs
+@@ -6,6 +6,8 @@ use crate::{
+ use calloop::LoopHandle;
+ use cosmic_comp_config::AppearanceConfig;
+ use id_tree::NodeId;
++#[cfg(feature = "xwayland")]
++use smithay::xwayland::{X11Surface, xwm::X11Relatable};
+ use smithay::{
+     backend::{
+         input::KeyState,
+@@ -33,7 +35,6 @@ use smithay::{
+         Buffer as BufferCoords, IsAlive, Logical, Physical, Point, Rectangle, Scale, Serial, Size,
+     },
+     wayland::seat::WaylandFocus,
+-    xwayland::{X11Surface, xwm::X11Relatable},
+ };
+ use stack::CosmicStackInternal;
+ use window::CosmicWindowInternal;
+@@ -690,8 +691,10 @@ impl CosmicMapped {
+                                     });
+                                     ui.label(match window.0.underlying_surface() {
+                                         WindowSurface::Wayland(_) => "Protocol: Wayland",
++                                        #[cfg(feature = "xwayland")]
+                                         WindowSurface::X11(_) => "Protocol: X11",
+                                     });
++                                    #[cfg(feature = "xwayland")]
+                                     if let WindowSurface::X11(surf) = window.0.underlying_surface()
+                                     {
+                                         let geo = surf.geometry();
+@@ -938,6 +941,7 @@ impl SpaceElement for CosmicMapped {
+     }
+ }
+ 
++#[cfg(feature = "xwayland")]
+ impl X11Relatable for CosmicMapped {
+     fn is_window(&self, window: &X11Surface) -> bool {
+         self.active_window().x11_surface() == Some(window)
+diff --git a/src/shell/element/surface.rs b/src/shell/element/surface.rs
+index a1b5c5d..41c2e14 100644
+--- a/src/shell/element/surface.rs
++++ b/src/shell/element/surface.rs
+@@ -13,6 +13,8 @@ use std::{
+     time::Duration,
+ };
+ 
++#[cfg(feature = "xwayland")]
++use smithay::xwayland::{X11Surface, xwm::X11Relatable};
+ use smithay::{
+     backend::renderer::{
+         ImportAll, Renderer,
+@@ -51,7 +53,6 @@ use smithay::{
+             SurfaceCachedState, ToplevelCachedState, ToplevelSurface, XdgToplevelSurfaceData,
+         },
+     },
+-    xwayland::{X11Surface, xwm::X11Relatable},
+ };
+ use tracing::trace;
+ 
+@@ -79,6 +80,7 @@ impl From<Window> for CosmicSurface {
+     }
+ }
+ 
++#[cfg(feature = "xwayland")]
+ impl From<X11Surface> for CosmicSurface {
+     fn from(s: X11Surface) -> Self {
+         CosmicSurface(Window::new_x11_window(s))
+@@ -97,6 +99,7 @@ impl PartialEq<ToplevelSurface> for CosmicSurface {
+     }
+ }
+ 
++#[cfg(feature = "xwayland")]
+ impl PartialEq<X11Surface> for CosmicSurface {
+     fn eq(&self, other: &X11Surface) -> bool {
+         self.x11_surface() == Some(other)
+@@ -126,6 +129,7 @@ impl CosmicSurface {
+                     .clone()
+                     .unwrap_or_default()
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.title().replace('\0', ""),
+         }
+     }
+@@ -164,6 +168,7 @@ impl CosmicSurface {
+                     .clone()
+                     .unwrap_or_default()
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.class().replace('\0', ""),
+         }
+     }
+@@ -171,6 +176,7 @@ impl CosmicSurface {
+     pub fn pending_size(&self) -> Option<Size<i32, Logical>> {
+         match self.0.underlying_surface() {
+             WindowSurface::Wayland(toplevel) => toplevel.with_pending_state(|state| state.size),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => Some(surface.geometry().size),
+         }
+     }
+@@ -178,6 +184,7 @@ impl CosmicSurface {
+     pub fn has_pending_changes(&self) -> bool {
+         match self.0.underlying_surface() {
+             WindowSurface::Wayland(toplevel) => toplevel.has_pending_changes(),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => false,
+         }
+     }
+@@ -210,6 +217,7 @@ impl CosmicSurface {
+             WindowSurface::Wayland(toplevel) => {
+                 toplevel.with_pending_state(|state| state.size = Some(geo.size.as_logical()))
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => {
+                 let _ = surface.configure(geo.as_logical());
+             }
+@@ -221,6 +229,7 @@ impl CosmicSurface {
+             WindowSurface::Wayland(toplevel) => {
+                 toplevel.with_pending_state(|state| state.bounds = size.into())
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => {}
+         }
+     }
+@@ -230,6 +239,7 @@ impl CosmicSurface {
+             WindowSurface::Wayland(toplevel) => with_toplevel_state(toplevel, pending, |state| {
+                 state.is_some_and(|state| state.states.contains(ToplevelState::Activated))
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.is_activated(),
+         }
+     }
+@@ -243,6 +253,7 @@ impl CosmicSurface {
+                     state.states.unset(ToplevelState::Activated);
+                 }
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => {
+                 let _ = surface.set_activated(activated);
+             }
+@@ -269,6 +280,7 @@ impl CosmicSurface {
+ 
+                 kde_state.or(xdg_state).unwrap_or(true)
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.is_decorated(),
+         }
+     }
+@@ -307,6 +319,7 @@ impl CosmicSurface {
+                     })
+                 }
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => {}
+         }
+     }
+@@ -318,6 +331,7 @@ impl CosmicSurface {
+                     state.is_some_and(|state| state.states.contains(ToplevelState::Resizing))
+                 }))
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => None,
+         }
+     }
+@@ -331,6 +345,7 @@ impl CosmicSurface {
+                     state.states.unset(ToplevelState::Resizing);
+                 }
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => {}
+         }
+     }
+@@ -342,6 +357,7 @@ impl CosmicSurface {
+                     state.is_some_and(|state| state.states.contains(ToplevelState::TiledLeft))
+                 }))
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => None,
+         }
+     }
+@@ -361,6 +377,7 @@ impl CosmicSurface {
+                     state.states.unset(ToplevelState::TiledBottom);
+                 }
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => {}
+         }
+     }
+@@ -370,6 +387,7 @@ impl CosmicSurface {
+             WindowSurface::Wayland(toplevel) => with_toplevel_state(toplevel, pending, |state| {
+                 state.is_some_and(|state| state.states.contains(ToplevelState::Fullscreen))
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.is_fullscreen(),
+         }
+     }
+@@ -383,6 +401,7 @@ impl CosmicSurface {
+                     state.states.unset(ToplevelState::Fullscreen);
+                 }
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => {
+                 let _ = surface.set_fullscreen(fullscreen);
+             }
+@@ -394,6 +413,7 @@ impl CosmicSurface {
+             WindowSurface::Wayland(toplevel) => with_toplevel_state(toplevel, pending, |state| {
+                 state.is_some_and(|state| state.states.contains(ToplevelState::Maximized))
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.is_maximized(),
+         }
+     }
+@@ -407,6 +427,7 @@ impl CosmicSurface {
+                     state.states.unset(ToplevelState::Maximized);
+                 }
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => {
+                 let _ = surface.set_maximized(maximized);
+             }
+@@ -427,6 +448,7 @@ impl CosmicSurface {
+             .get_or_insert_threadsafe(Minimized::default)
+             .0
+             .store(minimized, Ordering::SeqCst);
++        #[cfg(feature = "xwayland")]
+         if let WindowSurface::X11(surface) = self.0.underlying_surface() {
+             let _ = surface.set_hidden(minimized);
+             if !minimized {
+@@ -453,7 +475,7 @@ impl CosmicSurface {
+     }
+ 
+     pub fn set_suspended(&self, suspended: bool) {
+-        if let WindowSurface::Wayland(window) = self.0.underlying_surface() {
++        if let Some(window) = self.0.toplevel() {
+             window.with_pending_state(|state| {
+                 if suspended {
+                     state.states.set(ToplevelState::Suspended);
+@@ -476,6 +498,7 @@ impl CosmicSurface {
+                 }))
+                 .filter(|size| !(size.w == 0 && size.h == 0))
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.min_size(),
+         }
+     }
+@@ -492,6 +515,7 @@ impl CosmicSurface {
+                 }))
+                 .filter(|size| !(size.w == 0 && size.h == 0))
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => surface.max_size(),
+         }
+     }
+@@ -510,6 +534,7 @@ impl CosmicSurface {
+                     .as_ref()
+                     .is_some_and(|configure| configure.serial >= *serial)
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => true,
+         }
+     }
+@@ -524,6 +549,7 @@ impl CosmicSurface {
+                     .as_ref()
+                     .is_some_and(|configure| configure.serial >= *serial)
+             }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_surface) => true,
+         }
+     }
+@@ -565,6 +591,7 @@ impl CosmicSurface {
+                     }
+                 })
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_) => true,
+         }
+     }
+@@ -572,6 +599,7 @@ impl CosmicSurface {
+     pub fn force_configure(&self) -> Option<Serial> {
+         match self.0.underlying_surface() {
+             WindowSurface::Wayland(toplevel) => Some(toplevel.send_configure()),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => {
+                 let _ = surface.configure(None);
+                 None
+@@ -582,6 +610,7 @@ impl CosmicSurface {
+     pub fn send_configure(&self) -> Option<Serial> {
+         match self.0.underlying_surface() {
+             WindowSurface::Wayland(toplevel) => toplevel.send_pending_configure(),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_) => None,
+         }
+     }
+@@ -589,6 +618,7 @@ impl CosmicSurface {
+     pub fn close(&self) {
+         match self.0.underlying_surface() {
+             WindowSurface::Wayland(toplevel) => toplevel.send_close(),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => {
+                 let _ = surface.close();
+             }
+@@ -634,8 +664,9 @@ impl CosmicSurface {
+         relative_pos: Point<f64, Logical>,
+         surface_type: WindowSurfaceType,
+     ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
++        #[cfg(feature = "xwayland")]
+         if let Some(xsurface) = self.x11_surface() {
+-            xsurface
++            return xsurface
+                 .surface_under(relative_pos, Point::default(), surface_type)
+                 .map(|(_surface, surface_offset)| {
+                     (
+@@ -645,20 +676,19 @@ impl CosmicSurface {
+                         },
+                         surface_offset.to_f64(),
+                     )
+-                })
+-        } else {
+-            self.0
+-                .surface_under(relative_pos, surface_type)
+-                .map(|(surface, surface_offset)| {
+-                    (
+-                        PointerFocusTarget::WlSurface {
+-                            surface,
+-                            toplevel: Some(self.clone().into()),
+-                        },
+-                        surface_offset.to_f64(),
+-                    )
+-                })
++                });
+         }
++        self.0
++            .surface_under(relative_pos, surface_type)
++            .map(|(surface, surface_offset)| {
++                (
++                    PointerFocusTarget::WlSurface {
++                        surface,
++                        toplevel: Some(self.clone().into()),
++                    },
++                    surface_offset.to_f64(),
++                )
++            })
+     }
+ 
+     pub fn on_commit(&self) {
+@@ -768,6 +798,7 @@ impl CosmicSurface {
+                     })
+                     .collect()
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(_) => Vec::new(),
+         }
+     }
+@@ -807,6 +838,7 @@ impl CosmicSurface {
+                         .unwrap_or(FRAME_TIME_FILTER),
+                 )
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(surface) => {
+                 let Some(surface) = surface.wl_surface() else {
+                     return Vec::new();
+@@ -833,6 +865,7 @@ impl CosmicSurface {
+         }
+     }
+ 
++    #[cfg(feature = "xwayland")]
+     pub fn x11_surface(&self) -> Option<&X11Surface> {
+         self.0.x11_surface()
+     }
+@@ -888,18 +921,15 @@ impl KeyboardTarget<State> for CosmicSurface {
+         &self,
+         seat: &Seat<State>,
+         data: &mut State,
+-        mut keys: Vec<KeysymHandle<'_>>,
++        keys: Vec<KeysymHandle<'_>>,
+         serial: smithay::utils::Serial,
+     ) {
+-        if self.0.is_x11() {
+-            keys = vec![];
+-        }
+-
+         match self.0.underlying_surface() {
+             WindowSurface::Wayland(toplevel) => {
+                 KeyboardTarget::enter(toplevel.wl_surface(), seat, data, keys, serial)
+             }
+-            WindowSurface::X11(x11) => KeyboardTarget::enter(x11, seat, data, keys, serial),
++            #[cfg(feature = "xwayland")]
++            WindowSurface::X11(x11) => KeyboardTarget::enter(x11, seat, data, vec![], serial),
+         }
+     }
+ 
+@@ -908,6 +938,7 @@ impl KeyboardTarget<State> for CosmicSurface {
+             WindowSurface::Wayland(toplevel) => {
+                 KeyboardTarget::leave(toplevel.wl_surface(), seat, data, serial)
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(x11) => KeyboardTarget::leave(x11, seat, data, serial),
+         }
+     }
+@@ -925,6 +956,7 @@ impl KeyboardTarget<State> for CosmicSurface {
+             WindowSurface::Wayland(toplevel) => {
+                 KeyboardTarget::key(toplevel.wl_surface(), seat, data, key, state, serial, time)
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(x11) => {
+                 KeyboardTarget::key(x11, seat, data, key, state, serial, time)
+             }
+@@ -942,6 +974,7 @@ impl KeyboardTarget<State> for CosmicSurface {
+             WindowSurface::Wayland(toplevel) => {
+                 KeyboardTarget::modifiers(toplevel.wl_surface(), seat, data, modifiers, serial)
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(x11) => {
+                 KeyboardTarget::modifiers(x11, seat, data, modifiers, serial)
+             }
+@@ -955,6 +988,7 @@ impl WaylandFocus for CosmicSurface {
+     }
+ }
+ 
++#[cfg(feature = "xwayland")]
+ impl X11Relatable for CosmicSurface {
+     fn is_window(&self, window: &X11Surface) -> bool {
+         self.x11_surface() == Some(window)
+diff --git a/src/shell/focus/mod.rs b/src/shell/focus/mod.rs
+index 299cb4f..4277936 100644
+--- a/src/shell/focus/mod.rs
++++ b/src/shell/focus/mod.rs
+@@ -1,8 +1,10 @@
++#[cfg(feature = "xwayland")]
++use crate::wayland::handlers::xwayland_keyboard_grab::XWaylandGrabSeatData;
+ use crate::{
+     shell::{CosmicSurface, MinimizedWindow, Shell, Trigger, element::CosmicMapped},
+     state::Common,
+     utils::prelude::*,
+-    wayland::handlers::{xdg_shell::PopupGrabData, xwayland_keyboard_grab::XWaylandGrabSeatData},
++    wayland::handlers::xdg_shell::PopupGrabData,
+ };
+ use indexmap::IndexSet;
+ use smithay::{
+@@ -393,6 +395,7 @@ fn update_focus_state(
+             keyboard.unset_grab(state);
+         }
+         let serial = serial.unwrap_or_else(|| SERIAL_COUNTER.next_serial());
++        #[cfg(feature = "xwayland")]
+         state
+             .common
+             .xwayland_notify_focus_change(target.cloned(), serial);
+@@ -462,12 +465,14 @@ impl Common {
+             .cloned()
+             .collect::<Vec<_>>();
+         for seat in &seats {
++            #[cfg(feature = "xwayland")]
+             let mut xwayland_grab = seat
+                 .user_data()
+                 .get_or_insert(XWaylandGrabSeatData::default)
+                 .grab
+                 .lock()
+                 .unwrap();
++            #[cfg(feature = "xwayland")]
+             xwayland_grab.take_if(|(surface, g)| !g.grab().is_alive() || !surface.alive());
+ 
+             {
+diff --git a/src/shell/focus/order.rs b/src/shell/focus/order.rs
+index 81f23c6..4b266f5 100644
+--- a/src/shell/focus/order.rs
++++ b/src/shell/focus/order.rs
+@@ -2,12 +2,13 @@ use std::{ops::ControlFlow, time::Instant};
+ 
+ use cosmic_comp_config::workspace::WorkspaceLayout;
+ use keyframe::{ease, functions::EaseInOutCubic};
++#[cfg(feature = "xwayland")]
++use smithay::xwayland::X11Surface;
+ use smithay::{
+     desktop::{LayerSurface, PopupKind, PopupManager, layer_map_for_output},
+     output::{Output, OutputNoMode},
+     utils::{Logical, Point},
+     wayland::{session_lock::LockSurface, shell::wlr_layer::Layer},
+-    xwayland::X11Surface,
+ };
+ 
+ use crate::{
+@@ -37,6 +38,7 @@ pub enum Stage<'a> {
+         layer: LayerSurface,
+         location: Point<i32, Global>,
+     },
++    #[cfg(feature = "xwayland")]
+     OverrideRedirect {
+         surface: &'a X11Surface,
+         location: Point<i32, Global>,
+@@ -214,6 +216,7 @@ fn render_input_order_internal<R: 'static>(
+         // overlay redirect windows
+         // they need to be over sticky windows, because they could be popups of sticky windows,
+         // and we can't differenciate that.
++        #[cfg(feature = "xwayland")]
+         for (surface, location) in shell
+             .override_redirect_windows
+             .iter()
+diff --git a/src/shell/focus/target.rs b/src/shell/focus/target.rs
+index 63bf0a5..2031eca 100644
+--- a/src/shell/focus/target.rs
++++ b/src/shell/focus/target.rs
+@@ -15,6 +15,11 @@ use crate::{
+     wayland::handlers::{image_copy_capture::SessionHolder, xdg_shell::popup::get_popup_toplevel},
+ };
+ use id_tree::NodeId;
++#[cfg(feature = "xwayland")]
++use smithay::xwayland::{
++    X11Surface,
++    xwm::{XwmId, XwmOfferData},
++};
+ use smithay::{
+     backend::input::KeyState,
+     desktop::{LayerSurface, PopupKind, WindowSurface, WindowSurfaceType, space::SpaceElement},
+@@ -38,10 +43,6 @@ use smithay::{
+     },
+     utils::{IsAlive, Logical, Point, Serial, Transform},
+     wayland::{seat::WaylandFocus, selection::data_device::WlOfferData, session_lock::LockSurface},
+-    xwayland::{
+-        X11Surface,
+-        xwm::{XwmId, XwmOfferData},
+-    },
+ };
+ 
+ #[derive(Debug, Clone, PartialEq)]
+@@ -50,6 +51,7 @@ pub enum PointerFocusTarget {
+         surface: WlSurface,
+         toplevel: Option<PointerFocusToplevel>,
+     },
++    #[cfg(feature = "xwayland")]
+     X11Surface {
+         surface: X11Surface,
+         toplevel: Option<CosmicSurface>,
+@@ -95,29 +97,29 @@ impl From<KeyboardFocusTarget> for PointerFocusTarget {
+             KeyboardFocusTarget::Element(elem) => {
+                 let window = elem.active_window();
+ 
++                #[cfg(feature = "xwayland")]
+                 if let Some(xsurface) = window.x11_surface() {
+-                    PointerFocusTarget::X11Surface {
++                    return PointerFocusTarget::X11Surface {
+                         surface: xsurface.clone(),
+                         toplevel: Some(window),
+-                    }
+-                } else {
+-                    PointerFocusTarget::WlSurface {
+-                        surface: window.wl_surface().unwrap().into_owned(),
+-                        toplevel: Some(window.into()),
+-                    }
++                    };
++                }
++                PointerFocusTarget::WlSurface {
++                    surface: window.wl_surface().unwrap().into_owned(),
++                    toplevel: Some(window.into()),
+                 }
+             }
+             KeyboardFocusTarget::Fullscreen(elem) => {
++                #[cfg(feature = "xwayland")]
+                 if let Some(xsurface) = elem.x11_surface() {
+-                    PointerFocusTarget::X11Surface {
++                    return PointerFocusTarget::X11Surface {
+                         surface: xsurface.clone(),
+                         toplevel: Some(elem),
+-                    }
+-                } else {
+-                    PointerFocusTarget::WlSurface {
+-                        surface: elem.wl_surface().unwrap().into_owned(),
+-                        toplevel: Some(elem.into()),
+-                    }
++                    };
++                }
++                PointerFocusTarget::WlSurface {
++                    surface: elem.wl_surface().unwrap().into_owned(),
++                    toplevel: Some(elem.into()),
+                 }
+             }
+             KeyboardFocusTarget::LayerSurface(layer) => PointerFocusTarget::WlSurface {
+@@ -141,6 +143,7 @@ impl PointerFocusTarget {
+     fn inner_pointer_target(&self) -> &dyn PointerTarget<State> {
+         match self {
+             PointerFocusTarget::WlSurface { surface, .. } => surface,
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => surface,
+             PointerFocusTarget::StackUI(u) => u,
+             PointerFocusTarget::WindowUI(u) => u,
+@@ -152,6 +155,7 @@ impl PointerFocusTarget {
+     fn inner_touch_target(&self) -> &dyn TouchTarget<State> {
+         match self {
+             PointerFocusTarget::WlSurface { surface, .. } => surface,
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => surface,
+             PointerFocusTarget::StackUI(u) => u,
+             PointerFocusTarget::WindowUI(u) => u,
+@@ -177,6 +181,7 @@ impl PointerFocusTarget {
+                         point,
+                     )
+                 }),
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(x11_surface) => Some((
+                 Self::X11Surface {
+                     surface: x11_surface.clone(),
+@@ -203,6 +208,7 @@ impl PointerFocusTarget {
+                         .find(|(w, _)| w.wl_surface().map(|s2| s == *s2).unwrap_or(false))
+                         .map(|(s, _)| s)
+                 }),
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface {
+                 toplevel: Some(surface),
+                 ..
+@@ -218,6 +224,7 @@ impl PointerFocusTarget {
+             PointerFocusTarget::WlSurface { surface, .. } => {
+                 surface.client().is_some_and(|c| c == *client)
+             }
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => surface
+                 .wl_surface()
+                 .is_some_and(|s| s.client().is_some_and(|c| c == *client)),
+@@ -265,6 +272,7 @@ impl KeyboardFocusTarget {
+         }
+     }
+ 
++    #[cfg(feature = "xwayland")]
+     fn x11_surface(&self) -> Option<X11Surface> {
+         match self {
+             KeyboardFocusTarget::Element(mapped) => mapped.active_window().x11_surface().cloned(),
+@@ -273,6 +281,7 @@ impl KeyboardFocusTarget {
+         }
+     }
+ 
++    #[cfg(feature = "xwayland")]
+     pub fn is_xwm(&self, xwm: XwmId) -> bool {
+         if let Some(surface) = self.x11_surface() {
+             surface.xwm_id().unwrap() == xwm
+@@ -300,6 +309,7 @@ impl IsAlive for PointerFocusTarget {
+         match self {
+             // XXX? does this change anything
+             PointerFocusTarget::WlSurface { surface, .. } => surface.alive(),
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => surface.alive(),
+             PointerFocusTarget::StackUI(e) => e.alive(),
+             PointerFocusTarget::WindowUI(e) => e.alive(),
+@@ -499,6 +509,7 @@ impl TouchTarget<State> for PointerFocusTarget {
+ 
+ pub enum CosmicOfferData<S: Source> {
+     Wl(WlOfferData<S>),
++    #[cfg(feature = "xwayland")]
+     X11(XwmOfferData<S>),
+ }
+ 
+@@ -506,6 +517,7 @@ impl<S: Source> OfferData for CosmicOfferData<S> {
+     fn disable(&self) {
+         match self {
+             CosmicOfferData::Wl(data) => data.disable(),
++            #[cfg(feature = "xwayland")]
+             CosmicOfferData::X11(data) => data.disable(),
+         }
+     }
+@@ -513,6 +525,7 @@ impl<S: Source> OfferData for CosmicOfferData<S> {
+     fn drop(&self) {
+         match self {
+             CosmicOfferData::Wl(data) => data.drop(),
++            #[cfg(feature = "xwayland")]
+             CosmicOfferData::X11(data) => data.drop(),
+         }
+     }
+@@ -520,6 +533,7 @@ impl<S: Source> OfferData for CosmicOfferData<S> {
+     fn validated(&self) -> bool {
+         match self {
+             CosmicOfferData::Wl(data) => data.validated(),
++            #[cfg(feature = "xwayland")]
+             CosmicOfferData::X11(data) => data.validated(),
+         }
+     }
+@@ -545,6 +559,7 @@ impl DndFocus<State> for PointerFocusTarget {
+                 DndFocus::enter(surface, data, dh, source, seat, location, serial)
+                     .map(CosmicOfferData::Wl)
+             }
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => {
+                 DndFocus::enter(surface, data, dh, source, seat, location, serial)
+                     .map(CosmicOfferData::X11)
+@@ -566,10 +581,12 @@ impl DndFocus<State> for PointerFocusTarget {
+                 let offer = match offer {
+                     Some(CosmicOfferData::Wl(offer)) => Some(offer),
+                     None => None,
++                    #[cfg(feature = "xwayland")]
+                     _ => return,
+                 };
+                 DndFocus::motion(surface, data, offer, seat, location, time)
+             }
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => {
+                 let offer = match offer {
+                     Some(CosmicOfferData::X11(offer)) => Some(offer),
+@@ -593,10 +610,12 @@ impl DndFocus<State> for PointerFocusTarget {
+                 let offer = match offer {
+                     Some(CosmicOfferData::Wl(offer)) => Some(offer),
+                     None => None,
++                    #[cfg(feature = "xwayland")]
+                     _ => return,
+                 };
+                 DndFocus::leave(surface, data, offer, seat)
+             }
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => {
+                 let offer = match offer {
+                     Some(CosmicOfferData::X11(offer)) => Some(offer),
+@@ -620,10 +639,12 @@ impl DndFocus<State> for PointerFocusTarget {
+                 let offer = match offer {
+                     Some(CosmicOfferData::Wl(offer)) => Some(offer),
+                     None => None,
++                    #[cfg(feature = "xwayland")]
+                     _ => return,
+                 };
+                 DndFocus::drop(surface, data, offer, seat)
+             }
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => {
+                 let offer = match offer {
+                     Some(CosmicOfferData::X11(offer)) => Some(offer),
+@@ -687,12 +708,16 @@ impl KeyboardTarget<State> for KeyboardFocusTarget {
+         modifiers: ModifiersState,
+         serial: Serial,
+     ) {
++        #[cfg(feature = "xwayland")]
++        let same_x11_surface = replaced
++            .x11_surface()
++            .is_some_and(|s| Some(s) == self.x11_surface());
++        #[cfg(not(feature = "xwayland"))]
++        let same_x11_surface = false;
+         if !replaced
+             .wl_surface()
+             .is_some_and(|s| Some(s) == self.wl_surface())
+-            && !replaced
+-                .x11_surface()
+-                .is_some_and(|s| Some(s) == self.x11_surface())
++            && !same_x11_surface
+         {
+             KeyboardTarget::leave(&replaced, seat, data, serial);
+             KeyboardTarget::enter(self, seat, data, keys, serial);
+@@ -728,6 +753,7 @@ impl WaylandFocus for PointerFocusTarget {
+     fn wl_surface(&self) -> Option<Cow<'_, WlSurface>> {
+         Some(match self {
+             PointerFocusTarget::WlSurface { surface, .. } => Cow::Borrowed(surface),
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => Cow::Owned(surface.wl_surface()?),
+             PointerFocusTarget::ResizeFork(_)
+             | PointerFocusTarget::StackUI(_)
+@@ -740,6 +766,7 @@ impl WaylandFocus for PointerFocusTarget {
+     fn same_client_as(&self, object_id: &ObjectId) -> bool {
+         match self {
+             PointerFocusTarget::WlSurface { surface, .. } => surface.id().same_client_as(object_id),
++            #[cfg(feature = "xwayland")]
+             PointerFocusTarget::X11Surface { surface, .. } => surface
+                 .wl_surface()
+                 .is_some_and(|s| s.id().same_client_as(object_id)),
+diff --git a/src/shell/grabs/mod.rs b/src/shell/grabs/mod.rs
+index 0c5448c..dc9f555 100644
+--- a/src/shell/grabs/mod.rs
++++ b/src/shell/grabs/mod.rs
+@@ -1,5 +1,7 @@
+ use calloop::LoopHandle;
+ use cosmic_settings_config::shortcuts;
++#[cfg(feature = "xwayland")]
++use smithay::xwayland::xwm;
+ use smithay::{
+     input::{
+         Seat,
+@@ -21,7 +23,6 @@ use smithay::{
+         wayland_server::protocol::wl_surface::WlSurface,
+     },
+     utils::{Logical, Point, Serial},
+-    xwayland::xwm,
+ };
+ 
+ use crate::{
+@@ -169,6 +170,7 @@ impl From<ResizeEdge> for xdg_toplevel::ResizeEdge {
+     }
+ }
+ 
++#[cfg(feature = "xwayland")]
+ impl From<xwm::ResizeEdge> for ResizeEdge {
+     #[inline]
+     fn from(x: xwm::ResizeEdge) -> Self {
+diff --git a/src/shell/layout/floating/grabs/resize.rs b/src/shell/layout/floating/grabs/resize.rs
+index cf27545..4084e05 100644
+--- a/src/shell/layout/floating/grabs/resize.rs
++++ b/src/shell/layout/floating/grabs/resize.rs
+@@ -542,6 +542,7 @@ impl ResizeSurfaceGrab {
+                                 floating_layer.space.outputs(),
+                             );
+                         }
++                        #[cfg(feature = "xwayland")]
+                         WindowSurface::X11(surface) => {
+                             let mut geometry = surface.geometry();
+                             geometry.loc += (location - new_location).as_logical();
+diff --git a/src/shell/layout/mod.rs b/src/shell/layout/mod.rs
+index a247541..bdc39f5 100644
+--- a/src/shell/layout/mod.rs
++++ b/src/shell/layout/mod.rs
+@@ -2,10 +2,11 @@
+ 
+ use cosmic_settings_config::{shortcuts::action::Orientation, window_rules::ApplicationException};
+ use regex::{Regex, RegexSet};
++#[cfg(feature = "xwayland")]
++use smithay::xwayland::xwm::WmWindowType;
+ use smithay::{
+     desktop::WindowSurface,
+     wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
+-    xwayland::xwm::WmWindowType,
+ };
+ use tracing::warn;
+ 
+@@ -30,6 +31,7 @@ pub fn is_dialog(window: &CosmicSurface) -> bool {
+                 return true;
+             }
+         }
++        #[cfg(feature = "xwayland")]
+         WindowSurface::X11(surface) => {
+             if surface.is_override_redirect()
+                 || surface.is_popup()
+diff --git a/src/shell/mod.rs b/src/shell/mod.rs
+index 1512ab4..2eb3eea 100644
+--- a/src/shell/mod.rs
++++ b/src/shell/mod.rs
+@@ -34,7 +34,7 @@ use smithay::{
+         space::SpaceElement,
+         utils::{
+             OutputPresentationFeedback, surface_presentation_feedback_flags_from_states,
+-            surface_primary_scanout_output, take_presentation_feedback_surface_tree,
++            surface_primary_scanout_output,
+         },
+     },
+     input::{
+@@ -55,9 +55,12 @@ use smithay::{
+         session_lock::LockSurface,
+         shell::wlr_layer::{KeyboardInteractivity, Layer, LayerSurfaceCachedState},
+         xdg_activation::XdgActivationState,
+-        xwayland_keyboard_grab::XWaylandKeyboardGrab,
+     },
+-    xwayland::X11Surface,
++};
++#[cfg(feature = "xwayland")]
++use smithay::{
++    desktop::utils::take_presentation_feedback_surface_tree,
++    wayland::xwayland_keyboard_grab::XWaylandKeyboardGrab, xwayland::X11Surface,
+ };
+ use tracing::error;
+ 
+@@ -229,6 +232,7 @@ impl ResizeMode {
+ #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+ pub enum ActivationKey {
+     Wayland(WlSurface),
++    #[cfg(feature = "xwayland")]
+     X11(u32),
+ }
+ 
+@@ -238,6 +242,7 @@ impl From<&CosmicSurface> for ActivationKey {
+             WindowSurface::Wayland(toplevel) => {
+                 ActivationKey::Wayland(toplevel.wl_surface().clone())
+             }
++            #[cfg(feature = "xwayland")]
+             WindowSurface::X11(s) => ActivationKey::X11(s.window_id()),
+         }
+     }
+@@ -266,10 +271,12 @@ pub struct Shell {
+     pub pending_windows: Vec<PendingWindow>,
+     pub pending_layers: Vec<PendingLayer>,
+     pub pending_activations: HashMap<ActivationKey, ActivationContext>,
++    #[cfg(feature = "xwayland")]
+     pub override_redirect_windows: Vec<X11Surface>,
+     pub session_lock: Option<SessionLock>,
+     pub seats: Seats,
+     pub previous_workspace_idx: Option<(Serial, WeakOutput, usize)>,
++    #[cfg(feature = "xwayland")]
+     pub xwayland_keyboard_grab: Option<XWaylandKeyboardGrab<State>>,
+ 
+     theme: cosmic::Theme,
+@@ -1583,9 +1590,11 @@ impl Shell {
+             pending_windows: Vec::new(),
+             pending_layers: Vec::new(),
+             pending_activations: HashMap::new(),
++            #[cfg(feature = "xwayland")]
+             override_redirect_windows: Vec::new(),
+             session_lock: None,
+             previous_workspace_idx: None,
++            #[cfg(feature = "xwayland")]
+             xwayland_keyboard_grab: None,
+ 
+             theme,
+@@ -1929,7 +1938,8 @@ impl Shell {
+             })
+             // override redirect window?
+             .or_else(|| {
+-                self.outputs().find(|o| {
++                #[cfg(feature = "xwayland")]
++                return self.outputs().find(|o| {
+                     self.override_redirect_windows.iter().any(|or| {
+                         if or.wl_surface().as_ref() == Some(surface) {
+                             or.geometry()
+@@ -1940,7 +1950,9 @@ impl Shell {
+                             false
+                         }
+                     })
+-                })
++                });
++                #[cfg(not(feature = "xwayland"))]
++                None
+             })
+             // sticky window ?
+             .or_else(|| {
+@@ -2462,7 +2474,9 @@ impl Shell {
+             map.cleanup();
+         }
+ 
++        #[cfg(feature = "xwayland")]
+         self.override_redirect_windows.retain(|or| or.alive());
++        #[cfg(feature = "xwayland")]
+         self.override_redirect_windows
+             .iter()
+             .for_each(|or| or.refresh());
+@@ -2837,6 +2851,7 @@ impl Shell {
+         new_target
+     }
+ 
++    #[cfg(feature = "xwayland")]
+     pub fn map_override_redirect(&mut self, window: X11Surface) {
+         let geo = window.geometry();
+         for (output, overlap) in self.outputs().cloned().filter_map(|o| {
+@@ -4827,6 +4842,7 @@ impl Shell {
+             });
+         }
+ 
++        #[cfg(feature = "xwayland")]
+         self.override_redirect_windows.iter().for_each(|or| {
+             if let Some(wl_surface) = or.wl_surface() {
+                 take_presentation_feedback_surface_tree(
+diff --git a/src/state.rs b/src/state.rs
+index b10c4d8..e45ee9a 100644
+--- a/src/state.rs
++++ b/src/state.rs
+@@ -1,11 +1,14 @@
+ // SPDX-License-Identifier: GPL-3.0-only
+ 
++#[cfg(feature = "x11-backend")]
++use crate::backend::x11::X11State;
++#[cfg(feature = "xwayland")]
++use crate::xwayland::XWaylandState;
+ use crate::{
+     backend::{
+         kms::{KmsGuard, KmsState},
+         render::{GlMultiError, RendererRef},
+         winit::WinitState,
+-        x11::X11State,
+     },
+     config::{CompOutputConfig, Config, ScreenFilter},
+     dbus::a11y_keyboard_monitor::A11yKeyboardMonitorState,
+@@ -27,7 +30,6 @@ use crate::{
+             workspace::{WorkspaceState, WorkspaceUpdateGuard},
+         },
+     },
+-    xwayland::XWaylandState,
+ };
+ use anyhow::Context;
+ use calloop::RegistrationToken;
+@@ -110,8 +112,12 @@ use smithay::{
+         virtual_keyboard::VirtualKeyboardManagerState,
+         xdg_activation::XdgActivationState,
+         xdg_foreign::XdgForeignState,
+-        xwayland_keyboard_grab::XWaylandKeyboardGrabState,
+-        xwayland_shell::XWaylandShellState,
++    },
++};
++#[cfg(feature = "xwayland")]
++use smithay::{
++    wayland::{
++        xwayland_keyboard_grab::XWaylandKeyboardGrabState, xwayland_shell::XWaylandShellState,
+     },
+     xwayland::XWaylandClientData,
+ };
+@@ -200,6 +206,7 @@ pub fn advertised_node_for_client(client: &Client) -> Option<DrmNode> {
+         return normal_client.advertised_drm_node;
+     }
+     // last but not least all xwayland-surfaces should also share a single node
++    #[cfg(feature = "xwayland")]
+     if let Some(xwayland_client) = client.get_data::<XWaylandClientData>() {
+         return xwayland_client.user_data().get::<DrmNode>().cloned();
+     }
+@@ -289,8 +296,11 @@ pub struct Common {
+     pub xdg_activation_state: XdgActivationState,
+     pub xdg_foreign_state: XdgForeignState,
+     pub workspace_state: WorkspaceState<State>,
++    #[cfg(feature = "xwayland")]
+     pub xwayland_scale: Option<f64>,
++    #[cfg(feature = "xwayland")]
+     pub xwayland_state: Option<XWaylandState>,
++    #[cfg(feature = "xwayland")]
+     pub xwayland_shell_state: XWaylandShellState,
+     pub pointer_focus_state: Option<PointerFocusState>,
+ 
+@@ -300,6 +310,7 @@ pub struct Common {
+ 
+ #[derive(Debug)]
+ pub enum BackendData {
++    #[cfg(feature = "x11-backend")]
+     X11(X11State),
+     Winit(WinitState),
+     Kms(KmsState),
+@@ -309,6 +320,7 @@ pub enum BackendData {
+ }
+ 
+ pub enum LockedBackend<'a> {
++    #[cfg(feature = "x11-backend")]
+     X11(&'a mut X11State),
+     Winit(&'a mut WinitState),
+     Kms(KmsGuard<'a>),
+@@ -341,6 +353,7 @@ impl BackendData {
+         }
+     }
+ 
++    #[cfg(feature = "x11-backend")]
+     pub fn x11(&mut self) -> &mut X11State {
+         match self {
+             BackendData::X11(x11_state) => x11_state,
+@@ -360,6 +373,7 @@ impl BackendData {
+             BackendData::Winit(_) => {} // We cannot do this on the winit backend.
+             // Winit has a very strict render-loop and skipping frames breaks atleast the wayland winit-backend.
+             // Swapping with damage (which should be empty on these frames) is likely good enough anyway.
++            #[cfg(feature = "x11-backend")]
+             BackendData::X11(state) => state.schedule_render(output),
+             BackendData::Kms(state) => state.schedule_render(output),
+             _ => unreachable!("No backend was initialized"),
+@@ -379,6 +393,7 @@ impl BackendData {
+             BackendData::Winit(state) => {
+                 state.backend.renderer().import_dmabuf(&dmabuf, None)?;
+             }
++            #[cfg(feature = "x11-backend")]
+             BackendData::X11(state) => {
+                 state.renderer.import_dmabuf(&dmabuf, None)?;
+             }
+@@ -414,6 +429,7 @@ impl BackendData {
+                 }
+             }
+             BackendData::Winit(winit) => Ok(RendererRef::Glow(winit.backend.renderer())),
++            #[cfg(feature = "x11-backend")]
+             BackendData::X11(x11) => Ok(RendererRef::Glow(&mut x11.renderer)),
+             _ => unreachable!("No backend set when getting offscreen renderer"),
+         }
+@@ -423,6 +439,7 @@ impl BackendData {
+         match self {
+             BackendData::Kms(state) => state.update_screen_filter(screen_filter),
+             BackendData::Winit(state) => state.update_screen_filter(screen_filter),
++            #[cfg(feature = "x11-backend")]
+             BackendData::X11(state) => state.update_screen_filter(screen_filter),
+             _ => unreachable!("No backend set when setting screen filters"),
+         }
+@@ -431,6 +448,7 @@ impl BackendData {
+     pub fn lock(&mut self) -> LockedBackend<'_> {
+         match self {
+             BackendData::Kms(state) => LockedBackend::Kms(state.lock_devices()),
++            #[cfg(feature = "x11-backend")]
+             BackendData::X11(state) => LockedBackend::X11(state),
+             BackendData::Winit(state) => LockedBackend::Winit(state),
+             _ => unreachable!("Tried to lock unset backend"),
+@@ -442,6 +460,7 @@ impl LockedBackend<'_> {
+     pub fn all_outputs(&self) -> Vec<Output> {
+         match self {
+             LockedBackend::Kms(state) => state.all_outputs(),
++            #[cfg(feature = "x11-backend")]
+             LockedBackend::X11(state) => state.all_outputs(),
+             LockedBackend::Winit(state) => state.all_outputs(),
+         }
+@@ -530,6 +549,7 @@ impl LockedBackend<'_> {
+                 clock,
+             ),
+             LockedBackend::Winit(state) => state.apply_config_for_outputs(test_only),
++            #[cfg(feature = "x11-backend")]
+             LockedBackend::X11(state) => state.apply_config_for_outputs(test_only),
+         }?;
+ 
+@@ -576,6 +596,7 @@ impl LockedBackend<'_> {
+                 LockedBackend::Winit(_) => {} // We cannot do this on the winit backend.
+                 // Winit has a very strict render-loop and skipping frames breaks atleast the wayland winit-backend.
+                 // Swapping with damage (which should be empty on these frames) is likely good enough anyway.
++                #[cfg(feature = "x11-backend")]
+                 LockedBackend::X11(state) => state.schedule_render(&output),
+                 LockedBackend::Kms(state) => state.schedule_render(&output),
+             }
+@@ -583,7 +604,9 @@ impl LockedBackend<'_> {
+ 
+         loop_handle.insert_idle(move |state| {
+             state.update_inhibitor_locks();
++            #[cfg(feature = "xwayland")]
+             state.common.update_xwayland_settings();
++            #[cfg(feature = "xwayland")]
+             state.common.update_xwayland_primary_output();
+         });
+ 
+@@ -667,7 +690,9 @@ impl State {
+         let xdg_decoration_state = XdgDecorationState::new::<Self>(dh);
+         let session_lock_manager_state =
+             SessionLockManagerState::new::<Self, _>(dh, client_not_sandboxed);
++        #[cfg(feature = "xwayland")]
+         XWaylandKeyboardGrabState::new::<Self>(dh);
++        #[cfg(feature = "xwayland")]
+         let xwayland_shell_state = XWaylandShellState::new::<Self>(dh);
+         PointerConstraintsState::new::<Self>(dh);
+         PointerGesturesState::new::<Self>(dh);
+@@ -794,8 +819,11 @@ impl State {
+                 workspace_state,
+                 a11y_state,
+                 a11y_keyboard_monitor_state,
++                #[cfg(feature = "xwayland")]
+                 xwayland_scale: None,
++                #[cfg(feature = "xwayland")]
+                 xwayland_state: None,
++                #[cfg(feature = "xwayland")]
+                 xwayland_shell_state,
+                 pointer_focus_state: None,
+ 
+@@ -1008,6 +1036,7 @@ impl Common {
+         }
+ 
+         // OR windows
++        #[cfg(feature = "xwayland")]
+         shell.override_redirect_windows.iter().for_each(|or| {
+             if let Some(wl_surface) = or.wl_surface() {
+                 with_surfaces_surface_tree(&wl_surface, processor);
+@@ -1198,6 +1227,7 @@ impl Common {
+             });
+         }
+ 
++        #[cfg(feature = "xwayland")]
+         shell.override_redirect_windows.iter().for_each(|or| {
+             if let Some(wl_surface) = or.wl_surface() {
+                 if let Some(feedback) =
+@@ -1402,6 +1432,7 @@ impl Common {
+             }
+         }
+ 
++        #[cfg(feature = "xwayland")]
+         shell.override_redirect_windows.iter().for_each(|or| {
+             if let Some(wl_surface) = or.wl_surface() {
+                 send_frames_surface_tree(&wl_surface, output, time, THROTTLE, should_send);
+diff --git a/src/systemd.rs b/src/systemd.rs
+index 422d91c..3bfe263 100644
+--- a/src/systemd.rs
++++ b/src/systemd.rs
+@@ -7,17 +7,18 @@ use tracing::{error, warn};
+ 
+ pub fn ready(common: &Common) {
+     if booted() {
++        #[cfg(feature = "xwayland")]
++        let display = common
++            .xwayland_state
++            .as_ref()
++            .map(|s| format!(":{}", s.display))
++            .unwrap_or_default();
++        #[cfg(not(feature = "xwayland"))]
++        let display = String::new();
+         match Command::new("systemctl")
+             .args(["--user", "import-environment", "WAYLAND_DISPLAY", "DISPLAY"])
+             .env("WAYLAND_DISPLAY", &common.socket)
+-            .env(
+-                "DISPLAY",
+-                common
+-                    .xwayland_state
+-                    .as_ref()
+-                    .map(|s| format!(":{}", s.display))
+-                    .unwrap_or_default(),
+-            )
++            .env("DISPLAY", display)
+             .status()
+         {
+             Ok(x) if x.success() => {}
+diff --git a/src/wayland/handlers/compositor.rs b/src/wayland/handlers/compositor.rs
+index 4083bf4..152b435 100644
+--- a/src/wayland/handlers/compositor.rs
++++ b/src/wayland/handlers/compositor.rs
+@@ -2,6 +2,8 @@
+ 
+ use crate::{shell::grabs::SeatMoveGrabState, state::ClientState, utils::prelude::*};
+ use calloop::Interest;
++#[cfg(feature = "xwayland")]
++use smithay::xwayland::XWaylandClientData;
+ use smithay::{
+     backend::renderer::{
+         element::{Kind, surface::KindEvaluation},
+@@ -27,7 +29,6 @@ use smithay::{
+             },
+         },
+     },
+-    xwayland::XWaylandClientData,
+ };
+ use std::{collections::VecDeque, sync::Mutex, time::Duration};
+ 
+@@ -87,6 +88,7 @@ fn layer_surface_check_inital_configure(surface: &LayerSurface) -> bool {
+ }
+ 
+ pub fn client_compositor_state(client: &Client) -> &CompositorClientState {
++    #[cfg(feature = "xwayland")]
+     if let Some(state) = client.get_data::<XWaylandClientData>() {
+         return &state.compositor_state;
+     }
+diff --git a/src/wayland/handlers/mod.rs b/src/wayland/handlers/mod.rs
+index d3d22f0..3d4b28f 100644
+--- a/src/wayland/handlers/mod.rs
++++ b/src/wayland/handlers/mod.rs
+@@ -47,5 +47,7 @@ pub mod workspace;
+ pub mod xdg_activation;
+ pub mod xdg_foreign;
+ pub mod xdg_shell;
++#[cfg(feature = "xwayland")]
+ pub mod xwayland_keyboard_grab;
++#[cfg(feature = "xwayland")]
+ pub mod xwayland_shell;
+diff --git a/src/wayland/handlers/output_configuration.rs b/src/wayland/handlers/output_configuration.rs
+index 1639152..82c7294 100644
+--- a/src/wayland/handlers/output_configuration.rs
++++ b/src/wayland/handlers/output_configuration.rs
+@@ -32,6 +32,7 @@ impl OutputConfigurationHandler for State {
+             output.config_mut().xwayland_primary =
+                 primary_output.as_ref().is_some_and(|o| *o == output);
+         }
++        #[cfg(feature = "xwayland")]
+         self.common.update_xwayland_primary_output();
+         self.common
+             .config
+diff --git a/src/wayland/handlers/security_context.rs b/src/wayland/handlers/security_context.rs
+index b715afd..6adf712 100644
+--- a/src/wayland/handlers/security_context.rs
++++ b/src/wayland/handlers/security_context.rs
+@@ -1,11 +1,11 @@
+ use crate::state::{ClientState, State};
++#[cfg(feature = "xwayland")]
++use smithay::{backend::drm::DrmNode, xwayland::XWaylandClientData};
+ use smithay::{
+-    backend::drm::DrmNode,
+     delegate_security_context,
+     wayland::security_context::{
+         SecurityContext, SecurityContextHandler, SecurityContextListenerSource,
+     },
+-    xwayland::XWaylandClientData,
+ };
+ use std::sync::Arc;
+ use tracing::warn;
+@@ -31,14 +31,15 @@ impl SecurityContextHandler for State {
+                 let drm_node = client_data
+                     .as_ref()
+                     .and_then(|data| data.downcast_ref::<ClientState>())
+-                    .and_then(|data| data.advertised_drm_node)
+-                    .or_else(|| {
+-                        client_data
+-                            .as_ref()
+-                            .and_then(|data| data.downcast_ref::<XWaylandClientData>())
+-                            .and_then(|data| data.user_data().get::<DrmNode>().cloned())
+-                    })
+-                    .or(new_state.advertised_drm_node);
++                    .and_then(|data| data.advertised_drm_node);
++                #[cfg(feature = "xwayland")]
++                let drm_node = drm_node.or_else(|| {
++                    client_data
++                        .as_ref()
++                        .and_then(|data| data.downcast_ref::<XWaylandClientData>())
++                        .and_then(|data| data.user_data().get::<DrmNode>().cloned())
++                });
++                let drm_node = drm_node.or(new_state.advertised_drm_node);
+ 
+                 if let Err(err) = state.common.display_handle.insert_client(
+                     client_stream,
+diff --git a/src/wayland/handlers/selection.rs b/src/wayland/handlers/selection.rs
+index 5abb0b1..9e30773 100644
+--- a/src/wayland/handlers/selection.rs
++++ b/src/wayland/handlers/selection.rs
+@@ -1,14 +1,24 @@
+ // SPDX-License-Identifier: GPL-3.0-only
+ 
+ use crate::state::State;
++use smithay::wayland::selection::SelectionHandler;
++#[cfg(feature = "xwayland")]
+ use smithay::{
+     input::Seat,
+-    wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget},
++    wayland::selection::{SelectionSource, SelectionTarget},
+     xwayland::xwm::XwmId,
+ };
++#[cfg(feature = "xwayland")]
+ use std::os::unix::io::OwnedFd;
++#[cfg(feature = "xwayland")]
+ use tracing::warn;
+ 
++#[cfg(not(feature = "xwayland"))]
++impl SelectionHandler for State {
++    type SelectionUserData = ();
++}
++
++#[cfg(feature = "xwayland")]
+ impl SelectionHandler for State {
+     type SelectionUserData = XwmId;
+ 

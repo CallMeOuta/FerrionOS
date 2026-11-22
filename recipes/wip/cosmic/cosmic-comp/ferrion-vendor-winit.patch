@@ -1,0 +1,33 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 2cd3ac7..4eeae13 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1298,7 +1298,6 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+ [[package]]
+ name = "dpi"
+ version = "0.1.1"
+-source = "git+https://github.com/jackpot51/winit.git?branch=redox-0.30#a3d6894a25b1a29f481c6a0f765df35ae36eaf46"
+ 
+ [[package]]
+ name = "drm"
+@@ -6871,7 +6870,6 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+ [[package]]
+ name = "winit"
+ version = "0.30.12"
+-source = "git+https://github.com/jackpot51/winit.git?branch=redox-0.30#a3d6894a25b1a29f481c6a0f765df35ae36eaf46"
+ dependencies = [
+  "ahash",
+  "android-activity",
+diff --git a/Cargo.toml b/Cargo.toml
+index 4d554e5..33dd038 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -149,7 +149,7 @@ cosmic-client-toolkit = { git = "https://github.com/pop-os//cosmic-protocols", b
+ 
+ [patch.crates-io]
+ smithay = { git = "https://github.com/jackpot51/smithay.git", branch = "redox" }
+-winit = { git = "https://github.com/jackpot51/winit.git", branch = "redox-0.30" }
++winit = { path = "vendor/winit" }
+ # wayland-rs patches using git
+ wayland-backend = { git = "https://github.com/jackpot51/wayland-rs.git", branch = "redox" }
+ wayland-client = { git = "https://github.com/jackpot51/wayland-rs.git", branch = "redox" }

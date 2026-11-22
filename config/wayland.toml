@@ -12,6 +12,7 @@ bash = {}
 cosmic-app-library = {}
 cosmic-comp = {}
 gtk3 = "source"
+libglvnd = {}
 libcosmic-wayland = {}
 iced-wayland = {}
 mesa = {}
