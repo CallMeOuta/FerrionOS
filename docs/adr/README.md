@@ -38,3 +38,4 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0032](0032-gpu-page-flips-and-vblank.md) | DRM page flips and synthesized vertical-blank events on display handles |
 | [0033](0033-venus-on-ferrionos.md) | Mesa's Venus Vulkan driver, its pinned protocol and its render-scheme discovery |
 | [0034](0034-zink-selection.md) | Zink, the EGL platforms that choose it, and its frames in Orbital windows |
+| [0035](0035-signed-update-index.md) | Signed update index, verify-before-parse client and release tool |
