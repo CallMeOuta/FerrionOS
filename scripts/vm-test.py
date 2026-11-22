@@ -1004,6 +1004,81 @@ def test_fdtable_race(vm, args):
     return ok, note or "dup2 and F_DUPFD raced open, dup and close without a deadlock"
 
 
+def test_nvme_queue(vm, args):
+    """Runs nvme-queue-probe for 300 s (128 + (r % 64) 128 KiB records compressed to 4 KiB blocks), failing with /scheme/sys watcher dumps if no progress occurs for 20 s (use --config firefox)."""
+    if not user_bash(vm, args.timeout):
+        return False, "no user Bash prompt after login"
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo NVQRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)NVQRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    status, _ = run("unset MAIL MAILPATH MAILCHECK; " + GUEST_WATCH, 30)
+    if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
+        return False, "the guest watcher did not start"
+
+    duration = 300
+    stall_limit = 20
+    since = vm.mark()
+    started = time.monotonic()
+    status, _ = run(f"(nvme-queue-probe {duration}; echo NVMEQ-EXIT=$?) & true", 30)
+    if status != 0:
+        return False, f"failed to start nvme-queue-probe (status {status})"
+
+    last_progress = time.monotonic()
+    last_round = -1
+    small_rounds = {}
+    done_match = None
+    exit_match = None
+    seen_chars = 0
+    deadline = started + duration + 120
+    while time.monotonic() < deadline:
+        chunk = vm.text(since)[seen_chars:]
+        nl = chunk.rfind("\n")
+        if nl >= 0:
+            lines = chunk[:nl + 1]
+            seen_chars += nl + 1
+            for match in re.finditer(r"(?m)^NVMEQ (\d+)(?: (\d+))?$", lines):
+                last_round = int(match.group(1))
+                last_progress = time.monotonic()
+            for match in re.finditer(r"(?m)^NVMEQ-SMALL (\d+) (\d+)(?: (\d+))?$", lines):
+                small_rounds[match.group(1)] = int(match.group(2))
+                last_progress = time.monotonic()
+            done_match = done_match or re.search(r"(?m)^NVMEQ-DONE rounds=(\d+) elapsed_ms=(\d+)$", lines)
+            exit_match = exit_match or re.search(r"(?m)^NVMEQ-EXIT=(\d+)$", lines)
+            if exit_match:
+                break
+        if time.monotonic() - last_progress >= stall_limit:
+            stalled_s = round(time.monotonic() - started, 1)
+            guest_watch(vm, "watch-failed-1", "context syscall", 60)
+            time.sleep(3)
+            guest_watch(vm, "watch-failed-2", "context syscall", 60)
+            guest_watch(vm, "watch-failed-iostat", "iostat", 60)
+            results = {"stalled": True, "last_round": last_round, "small_rounds": small_rounds, "stalled_after_s": stalled_s}
+            (vm.out / "nvme-queue.json").write_text(json.dumps(results, indent=2) + "\n")
+            return False, f"stalled after {stalled_s}s at round {last_round} (small {small_rounds}, no progress for {stall_limit}s); see {vm.out}"
+        time.sleep(0.5)
+
+    elapsed_s = round(time.monotonic() - started, 1)
+    exit_code = int(exit_match.group(1)) if exit_match else None
+    if exit_code != 0 or not done_match:
+        guest_watch(vm, "watch-failed-1", "context syscall", 60)
+        time.sleep(3)
+        guest_watch(vm, "watch-failed-2", "context syscall", 60)
+        guest_watch(vm, "watch-failed-iostat", "iostat", 60)
+        results = {"stalled": exit_code is None, "exit_code": exit_code, "last_round": last_round, "small_rounds": small_rounds, "elapsed_s": elapsed_s}
+        (vm.out / "nvme-queue.json").write_text(json.dumps(results, indent=2) + "\n")
+        return False, f"nvme-queue-probe failed (exit {exit_code}, last round {last_round}, small {small_rounds}, {elapsed_s}s); see {vm.out}"
+
+    rounds = int(done_match.group(1))
+    probe_ms = int(done_match.group(2))
+    results = {"stalled": False, "rounds": rounds, "small_rounds": small_rounds, "probe_ms": probe_ms, "elapsed_s": elapsed_s}
+    (vm.out / "nvme-queue.json").write_text(json.dumps(results, indent=2) + "\n")
+    return True, f"completed {rounds} rounds (small {small_rounds}) in {probe_ms / 1000:.1f}s without stalling; see {vm.out}"
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -6992,6 +7067,7 @@ TESTS["fork-wake"] = test_fork_wake
 TESTS["ipc-fd"] = test_ipc_fd
 TESTS["jit-signal"] = test_jit_signal
 TESTS["fdtable-race"] = test_fdtable_race
+TESTS["nvme-queue"] = test_nvme_queue
 TESTS["firefox-js"] = test_firefox_js
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call

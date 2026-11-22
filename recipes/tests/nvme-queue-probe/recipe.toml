@@ -1,0 +1,10 @@
+[package]
+description = "Writes large batched bursts across every NVMe submission-queue phase to catch wraparound and command-id hangs"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/nvme-queue-probe" "${COOKBOOK_RECIPE}/nvme-queue-probe.c" ${LDFLAGS}
+"""
