@@ -1,4 +1,3 @@
-#[cfg(target_os = "redox")]
 use redoxfs::key_tool::Secret;
 use redoxfs::key_tool::{
     EXIT_USAGE, MAX_ROLL_RETRIES, Outcome, read_secret, recovery_key, require_seeded_random,
@@ -261,8 +260,27 @@ fn run() -> std::result::Result<(), KeyErr> {
     {
         return Err(KeyErr::usage("invalid operation or options"));
     }
-    let password = read_secret(key_file.as_deref(), "Current passphrase")
-        .map_err(|err| KeyErr::unchanged(err.to_string()))?;
+    let both_on_stdin = key_file.as_deref() == Some("-") && new_key_file.as_deref() == Some("-");
+    let (password, mut stdin_new) = if both_on_stdin {
+        let both = read_secret(Some("-"), "").map_err(|err| KeyErr::unchanged(err.to_string()))?;
+        let split = both.0.iter().position(|&b| b == 0).ok_or_else(|| {
+            KeyErr::usage(
+                "with --key-file - and --new-key-file -, stdin holds OLD, a NUL byte, then NEW",
+            )
+        })?;
+        let old = Secret(both.0[..split].to_vec());
+        let new = Secret(both.0[split + 1..].to_vec());
+        if old.0.is_empty() || new.0.is_empty() || new.0.contains(&0) {
+            return Err(KeyErr::unchanged("passphrase must contain 1 to 4096 bytes"));
+        }
+        (old, Some(new))
+    } else {
+        (
+            read_secret(key_file.as_deref(), "Current passphrase")
+                .map_err(|err| KeyErr::unchanged(err.to_string()))?,
+            None,
+        )
+    };
     let mut volume =
         Volume::open(&path, &password.0).map_err(|err| KeyErr::unchanged(err.to_string()))?;
     let header = volume
@@ -305,8 +323,11 @@ fn run() -> std::result::Result<(), KeyErr> {
         new_secret = if recovery {
             recovery_key().map_err(|err| KeyErr::unchanged(err.to_string()))?
         } else {
-            let value = read_secret(new_key_file.as_deref(), "New passphrase")
-                .map_err(|err| KeyErr::unchanged(err.to_string()))?;
+            let value = match stdin_new.take() {
+                Some(value) => value,
+                None => read_secret(new_key_file.as_deref(), "New passphrase")
+                    .map_err(|err| KeyErr::unchanged(err.to_string()))?,
+            };
             if new_key_file.is_none() {
                 let confirmation = read_secret(None, "Confirm new passphrase")
                     .map_err(|err| KeyErr::unchanged(err.to_string()))?;
