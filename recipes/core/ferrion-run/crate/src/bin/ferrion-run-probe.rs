@@ -39,6 +39,33 @@ mod probe {
             ["hold-socket", address, ref rest @ ..] => hold_socket(address, rest),
             ["use-fd", path] => use_fd(path),
             ["connect", address, path] => connect(address, path),
+            ["escape", scope, secret, marker, victim, home] => ferrion_run::escape::escape(
+                scope.as_ref(),
+                secret.as_ref(),
+                marker,
+                victim.as_ref(),
+                home.as_ref(),
+            ),
+            ["race-swap", scope, outside, seconds] => ferrion_run::escape::race_swap(
+                scope.as_ref(),
+                outside.as_ref(),
+                seconds.parse().unwrap_or(10),
+            ),
+            ["race-read", scope, name, marker, seconds] => ferrion_run::escape::race_read(
+                scope.as_ref(),
+                name,
+                marker,
+                seconds.parse().unwrap_or(10),
+            ),
+            ["schemes"] => ferrion_run::escape::schemes(),
+            ["disk"] => ferrion_run::escape::raw_disk(),
+            ["tree-hash", dir] => ferrion_run::escape::tree_hash(dir.as_ref()),
+            ["clone-escape", dir, outside] => {
+                ferrion_run::escape::clone_escape(dir.as_ref(), outside.as_ref())
+            }
+            ["home"] => ferrion_run::escape::home_report(),
+            ["foreign-filetable"] => ferrion_run::escape::foreign_filetable(),
+            ["hold-filetable", program, ref rest @ ..] => hold_filetable(program, rest),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
@@ -83,6 +110,27 @@ mod probe {
             .exec();
         eprintln!("ferrion-run-probe: cannot run {program}: {error}");
         2
+    }
+
+    fn hold_filetable(program: &str, rest: &[&str]) -> i32 {
+        let thread_fd = ferrion_run::launch::current_thread_fd();
+        let held = match call::dup(thread_fd, b"filetable-binary") {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: cannot open this process's file table: {e}");
+                return 2;
+            }
+        };
+        println!("ferrion-run-probe: holding this process's file table at {held}");
+        let status = std::process::Command::new(program).args(rest).status();
+        let _ = call::close(held);
+        match status {
+            Ok(status) => status.code().unwrap_or(128),
+            Err(e) => {
+                eprintln!("ferrion-run-probe: cannot run {program}: {e}");
+                2
+            }
+        }
     }
 
     fn use_fd(path: &str) -> i32 {

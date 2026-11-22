@@ -6,29 +6,91 @@ use serde::Deserialize;
 #[cfg(target_os = "redox")]
 pub mod launch;
 
+#[cfg(target_os = "redox")]
+pub mod escape;
+
+pub mod sessions;
+
 pub const NETWORK_SCHEMES: [&str; 4] = ["ip", "icmp", "tcp", "udp"];
 
+pub const SCOPED_SCHEMES: [&str; 13] = [
+    "event",
+    "memory",
+    "pipe",
+    "time",
+    "rand",
+    "null",
+    "zero",
+    "sys",
+    "proc",
+    "uds_stream",
+    "uds_dgram",
+    "eventfd",
+    "timerfd",
+];
+
+pub const SYSTEM_PATHS: [&str; 8] = [
+    "/usr", "/bin", "/lib", "/include", "/share", "/ssl", "/etc", "/dev",
+];
+
+pub const PASSED_VARIABLES: [&str; 10] = [
+    "PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "COLUMNS", "LINES", "USER", "LOGNAME",
+];
+
 pub const PROFILE_DIR: &str = "/etc/ferrion-run";
+
+pub const STATE_DIR: &str = ".local/state/ferrion-run";
+
+pub const MAX_GRANTS: usize = 32;
 
 pub const EXIT_REFUSED: i32 = 125;
 
 pub const USAGE: &str = "\
-usage: ferrion-run [--no-network] [--] PROGRAM [ARGUMENT ...]
+usage: ferrion-run [OPTION ...] [--] PROGRAM [ARGUMENT ...]
+       ferrion-run sessions | diff SESSION | apply SESSION | discard SESSION
 
-Starts PROGRAM in a namespace of its own. This release limits network access only:
-  --no-network   PROGRAM gets no ip, icmp, tcp or udp scheme, so it cannot open a
-                 socket; a connection fails as on a machine without a network.
-  --files DIR, --read-only DIR
-                 not available yet: a storage scope waits for a file-access proxy,
-                 and ferrion-run refuses these options instead of ignoring them.
+Starts PROGRAM in a scoped session: a namespace of its own in which the file
+system holds only what the session was given. Every path keeps its real name.
+  --files DIR        DIR, read-write.
+  --read-only PATH   PATH, a folder or a file, read-only.
+  --clone DIR        DIR through a copy-on-write layer: PROGRAM reads DIR, and its
+                     writes and deletes land in the session's layer, never in DIR.
+                     The layer outlives the session: `ferrion-run diff SESSION`
+                     lists what changed, `apply SESSION` writes it into DIR,
+                     `discard SESSION` throws it away, `sessions` lists layers.
+  --no-network       PROGRAM gets no ip, icmp, tcp or udp scheme, so it cannot open
+                     a socket; a connection fails as on a machine without a network.
+  --env NAME         passes the caller's variable NAME on to PROGRAM.
+  --pty              PROGRAM may open new terminals (the pty scheme). WARNING: the
+                     pty scheme is not scoped to the session; give it only to
+                     programs you trust.
+Options may repeat; ferrion-run holds at most 32 folders and files.
 
-PROGRAM never gets the sudo scheme, which would hand it a namespace with everything
-back, unless its profile says allow_sudo = true.
+Besides these, every session gets read-only /usr, /bin, /lib, /include, /share,
+/ssl, /etc and /dev, an empty home of its own (HOME) and an empty /tmp of its own,
+both in ~/.local/state/ferrion-run/SESSION, which the session itself cannot see
+otherwise. Any other path answers as missing. PROGRAM cannot rename or remove a
+folder that holds another of its folders or ferrion-run's sessions. A symlink it
+writes or moves stays, and since programs outside a session follow it,
+ferrion-run lists each such symlink that leads outside its folder when PROGRAM
+exits; `diff` and `apply` list those in a layer. A symlink that was there before
+the session and that PROGRAM re-aims by changing a folder or symlink on its way
+is not listed. The namespace holds the `file` scheme
+of the session and event, memory, pipe, time, rand, null, zero, sys, proc,
+uds_stream, uds_dgram, eventfd and timerfd, plus the network schemes and pty as
+above; never sudo, file-scope, debug, log, shm, chan, audio, the display schemes or
+a disk. Through sys PROGRAM still reads the list of processes and the paths of the
+descriptors every process holds. PROGRAM's environment holds PATH, TERM, LANG,
+LC_ALL, LC_CTYPE, TZ, COLUMNS, LINES, USER, LOGNAME, HOME, TMPDIR and the --env
+variables, nothing else. It starts in the caller's folder when that folder is in
+the session, in its home otherwise.
 
 Every launch closes the descriptors PROGRAM would inherit except standard input,
 output and error, so a socket opened before the launch does not reach it. Standard
 input, output and error must be a terminal, a pipe or the null device: ferrion-run
-refuses to start when one is a socket or a file on disk.
+refuses to start when one is a socket or a file on disk. ferrion-run waits for
+PROGRAM; the session's files close when ferrion-run exits, also for programs
+PROGRAM left running.
 
 A profile in /etc/ferrion-run/<file name of PROGRAM>.toml applies to every launch
 of that program:
@@ -36,15 +98,26 @@ of that program:
   network = false     # the same as --no-network; true leaves the network to the
                       # command line
   allow_sudo = true   # optional, default false. WARNING: through sudo PROGRAM can
-                      # get a namespace with the network and every other scheme,
-                      # so --no-network no longer holds for it.
+                      # get a namespace with the network, every other scheme and
+                      # the whole file system, so the session no longer holds.
 Apart from allow_sudo, a profile and the command line only take access away.
-ferrion-run exits with 125 when it refuses to start PROGRAM.
+ferrion-run exits with 125 when it refuses to start PROGRAM, and with PROGRAM's
+status otherwise.
 ";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrantKind {
+    Files,
+    ReadOnly,
+    Clone,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Options {
     pub no_network: bool,
+    pub pty: bool,
+    pub grants: Vec<(GrantKind, PathBuf)>,
+    pub env: Vec<OsString>,
     pub program: OsString,
     pub args: Vec<OsString>,
 }
@@ -53,24 +126,76 @@ pub struct Options {
 pub enum Command {
     Help,
     Run(Options),
+    Sessions,
+    Diff(String),
+    Apply(String),
+    Discard(String),
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    if let Some(first) = args.peek().and_then(|a| a.to_str()) {
+        let first = first.to_owned();
+        let session = |args: &mut dyn Iterator<Item = OsString>| -> Result<String, String> {
+            let id = args
+                .next()
+                .and_then(|a| a.into_string().ok())
+                .ok_or(format!("{first} needs a session"))?;
+            if args.next().is_some() {
+                return Err(format!("{first} takes one session"));
+            }
+            if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                return Err(format!("{id:?} is not a session name"));
+            }
+            Ok(id)
+        };
+        match first.as_str() {
+            "sessions" => {
+                args.next();
+                return if args.next().is_some() {
+                    Err("sessions takes no argument".into())
+                } else {
+                    Ok(Command::Sessions)
+                };
+            }
+            "diff" | "apply" | "discard" => {
+                args.next();
+                let id = session(&mut args)?;
+                return Ok(match first.as_str() {
+                    "diff" => Command::Diff(id),
+                    "apply" => Command::Apply(id),
+                    _ => Command::Discard(id),
+                });
+            }
+            _ => {}
+        }
+    }
     let mut no_network = false;
+    let mut pty = false;
+    let mut grants = Vec::new();
+    let mut env = Vec::new();
     let program = loop {
         let Some(arg) = args.next() else {
             return Err("no program given".into());
         };
-        match arg.to_str() {
+        let kind = match arg.to_str() {
             Some("-h" | "--help") => return Ok(Command::Help),
-            Some("--no-network") => no_network = true,
-            Some("--files" | "--read-only") => {
-                return Err(format!(
-                    "{} is not available yet: a storage scope waits for a file-access proxy",
-                    arg.to_string_lossy()
-                ));
+            Some("--no-network") => {
+                no_network = true;
+                continue;
             }
+            Some("--pty") => {
+                pty = true;
+                continue;
+            }
+            Some("--env") => {
+                let name = args.next().ok_or("--env needs a variable name")?;
+                env.push(name);
+                continue;
+            }
+            Some("--files") => GrantKind::Files,
+            Some("--read-only") => GrantKind::ReadOnly,
+            Some("--clone") => GrantKind::Clone,
             Some("--") => match args.next() {
                 Some(program) => break program,
                 None => return Err("no program given".into()),
@@ -79,10 +204,20 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                 return Err(format!("unknown option {option}"));
             }
             _ => break arg,
+        };
+        let path = args
+            .next()
+            .ok_or_else(|| format!("{} needs a path", arg.to_string_lossy()))?;
+        if grants.len() >= MAX_GRANTS {
+            return Err(format!("more than {MAX_GRANTS} folders and files"));
         }
+        grants.push((kind, PathBuf::from(path)));
     };
     Ok(Command::Run(Options {
         no_network,
+        pty,
+        grants,
+        env,
         program,
         args: args.collect(),
     }))
@@ -115,11 +250,21 @@ pub fn parse_profile(text: &str) -> Result<Profile, String> {
     Ok(profile)
 }
 
-pub fn child_schemes(caller: &[String], withhold_network: bool, allow_sudo: bool) -> Vec<String> {
+pub fn child_schemes(
+    caller: &[String],
+    withhold_network: bool,
+    allow_sudo: bool,
+    pty: bool,
+) -> Vec<String> {
     caller
         .iter()
-        .filter(|name| !(withhold_network && NETWORK_SCHEMES.contains(&name.as_str())))
-        .filter(|name| allow_sudo || name.as_str() != "sudo")
+        .filter(|name| {
+            let name = name.as_str();
+            SCOPED_SCHEMES.contains(&name)
+                || (!withhold_network && NETWORK_SCHEMES.contains(&name))
+                || (allow_sudo && name == "sudo")
+                || (pty && name == "pty")
+        })
         .cloned()
         .collect()
 }

@@ -39,7 +39,7 @@ When a process starts another program, the `namespace` is inherited,
 so a new process can only access the schemes, files and directories that its parent process had available.
 If a parent process wants to limit (**sandbox**) a child process, it would do so as part of creating the child process.
 
-`init` starts in the root namespace, which `bootstrap` creates. `login` has code that builds a namespace for the user who logs in: `apply_login_schemes` in `src/bin/login.rs` of the `userutils` source (recipe `recipes/core/userutils`) reads the user's list of schemes from `/etc/login_schemes.toml`, creates a namespace with those schemes, and enters it before the user's shell starts. `config/base.toml` writes that file: `root` gets every scheme (`"*"`) and `user` gets a list of schemes. A namespace created this way can create schemes only when its list holds the entry `namespace:scheme-create`, a right rather than a scheme, and the namespace it is created from can create schemes too. `root`'s list holds it, so that the installer, run by root, can serve the file system of the disk it installs to. `ferrion-run` does not ask for the right when it builds a namespace.
+`init` starts in the root namespace, which `bootstrap` creates. `login` has code that builds a namespace for the user who logs in: `apply_login_schemes` in `src/bin/login.rs` of the `userutils` source (recipe `recipes/core/userutils`) reads the user's list of schemes from `/etc/login_schemes.toml`, creates a namespace with those schemes, and enters it before the user's shell starts. `config/base.toml` writes that file: `root` gets every scheme (`"*"`) and `user` gets a list of schemes. A namespace created this way can create schemes only when its list holds the entry `namespace:scheme-create`, a right rather than a scheme, and the namespace it is created from can create schemes too. `root`'s list holds it, so that the installer, run by root, can serve the file system of the disk it installs to. `ferrion-run` does not ask for the right when it builds a namespace. In a namespace that `ferrion-run` builds, the name `file` belongs to the session's file-access proxy instead of the disk's file system, so every path a program in the session opens is answered by the proxy ([Security](./security.md#scoped-sessions)).
 
 FerrionOS also provides a `null` namespace.
 A process that exists in the `null` namespace cannot open files or schemes by name, and can only use file descriptors that are already open.
@@ -47,7 +47,7 @@ This is a security mechanism, mostly used to by daemons running with `root` perm
 A daemon will typically open its scheme and any resources it needs during its initialization,
 then it will ask the kernel to place it in the `null` namespace so no further resources can be opened.
 
-FerrionOS has not tested how well a namespace, the `null` namespace included, confines the programs in it. Sandboxing of user programs is planned. See [Security](./security.md).
+FerrionOS tests the file system of a `ferrion-run` session as a boundary, and no other namespace, the `null` namespace included. See [Security](./security.md).
 
 ## Providing a Scheme
 

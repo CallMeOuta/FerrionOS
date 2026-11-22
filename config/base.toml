@@ -80,6 +80,7 @@ schemes = [
   "linux-session",
   # File schemes
   "file",
+  "file-scope",
   # Display schemes
   "display*",
   # Other schemes

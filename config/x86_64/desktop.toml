@@ -31,10 +31,11 @@ ion = {}
 nushell = {}
 zsh = {}
 ferrion-cli = {}
-# The program launcher of security roadmap S12: `ferrion-run --no-network PROGRAM`.
-# It only takes access away (the network schemes, the sudo scheme, inherited descriptors)
-# and is not setuid; scripts/vm-test.py ferrion-run checks it.
+# The program launcher of security roadmap S12 and ferrion-scope, the root service that serves
+# each ferrion-run session's file scheme through a proxy running as the caller; neither is
+# setuid. scripts/vm-test.py ferrion-run and agent-scope check them.
 ferrion-run = {}
+ferrion-scope = {}
 # Security roadmap S12: run as `user`, it checks that signals sent through process handles
 # follow kill()'s permission rule; scripts/vm-test.py signal-handle runs it.
 signal-handle-probe = {}

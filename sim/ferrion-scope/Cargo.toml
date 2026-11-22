@@ -1,0 +1,16 @@
+[package]
+name = "ferrion-scope-sim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Deterministic simulation test of ferrion-scope's path resolution for FerrionOS"
+
+[dependencies]
+ferrion-scope = { path = "../../recipes/core/ferrion-scope/crate" }
+
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+
+[workspace]

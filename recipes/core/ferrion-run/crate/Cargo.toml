@@ -1,6 +1,6 @@
 [package]
 name = "ferrion-run"
-description = "FerrionOS program launcher that withholds the network"
+description = "FerrionOS program launcher: scoped sessions that hold only the folders they are given"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -15,6 +15,8 @@ name = "ferrion-run-probe"
 path = "src/bin/ferrion-run-probe.rs"
 
 [dependencies]
+ferrion-scope = { path = "../../ferrion-scope/crate" }
+libc = "0.2.191"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

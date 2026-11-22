@@ -1,5 +1,5 @@
 [package]
-description = "FerrionOS program launcher that withholds the network"
+description = "FerrionOS program launcher: scoped sessions that hold only the folders and schemes they are given"
 
 [build]
 template = "custom"

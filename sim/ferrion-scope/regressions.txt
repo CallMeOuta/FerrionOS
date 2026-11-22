@@ -1,0 +1,4 @@
+1374 200 a hidden folder that holds a granted folder hid the way to it (the session's own home under ferrion-run's sessions, with --files ~)
+140 200 a missing folder inside one grant on the way to another grant ended the walk
+0 200 a folder handle kept across a rename, with a symlink put in the folder's place, was trusted on later relative lookups
+19 200 a session renamed a folder above another granted folder, so that grant's path named something else

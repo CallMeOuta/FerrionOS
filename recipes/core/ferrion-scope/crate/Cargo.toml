@@ -1,0 +1,27 @@
+[package]
+name = "ferrion-scope"
+description = "FerrionOS file-access proxy: a program started by ferrion-run sees only the folders it was granted"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "ferrion-scoped"
+path = "src/bin/ferrion-scoped.rs"
+
+[[bin]]
+name = "ferrion-scope-proxy"
+path = "src/bin/ferrion-scope-proxy.rs"
+
+[dependencies]
+
+[target.'cfg(target_os = "redox")'.dependencies]
+libc = "0.2.191"
+libredox = { version = "0.1.25", default-features = false, features = ["call", "std", "mkns"] }
+ioslice = "0.6"
+redox_syscall = { version = "0.9.5", features = ["std"] }
+redox-scheme = "0.12"
+
+[profile.release]
+panic = "abort"

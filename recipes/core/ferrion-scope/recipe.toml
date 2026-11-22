@@ -1,0 +1,11 @@
+[package]
+description = "FerrionOS file-access proxy for ferrion-run's storage scopes"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+mkdir -pv "${COOKBOOK_STAGE}/usr/lib/init.d"
+cp "${COOKBOOK_RECIPE}/20_ferrion-scoped.service" "${COOKBOOK_STAGE}/usr/lib/init.d/20_ferrion-scoped.service"
+"""

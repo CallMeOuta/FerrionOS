@@ -1,0 +1,7 @@
+[unit]
+description = "Storage scopes for ferrion-run"
+requires_weak = ["00_base.target"]
+
+[service]
+cmd = "ferrion-scoped"
+type = "notify"

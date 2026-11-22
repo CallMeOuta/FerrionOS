@@ -3569,8 +3569,8 @@ def ferrion_run_checks(vm, args, port, seen):
     status, output = run("profile", f"ferrion-run ferrion-run-probe connect {address} /probe-profile")
     if "/probe-profile" in seen or status != 1 or "cannot connect" not in output:
         problems.append(f"the profile /etc/ferrion-run/ferrion-run-probe.toml did not withhold the network (exit {status})")
-    status, output = run("inherit", f"ferrion-run-probe hold-socket {address} -- "
-                                    "ferrion-run --no-network ferrion-run-probe use-fd /held-launched")
+    status, output = run("inherit", f"ferrion-run-probe hold-socket {address} -- ferrion-run --no-network "
+                                    "--env FERRION_RUN_PROBE_FDS ferrion-run-probe use-fd /held-launched")
     if "/held-launched" in seen or status != 1 or re.search(r"descriptor \S+ usable:", output):
         problems.append(f"a socket opened before the launch worked in the program (exit {status})")
 
@@ -3580,9 +3580,9 @@ def ferrion_run_checks(vm, args, port, seen):
     status, output = run("stdin", f"ferrion-run-probe hold-socket {address} --stdin -- ferrion-run --no-network true")
     if status != 125 or "is a socket" not in output:
         problems.append(f"a socket as standard input was not refused (exit {status})")
-    status, output = run("files", "ferrion-run --files /tmp ls")
-    if status != 125 or "file-access proxy" not in output:
-        problems.append(f"--files was not refused (exit {status})")
+    status, output = run("files", "ferrion-run --files /home/user/no-such-folder ls")
+    if status != 125 or "no-such-folder" not in output:
+        problems.append(f"--files with a missing folder was not refused (exit {status})")
 
     (vm.out / "ferrion-run.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
     if controls:
@@ -6020,6 +6020,362 @@ def reboot_to_user(vm, args):
     return None
 
 
+SCOPE_MARKER = "ferrion-scope-secret-5c7d"
+SCOPE_ROUTES = ["start-folder", "absolute", "scheme-path", "dotdot", "dotdot-many", "stat", "symlink-absolute",
+                "symlink-relative", "symlink-dir", "symlink-root", "symlink-scheme", "symlink-chain",
+                "symlink-dir-write", "openat-dotdot", "openat-absolute", "chdir-up", "list-outside", "hardlink-in",
+                "hardlink-out", "rename-in", "rename-out", "write-out", "delete-out", "race-in-session",
+                "inherited-fd", "home-config", "env-home", "env-token", "sessions-folder", "scheme-sudo",
+                "scheme-file-scope", "scheme-linux-session", "scheme-pty", "scheme-debug", "scheme-shm", "scheme-log",
+                "raw-disk"]
+SCOPE_OPTIONAL = {"scheme-linux-session", "raw-disk", "symlink-scheme", "scheme-debug", "scheme-shm"}
+SCOPE_STALE_ROUTES = ["stale-dir", "stale-link"]
+SCOPE_LINKS = ("cd /home/user/scope && ln -s /home/user/.ssh to-ssh && ln -s inside in && mkdir -p d d2/sub && "
+               "ln -s ../.. d/up && ln -s ../in d/back && ln -s ../../x d2/sub/l && mv d2/sub/l l2 && mv p/q/old old2")
+SCOPE_LINKS_OUT = {"/home/user/scope/to-ssh", "/home/user/scope/d/up", "/home/user/scope/l2", "/home/user/scope/old2"}
+SCOPE_SCHEMES = {"event", "memory", "pipe", "time", "rand", "null", "zero", "sys", "proc", "uds_stream", "uds_dgram",
+                 "eventfd", "timerfd", "ip", "icmp", "tcp", "udp", "file"}
+SCOPE_TOP = {"bin", "dev", "etc", "home", "include", "lib", "share", "ssl", "tmp", "usr"}
+SCOPE_VARS = {"PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "COLUMNS", "LINES", "USER", "LOGNAME", "HOME", "TMPDIR"}
+
+
+def scope_routes(output):
+    return dict(re.findall(r"ROUTE (\S+) (REACHED|REFUSED)", output))
+
+
+def scope_setup(vm):
+    """Creates, as `user`, the folder a session gets (~/scope) and the files outside it the probe goes after."""
+    return guest_run(vm, "scset", "rm -rf /home/user/scope /home/user/outside; mkdir -p /home/user/scope "
+                     f"/home/user/outside /home/user/.ssh && echo {SCOPE_MARKER} > /home/user/outside/secret.txt && "
+                     f"echo {SCOPE_MARKER} > /home/user/.ssh/id_probe && echo victim > /home/user/outside/victim.txt && "
+                     "mkdir -p /home/user/.local/state/ferrion-run/decoy-route", 60)
+
+
+def scope_escape(vm, tag, launcher):
+    line = (f"cd /home/user/outside && PROBE_TOKEN={SCOPE_MARKER} {launcher}ferrion-run-probe escape /home/user/scope "
+            f"/home/user/outside/secret.txt {SCOPE_MARKER} /home/user/outside/victim.txt /home/user "
+            "3</home/user/outside/secret.txt")
+    return guest_run(vm, tag, line, 600)
+
+
+def test_agent_scope(vm, args):
+    """Security roadmap S12, storage scopes (product roadmap, agent items 1 and 3): as `user`, ferrion-run-probe escape tries every route out of a folder (absolute and /scheme/file paths, .., symlinks in and out, openat on a folder descriptor, chdir, listing, hard links, renames, writes and deletes outside, a rename-and-symlink race inside the session and between two sessions, an inherited descriptor, the starting folder, the caller's home, environment and ferrion-run's own sessions, and the sudo, file-scope, linux-session, pty, debug, shm, log and disk schemes). Each route must reach the secret without the launcher and be refused under `ferrion-run --files ~/scope`; so must stale-dir and stale-link, a folder and a file descriptor kept while their folder is renamed and a symlink to the secret's folder takes its name (an openat and a flinkat through them), which reach only a decoy without the launcher; as root, a disk must be readable without it and not under it. Then the session's namespace, its top folder and its fresh home and environment (AS2), an explicit read-only share, the hiding of ferrion-run's sessions inside a granted home, also against renaming a folder above them (unhide-rename), a session started by a program that leaks a handle to its own file table (foreign-filetable: without the launcher the probe can copy that table and so take every descriptor in it; under it the session must start and hold no such handle), and the list of symlinks the session left that lead outside its folder (written there, written and then moved, and one that was there before the session and that it moved to a depth where its relative target leaves the folder), printed when it ends."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    log, controls, problems, notes = [], [], [], []
+
+    def run(tag, line, timeout=120):
+        status, output = guest_run(vm, tag, line, timeout)
+        log.append(f"$ {line}\nexit {status}\n{output}\n")
+        return status, output
+
+    status, _ = run("scinit", "ferrion-run true")
+    if status != 0:
+        problems.append(f"ferrion-run true exited {status}")
+    scope_setup(vm)
+    status, output = scope_escape(vm, "scfree", "")
+    log.append(f"[without ferrion-run] exit {status}\n{output}\n")
+    free = scope_routes(output)
+    run("screset", "echo victim > /home/user/outside/victim.txt; rm -rf /home/user/scope; mkdir /home/user/scope")
+    status, output = scope_escape(vm, "scjail", "ferrion-run --files /home/user/scope ")
+    log.append(f"[under ferrion-run --files ~/scope] exit {status}\n{output}\n")
+    jailed = scope_routes(output)
+    run("scdecoyr", "rmdir /home/user/.local/state/ferrion-run/decoy-route")
+    counted = []
+    for route in SCOPE_ROUTES:
+        if free.get(route) != "REACHED":
+            (notes if route in SCOPE_OPTIONAL else controls).append(f"{route} {free.get(route, 'missing')}")
+            continue
+        counted.append(route)
+        if jailed.get(route) != "REFUSED":
+            problems.append(f"route {route} {jailed.get(route, 'not run')} under ferrion-run")
+    for route in SCOPE_STALE_ROUTES:
+        counted.append(route)
+        if jailed.get(route) != "REFUSED":
+            problems.append(f"route {route} {jailed.get(route, 'not run')} under ferrion-run")
+        notes.append(f"{route} without the launcher: {free.get(route, 'not run')}")
+    status, output = run("scleft", "ls -A /home/user/outside")
+    left = set(output.split())
+    if left != {"secret.txt", "victim.txt"}:
+        problems.append(f"the session changed the folder outside its scope: {sorted(left)}")
+
+    probe = "ferrion-run-probe race-{} /home/user/scope {} 15"
+    swap, read = probe.format("swap", "/home/user/outside"), probe.format("read", f"secret.txt {SCOPE_MARKER}")
+    _, output = run("scrace0", f"{swap} > /dev/null & {read}; wait", 120)
+    if "ROUTE race-sessions REACHED" not in output:
+        controls.append("race-sessions without ferrion-run")
+    else:
+        _, output = run("scrace1", f"ferrion-run --files /home/user/scope {swap} > /dev/null & "
+                                    f"ferrion-run --files /home/user/scope {read}; wait", 180)
+        counted.append("race-sessions")
+        if "ROUTE race-sessions REFUSED" not in output:
+            problems.append("route race-sessions reached the secret under ferrion-run")
+    _, output = run("scft0", "ferrion-run-probe hold-filetable ferrion-run-probe foreign-filetable")
+    if "ROUTE foreign-filetable REACHED" not in output:
+        controls.append("foreign-filetable without ferrion-run")
+    else:
+        status, output = run("scft1", "ferrion-run-probe hold-filetable ferrion-run --files /home/user/scope "
+                                      "ferrion-run-probe foreign-filetable")
+        counted.append("foreign-filetable")
+        if status != 0 or "ROUTE foreign-filetable REFUSED" not in output:
+            problems.append(f"route foreign-filetable: a session that inherited another process's file table exited {status}"
+                            + (" and held that table" if "ROUTE foreign-filetable REACHED" in output else ""))
+
+    _, output = run("scns", "ferrion-run ferrion-run-probe schemes")
+    found = re.search(r"SCHEMES (.*)", output)
+    namespace = found.group(1).split() if found else []
+    if not found or set(namespace) - SCOPE_SCHEMES or "file" not in namespace:
+        problems.append(f"the session's namespace holds {namespace}")
+    _, output = run("sctop", "ferrion-run ls -A /")
+    top = set(output.split())
+    if top - SCOPE_TOP or "usr" not in top:
+        problems.append(f"the session's / holds {sorted(top)}")
+
+    status, before = run("scst0", "ls /home/user/.local/state/ferrion-run | wc -l")
+    _, output = run("schome", "ferrion-run ferrion-run-probe home")
+    found = re.search(r"HOME (\S+) entries Ok\((\d+)\) tmp Ok\((\d+)\) writable (\w+) vars (\S*)", output)
+    if not found or not re.fullmatch(r"/home/user/\.local/state/ferrion-run/\d+-\d+/home", found.group(1)) \
+            or found.group(2, 3, 4) != ("0", "0", "true") or set(found.group(5).split(",")) - SCOPE_VARS:
+        problems.append("the session's home is not a fresh, empty, writable folder of its own with only the "
+                        f"passed variables: {found.group(0) if found else output.strip()[-200:]}")
+    status, after = run("scst1", "ls /home/user/.local/state/ferrion-run | wc -l")
+    if before.split()[-1:] != after.split()[-1:]:
+        problems.append(f"a session left its folder behind ({before.split()[-1:]} then {after.split()[-1:]})")
+    status, output = run("scshare", "ferrion-run --read-only /home/user/.ssh/id_probe cat /home/user/.ssh/id_probe")
+    if status != 0 or SCOPE_MARKER not in output:
+        problems.append(f"an explicit read-only share was not readable (exit {status})")
+    status, _ = run("scshare-w", "ferrion-run --read-only /home/user/.ssh/id_probe bash -c \"echo x >> /home/user/.ssh/id_probe\"")
+    if status == 0:
+        problems.append("a read-only share was writable")
+    decoy = "/home/user/.local/state/ferrion-run/decoy-0"
+    run("scdecoy", f"mkdir -p {decoy} && echo {SCOPE_MARKER} > {decoy}/x")
+    status, output = run("schide", "ferrion-run --files /home/user bash -c "
+                                   "\"ls -A /home/user/.local/state/ferrion-run; echo home=\\$HOME\"")
+    if "decoy-0" in output.split() or "home=/home/user/.local/state/ferrion-run/" not in output:
+        problems.append("inside a session given the whole home, another session's folder was listed or its own home was missing")
+    status, output = run("schide2", f"ferrion-run --files /home/user cat {decoy}/x")
+    if status == 0 or SCOPE_MARKER in output:
+        problems.append("another session's folder was readable inside a session given the whole home")
+    status, output = run("schide3", "ferrion-run --files /home/user bash -c "
+                                    "\"mv /home/user/.local /home/user/.local-moved; mv /home/user/.local/state /home/user/.local/state-moved; "
+                                    "cat /home/user/.local-moved/state/ferrion-run/decoy-0/x /home/user/.local/state-moved/ferrion-run/decoy-0/x\"")
+    _, moved = run("schide3m", "for d in /home/user/.local-moved /home/user/.local/state-moved; do "
+                               "test -e $d && echo $((40+2))MOVED; done; true")
+    run("schide3r", "mv /home/user/.local-moved /home/user/.local 2>/dev/null; mv /home/user/.local/state-moved /home/user/.local/state 2>/dev/null; true")
+    counted.append("unhide-rename")
+    if SCOPE_MARKER in output or "42MOVED" in moved:
+        problems.append("route unhide-rename: a session given the whole home renamed a folder above ferrion-run's sessions"
+                        + (" and read another session's folder" if SCOPE_MARKER in output else ""))
+    run("scdecoy2", f"rm -rf {decoy}")
+    run("sclnprep", "rm -rf /home/user/scope && mkdir -p /home/user/scope/p/q && ln -s ../../in /home/user/scope/p/q/old")
+    status, output = run("sclinks", f"ferrion-run --files /home/user/scope bash -c \"{SCOPE_LINKS}\"")
+    listed = set(re.findall(r"leads outside /home/user/scope: (\S+) ->", output))
+    if status != 0 or listed != SCOPE_LINKS_OUT:
+        problems.append(f"symlinks leading outside the folder: listed {sorted(listed)}, want {sorted(SCOPE_LINKS_OUT)} (exit {status})")
+    _, output = run("sclinks2", "ls -l /home/user/scope /home/user/scope/d")
+    if output.count(" -> ") < 5:
+        problems.append("the session's symlinks did not stay in the folder")
+    status, output = run("schome2", "ferrion-run --files /home/user cat /home/user/outside/secret.txt")
+    if SCOPE_MARKER not in output:
+        problems.append(f"a session given the whole home could not read a file in it (exit {status})")
+
+    since = vm.mark()
+    vm.type("exit\n")
+    if not vm.wait_serial(r"login: ", args.timeout, since):
+        problems.append("no login prompt after logging out")
+    else:
+        vm.type("root\n")
+        if vm.wait_serial(r"(?i)password: ", 20, since):
+            vm.type("password\n")
+            time.sleep(3)
+            _, output = run("scdisk0", "ferrion-run-probe disk")
+            if "ROUTE raw-disk REACHED" not in output:
+                controls.append("raw-disk as root without ferrion-run")
+            else:
+                counted.append("raw-disk (root)")
+                _, output = run("scdisk1", "ferrion-run ferrion-run-probe disk")
+                if "ROUTE raw-disk REFUSED" not in output:
+                    problems.append("route raw-disk (root) reached a disk under ferrion-run")
+                _, output = run("scdisk2", "ferrion-run ferrion-run-probe schemes")
+                found = re.search(r"SCHEMES (.*)", output)
+                rootns = found.group(1).split() if found else []
+                if not found or set(rootns) - SCOPE_SCHEMES:
+                    problems.append(f"root's session namespace holds {rootns}")
+        else:
+            problems.append("no password prompt for root")
+    (vm.out / "agent-scope.txt").write_text("".join(log))
+    summary = (f"{len(counted)} routes, {len(counted) - sum(1 for p in problems if p.startswith('route '))} "
+               f"refused under ferrion-run; namespace {' '.join(namespace)}")
+    if notes:
+        summary += "; not on this image: " + ", ".join(notes)
+    if controls:
+        return False, "control without the launcher failed, so the run proves nothing: " + "; ".join(controls) + f"; see {vm.out}"
+    if problems:
+        return False, "; ".join(problems) + f"; {summary}; see {vm.out}"
+    return True, summary
+
+
+CLONE_TREE = ("cd /home/user/clone-seed && echo one > a.txt && echo two > b.txt && echo gone > del.txt && "
+              "echo move > mv-from.txt && echo echo hi > script.sh && mkdir -p olddir lowerdir/in && "
+              "echo old > olddir/x && echo z > lowerdir/in/z && ln -s a.txt link1")
+CLONE_EDIT = ("cd {} && echo added > new.txt && echo more >> a.txt && printf replaced > b.txt && rm del.txt && "
+              "mv mv-from.txt mv-to.txt && mkdir -p sub/deep && echo deep > sub/deep/f && ln -s new.txt link2 && "
+              "chmod +x script.sh && rm -r olddir && mkdir olddir && echo fresh > olddir/fresh && mv lowerdir renameddir && "
+              "rm link1 && ln -s b.txt link1 && ln -s /home/user/.ssh to-ssh && ln -s . dot && ln -s dot/../clone-b via")
+
+
+def test_agent_clone(vm, args):
+    """Security roadmap S12 and product roadmap agent item 3, clone mode: as `user`, a scripted edit session (new, appended, replaced, deleted, renamed and chmod-ed files, a new folder tree, a deleted and recreated folder, a renamed folder, symlinks) runs under `ferrion-run --clone DIR`; DIR must be unchanged after it, `ferrion-run diff` must list the changes, and `ferrion-run apply` must leave DIR identical (paths, modes, link targets, contents) to the same script run directly on a copy. A second clone session then `ferrion-run discard` must leave DIR as it was. The end of the session and `diff` must list the two symlinks that lead outside DIR: an absolute one, and `via`, which leaves DIR only through `dot`, another symlink the session added, so it is resolved in the merged view of the layer over DIR. Then clone-stale: a descriptor opened read-only on a file in DIR, whose folder the session then replaces by a symlink to a folder outside, must not get its mode changed, which would copy the file up through that symlink; without the launcher the change succeeds and writes nothing outside."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    log, problems = [], []
+
+    def run(tag, line, timeout=180):
+        status, output = guest_run(vm, tag, line, timeout)
+        log.append(f"$ {line}\nexit {status}\n{output}\n")
+        return status, output
+
+    def tree(tag, path):
+        _, output = run(tag, f"ferrion-run-probe tree-hash {path}")
+        found = re.search(r"TREE (\S+ \d+)", output)
+        return found.group(1) if found else output.strip()[-120:]
+
+    run("clprep", "rm -rf /home/user/clone-seed /home/user/clone-a /home/user/clone-b && mkdir /home/user/clone-seed && "
+                  f"{CLONE_TREE} && tar -cf /home/user/clone-seed.tar -C /home/user/clone-seed .")
+    reset = ("rm -rf /home/user/clone-{0} && mkdir /home/user/clone-{0} && "
+             "tar -xf /home/user/clone-seed.tar -C /home/user/clone-{0}")
+    run("clra", reset.format("a"))
+    run("clrb", reset.format("b"))
+    seed = tree("clh0", "/home/user/clone-a")
+    status, _ = run("cldirect", f"bash -c \"{CLONE_EDIT.format('/home/user/clone-b')}\"")
+    direct = tree("clhd", "/home/user/clone-b")
+    if status != 0 or direct == seed:
+        problems.append(f"the edit script did not run directly (exit {status})")
+    session_line = f"ferrion-run --clone /home/user/clone-a bash -c \"{CLONE_EDIT.format('/home/user/clone-a')}\""
+    status, output = run("clsession", session_line, 300)
+    session = re.search(r"session (\d+-\d+) keeps", output)
+    if status != 0 or not session:
+        problems.append(f"the clone session failed (exit {status})")
+    ended = set(re.findall(r"leads outside /home/user/clone-a: /home/user/clone-a/(\S+) ->", output))
+    if ended != {"to-ssh", "via"}:
+        problems.append(f"the end of the clone session listed {sorted(ended)} as leading outside the folder, want ['to-ssh', 'via']")
+    after = tree("clh1", "/home/user/clone-a")
+    if after != seed:
+        problems.append(f"the clone session wrote into DIR ({seed} became {after})")
+    applied = discarded = "not run"
+    if session:
+        _, diff = run("cldiff", f"ferrion-run diff {session.group(1)}")
+        changes = re.findall(r"^[AMD] \S+", diff, re.M)
+        if len(changes) < 10:
+            problems.append(f"ferrion-run diff listed {len(changes)} changes")
+        outside = sorted(re.findall(r"^! (\S+) -> ", diff, re.M))
+        if outside != ["to-ssh", "via"]:
+            problems.append(f"ferrion-run diff listed {outside} as leading outside the folder, want ['to-ssh', 'via']")
+        status, _ = run("clapply", f"ferrion-run apply {session.group(1)}")
+        applied = tree("clh2", "/home/user/clone-a")
+        if status != 0 or applied != direct:
+            problems.append(f"after apply DIR is {applied}, the direct run gave {direct} (exit {status})")
+        run("clra2", reset.format("a"))
+        status, output = run("clsession2", session_line, 300)
+        second = re.search(r"session (\d+-\d+) keeps", output)
+        if second:
+            status, _ = run("cldiscard", f"ferrion-run discard {second.group(1)}")
+            discarded = tree("clh3", "/home/user/clone-a")
+            if status != 0 or discarded != seed:
+                problems.append(f"after discard DIR is {discarded}, not {seed} (exit {status})")
+            _, output = run("clgone", f"ferrion-run diff {second.group(1)}")
+            if "no session" not in output:
+                problems.append("a discarded session still had a layer")
+        else:
+            problems.append("the second clone session failed")
+    run("clesc0", "rm -rf /home/user/cl-esc /home/user/cl-esc2 /home/user/clone-outside && mkdir -p "
+                  "/home/user/cl-esc/clone-d /home/user/cl-esc2/clone-d /home/user/clone-outside && "
+                  "echo planted > /home/user/cl-esc/clone-d/clone-planted && echo planted > /home/user/cl-esc2/clone-d/clone-planted")
+    _, free = run("clesc1", "ferrion-run-probe clone-escape /home/user/cl-esc2 /home/user/clone-outside")
+    _, jailed = run("clesc2", "ferrion-run --clone /home/user/cl-esc ferrion-run-probe clone-escape /home/user/cl-esc "
+                              "/home/user/clone-outside")
+    _, left = run("clesc3", "ls -A /home/user/clone-outside | wc -l")
+    escaped = re.search(r"session (\d+-\d+) keeps", jailed)
+    if escaped:
+        run("clesc4", f"ferrion-run discard {escaped.group(1)}")
+    stale = "REFUSED" if "ROUTE clone-stale REFUSED" in jailed else "REACHED" if "ROUTE clone-stale REACHED" in jailed else "not run"
+    if "ROUTE clone-stale REACHED" not in free:
+        problems.append("control: clone-escape could not change its descriptor's mode without the launcher")
+    if stale != "REFUSED" or left.split()[-1:] != ["0"]:
+        problems.append(f"route clone-stale {stale} under ferrion-run --clone, {left.split()[-1:]} files written outside the folder")
+    (vm.out / "agent-clone.txt").write_text("".join(log))
+    summary = (f"seed {seed}; direct {direct}; after the session {after}; after apply {applied}; after discard {discarded}; "
+               f"clone-stale {stale}")
+    if problems:
+        return False, "; ".join(problems) + f"; {summary}; see {vm.out}"
+    return True, summary
+
+
+SCOPE_WORK = ("rm -rf {0}/w && mkdir {0}/w && cd {0}/w && tar -xf /home/user/bench/src.tar && git init -q && "
+              "git add -A && git status --short | wc -l")
+
+
+OVERHEAD_LOAD_LIMIT = 12.0
+
+
+def test_agent_scope_overhead(vm, args):
+    """S12 overhead: as `user`, a file-heavy workload (unpack a tarball of 100 files of about 8 KB in 10 folders, written by bash builtins so that making them starts no process, then git init, git add -A and git status) runs directly and under `ferrion-run --files`, alternating, three times each; passes when the median under the proxy is within 20% of the median without it. Reports both and the host's load before and after each run, and marks the result host-limited when a load is above 12."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    log = []
+
+    def run(tag, line, timeout=900):
+        status, output = guest_run(vm, tag, line, timeout)
+        log.append(f"$ {line}\nexit {status}\n{output}\n")
+        return status, output
+
+    status, output = run("ovprep", "rm -rf /home/user/bench /home/user/benchsrc /home/user/wa /home/user/wb && "
+                                   "mkdir -p /home/user/bench /home/user/wa /home/user/wb /home/user/benchsrc/include && "
+                                   "cd /home/user/benchsrc/include && mkdir d{1..10} && for d in {1..10}; do "
+                                   "for f in {1..10}; do printf \"$d $f %s\\n\" {1..1000} > d$d/f$f.h; done; done && "
+                                   "tar -cf /home/user/bench/src.tar -C /home/user/benchsrc include && "
+                                   "find /home/user/benchsrc -type f | wc -l", 600)
+    if status != 0 or not re.search(r"^\s*100\s*$", output, re.M):
+        (vm.out / "agent-scope-overhead.txt").write_text("".join(log))
+        return False, f"the workload's tree was not made (exit {status}); see {vm.out}"
+    times = {"direct": [], "proxy": []}
+    counts = set()
+    loads = []
+    for round_ in range(3):
+        for kind, line in (("direct", f"bash -c \"{SCOPE_WORK.format('/home/user/wa')}\""),
+                           ("proxy", "ferrion-run --files /home/user/wb --read-only /home/user/bench "
+                                     f"bash -c \"{SCOPE_WORK.format('/home/user/wb')}\"")):
+            before = os.getloadavg()[0]
+            status, output = run(f"ov{kind}{round_}", f"s=$EPOCHREALTIME; {line}; e=$EPOCHREALTIME; echo T $s $e")
+            loads.append((before, os.getloadavg()[0]))
+            log.append(f"host load1 {loads[-1][0]:.2f} before, {loads[-1][1]:.2f} after\n")
+            found = re.search(r"(\d+)\s+T (\d+[.,]\d+) (\d+[.,]\d+)", output)
+            if status != 0 or not found:
+                (vm.out / "agent-scope-overhead.txt").write_text("".join(log))
+                return False, f"{kind} run {round_ + 1} failed (exit {status}); see {vm.out}"
+            counts.add(found.group(1))
+            start, end = (float(found.group(i).replace(",", ".")) for i in (2, 3))
+            times[kind].append(end - start)
+    (vm.out / "agent-scope-overhead.txt").write_text("".join(log))
+    direct, proxy = sorted(times["direct"])[1], sorted(times["proxy"])[1]
+    ratio = proxy / direct
+    summary = (f"direct {', '.join(f'{t:.2f}' for t in times['direct'])} s, under ferrion-run "
+               f"{', '.join(f'{t:.2f}' for t in times['proxy'])} s; medians {direct:.2f} s and {proxy:.2f} s, "
+               f"{(ratio - 1) * 100:+.1f}%; git status lines {sorted(counts)}; host load1 before and after each run "
+               f"{', '.join(f'{a:.1f}/{b:.1f}' for a, b in loads)}")
+    if max(max(pair) for pair in loads) > OVERHEAD_LOAD_LIMIT:
+        summary += f"; host-limited: load1 above {OVERHEAD_LOAD_LIMIT:g}"
+    if len(counts) != 1:
+        return False, f"the runs saw different trees; {summary}"
+    return ratio <= 1.2, summary
+
+
 def test_hardened_malloc(vm, args):
     """Logs in as `user` on the serial console, measures sparse PROT_NONE reservation cost (32 MiB to 32 GiB), probes PROT_NONE/mremap/madvise/getrandom/mprotect, runs hardened_malloc's 58-binary upstream test suite on 32 MiB default and light builds, times upstream 32 GiB x 4 arenas launch/exit, and benchmarks dlmalloc vs hardened_malloc default vs light."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -6139,6 +6495,9 @@ TESTS["gpu-submit"] = test_gpu_submit
 TESTS["gpu-syncobj"] = test_gpu_syncobj
 TESTS["gpu-flip"] = test_gpu_flip
 TESTS["vk-exact"] = test_vk_exact
+TESTS["agent-scope"] = test_agent_scope
+TESTS["agent-clone"] = test_agent_clone
+TESTS["agent-scope-overhead"] = test_agent_scope_overhead
 TESTS["hardened-malloc"] = test_hardened_malloc
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}

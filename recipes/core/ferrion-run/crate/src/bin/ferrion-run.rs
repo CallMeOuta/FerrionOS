@@ -1,10 +1,22 @@
 use std::process;
 
-use ferrion_run::{Command, EXIT_REFUSED, USAGE, parse_args, parse_profile, profile_path};
+use ferrion_run::{
+    Command, EXIT_REFUSED, USAGE, parse_args, parse_profile, profile_path, sessions,
+};
 
 fn refuse(reason: &str) -> ! {
     eprintln!("ferrion-run: {reason}");
     process::exit(EXIT_REFUSED);
+}
+
+fn done(result: Result<(), String>) -> ! {
+    match result {
+        Ok(()) => process::exit(0),
+        Err(reason) => {
+            eprintln!("ferrion-run: {reason}");
+            process::exit(1);
+        }
+    }
 }
 
 fn main() {
@@ -13,6 +25,10 @@ fn main() {
             print!("{USAGE}");
             return;
         }
+        Ok(Command::Sessions) => done(sessions::list()),
+        Ok(Command::Diff(id)) => done(sessions::diff(&id)),
+        Ok(Command::Apply(id)) => done(sessions::apply(&id)),
+        Ok(Command::Discard(id)) => done(sessions::discard(&id)),
         Ok(Command::Run(options)) => options,
         Err(reason) => {
             eprint!("ferrion-run: {reason}\n\n{USAGE}");
@@ -37,11 +53,10 @@ fn main() {
     }
 
     #[cfg(target_os = "redox")]
-    refuse(&ferrion_run::launch::run(
-        &options,
-        withhold_network,
-        allow_sudo,
-    ));
+    match ferrion_run::launch::run(&options, withhold_network, allow_sudo) {
+        ferrion_run::launch::Outcome::Refused(reason) => refuse(&reason),
+        ferrion_run::launch::Outcome::Exited(code) => process::exit(code),
+    }
     #[cfg(not(target_os = "redox"))]
     {
         let _ = (withhold_network, allow_sudo);

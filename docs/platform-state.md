@@ -47,6 +47,9 @@ Component sources cited here are the checkouts a fetch puts in `recipes/core/<na
 - There is no Linux binary compatibility; programs are ported from source by design ([`book/src/developer-faq.md`](../book/src/developer-faq.md)).
 - The kernel's system-call interface is unstable ([`book/src/how-redox-compares.md`](../book/src/how-redox-compares.md)), and Rust's targets are only expected to work with upstream's latest release because the ABI is not yet stable ([rustc book](https://doc.rust-lang.org/nightly/rustc/platform-support/redox.html)). The book plans a stable ABI for `libredox` only, keeps relibc unstable while it is under heavy development, and keeps `redox_syscall` unstable ([`book/src/libraries-apis.md`](../book/src/libraries-apis.md)). Write a port against relibc or `libredox`, not against raw system calls.
 - Ported programs known to misbehave: Servo "Often Crashes", Neovim "Crashes", Zsh "Hangs", LuaJit "Often Crashing" ([`book/src/important-programs.md`](../book/src/important-programs.md)).
+- relibc `74b5e7e3` answers `fcntl(fd, F_DUPFD, n)` with the lowest free descriptor and ignores `n` (`redox-rt/src/sys.rs`, `fcntl`), where POSIX asks for the lowest at or above `n`. Move a descriptor to a chosen number with `dup2`, or pass its number to the program that inherits it.
+- A descriptor received over a pipe with `call_ro(pipe, ..., CallFlags::FD, ...)` was unusable in `ferrion-scoped` (`dup` answered `EBADF`, seen 2026-11-21); received with `CallFlags::FD | CallFlags::FD_UPPER`, as `init` takes a scheme daemon's capability (`base` `init/src/service.rs`), it works.
+- A scheme serves requests in the address space of the process that created its socket: the kernel maps each request's buffers into that process (`kernel` `e7f1d423`, `src/scheme/user.rs`, `UserInner::context`). A socket created by one process and served by another faults on the first path it reads, so the serving process creates its own socket and hands out a descriptor for it.
 - Native eventfd and timerfd descriptors are provided by `fdobjd` and the relibc patch `ferrion-fd-primitives.patch`. The x86_64 guest check `scripts/vm-test.py fd-primitives --config fd-primitives` passed on 2026-11-21; removing the daemon made the probe fail at eventfd creation. It covers counter/semaphore I/O, timer deadlines and intervals, poll/epoll wakeups and dup/fork/exec sharing. Timer cancellation-on-clock-change is refused with `EINVAL` until a clock-change notification exists; signalfd remains unimplemented. The native event queue reports changes, not Linux level-triggered snapshots.
 
 ### Filesystem
@@ -54,6 +57,7 @@ Component sources cited here are the checkouts a fetch puts in `recipes/core/<na
 - RedoxFS has no fsck or repair tool: `Cargo.toml` of `redoxfs` at `5ba45a68` builds five binaries, `redoxfs` (mount), `redoxfs-ar`, `redoxfs-clone`, `redoxfs-mkfs` and `redoxfs-resize`. A damaged image is rebuilt, not repaired.
 - When the installer reports "No space left on device", raise `filesystem_size` in the config first.
 - Advisory file locks are real on RedoxFS through the relibc and RedoxFS patches `ferrion-file-locks.patch`: fcntl `F_SETLK`, `F_SETLKW` (blocking, with deadlock detection) and `F_GETLK`, open-file-description locks and `flock`, released when the owner closes the file or exits. A conflict answers `EAGAIN`, and `flock` answers `EWOULDBLOCK`. `scripts/vm-test.py file-locks` runs `lock-probe` (25 checks) and two SQLite writers in WAL and rollback-journal mode; it passed on 2026-11-21.
+- Inside a `ferrion-run` session, locks on files in `--files` and `--clone` folders are answered by the session's proxy: a conflicting lock fails at once instead of waiting, and a lock does not exclude programs outside the session (`.scratch/agent-scope/issues/01-waiting-locks.md`).
 
 ### Debugging and virtual machines
 
@@ -76,6 +80,7 @@ Of upstream's last 100 default-branch pipelines, relibc had 78 failed and 14 pas
 
 - "Exploit Mitigations: No (planned)" ([`book/src/features.md`](../book/src/features.md)).
 - The sandbox tool `contain` is "a partial implementation of sandboxing" ([`book/src/developer-faq.md`](../book/src/developer-faq.md)).
+- `ferrion-run` sessions are scoped, not contained: their file system holds only the folders they are given, and their limits are listed in [`book/src/security.md`](../book/src/security.md#scoped-sessions).
 - The images' login accounts are dev credentials ([`AGENTS.md`](../AGENTS.md), Security).
 
 Describe FerrionOS's security as it is in any text you write. A test or design that leans on user separation or `contain` as a boundary rests on an open gap.
