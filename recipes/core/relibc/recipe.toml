@@ -4,7 +4,7 @@ description = "FerrionOS POSIX/C Standard Library"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/relibc.git"
 rev = "74b5e7e315043a21b599f271d5692727aa54f64d"
-patches = ["ferrion-sigentry-rcx.patch", "ferrion-resolver.patch", "ferrion-dns-match.patch", "ferrion-dlopen-reentrant.patch", "ferrion-fd-primitives.patch", "ferrion-dlopen-tls.patch", "ferrion-cond-clock.patch", "ferrion-dso-atexit.patch", "ferrion-redox-ioctl-virtgpu.patch", "ferrion-redox-ioctl-views.patch", "ferrion-scm-rights-clone.patch", "ferrion-pthread-stack-min.patch", "ferrion-virtgpu-requests.patch", "ferrion-gpu-blob.patch", "ferrion-gpu-submit.patch", "ferrion-gpu-syncobj.patch", "ferrion-drm-page-flip.patch", "ferrion-gpu-fences.patch", "ferrion-file-locks.patch", "ferrion-fdcntl-lock-order.patch", "ferrion-pthread-mutex-fastpath.patch", "ferrion-pthread-mutex-const-owner.patch", "ferrion-madvise.patch", "ferrion-abort-sigabrt.patch"]
+patches = ["ferrion-sigentry-rcx.patch", "ferrion-resolver.patch", "ferrion-dns-match.patch", "ferrion-dlopen-reentrant.patch", "ferrion-fd-primitives.patch", "ferrion-dlopen-tls.patch", "ferrion-cond-clock.patch", "ferrion-dso-atexit.patch", "ferrion-redox-ioctl-virtgpu.patch", "ferrion-redox-ioctl-views.patch", "ferrion-scm-rights-clone.patch", "ferrion-pthread-stack-min.patch", "ferrion-virtgpu-requests.patch", "ferrion-gpu-blob.patch", "ferrion-gpu-submit.patch", "ferrion-gpu-syncobj.patch", "ferrion-drm-page-flip.patch", "ferrion-gpu-fences.patch", "ferrion-file-locks.patch", "ferrion-fdcntl-lock-order.patch", "ferrion-pthread-mutex-fastpath.patch", "ferrion-pthread-mutex-const-owner.patch", "ferrion-madvise.patch", "ferrion-abort-sigabrt.patch", "ferrion-stack-guard.patch"]
 
 [build]
 template = "custom"

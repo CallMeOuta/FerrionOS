@@ -1,0 +1,321 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the patches before it in the recipe's list applied (meant for upstream once the namespace policy for exec entropy is settled):
+- Add `redox_rt::proc::exec_random_bytes` (reusable by S10 ASLR) reading bounded random bytes from `/scheme/rand`, and push `AT_RANDOM` (16 bytes at page-aligned offset 0 of the child's args/envs/auxv mapping) in `fexec_impl`. Fail closed when `/scheme/rand` is unavailable, with a narrow early-boot exemption for root `init` before `00_randd` registers `/scheme/rand` (omitting `AT_RANDOM` rather than fabricating a constant).
+- Make `__stack_chk_guard` mutable in `.data`, copy `AT_RANDOM` into it on every start-up path (`ld.so` `stage2` via `DSO::init_self_stack_chk_guard` before `Linker::load_program` so `COPY` relocations, `GLOB_DAT` and DSO `.init_array` all see the random guard; `relibc_start_v1` for static and dynamic executables before init/constructors/main).
+- Save the auxv pointer and implement bounded `getauxval` (with `<elf.h>` included from `<sys/auxv.h>`).
+- Install empty `libssp.a` and `libssp_nonshared.a` beside `libdl.a`, `libpthread.a` and `librt.a` because `libc` already defines `__stack_chk_guard` and `__stack_chk_fail`.
+- Propagate errors from the interpreter `fexec_impl` call in `posix_spawn` instead of panicking on `.unwrap()`, so a spawner lacking `/scheme/rand` receives `ENODEV`.
+
+diff --git a/Makefile b/Makefile
+index 4534cf82..fc77f7f1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -97,10 +97,12 @@ ifeq ($(USE_RUST_LIBM),)
+ else
+ 	$(AR) -rcs "$(DESTDIR)/lib/libm.a"
+ endif
+-	# Empty libraries for dl, pthread, and rt
++	# Empty libraries for dl, pthread, rt, and ssp
+ 	$(AR) -rcs "$(DESTDIR)/lib/libdl.a"
+ 	$(AR) -rcs "$(DESTDIR)/lib/libpthread.a"
+ 	$(AR) -rcs "$(DESTDIR)/lib/librt.a"
++	$(AR) -rcs "$(DESTDIR)/lib/libssp.a"
++	$(AR) -rcs "$(DESTDIR)/lib/libssp_nonshared.a"
+ 
+ install-tests: tests
+ 	$(MAKE) -C tests
+diff --git a/redox-rt/src/proc.rs b/redox-rt/src/proc.rs
+index 3fb375f3..032d4b5c 100644
+--- a/redox-rt/src/proc.rs
++++ b/redox-rt/src/proc.rs
+@@ -69,6 +69,55 @@ pub struct ExtraInfo<'a> {
+     pub same_process: bool,
+ }
+ 
++pub const AT_RANDOM_BYTES: usize = 16;
++const EXEC_RANDOM_MAX_BYTES: usize = 256;
++const EXEC_RANDOM_MAX_READS: usize = 64;
++
++pub fn exec_random_bytes(buf: &mut [u8]) -> Result<()> {
++    if buf.is_empty() {
++        return Ok(());
++    }
++    if buf.len() > EXEC_RANDOM_MAX_BYTES {
++        return Err(Error::new(EINVAL));
++    }
++    let rand_fd = FdGuard::open_into_upper("/scheme/rand", syscall::O_RDONLY | O_CLOEXEC)?;
++    let mut filled = 0;
++    for _ in 0..EXEC_RANDOM_MAX_READS {
++        if filled == buf.len() {
++            return Ok(());
++        }
++        match rand_fd.read(&mut buf[filled..]) {
++            Ok(0) => return Err(Error::new(EIO)),
++            Ok(n) => {
++                assert!(n <= buf.len() - filled);
++                filled += n;
++            }
++            Err(Error { errno: EINTR }) => continue,
++            Err(err) => return Err(err),
++        }
++    }
++    if filled == buf.len() {
++        Ok(())
++    } else {
++        Err(Error::new(EIO))
++    }
++}
++
++#[cfg(feature = "proc")]
++fn is_early_boot_spawner() -> bool {
++    let resugid = crate::sys::posix_getresugid();
++    if resugid.ruid != 0 || resugid.euid != 0 {
++        return false;
++    }
++    let pid = crate::sys::posix_getpid();
++    pid == 1 || crate::sys::posix_getppid() == 1
++}
++
++#[cfg(not(feature = "proc"))]
++fn is_early_boot_spawner() -> bool {
++    true
++}
++
+ #[expect(clippy::too_many_arguments)]
+ pub fn fexec_impl(
+     image_file: FdGuardUpper,
+@@ -349,9 +398,22 @@ pub fn fexec_impl(
+     )?;
+     push(AT_PHENT)?;
+ 
++    let mut random_bytes = [0_u8; AT_RANDOM_BYTES];
++    let has_random = match exec_random_bytes(&mut random_bytes) {
++        Ok(()) => true,
++        Err(err)
++            if (err == Error::new(ENODEV) || cfg!(not(feature = "proc")))
++                && is_early_boot_spawner() =>
++        {
++            false
++        }
++        Err(err) => return Err(err),
++    };
++
+     let total_args_envs_auxvpointee_size = args.iter().map(|arg| arg.len() + 1).sum::<usize>()
+         + envs.iter().map(|env| env.len() + 1).sum::<usize>()
+-        + extrainfo.cwd.map_or(0, |s| s.len() + 1);
++        + extrainfo.cwd.map_or(0, |s| s.len() + 1)
++        + if has_random { AT_RANDOM_BYTES + 1 } else { 0 };
+     let args_envs_size_aligned = total_args_envs_auxvpointee_size.next_multiple_of(PAGE_SIZE);
+     let target_args_env_address = mmap_anon_remote(
+         &grants_fd,
+@@ -387,6 +449,11 @@ pub fn fexec_impl(
+             Ok(address)
+         };
+ 
++        if has_random {
++            push(append(&random_bytes)?)?;
++            push(AT_RANDOM)?;
++        }
++
+         if let Some(cwd) = extrainfo.cwd {
+             push(append(cwd)?)?;
+             push(AT_REDOX_INITIAL_CWD_PTR)?;
+diff --git a/src/header/stdlib/mod.rs b/src/header/stdlib/mod.rs
+index 5c978a7c..7a2c67e1 100644
+--- a/src/header/stdlib/mod.rs
++++ b/src/header/stdlib/mod.rs
+@@ -120,11 +120,28 @@ pub unsafe extern "C" fn abort() -> ! {
+ 
+ #[cfg(not(target_pointer_width = "64"))]
+ #[unsafe(no_mangle)]
+-static __stack_chk_guard: uintptr_t = 0x19fcadfe;
++static mut __stack_chk_guard: uintptr_t = 0x19fcadfe;
+ 
+ #[cfg(target_pointer_width = "64")]
+ #[unsafe(no_mangle)]
+-static __stack_chk_guard: uintptr_t = 0xd048c37519fcadfe;
++static mut __stack_chk_guard: uintptr_t = 0xd048c37519fcadfe;
++
++pub(crate) unsafe fn stack_chk_guard_from_auxv(at_random: usize) -> Option<usize> {
++    if at_random == 0 {
++        return None;
++    }
++    let mut bytes = [0_u8; mem::size_of::<usize>()];
++    unsafe {
++        ptr::copy_nonoverlapping(at_random as *const u8, bytes.as_mut_ptr(), bytes.len());
++    }
++    Some(usize::from_ne_bytes(bytes))
++}
++
++pub(crate) unsafe fn set_stack_chk_guard(guard: usize) {
++    unsafe {
++        ptr::write_volatile(&raw mut __stack_chk_guard, guard as uintptr_t);
++    }
++}
+ 
+ #[unsafe(no_mangle)]
+ unsafe extern "C" fn __stack_chk_fail() -> ! {
+diff --git a/src/header/sys_auxv/cbindgen.toml b/src/header/sys_auxv/cbindgen.toml
+index 1ac42b21..ae209e9e 100644
+--- a/src/header/sys_auxv/cbindgen.toml
++++ b/src/header/sys_auxv/cbindgen.toml
+@@ -1,3 +1,4 @@
++sys_includes = ["elf.h"]
+ include_guard = "_RELIBC_SYS_AUXV_H"
+ language = "C"
+ style = "Tag"
+diff --git a/src/header/sys_auxv/mod.rs b/src/header/sys_auxv/mod.rs
+index dbd26a8c..9020d6e7 100644
+--- a/src/header/sys_auxv/mod.rs
++++ b/src/header/sys_auxv/mod.rs
+@@ -8,6 +8,12 @@ pub use crate::platform::auxv_defs::*;
+ 
+ /// See <https://www.man7.org/linux/man-pages/man3/getauxval.3.html>.
+ #[unsafe(no_mangle)]
+-pub extern "C" fn getauxval(_t: c_ulong) -> c_ulong {
+-    0
++pub extern "C" fn getauxval(t: c_ulong) -> c_ulong {
++    match crate::platform::get_auxv_saved(t as usize) {
++        Some(val) => val as c_ulong,
++        None => {
++            crate::platform::ERRNO.set(crate::header::errno::ENOENT);
++            0
++        }
++    }
+ }
+diff --git a/src/ld_so/dso.rs b/src/ld_so/dso.rs
+index bf52f039..52343486 100644
+--- a/src/ld_so/dso.rs
++++ b/src/ld_so/dso.rs
+@@ -397,6 +397,29 @@ pub struct DSO {
+ }
+ 
+ impl DSO {
++    pub unsafe fn init_self_stack_chk_guard(base: *const u8, dyns: &[Dyn], guard: usize) {
++        let Ok((dynamic, _)) = Self::parse_dynamic("", base, true, dyns) else {
++            return;
++        };
++        let Some((_, sym)) = dynamic.hash_table.find(
++            "__stack_chk_guard",
++            None,
++            dynamic.symbols,
++            dynamic.dynstrtab,
++            &VersionTable::default(),
++        ) else {
++            return;
++        };
++        if sym.st_shndx(NativeEndian) == elf::SHN_UNDEF {
++            return;
++        }
++        let sym_size = usize::try_from(sym.st_size(NativeEndian)).unwrap_or(0);
++        assert_eq!(sym_size, core::mem::size_of::<usize>());
++        let sym_val = usize::try_from(sym.st_value(NativeEndian)).expect("within bounds");
++        let guard_ptr = unsafe { base.byte_add(sym_val).cast_mut().cast::<usize>() };
++        unsafe { guard_ptr.write_volatile(guard) };
++    }
++
+     #[expect(clippy::not_unsafe_ptr_arg_deref, reason = "see FIXME note")]
+     pub fn from_raw(
+         base: *const u8,
+diff --git a/src/ld_so/start.rs b/src/ld_so/start.rs
+index 43e42165..34073518 100644
+--- a/src/ld_so/start.rs
++++ b/src/ld_so/start.rs
+@@ -469,6 +469,7 @@ fn stage2(
+     // we might need global lock for this kind of stuff
+     _r_debug.lock().r_ldbase = self_base;
+ 
++    let sp_ptr: *const Stack = sp;
+     let name_or_path = if is_manual {
+         // ld.so is run directly by user and not via execve() or similar systemcall
+         println!("argv: {:#?}", argv);
+@@ -485,6 +486,20 @@ fn stage2(
+         argv[0].clone()
+     };
+ 
++    crate::platform::set_auxv_ptr(unsafe { (*sp_ptr).auxv().cast() });
++    if let Some(at_random) = crate::platform::get_auxv(&auxv, crate::platform::auxv_defs::AT_RANDOM)
++        && let Some(guard) =
++            unsafe { crate::header::stdlib::stack_chk_guard_from_auxv(at_random) }
++    {
++        unsafe {
++            crate::ld_so::dso::DSO::init_self_stack_chk_guard(
++                self_base as *const u8,
++                my_dyns,
++                guard,
++            );
++        }
++    }
++
+     {
+         let name = name_or_path.split('/').next_back();
+         let level = envs.get(RELIBC_LOG_ENV_VAR_STR).map(String::as_str);
+diff --git a/src/platform/mod.rs b/src/platform/mod.rs
+index 386b971a..eabbd827 100644
+--- a/src/platform/mod.rs
++++ b/src/platform/mod.rs
+@@ -281,6 +281,33 @@ impl<T: Write> Write for CountingWriter<T> {
+     }
+ }
+ 
++const AUXV_SCAN_LIMIT: usize = 128;
++static AUXV_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
++
++pub fn set_auxv_ptr(ptr: *const usize) {
++    AUXV_PTR.store(ptr as usize, core::sync::atomic::Ordering::Release);
++}
++
++pub fn get_auxv_saved(requested_kind: usize) -> Option<usize> {
++    let raw = AUXV_PTR.load(core::sync::atomic::Ordering::Acquire);
++    if raw == 0 {
++        return None;
++    }
++    let mut ptr = raw as *const usize;
++    for _ in 0..AUXV_SCAN_LIMIT {
++        let kind = unsafe { *ptr };
++        if kind == self::auxv_defs::AT_NULL {
++            return None;
++        }
++        let value = unsafe { *ptr.add(1) };
++        if kind == requested_kind {
++            return Some(value);
++        }
++        ptr = unsafe { ptr.add(2) };
++    }
++    None
++}
++
+ // TODO: Set a global variable once get_auxvs is called, and then implement getauxval based on
+ // get_auxv.
+ 
+diff --git a/src/platform/redox/mod.rs b/src/platform/redox/mod.rs
+--- a/src/platform/redox/mod.rs
++++ b/src/platform/redox/mod.rs
+@@ -1606,8 +1606,7 @@
+                 envs.as_slice(),
+                 &extra_info,
+                 Some(interp_override),
+-            )
+-            .unwrap();
++            )?;
+         }
+ 
+         let start_fd = child.thr_fd.dup_into_upper(b"start")?;
+diff --git a/src/start.rs b/src/start.rs
+index 4cdfdcb1..5139e785 100644
+--- a/src/start.rs
++++ b/src/start.rs
+@@ -161,6 +161,14 @@ pub unsafe extern "C" fn relibc_start_v1(
+     // Ensure correct host system before executing more system calls
+     unsafe { relibc_verify_host() };
+ 
++    crate::platform::set_auxv_ptr(sp.auxv().cast());
++    if let Some(at_random) = unsafe {
++        crate::platform::get_auxv_raw(sp.auxv().cast(), crate::platform::auxv_defs::AT_RANDOM)
++    } && let Some(guard) = unsafe { crate::header::stdlib::stack_chk_guard_from_auxv(at_random) }
++    {
++        unsafe { crate::header::stdlib::set_stack_chk_guard(guard) };
++    }
++
+     #[cfg(target_os = "redox")]
+     let thr_fd = redox_rt::proc::FdGuard::new(
+         unsafe {
