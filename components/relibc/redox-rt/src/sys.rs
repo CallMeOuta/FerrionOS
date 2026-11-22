@@ -722,43 +722,39 @@ pub fn fdcntl(
     }
     let _siglock = tmp_disable_signals();
 
+    let mut fdtbl_guard = current_filetable().inner.lock();
     let fd_guard = current_filetable().fd.lock();
     let mut old_flags = None;
-    let out;
 
-    {
-        let mut fdtbl_guard = current_filetable().inner.lock();
+    let _ = fdtbl_guard.get_fd_flags(fd)?;
 
-        let _ = fdtbl_guard.get_fd_flags(fd)?;
+    let out = match cmd {
+        FileTableVerb::Dup2 | FileTableVerb::Move => {
+            let target_fd = if let Some(nfd) = new_fd {
+                if cmd == FileTableVerb::Dup2 && fd == nfd {
+                    return Ok(fd);
+                }
+                nfd
+            } else {
+                fdtbl_guard.get_lowest_available_slot(target)?
+            };
 
-        out = match cmd {
-            FileTableVerb::Dup2 | FileTableVerb::Move => {
-                let target_fd = if let Some(nfd) = new_fd {
-                    if cmd == FileTableVerb::Dup2 && fd == nfd {
-                        return Ok(fd);
-                    }
-                    nfd
-                } else {
-                    fdtbl_guard.get_lowest_available_slot(target)?
-                };
+            old_flags = fdtbl_guard.get_fd_flags(target_fd).ok();
 
-                old_flags = fdtbl_guard.get_fd_flags(target_fd).ok();
-
-                fdtbl_guard.override_at(target_fd, fd_guard.as_ref())?;
-                target_fd
-            }
-            FileTableVerb::Swap => {
-                let target_fd = if let Some(nfd) = new_fd {
-                    nfd
-                } else {
-                    fdtbl_guard.get_lowest_available_slot(target)?
-                };
-                let _ = fdtbl_guard.get_fd_flags(target_fd)?;
-                target_fd
-            }
-            _ => return Err(Error::new(EINVAL)),
-        };
-    }
+            fdtbl_guard.override_at(target_fd, fd_guard.as_ref())?;
+            target_fd
+        }
+        FileTableVerb::Swap => {
+            let target_fd = if let Some(nfd) = new_fd {
+                nfd
+            } else {
+                fdtbl_guard.get_lowest_available_slot(target)?
+            };
+            let _ = fdtbl_guard.get_fd_flags(target_fd)?;
+            target_fd
+        }
+        _ => return Err(Error::new(EINVAL)),
+    };
 
     let res = {
         let Some(ref sync_fd) = *fd_guard else {
@@ -774,8 +770,6 @@ pub fn fdcntl(
             &[cmd as u64],
         )
     };
-
-    let mut fdtbl_guard = current_filetable().inner.lock();
 
     if res.is_err() {
         match cmd {
