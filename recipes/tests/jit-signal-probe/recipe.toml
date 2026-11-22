@@ -1,0 +1,10 @@
+[package]
+description = "Checks the signal and memory-protection calls a JavaScript JIT needs: fault handlers that read and change the machine context, and W^X code pages"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/jit-signal-probe" "${COOKBOOK_RECIPE}/jit-signal-probe.c" ${LDFLAGS} -lpthread
+"""

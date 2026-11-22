@@ -970,6 +970,15 @@ def test_directory_fsync(vm, args):
     return ok, note or "directory fsync accepts both open modes and rejects an invalid descriptor"
 
 
+def test_jit_signal(vm, args):
+    """What SpiderMonkey's JIT asks of signals and memory: SIGSEGV and SIGILL handlers that read and change the machine context and resume, faults on PROT_NONE loads, non-executable and RW-to-RX code pages, a handler on a thread's alternate stack, and SIG_DFL after a handler (use --config firefox)."""
+    passes = ("segv-store", "sigill-ud2", "segv-exec-nx", "wx-reserve", "wx-exec", "wx-store-faults",
+              "wx-rw-not-exec", "wx-rewrite", "wx-decommit", "segv-load-prot-none", "segv-load-mprotect-none",
+              "thread-altstack", "segv-repeat", "segv-default-after-handler")
+    ok, note = user_probe(vm, args, "jit-signal-probe", passes)
+    return ok, note or "fault handlers read and rewrote the machine context; W^X code pages and PROT_NONE behaved"
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -5162,6 +5171,7 @@ TESTS["dlopen-tls"] = test_dlopen_tls
 TESTS["cond-clock"] = test_cond_clock
 TESTS["fork-wake"] = test_fork_wake
 TESTS["ipc-fd"] = test_ipc_fd
+TESTS["jit-signal"] = test_jit_signal
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
 TESTS["linux-hello"] = test_linux_hello

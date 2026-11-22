@@ -1,0 +1,63 @@
+diff --git a/src/context/memory.rs b/src/context/memory.rs
+index 4930295a..05a11c24 100644
+--- a/src/context/memory.rs
++++ b/src/context/memory.rs
+@@ -36,14 +36,19 @@ use super::context::HardBlockedReason;
+ 
+ pub const MMAP_MIN_DEFAULT: usize = PAGE_SIZE;
+ 
++fn prot_accessible(flags: MapFlags) -> bool {
++    flags.intersects(MapFlags::PROT_READ | MapFlags::PROT_WRITE | MapFlags::PROT_EXEC)
++}
+ pub fn page_flags(flags: MapFlags) -> PageFlags<RmmA> {
+     PageFlags::new()
+-        .user(true)
++        .user(prot_accessible(flags))
+         .execute(flags.contains(MapFlags::PROT_EXEC))
+         .write(flags.contains(MapFlags::PROT_WRITE))
+-    //TODO: PROT_READ
+ }
+ pub fn map_flags(page_flags: PageFlags<RmmA>) -> MapFlags {
++    if !page_flags.has_user() {
++        return MapFlags::empty();
++    }
+     let mut flags = MapFlags::PROT_READ;
+     if page_flags.has_write() {
+         flags |= MapFlags::PROT_WRITE;
+@@ -302,6 +307,7 @@ impl AddrSpaceWrapper {
+                 .info
+                 .flags()
+                 // TODO: Require a capability in order to map executable memory?
++                .user(prot_accessible(flags))
+                 .execute(flags.contains(MapFlags::PROT_EXEC))
+                 .write(flags.contains(MapFlags::PROT_WRITE));
+ 
+@@ -1991,7 +1997,7 @@ impl Grant {
+                     mapper.remap_with_full(page.start_address(), |same_phys, old_flags| {
+                         if !old_flags.has_write() && new_flags.has_write() {
+                             // Page flags will be updated in [`correct_inner`].
+-                            None
++                            Some((same_phys, new_flags.write(false)))
+                         } else {
+                             Some((same_phys, new_flags))
+                         }
+@@ -2597,7 +2603,10 @@ fn correct_inner<'l>(
+ 
+     let grant_flags = grant_info.flags();
+     match access {
+-        // TODO: has_read
++        _ if !grant_flags.has_user() => {
++            debug!("Access, but grant was PROT_NONE.");
++            return Err(PfError::Segv);
++        }
+         AccessMode::Read => (),
+ 
+         AccessMode::Write if !grant_flags.has_write() => {
+@@ -3124,6 +3133,7 @@ bitflags::bitflags! {
+ impl TlbShootdownActions {
+     pub fn change_of_flags(old: PageFlags<RmmA>, new: PageFlags<RmmA>) -> Self {
+         let mut this = Self::empty();
++        this.set(Self::REVOKE_READ, old.has_user() && !new.has_user());
+         this.set(Self::REVOKE_WRITE, old.has_write() && !new.has_write());
+         this.set(Self::REVOKE_EXEC, old.has_execute() && !new.has_execute());
+         this
