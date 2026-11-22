@@ -425,10 +425,31 @@ static void descriptor_flags(const char *program) {
     pass("descriptor-flags-exec");
 }
 
+static void timerfd_alarm_quota(void) {
+    int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    CHECK(fd >= 0);
+    struct itimerspec value = timer_value(3600, 0, 0);
+    for (int i = 0; i < 1100; i++) {
+        CHECK(timerfd_settime(fd, 0, &value, NULL) == 0);
+    }
+    CHECK(close(fd) == 0);
+    for (int i = 0; i < 1024; i++) {
+        int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+        CHECK(tfd >= 0);
+        CHECK(timerfd_settime(tfd, 0, &value, NULL) == 0);
+        CHECK(close(tfd) == 0);
+    }
+    fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    CHECK(fd >= 0);
+    CHECK(timerfd_settime(fd, 0, &value, NULL) == 0);
+    CHECK(close(fd) == 0);
+    pass("timerfd-alarm-quota");
+}
+
 int main(int argc, char **argv) {
     CHECK(setvbuf(stdout, NULL, _IONBF, 0) == 0);
     CHECK(signal(SIGALRM, timed_out) != SIG_ERR);
-    alarm(20);
+    alarm(30);
     if (argc == 6 && strcmp(argv[1], "--exec-child") == 0) {
         exec_child(argv + 2);
         return 0;
@@ -444,6 +465,7 @@ int main(int argc, char **argv) {
     timerfd_rearm();
     timerfd_shared();
     descriptor_flags(argv[0]);
+    timerfd_alarm_quota();
     alarm(0);
     puts("fd-primitives-probe: PASS");
     return 0;

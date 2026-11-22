@@ -13,8 +13,12 @@ const MAX_OBJECTS: usize = 4096;
 const MAX_PER_UID: usize = 1024;
 const MAX_ALARMS: usize = 4096;
 const MAX_ALARMS_PER_UID: usize = 1024;
+const MAX_RETRY_PASSES: usize = MAX_OBJECTS + 1;
 const COUNTER_MAX: u64 = u64::MAX - 1;
 const NANO: u128 = 1_000_000_000;
+const TOKEN_COUNTERS: usize = 1;
+const TOKEN_TIMERS: usize = 2;
+const FIRST_ALARM_TOKEN: usize = 3;
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -22,37 +26,43 @@ enum Kind {
     Timer,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arm {
+    Disarmed,
+    Armed { deadline: u128, alarm: usize },
+}
+
 struct Timer {
     clock: usize,
-    deadline: u128,
+    arm: Arm,
     interval: u128,
     count: u64,
-    generation: u64,
 }
 
 impl Timer {
-    fn advance(&mut self, now: u128) {
-        if self.deadline == 0 || now < self.deadline {
-            return;
+    fn expire_at(&mut self, deadline: u128, now: u128) -> Option<u128> {
+        if now < deadline {
+            return Some(deadline);
         }
-        let count = if self.interval == 0 {
-            self.deadline = 0;
-            1
+        let (count, next) = if self.interval == 0 {
+            (1u128, None)
         } else {
-            let count = 1 + (now - self.deadline) / self.interval;
-            self.deadline += count * self.interval;
-            count
+            let count = 1 + (now - deadline) / self.interval;
+            let next = deadline.checked_add(count.saturating_mul(self.interval));
+            (count, next)
         };
         self.count = self
             .count
             .saturating_add(count.min(COUNTER_MAX as u128) as u64);
+        next
     }
 
     fn settings(&self, now: u128, buf: &mut [u8]) {
-        for (chunk, nanos) in buf
-            .chunks_exact_mut(16)
-            .zip([self.interval, self.deadline.saturating_sub(now)])
-        {
+        let remaining = match self.arm {
+            Arm::Disarmed => 0,
+            Arm::Armed { deadline, .. } => deadline.saturating_sub(now),
+        };
+        for (chunk, nanos) in buf.chunks_exact_mut(16).zip([self.interval, remaining]) {
             chunk[..8].copy_from_slice(&((nanos / NANO) as i64).to_ne_bytes());
             chunk[8..].copy_from_slice(&((nanos % NANO) as i64).to_ne_bytes());
         }
@@ -71,7 +81,6 @@ struct Object {
 
 struct Alarm {
     object: usize,
-    generation: u64,
     uid: u32,
     _fd: Fd,
 }
@@ -105,7 +114,33 @@ impl<'a> Objects<'a> {
             objects: BTreeMap::new(),
             alarms: BTreeMap::new(),
             next_id: 1,
-            next_alarm: 3,
+            next_alarm: FIRST_ALARM_TOKEN,
+        }
+    }
+
+    fn assert_alarm_invariants(&self, uid: Option<u32>) {
+        let armed = self
+            .objects
+            .values()
+            .filter(|object| {
+                matches!(
+                    object.value,
+                    Value::Timer(Timer {
+                        arm: Arm::Armed { .. },
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!(self.alarms.len(), armed);
+        assert!(self.alarms.len() <= MAX_ALARMS);
+        if let Some(uid) = uid {
+            let per_uid = self
+                .alarms
+                .values()
+                .filter(|alarm| alarm.uid == uid)
+                .count();
+            assert!(per_uid <= MAX_ALARMS_PER_UID);
         }
     }
 
@@ -129,36 +164,52 @@ impl<'a> Objects<'a> {
         }
     }
 
-    fn refresh(&mut self, id: usize) -> Result<()> {
-        let clock = match &self.objects.get(&id).ok_or(Error::new(EBADF))?.value {
-            Value::Timer(timer) => timer.clock,
-            Value::Counter { .. } => return Ok(()),
+    fn rearm(&mut self, id: usize, deadline: Option<u128>) -> Result<()> {
+        let (uid, clock, old_arm) = {
+            let object = self.objects.get(&id).ok_or(Error::new(EBADF))?;
+            let Value::Timer(timer) = &object.value else {
+                return Err(Error::new(EINVAL));
+            };
+            (object.uid, timer.clock, timer.arm)
         };
-        let now = self.now(clock)?;
-        if let Value::Timer(timer) = &mut self.objects.get_mut(&id).unwrap().value {
-            timer.advance(now);
-        }
-        Ok(())
-    }
-
-    fn schedule(&mut self, id: usize, timer: &Timer, uid: u32) -> Result<()> {
-        if timer.deadline == 0 {
+        let old_token = match old_arm {
+            Arm::Disarmed => None,
+            Arm::Armed { alarm, .. } => Some(alarm),
+        };
+        let Some(deadline) = deadline else {
+            if let Some(token) = old_token {
+                let removed = self.alarms.remove(&token);
+                assert!(removed.is_some());
+            }
+            if let Some(Object {
+                value: Value::Timer(timer),
+                ..
+            }) = self.objects.get_mut(&id)
+            {
+                timer.arm = Arm::Disarmed;
+            }
+            self.assert_alarm_invariants(Some(uid));
             return Ok(());
-        }
-        if self.alarms.len() >= MAX_ALARMS
-            || self
-                .alarms
-                .values()
-                .filter(|alarm| alarm.uid == uid)
-                .count()
-                >= MAX_ALARMS_PER_UID
-        {
+        };
+        let reused = usize::from(old_token.is_some());
+        let uid_count = self
+            .alarms
+            .values()
+            .filter(|alarm| alarm.uid == uid)
+            .count();
+        if self.alarms.len() - reused >= MAX_ALARMS || uid_count - reused >= MAX_ALARMS_PER_UID {
             return Err(Error::new(EAGAIN));
         }
+        let time = TimeSpec {
+            tv_sec: (deadline / NANO)
+                .try_into()
+                .map_err(|_| Error::new(EOVERFLOW))?,
+            tv_nsec: (deadline % NANO) as i32,
+        };
         let token = self.next_alarm;
-        self.next_alarm = token.checked_add(1).ok_or(Error::new(EOVERFLOW))?;
+        let next_alarm = token.checked_add(1).ok_or(Error::new(EOVERFLOW))?;
         let fd = self.time_root.openat(
-            if timer.clock == CLOCK_REALTIME {
+            if clock == CLOCK_REALTIME {
                 "1/timer"
             } else {
                 "4/timer"
@@ -167,52 +218,98 @@ impl<'a> Objects<'a> {
             0,
         )?;
         subscribe(self.events, fd.raw(), token)?;
-        let time = TimeSpec {
-            tv_sec: (timer.deadline / NANO)
-                .try_into()
-                .map_err(|_| Error::new(EOVERFLOW))?,
-            tv_nsec: (timer.deadline % NANO) as i32,
-        };
         if syscall::write(fd.raw(), &time)? != size_of::<TimeSpec>() {
             return Err(Error::new(EIO));
+        }
+        self.next_alarm = next_alarm;
+        if let Some(old) = old_token {
+            let removed = self.alarms.remove(&old);
+            assert!(removed.is_some());
         }
         self.alarms.insert(
             token,
             Alarm {
                 object: id,
-                generation: timer.generation,
                 uid,
                 _fd: fd,
             },
         );
+        if let Some(Object {
+            value: Value::Timer(timer),
+            ..
+        }) = self.objects.get_mut(&id)
+        {
+            timer.arm = Arm::Armed {
+                deadline,
+                alarm: token,
+            };
+        }
+        self.assert_alarm_invariants(Some(uid));
         Ok(())
+    }
+
+    fn refresh(&mut self, id: usize) -> Result<()> {
+        let (clock, armed_deadline) = match &self.objects.get(&id).ok_or(Error::new(EBADF))?.value {
+            Value::Timer(timer) => match timer.arm {
+                Arm::Disarmed => return Ok(()),
+                Arm::Armed { deadline, .. } => (timer.clock, deadline),
+            },
+            Value::Counter { .. } => return Ok(()),
+        };
+        let now = self.now(clock)?;
+        if now < armed_deadline {
+            return Ok(());
+        }
+        let next = match &mut self.objects.get_mut(&id).unwrap().value {
+            Value::Timer(timer) => timer.expire_at(armed_deadline, now),
+            Value::Counter { .. } => return Ok(()),
+        };
+        self.rearm(id, next)
     }
 
     fn wake(&mut self, token: usize) -> Result<()> {
         let Some(alarm) = self.alarms.remove(&token) else {
             return Ok(());
         };
-        let Some(object) = self.objects.remove(&alarm.object) else {
+        let id = alarm.object;
+        let uid = alarm.uid;
+        let (clock, deadline) = {
+            let object = self
+                .objects
+                .get_mut(&id)
+                .expect("alarm points to live object");
+            let Value::Timer(timer) = &mut object.value else {
+                panic!("alarm points to timer");
+            };
+            let Arm::Armed {
+                deadline,
+                alarm: armed_token,
+            } = timer.arm
+            else {
+                panic!("alarm points to armed timer");
+            };
+            assert_eq!(armed_token, token);
+            timer.arm = Arm::Disarmed;
+            (timer.clock, deadline)
+        };
+        self.assert_alarm_invariants(Some(uid));
+        let Ok(now) = self.now(clock) else {
             return Ok(());
         };
-        let Object { uid, mut value } = object;
-        let result = if let Value::Timer(timer) = &mut value {
-            if timer.generation == alarm.generation {
-                timer.advance(self.now(timer.clock)?);
-                self.schedule(alarm.object, timer, uid)?;
-                if timer.count != 0 {
-                    self.notify(alarm.object, EVENT_READ)
-                } else {
-                    Ok(())
-                }
-            } else {
-                Ok(())
-            }
-        } else {
-            Ok(())
+        let (next, readable) = {
+            let Value::Timer(timer) = &mut self.objects.get_mut(&id).unwrap().value else {
+                unreachable!();
+            };
+            let next = timer.expire_at(deadline, now);
+            (next, timer.count != 0)
         };
-        self.objects.insert(alarm.object, Object { uid, value });
-        result
+        if let Err(error) = self.rearm(id, next) {
+            eprintln!("fdobjd: rearm failed on wake for timer {id}: {error}");
+        }
+        if readable {
+            self.notify(id, EVENT_READ)?;
+        }
+        Ok(())
     }
 }
 
@@ -260,10 +357,9 @@ impl SchemeSync for Objects<'_> {
                 }
                 Value::Timer(Timer {
                     clock,
-                    deadline: 0,
+                    arm: Arm::Disarmed,
                     interval: 0,
                     count: 0,
-                    generation: 0,
                 })
             }
         };
@@ -357,48 +453,57 @@ impl SchemeSync for Objects<'_> {
             return Err(Error::new(EINVAL));
         }
         self.refresh(id)?;
-        let object = self.objects.get(&id).ok_or(Error::new(EBADF))?;
-        let Value::Timer(current) = &object.value else {
-            return Err(Error::new(EINVAL));
+        let clock = match &self.objects.get(&id).ok_or(Error::new(EBADF))?.value {
+            Value::Timer(timer) => timer.clock,
+            Value::Counter { .. } => return Err(Error::new(EINVAL)),
         };
-        let now = self.now(current.clock)?;
+        let now = self.now(clock)?;
         match metadata {
             [2, 0, 0] => {
-                current.settings(now, payload);
+                if let Value::Timer(current) = &self.objects.get(&id).unwrap().value {
+                    current.settings(now, payload);
+                }
                 Ok(0)
             }
             [1, flags, 0] if *flags <= 1 => {
                 let interval = decode_time(&payload[..16])?;
                 let value = decode_time(&payload[16..])?;
-                let deadline = if value == 0 {
-                    0
+                let initial_deadline = if value == 0 {
+                    None
                 } else if *flags == 1 {
-                    value
+                    Some(value)
                 } else {
-                    now + value
+                    Some(now.checked_add(value).ok_or(Error::new(EOVERFLOW))?)
                 };
-                if deadline / NANO > i64::MAX as u128
-                    || (deadline != 0 && (deadline + interval) / NANO > i64::MAX as u128)
-                {
-                    return Err(Error::new(EOVERFLOW));
+                if let Some(deadline) = initial_deadline {
+                    if deadline / NANO > i64::MAX as u128
+                        || deadline
+                            .checked_add(interval)
+                            .is_none_or(|d| d / NANO > i64::MAX as u128)
+                    {
+                        return Err(Error::new(EOVERFLOW));
+                    }
                 }
-                let mut timer = Timer {
-                    clock: current.clock,
-                    deadline,
+                let mut old = [0; 32];
+                let mut pending = Timer {
+                    clock,
+                    arm: Arm::Disarmed,
                     interval,
                     count: 0,
-                    generation: current
-                        .generation
-                        .checked_add(1)
-                        .ok_or(Error::new(EOVERFLOW))?,
                 };
-                timer.advance(now);
-                let mut old = [0; 32];
-                current.settings(now, &mut old);
-                let uid = object.uid;
-                self.schedule(id, &timer, uid)?;
-                let readable = timer.count != 0;
-                self.objects.get_mut(&id).unwrap().value = Value::Timer(timer);
+                let next_deadline = match initial_deadline {
+                    Some(deadline) => pending.expire_at(deadline, now),
+                    None => None,
+                };
+                if let Value::Timer(current) = &self.objects.get(&id).unwrap().value {
+                    current.settings(now, &mut old);
+                }
+                self.rearm(id, next_deadline)?;
+                let readable = pending.count != 0;
+                if let Value::Timer(timer) = &mut self.objects.get_mut(&id).unwrap().value {
+                    timer.interval = pending.interval;
+                    timer.count = pending.count;
+                }
                 payload.copy_from_slice(&old);
                 if readable {
                     self.notify(id, EVENT_READ)?;
@@ -453,7 +558,17 @@ impl SchemeSync for Objects<'_> {
     }
 
     fn on_close(&mut self, id: usize) {
-        self.objects.remove(&id);
+        if let Some(object) = self.objects.remove(&id) {
+            if let Value::Timer(Timer {
+                arm: Arm::Armed { alarm, .. },
+                ..
+            }) = object.value
+            {
+                let removed = self.alarms.remove(&alarm);
+                assert!(removed.is_some());
+            }
+            self.assert_alarm_invariants(Some(object.uid));
+        }
     }
 }
 
@@ -578,7 +693,7 @@ impl Requests {
     }
 
     fn retry(&mut self, scheme: &mut Objects<'_>) -> Result<()> {
-        loop {
+        for _ in 0..MAX_RETRY_PASSES {
             let before = self.pending.len();
             for _ in 0..before {
                 let (caller, op) = self.pending.pop_front().unwrap();
@@ -588,6 +703,7 @@ impl Requests {
                 return Ok(());
             }
         }
+        Err(Error::new(EIO))
     }
 }
 
@@ -617,8 +733,8 @@ fn run() -> Result<()> {
     let mut timers = Objects::new(Kind::Timer, &timer_socket, &events, &time_root, &clocks);
     register_sync_scheme(&event_socket, "eventfd", &mut counters)?;
     register_sync_scheme(&timer_socket, "timerfd", &mut timers)?;
-    subscribe(&events, event_socket.inner().raw(), 1)?;
-    subscribe(&events, timer_socket.inner().raw(), 2)?;
+    subscribe(&events, event_socket.inner().raw(), TOKEN_COUNTERS)?;
+    subscribe(&events, timer_socket.inner().raw(), TOKEN_TIMERS)?;
     libredox::call::setrens(0, 0)?;
     notify.write(&[0])?;
     drop(notify);
@@ -633,8 +749,8 @@ fn run() -> Result<()> {
             Ok(_) => {}
         }
         match event.data {
-            1 => counter_requests.receive(&mut counters)?,
-            2 => timer_requests.receive(&mut timers)?,
+            TOKEN_COUNTERS => counter_requests.receive(&mut counters)?,
+            TOKEN_TIMERS => timer_requests.receive(&mut timers)?,
             token => {
                 timers.wake(token)?;
                 timer_requests.retry(&mut timers)?;

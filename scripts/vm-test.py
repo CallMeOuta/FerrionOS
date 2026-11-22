@@ -1103,7 +1103,7 @@ def test_fd_primitives(vm, args):
         "timerfd-monotonic-relative-absolute-readiness",
         "timerfd-realtime-relative-absolute-readiness",
         "timerfd-gettime-interval-disarm-rearm", "timerfd-dup-fork-blocking",
-        "descriptor-flags-exec",
+        "descriptor-flags-exec", "timerfd-alarm-quota",
     )
     lines = output.splitlines()
     missing = [name for name in expected if f"fd-primitives-probe: pass {name}" not in lines]
