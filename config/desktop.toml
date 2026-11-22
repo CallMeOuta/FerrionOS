@@ -16,6 +16,7 @@ hicolor-icon-theme = {}
 installer-gui = {}
 libxkbcommon = "source"
 netsurf = {}
+noto-sans-cjk = {}
 patchelf = {}
 pop-icon-theme = {}
 shared-mime-info = {}

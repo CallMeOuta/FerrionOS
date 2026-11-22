@@ -1,0 +1,15 @@
+[source]
+tar = "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/01_NotoSansCJK-OTF-VF.zip"
+blake3 = "f0e108e67b7911aebfd9dc072188cf338b26adf7b75c67962a89d809337abf4d"
+
+[build]
+template = "custom"
+script = """
+install -Dm644 "${COOKBOOK_SOURCE}/Variable/OTC/NotoSansCJK-VF.otf.ttc" "${COOKBOOK_STAGE}/usr/share/fonts/Noto-Sans-CJK/NotoSansCJK-VF.otf.ttc"
+install -m644 "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/fonts/Noto-Sans-CJK/LICENSE"
+install -Dm644 "${COOKBOOK_RECIPE}/70-noto-sans-cjk.conf" "${COOKBOOK_STAGE}/etc/fonts/conf.d/70-noto-sans-cjk.conf"
+"""
+
+[package]
+version = "2.004"
+description = "Variable Noto Sans CJK fonts for Chinese, Japanese and Korean"

@@ -104,7 +104,7 @@
 # disk-install boot copies in a temporary directory instead), and `make` is
 # told the image is up to date, so a run never starts a build. Screenshots
 # (PNG) and the serial log of each run go under --out. Run from the
-# repository root. Python standard library only.
+# repository root. Python standard library only; firefox-cjk is BLOCKED without Pillow.
 # 3D devices use EGL headless and a private Unix VNC socket; screenshots fall
 # back to RFB when screendump reports no surface. --trace EVENT records QEMU
 # events in qemu-trace.log, read by VM.trace(). Each run writes result.json with
@@ -2226,6 +2226,107 @@ def test_firefox_headless(vm, args):
     return True, "; ".join(f"{name}: {note}" for name, note in results) + f"; inspect the PNGs in {vm.out}"
 
 
+FIREFOX_CJK = [
+    ("zh-CN", "SC", "中文汉字骨直"),
+    ("zh-TW", "TC", "中文漢字骨直"),
+    ("zh-HK", "HK", "香港漢字骨直"),
+    ("ja", "JP", "日本語あいう"),
+    ("ko", "KR", "한국어한글말"),
+]
+
+
+def test_firefox_cjk(vm, args):
+    """Firefox draws Chinese, Japanese and Korean text with the image's Noto Sans CJK, each glyph matching the host's rendering of the same pinned font, and fc-match picks each language's region (use --config firefox)."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        raise Blocked("firefox-cjk draws its host reference with Pillow, which this host lacks")
+
+    font_path = ROOT / "recipes/fonts/noto-sans-cjk/source/Variable/OTC/NotoSansCJK-VF.otf.ttc"
+    if not font_path.is_file():
+        raise Blocked("fetch noto-sans-cjk first; the CJK check needs its pinned font as a host reference")
+    faces = subprocess.check_output(
+        ["fc-scan", "--format", "%{family[0]}|%{index}\\n", str(font_path)], text=True)
+    indices = {family: int(index) for family, index in
+               (line.rsplit("|", 1) for line in faces.splitlines()) if int(index) < 65536}
+    reference = Image.new("RGB", (800, 600), "white")
+    drawing = ImageDraw.Draw(reference)
+    html = ['<!doctype html><meta charset="utf-8"><title>CJK</title><body style="margin:0;background:white">']
+    for row, (lang, region, text) in enumerate(FIREFOX_CJK):
+        font = ImageFont.truetype(str(font_path), 48, index=indices[f"Noto Sans CJK {region}"])
+        font.set_variation_by_axes([400])
+        html.append(f'<canvas id="c{row}" lang="{lang}" width="800" height="96" style="display:block"></canvas>')
+        html.append(f'<script>var c=document.getElementById("c{row}").getContext("2d");'
+                    'c.font="48px sans-serif";c.fillStyle="black";')
+        for column, char in enumerate(text):
+            x = 8 + column * 64
+            drawing.text((x, row * 96 + 64), char, font=font, fill="black", anchor="ls")
+            html.append(f'c.fillText("\\u{ord(char):04x}",{x},64);')
+        html.append('</script>')
+    reference.save(vm.out / "cjk-reference.png")
+    encoded = base64.b64encode("".join(html).encode()).decode()
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, "no serial login"
+    vm.type("user\n")
+    time.sleep(3)
+    vm.type("bash --norc --noprofile --noediting\n")
+    time.sleep(1)
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo CJKRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)CJKRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    directory = "/tmp/firefox-cjk"
+    status, _ = run(f"mkdir -p {directory}/profile; printf '%s' '{encoded}' | base64 -d > {directory}/page.html", 30)
+    if status != 0:
+        return False, "could not write CJK page"
+    matches, failures = [], []
+    for lang, region, _ in FIREFOX_CJK:
+        status, result = run(f"fc-match --format '%{{family[0]}}\\n' 'sans-serif:lang={lang}'", 60)
+        matches.append(f"{lang}: {result.strip()}")
+        if status != 0 or f"Noto Sans CJK {region}" not in result.splitlines():
+            failures.append(f"{lang}: wrong fontconfig family")
+    (vm.out / "fc-match.txt").write_text("\n".join(matches) + "\n")
+    status, _ = run(f"MOZ_HEADLESS=1 firefox --headless --no-remote --profile {directory}/profile "
+                    f"--window-size=800,600 --screenshot {directory}/cjk.png file://{directory}/page.html "
+                    f"> {directory}/firefox.log 2>&1", 600)
+    if status is None:
+        vm.type("\x03")
+        time.sleep(2)
+    _, log = run(f"tail -n 40 {directory}/firefox.log", 30)
+    (vm.out / "firefox.log").write_text(log)
+    since = vm.mark()
+    vm.type(f"echo CJKPNG-BEGIN; base64 -w 0 {directory}/cjk.png; echo; echo CJKPNG-END\n")
+    found = vm.wait_serial(r"CJKPNG-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)CJKPNG-END", 300, since)
+    if not found:
+        return False, f"no CJK screenshot; firefox exit {status}"
+    image_path = vm.out / "cjk.png"
+    image_path.write_bytes(base64.b64decode("".join(found.group(1).split()), validate=True))
+    actual = Image.open(image_path).convert("L")
+    expected = reference.convert("L")
+    if actual.size != expected.size or status != 0:
+        return False, f"CJK screenshot {actual.size}, firefox exit {status}"
+    scores = []
+    for row, (lang, _, text) in enumerate(FIREFOX_CJK):
+        for column, char in enumerate(text):
+            box = (column * 64, row * 96, (column + 1) * 64, (row + 1) * 96)
+            wanted = {(i % 64, i // 64) for i, value in enumerate(expected.crop(box).tobytes()) if value < 128}
+            got = {(i % 64, i // 64) for i, value in enumerate(actual.crop(box).tobytes()) if value < 128}
+            best = 0
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    shifted = {(x + dx, y + dy) for x, y in got}
+                    union = wanted | shifted
+                    best = max(best, len(wanted & shifted) / len(union) if union else 0)
+            scores.append({"lang": lang, "glyph": char, "intersection_over_union": round(best, 4)})
+            if best < 0.70:
+                failures.append(f"{lang} {char}: glyph overlap {best:.3f} < 0.70")
+    (vm.out / "cjk-glyphs.json").write_text(json.dumps(scores, ensure_ascii=False, indent=2) + "\n")
+    return not failures, "; ".join(failures) if failures else "all CJK glyphs match the host reference; all regional fc-match families pass"
+
+
 # `make qemu` appends -cpu host after QEMUFLAGS, so a -cpu option there is overridden.
 RAND_NO_CPU = "-global host-x86_64-cpu.rdrand=off -global host-x86_64-cpu.rdseed=off"
 RAND_FIRMWARE = RAND_NO_CPU + " -device virtio-rng-pci"
@@ -4163,6 +4264,7 @@ TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-lo
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
          "dev-parity": test_dev_parity, "firefox-headless": test_firefox_headless, "rand-seed": test_rand_seed,
+         "firefox-cjk": test_firefox_cjk,
          "ferrion-run": test_ferrion_run}
 TESTS["ferrion-cli"] = test_ferrion_cli
 TESTS["update-today"] = test_update_today
