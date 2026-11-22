@@ -898,6 +898,9 @@ impl<'a, D: Disk> Transaction<'a, D> {
         name: &str,
         node_ptr: TreePtr<Node>,
     ) -> Result<()> {
+        if name.is_empty() || name.contains(':') || name.len() > DIR_ENTRY_MAX_LENGTH {
+            return Err(Error::new(EINVAL));
+        }
         let mut parent = self.read_tree(parent_ptr)?;
         let mut node = self.read_tree(node_ptr)?;
 
