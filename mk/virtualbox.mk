@@ -11,7 +11,7 @@ virtualbox: $(BUILD)/harddrive.img
 		fi \
 	fi
 	echo "Delete Disk"
-	-$(RM) harddrive.vdi
+	-$(RM) $(BUILD)/harddrive.vdi
 	echo "Create VM"
 	$(VBM) createvm --name FerrionOS --register
 	echo "Set Configuration"
