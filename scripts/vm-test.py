@@ -1667,7 +1667,7 @@ def test_gtk_window_wayland(vm, args):
     return test_gtk_window(vm, args, backend="wayland")
 
 
-def run_wayland_client(args, out, *, pointer_latency=False):
+def run_wayland_client(args, out, *, pointer_latency=False, desktop_columns=False):
     """Checks the DD1 pixman compositor with a cursor-capable virtio display and QMP input."""
     with tempfile.TemporaryDirectory(prefix="ferrion-dd-qmp-") as directory:
         path = Path(directory) / "qmp.sock"
@@ -1693,6 +1693,8 @@ def run_wayland_client(args, out, *, pointer_latency=False):
                                 return reply["return"]
 
                     qmp("qmp_capabilities")
+                    if desktop_columns:
+                        return test_desktop_columns(vm, args, qmp, boot_load)
                     ok, note = test_wayland_client(vm, args, qmp, boot_load, pointer_latency=pointer_latency)
                     if not pointer_latency and out.name == f"wayland-client-{args.repeat}":
                         measurements = [
@@ -1847,32 +1849,23 @@ def test_shm_reuse(vm, args):
     return status == 0 and passed == 8, f"{passed}/8 shared mapping cases pass; exit {status}; see {vm.out / 'probe.txt'}"
 
 
+def test_desktop_columns(vm, args, qmp, boot_load):
+    """Compares three windows in both layouts, recording timing with corners off/on."""
+    from desktop_columns import check
+    return check(vm, args, qmp, boot_load, root_shell, run_status)
+
+
+def run_desktop_columns(args, out):
+    """Checks ferrion-wm's layouts and per-frame timing; use --config wm-columns --repeat 10."""
+    return run_wayland_client(args, out, desktop_columns=True)
+
+
 def test_desktop_regions(vm, args):
     """Compares the desktop's region probes with flat/first-run.svg within two RGB steps."""
-    import xml.etree.ElementTree as ET
+    from desktop_fixtures import compare_probes, load_regions
 
-    fixture = ROOT / "scripts/desktop-fixtures/flat/first-run.svg"
-    svg = ET.parse(fixture).getroot()
-    ns = "{http://www.w3.org/2000/svg}"
-    regions = [
-        rect for group in svg.iter(ns + "g") if group.get("id") == "regions"
-        for rect in group.iter(ns + "rect")
-    ]
-    if not regions:
-        return False, f"no regions in {fixture.name}"
-    probes = []
-    for region in regions:
-        points = []
-        for probe in region.attrib["data-probes"].split():
-            place, color = probe.split(":")
-            x, y = map(int, place.split(","))
-            expected = bytes.fromhex(color.removeprefix("#"))
-            if len(expected) != 3:
-                raise ValueError(f"invalid RGB probe in {region.attrib['id']}")
-            points.append((x, y, expected))
-        # A region whose content changes (the status area's clock) carries no probes.
-        if points:
-            probes.append((region.attrib["id"], points))
+    probes = [(name, region["probes"]) for name, region in load_regions("first-run.svg").items()
+              if region["probes"]]
 
     while vm.elapsed() < args.timeout:
         if vm.screenshot().kind() == "login":
@@ -1887,15 +1880,7 @@ def test_desktop_regions(vm, args):
     frame.save_png(vm.out / "desktop-regions.png")
     differing = 0
     for name, points in probes:
-        differences = []
-        for x, y, expected in points:
-            if not (0 <= x < frame.width and 0 <= y < frame.height):
-                differences.append(f"({x},{y}) outside {frame.width}x{frame.height}")
-                continue
-            at = (y * frame.width + x) * 3
-            seen = frame.rgb[at:at + 3]
-            if any(abs(a - b) > 2 for a, b in zip(seen, expected)):
-                differences.append(f"({x},{y}) #{seen.hex()}, expected #{expected.hex()}")
+        differences = compare_probes(frame, points)
         differing += bool(differences)
         print(f"{'FAIL' if differences else 'PASS'} {name}: "
               + ("; ".join(differences) if differences else f"{len(points)} probes match"), flush=True)
@@ -6144,6 +6129,7 @@ OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
 OWN_IMAGE["wayland-client"] = run_wayland_client
 OWN_IMAGE["pointer-latency"] = run_pointer_latency
+OWN_IMAGE["desktop-columns"] = run_desktop_columns
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
@@ -6267,6 +6253,8 @@ def main():
             result = {"test": name, "run": run, "verdict": verdict, "note": note, "host": host,
                       "make": [*args.make, *make], "capture_sources": captures, "last_capture_source": last_capture,
                       "trace_events": run_args.trace, "trace_lines": trace_lines}
+            if name == "desktop-columns" and (out / "measurements.json").exists():
+                result["desktop_columns"] = json.loads((out / "measurements.json").read_text())
             (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
             print(f"{verdict} {name} {run}/{args.repeat}: {note}", flush=True)
     sys.exit(1 if failures else 2 if blocked else 0)
