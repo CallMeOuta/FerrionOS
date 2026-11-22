@@ -85,7 +85,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
  };
  
  static const struct dri_loader_funcs redox_swrast_loader_funcs = {
-@@ -445,8 +480,45 @@
+@@ -445,8 +480,74 @@
      .image_lookup = &image_lookup_extension,
  };
  
@@ -93,6 +93,16 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
 +    .swrast = &swrast_loader_extension,
 +    .kopper = &redox_kopper_loader_extension,
 +    .image_lookup = &image_lookup_extension,
++};
++
++enum {
++    REDOX_MAX_SCHEME_ENTRIES = 4096,
++    REDOX_MAX_DRIVER_ATTEMPTS = 2,
++};
++
++enum redox_driver {
++    REDOX_DRV_ZINK = 1,
++    REDOX_DRV_SWRAST = 2,
 +};
 +
 +static bool
@@ -103,7 +113,7 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
 +        return false;
 +    struct dirent *entry;
 +    bool found = false;
-+    while ((entry = readdir(dir)) != NULL) {
++    for (unsigned count = 0; count < REDOX_MAX_SCHEME_ENTRIES && (entry = readdir(dir)) != NULL; count++) {
 +        if (strncmp(entry->d_name, "gpu.", 4) == 0) {
 +            found = true;
 +            break;
@@ -113,72 +123,126 @@ FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Enable Z
 +    return found;
 +}
 +
- static bool
--redox_probe_device_sw(_EGLDisplay *disp)
-+redox_want_zink(_EGLDisplay *disp)
++static unsigned
++redox_select_drivers(_EGLDisplay *disp, enum redox_driver out[REDOX_MAX_DRIVER_ATTEMPTS])
 +{
 +    const char *override = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
-+    if (override && override[0] != '\0')
-+        return strcmp(override, "zink") == 0;
-+
-+    if (disp->Options.ForceSoftware)
-+        return false;
-+
-+    return redox_render_scheme_exists();
++    bool explicit_zink = override && strcmp(override, "zink") == 0;
++    if (explicit_zink) {
++        if (!disp->Options.Zink)
++            return 0;
++        out[0] = REDOX_DRV_ZINK;
++        return 1;
++    }
++    if (override && override[0] != '\0') {
++        out[0] = REDOX_DRV_SWRAST;
++        return 1;
++    }
++    if (disp->Options.Zink) {
++        out[0] = REDOX_DRV_ZINK;
++        return 1;
++    }
++    if (disp->Options.ForceSoftware) {
++        out[0] = REDOX_DRV_SWRAST;
++        return 1;
++    }
++    if (redox_render_scheme_exists()) {
++        out[0] = REDOX_DRV_ZINK;
++        out[1] = REDOX_DRV_SWRAST;
++        return 2;
++    }
++    out[0] = REDOX_DRV_SWRAST;
++    return 1;
 +}
 +
-+static bool
-+redox_probe_device(_EGLDisplay *disp, bool use_zink)
+ static bool
+-redox_probe_device_sw(_EGLDisplay *disp)
++redox_probe_device(_EGLDisplay *disp, enum redox_driver driver)
  {
      struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
      struct _egl_device *device = _eglFindDevice(dri2_dpy->fd_render_gpu, true);
-@@ -460,12 +532,14 @@
+@@ -460,12 +561,28 @@
      disp->Device = device;
      assert(disp->Device);
  
 -    dri2_dpy->driver_name = strdup("swrast");
++    const char *name = NULL;
++    switch (driver) {
++    case REDOX_DRV_ZINK:
++        name = "zink";
++        break;
++    case REDOX_DRV_SWRAST:
++        name = "swrast";
++        break;
++    default:
++        assert(!"invalid redox driver");
++        return false;
++    }
 +    free(dri2_dpy->driver_name);
-+    dri2_dpy->driver_name = strdup(use_zink ? "zink" : "swrast");
++    dri2_dpy->driver_name = strdup(name);
      if (!dri2_dpy->driver_name)
         return false;
  
      dri2_detect_swrast_kopper(disp);
 -    dri2_dpy->loader_funcs = &redox_swrast_loader_funcs;
++    assert(dri2_dpy->kopper == (driver == REDOX_DRV_ZINK));
 +    dri2_dpy->loader_funcs = dri2_dpy->kopper ? &redox_kopper_loader_funcs
 +                                              : &redox_swrast_loader_funcs;
++    assert(dri2_dpy->loader_funcs == (dri2_dpy->kopper ? &redox_kopper_loader_funcs : &redox_swrast_loader_funcs));
  
      return true;
  }
-@@ -536,7 +610,9 @@
-     bool driver_loaded = false;
+@@ -533,20 +650,32 @@
+ dri2_initialize_redox(_EGLDisplay *disp)
+ {
+     const char *err;
+-    bool driver_loaded = false;
      struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
- 
+-
 -    driver_loaded = redox_probe_device_sw(disp);
-+    bool want_zink = redox_want_zink(disp);
-+
-+    driver_loaded = redox_probe_device(disp, want_zink);
- 
-     if (!driver_loaded) {
-        err = "DRI2: failed to load driver";
-@@ -546,8 +622,16 @@
-     dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
- 
-     if (!dri2_create_screen(disp)) {
--       err = "DRI2: failed to create screen";
+-
+-    if (!driver_loaded) {
+-       err = "DRI2: failed to load driver";
 -       goto cleanup;
-+       if (want_zink && redox_probe_device(disp, false)) {
-+          dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
-+          if (!dri2_create_screen(disp)) {
-+             err = "DRI2: failed to create screen";
-+             goto cleanup;
-+          }
-+       } else {
-+          err = "DRI2: failed to create screen";
-+          goto cleanup;
++    enum redox_driver attempts[REDOX_MAX_DRIVER_ATTEMPTS];
++    unsigned attempt_count = redox_select_drivers(disp, attempts);
++    bool screen_created = false;
++
++    assert(attempt_count <= REDOX_MAX_DRIVER_ATTEMPTS);
++    err = "DRI2: failed to load driver";
++
++    for (unsigned i = 0; i < attempt_count; i++) {
++       if (!redox_probe_device(disp, attempts[i])) {
++          err = "DRI2: failed to load driver";
++          continue;
 +       }
++       dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
++       if (dri2_create_screen(disp)) {
++          screen_created = true;
++          break;
++       }
++       err = "DRI2: failed to create screen";
++       free(dri2_dpy->driver_name);
++       dri2_dpy->driver_name = NULL;
++       dri2_dpy->kopper = false;
++       dri2_dpy->loader_funcs = NULL;
      }
  
-     dri2_setup_screen(disp);
+-    dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
+-
+-    if (!dri2_create_screen(disp)) {
+-       err = "DRI2: failed to create screen";
++    if (!screen_created) {
+        goto cleanup;
+     }
+ 
+@@ -569,6 +698,5 @@
+     return EGL_TRUE;
+ 
+ cleanup:
+-    dri2_display_destroy(disp);
+     return _eglError(EGL_NOT_INITIALIZED, err);
+ }
 --- a/src/egl/drivers/dri2/platform_surfaceless.c
 +++ b/src/egl/drivers/dri2/platform_surfaceless.c
 @@ -23,6 +23,9 @@
