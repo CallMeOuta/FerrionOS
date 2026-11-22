@@ -1,0 +1,9 @@
+[package]
+description = "FerrionOS shared file mapping and backing reuse probe"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

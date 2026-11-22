@@ -1837,6 +1837,16 @@ def test_wayland_client(vm, args, qmp, boot_load, *, pointer_latency=False):
     return not problems, "; ".join(problems) if problems else f"{note}; see {vm.out}"
 
 
+def test_shm_reuse(vm, args):
+    """Checks fresh shared-file contents after repeated mapping, unmapping and unlinking."""
+    if not root_shell(vm, args.timeout):
+        return False, "serial root shell unavailable"
+    status, output = run_status(vm, "shm-reuse-probe", max(args.timeout, 120))
+    (vm.out / "probe.txt").write_text(output)
+    passed = len(re.findall(r"shm-reuse-probe: PASS ", output))
+    return status == 0 and passed == 8, f"{passed}/8 shared mapping cases pass; exit {status}; see {vm.out / 'probe.txt'}"
+
+
 def test_desktop_regions(vm, args):
     """Compares the desktop's region probes with flat/first-run.svg within two RGB steps."""
     import xml.etree.ElementTree as ET
@@ -6095,6 +6105,7 @@ TESTS["sudo-notty"] = test_sudo_notty
 TESTS["scheme-short-read"] = test_scheme_short_read
 TESTS["event-poll"] = test_event_poll
 TESTS["desktop-regions"] = test_desktop_regions
+TESTS["shm-reuse"] = test_shm_reuse
 TESTS["resolver"] = test_resolver
 TESTS["cli-tools"] = test_cli_tools
 TESTS["dlopen-ctor"] = test_dlopen_ctor
