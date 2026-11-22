@@ -1,4 +1,4 @@
-From f7396d44c3c21eecbfb5f0b9c9d52ddd2ac5b7aa Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: FerrionOS contributors <contributors@ferrion.invalid>
 Date: Sat, 21 Nov 2026 15:05:40 -0800
 Subject: [PATCH] ipc: Retry interrupted socket connections on FerrionOS
@@ -8,13 +8,12 @@ that transient failure in a separate adapter, preserving other errors.
 Name the public socket environment for ferrion-wm. The VM layout check
 uses this client for every arrangement command.
 ---
- niri-ipc/src/socket.rs             | 22 ++++----
- niri-ipc/src/socket/ferrion.rs     | 14 +++++
- src/backend/ferrion.rs             | 82 +++++++++++++++---------------
- src/backend/headless.rs            |  3 +-
- src/cli.rs                         | 22 +++++---
- src/handlers/image_copy_capture.rs | 12 +----
- 6 files changed, 82 insertions(+), 73 deletions(-)
+ niri-ipc/src/socket.rs             | 22 +++++++++-------------
+ niri-ipc/src/socket/ferrion.rs     | 14 ++++++++++++++
+ src/backend/headless.rs            |  3 +--
+ src/cli.rs                         | 22 ++++++++++++++++------
+ src/handlers/image_copy_capture.rs | 12 ++----------
+ 5 files changed, 42 insertions(+), 31 deletions(-)
  create mode 100644 niri-ipc/src/socket/ferrion.rs
 
 diff --git a/niri-ipc/src/socket.rs b/niri-ipc/src/socket.rs
@@ -102,105 +101,6 @@ index 00000000..68b85956
 +        }
 +    }
 +}
-diff --git a/src/backend/ferrion.rs b/src/backend/ferrion.rs
-index cd2b22b0..9bcbcaf7 100644
---- a/src/backend/ferrion.rs
-+++ b/src/backend/ferrion.rs
-@@ -111,54 +111,52 @@ impl Ferrion {
-                 max_bpc: None,
-             },
-         )])));
--        event_loop.insert_source(source, |_, _, state| {
--            loop {
--                let event = state.backend.ferrion().native.try_event();
--                match event {
--                    Ok(Some(BackendEvent::Input(input))) => {
--                        let backend = state.backend.ferrion();
--                        let time_us = match input {
--                            Input::Key(e) => e.time_us,
--                            Input::Motion(e) => e.time_us,
--                            Input::Button(e) => e.time_us,
--                            Input::Axis(e) => e.time_us,
--                        };
--                        if backend.pending_inputs.len() == 512 {
--                            backend.pending_inputs.pop_front();
--                            warn!("input timing sample dropped: output stalled");
--                        }
--                        backend.pending_inputs.push_back(time_us);
--                        if let Input::Key(event) = &input {
--                            if event.pressed {
--                                info!(
--                                    "FERRION_KEY code={} read_ns={}",
--                                    event.code,
--                                    (backend.input_epoch + time_us) * 1000
--                                );
--                            }
--                        }
--                        let time = InputTime::from_micros(backend.input_epoch + time_us);
--                        state.process_input_event(into_smithay(input, time));
--                    }
--                    Ok(Some(BackendEvent::CursorTiming(t))) => {
--                        info!(
--                            "FERRION_CURSOR read_us={} completed_us={} x={} y={}",
--                            t.read_us, t.completed_us, t.x, t.y
--                        );
-+        event_loop.insert_source(source, |_, _, state| loop {
-+            let event = state.backend.ferrion().native.try_event();
-+            match event {
-+                Ok(Some(BackendEvent::Input(input))) => {
-+                    let backend = state.backend.ferrion();
-+                    let time_us = match input {
-+                        Input::Key(e) => e.time_us,
-+                        Input::Motion(e) => e.time_us,
-+                        Input::Button(e) => e.time_us,
-+                        Input::Axis(e) => e.time_us,
-+                    };
-+                    if backend.pending_inputs.len() == 512 {
-+                        backend.pending_inputs.pop_front();
-+                        warn!("input timing sample dropped: output stalled");
-                     }
--                    Ok(Some(BackendEvent::DisplayChanged)) => {
--                        if let Err(err) = state.backend.ferrion().reconfigure(&mut state.niri) {
--                            error!("display handoff failed: {err:#}");
--                            state.niri.stop_signal.stop();
-+                    backend.pending_inputs.push_back(time_us);
-+                    if let Input::Key(event) = &input {
-+                        if event.pressed {
-+                            info!(
-+                                "FERRION_KEY code={} read_ns={}",
-+                                event.code,
-+                                (backend.input_epoch + time_us) * 1000
-+                            );
-                         }
-                     }
--                    Ok(None) => break,
--                    Err(err) => {
--                        error!("input reader failed: {err}");
-+                    let time = InputTime::from_micros(backend.input_epoch + time_us);
-+                    state.process_input_event(into_smithay(input, time));
-+                }
-+                Ok(Some(BackendEvent::CursorTiming(t))) => {
-+                    info!(
-+                        "FERRION_CURSOR read_us={} completed_us={} x={} y={}",
-+                        t.read_us, t.completed_us, t.x, t.y
-+                    );
-+                }
-+                Ok(Some(BackendEvent::DisplayChanged)) => {
-+                    if let Err(err) = state.backend.ferrion().reconfigure(&mut state.niri) {
-+                        error!("display handoff failed: {err:#}");
-                         state.niri.stop_signal.stop();
--                        break;
-                     }
-                 }
-+                Ok(None) => break,
-+                Err(err) => {
-+                    error!("input reader failed: {err}");
-+                    state.niri.stop_signal.stop();
-+                    break;
-+                }
-             }
-         })?;
-         info!(
 diff --git a/src/backend/headless.rs b/src/backend/headless.rs
 index 064c09f1..d30ec9e8 100644
 --- a/src/backend/headless.rs

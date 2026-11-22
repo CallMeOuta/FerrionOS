@@ -1,4 +1,4 @@
-From e238fef0887c0a8285b0adff1f94beda988f20ba Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: FerrionOS contributors <contributors@ferrion.invalid>
 Date: Sat, 21 Nov 2026 15:05:40 -0800
 Subject: [PATCH] backend: Run ferrion-wm on FerrionOS with timed CPU
@@ -13,13 +13,13 @@ Default Linux features preserve the original integrations. Target cooks
 and four fixture layouts run; the ten-boot acceptance series follows.
 Use the ferrion-wm name for the executable and visible interface.
 ---
- Cargo.lock                                  | 414 ++++++++++++---
+ Cargo.lock                                  | 414 +++++++++---
  Cargo.toml                                  |  47 +-
  niri-config/Cargo.toml                      |   7 +-
  niri-config/src/input.rs                    |   6 +
- src/backend/ferrion.rs                      | 551 ++++++++++++++++++++
+ src/backend/ferrion.rs                      | 669 ++++++++++++++++++++
  src/backend/headless.rs                     |   3 +-
- src/backend/mod.rs                          | 102 +++-
+ src/backend/mod.rs                          | 102 ++-
  src/backend/select.rs                       |  86 +++
  src/cli.rs                                  |  14 +-
  src/handlers/image_copy_capture.rs          |  21 +-
@@ -46,7 +46,7 @@ Use the ferrion-wm name for the executable and visible interface.
  src/ui/exit_confirm_dialog.rs               |   7 +-
  src/ui/hotkey_overlay.rs                    |   5 +-
  src/utils/mod.rs                            |   3 +-
- 33 files changed, 1273 insertions(+), 190 deletions(-)
+ 33 files changed, 1391 insertions(+), 190 deletions(-)
  create mode 100644 src/backend/ferrion.rs
  create mode 100644 src/backend/select.rs
 
@@ -1218,22 +1218,23 @@ index fd049b21..f2eb749f 100644
          match value {
 diff --git a/src/backend/ferrion.rs b/src/backend/ferrion.rs
 new file mode 100644
-index 00000000..cd2b22b0
+index 00000000..94ccccfd
 --- /dev/null
 +++ b/src/backend/ferrion.rs
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,669 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Added for FerrionOS on 2026-11-21 to niri's backend interface.
 +// Input adapter follows FerrionOS's MIT ferrion-wm-backend; its notices are
 +// retained in ferrion-vendor/backend/LICENSE.
 +use std::collections::{HashMap, VecDeque};
++use std::io;
 +use std::sync::{Arc, Mutex};
 +use std::time::{Duration, Instant};
 +
 +use anyhow::Context as _;
 +use calloop::ping::make_ping;
 +use calloop::timer::{TimeoutAction, Timer};
-+use calloop::LoopHandle;
++use calloop::{LoopHandle, RegistrationToken};
 +use ferrion_wm_backend::{self as native, BackendEvent, FrameScheduler, Input};
 +use niri_config::OutputName;
 +use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -1257,32 +1258,69 @@ index 00000000..cd2b22b0
 +};
 +use crate::utils::{get_monotonic_time, logical_output};
 +
++const MAX_EVENTS_PER_DISPATCH: usize = 256;
++const MAX_PENDING_INPUTS: usize = 512;
++const DEFAULT_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
++const FRAME_MARGIN: Duration = Duration::from_micros(500);
++const DISPLAY_CHANGE_PENDING_ERR: &str = "display change pending";
++
++#[derive(PartialEq, Eq)]
++enum CursorPlane {
++    Unknown,
++    Hidden,
++    Shown(Vec<u8>, (u32, u32), (i32, i32)),
++}
++
++struct ActiveDisplay {
++    texture: GlesTexture,
++    damage: OutputDamageTracker,
++    buffer_valid: bool,
++    cursor: CursorPlane,
++}
++
++enum Display {
++    Active(ActiveDisplay),
++    ChangePending,
++}
++
++enum DisplayEvent {
++    Changed,
++    Reconfigured(ActiveDisplay),
++}
++
++fn is_change_pending(err: &io::Error) -> bool {
++    matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Other)
++        && err.to_string() == DISPLAY_CHANGE_PENDING_ERR
++}
++
++fn anyhow_is_change_pending(err: &anyhow::Error) -> bool {
++    err.chain()
++        .find_map(|cause| cause.downcast_ref::<io::Error>())
++        .is_some_and(is_change_pending)
++}
++
 +pub struct Ferrion {
 +    native: native::Backend,
 +    renderer: GlesRenderer,
-+    texture: GlesTexture,
++    display: Display,
 +    output: Output,
-+    damage: OutputDamageTracker,
 +    scheduler: FrameScheduler,
-+    timer_pending: bool,
++    timer_token: Option<RegistrationToken>,
 +    render_due: bool,
-+    valid_buffer: bool,
 +    ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 +    input_epoch: u64,
 +    pending_inputs: VecDeque<u64>,
 +    frame: u64,
-+    cursor_image: Option<(Vec<u8>, (u32, u32), (i32, i32))>,
 +}
 +
 +impl Ferrion {
 +    pub fn new(event_loop: LoopHandle<'static, State>) -> anyhow::Result<Self> {
 +        let (ping, source) = make_ping()?;
-+        let native = native::Backend::open_with_wakeup(move || ping.ping())?;
++        let wakeup = ping.clone();
++        let native = native::Backend::open_with_wakeup(move || wakeup.ping())?;
 +        let input_epoch = get_monotonic_time().as_micros() as u64 - native.now_us();
 +        let (width, height) = native.dimensions();
-+        let period = native
-+            .refresh_period()
-+            .unwrap_or(Duration::from_nanos(16_666_667));
++        let period = native.refresh_period().unwrap_or(DEFAULT_FRAME_PERIOD);
 +        let mut renderer = unsafe {
 +            let display =
 +                EGLDisplay::new(EGLSurfacelessDisplay).context("surfaceless EGL display")?;
@@ -1303,7 +1341,7 @@ index 00000000..cd2b22b0
 +        );
 +        let mode = Mode {
 +            size: (width as i32, height as i32).into(),
-+            refresh: (1_000_000_000_u128 / period.as_micros()) as i32,
++            refresh: (1_000_000_000_u128 / period.as_micros().max(1)) as i32,
 +        };
 +        output.change_current_state(Some(mode), Some(Transform::Normal), None, None);
 +        output.set_preferred(mode);
@@ -1335,8 +1373,11 @@ index 00000000..cd2b22b0
 +                max_bpc: None,
 +            },
 +        )])));
-+        event_loop.insert_source(source, |_, _, state| {
-+            loop {
++        let damage = OutputDamageTracker::from_output(&output);
++        let reping = ping;
++        event_loop.insert_source(source, move |_, _, state| {
++            let mut drained = false;
++            for _ in 0..MAX_EVENTS_PER_DISPATCH {
 +                let event = state.backend.ferrion().native.try_event();
 +                match event {
 +                    Ok(Some(BackendEvent::Input(input))) => {
@@ -1347,7 +1388,7 @@ index 00000000..cd2b22b0
 +                            Input::Button(e) => e.time_us,
 +                            Input::Axis(e) => e.time_us,
 +                        };
-+                        if backend.pending_inputs.len() == 512 {
++                        if backend.pending_inputs.len() == MAX_PENDING_INPUTS {
 +                            backend.pending_inputs.pop_front();
 +                            warn!("input timing sample dropped: output stalled");
 +                        }
@@ -1371,18 +1412,29 @@ index 00000000..cd2b22b0
 +                        );
 +                    }
 +                    Ok(Some(BackendEvent::DisplayChanged)) => {
-+                        if let Err(err) = state.backend.ferrion().reconfigure(&mut state.niri) {
++                        let ferrion = state.backend.ferrion();
++                        ferrion.transition_display(DisplayEvent::Changed);
++                        if let Err(err) = ferrion.reconfigure(&mut state.niri) {
 +                            error!("display handoff failed: {err:#}");
 +                            state.niri.stop_signal.stop();
++                            drained = true;
++                            break;
 +                        }
 +                    }
-+                    Ok(None) => break,
++                    Ok(None) => {
++                        drained = true;
++                        break;
++                    }
 +                    Err(err) => {
 +                        error!("input reader failed: {err}");
 +                        state.niri.stop_signal.stop();
++                        drained = true;
 +                        break;
 +                    }
 +                }
++            }
++            if !drained {
++                reping.ping();
 +            }
 +        })?;
 +        info!(
@@ -1392,18 +1444,20 @@ index 00000000..cd2b22b0
 +        Ok(Self {
 +            native,
 +            renderer,
-+            texture,
-+            damage: OutputDamageTracker::from_output(&output),
++            display: Display::Active(ActiveDisplay {
++                texture,
++                damage,
++                buffer_valid: false,
++                cursor: CursorPlane::Unknown,
++            }),
 +            output,
-+            scheduler: FrameScheduler::new(period, Duration::from_micros(500)),
-+            timer_pending: false,
++            scheduler: FrameScheduler::new(period, FRAME_MARGIN),
++            timer_token: None,
 +            render_due: false,
-+            valid_buffer: false,
 +            ipc_outputs,
 +            input_epoch,
 +            pending_inputs: VecDeque::new(),
 +            frame: 0,
-+            cursor_image: None,
 +        })
 +    }
 +
@@ -1430,36 +1484,55 @@ index 00000000..cd2b22b0
 +        false
 +    }
 +
++    fn transition_display(&mut self, event: DisplayEvent) {
++        match event {
++            DisplayEvent::Changed => {
++                self.display = Display::ChangePending;
++            }
++            DisplayEvent::Reconfigured(active) => {
++                assert!(matches!(self.display, Display::ChangePending));
++                self.display = Display::Active(active);
++            }
++        }
++    }
++
 +    pub fn defer_redraw(&mut self, niri: &Niri) -> bool {
 +        if self.render_due {
 +            self.render_due = false;
 +            return false;
 +        }
-+        if !self.timer_pending {
++        if self.timer_token.is_none() {
 +            let now = self.native.now_us();
 +            let start = self.scheduler.next_start(now);
-+            niri.event_loop
++            let token = niri
++                .event_loop
 +                .insert_source(
 +                    Timer::from_duration(Duration::from_micros(start - now)),
 +                    |_, _, state| {
 +                        let backend = state.backend.ferrion();
-+                        backend.timer_pending = false;
++                        backend.timer_token = None;
 +                        backend.render_due = true;
 +                        TimeoutAction::Drop
 +                    },
 +                )
 +                .expect("register frame deadline");
-+            self.timer_pending = true;
++            self.timer_token = Some(token);
 +        }
 +        true
 +    }
 +
 +    fn reconfigure(&mut self, niri: &mut Niri) -> anyhow::Result<()> {
++        assert!(matches!(self.display, Display::ChangePending));
++        if let Some(token) = self.timer_token.take() {
++            niri.event_loop.remove(token);
++        }
++        self.render_due = false;
 +        self.native.reconfigure()?;
 +        let (width, height) = self.native.dimensions();
-+        self.texture = self
++        let texture: GlesTexture = self
 +            .renderer
 +            .create_buffer(Fourcc::Argb8888, (width as i32, height as i32).into())?;
++        assert_eq!(texture.size(), (width as i32, height as i32).into());
 +        let mode = Mode {
 +            size: (width as i32, height as i32).into(),
 +            refresh: 60_000,
@@ -1467,9 +1540,13 @@ index 00000000..cd2b22b0
 +        self.output
 +            .change_current_state(Some(mode), None, None, None);
 +        self.output.set_preferred(mode);
-+        self.damage = OutputDamageTracker::from_output(&self.output);
-+        self.valid_buffer = false;
-+        self.cursor_image = None;
++        let damage = OutputDamageTracker::from_output(&self.output);
++        self.transition_display(DisplayEvent::Reconfigured(ActiveDisplay {
++            texture,
++            damage,
++            buffer_valid: false,
++            cursor: CursorPlane::Unknown,
++        }));
 +        niri.output_resized(&self.output);
 +        Ok(())
 +    }
@@ -1480,8 +1557,16 @@ index 00000000..cd2b22b0
 +            niri.render_pointer(&mut self.renderer, &self.output, &mut |e| elements.push(e));
 +        }
 +        if elements.is_empty() {
-+            self.native.set_cursor(None, (0, 0), (0, 0))?;
-+            self.cursor_image = None;
++            let needs_hide = match &self.display {
++                Display::Active(active) => !matches!(active.cursor, CursorPlane::Hidden),
++                Display::ChangePending => unreachable!("update_cursor requires Active"),
++            };
++            if needs_hide {
++                self.native.set_cursor(None, (0, 0), (0, 0))?;
++                if let Display::Active(active) = &mut self.display {
++                    active.cursor = CursorPlane::Hidden;
++                }
++            }
 +            return Ok(false);
 +        }
 +        let scale = Scale::from(self.output.current_scale().fractional_scale());
@@ -1508,8 +1593,16 @@ index 00000000..cd2b22b0
 +            || hotspot.x >= geo.size.w
 +            || hotspot.y >= geo.size.h
 +        {
-+            self.native.set_cursor(None, (0, 0), (0, 0))?;
-+            self.cursor_image = None;
++            let needs_hide = match &self.display {
++                Display::Active(active) => !matches!(active.cursor, CursorPlane::Hidden),
++                Display::ChangePending => unreachable!("update_cursor requires Active"),
++            };
++            if needs_hide {
++                self.native.set_cursor(None, (0, 0), (0, 0))?;
++                if let Display::Active(active) = &mut self.display {
++                    active.cursor = CursorPlane::Hidden;
++                }
++            }
 +            return Ok(true);
 +        }
 +        sync.wait()?;
@@ -1521,31 +1614,52 @@ index 00000000..cd2b22b0
 +            Fourcc::Argb8888,
 +        )?;
 +        let pixels = self.renderer.map_texture(&mapping)?.to_vec();
-+        let image = (pixels, size, (hotspot.x, hotspot.y));
-+        if self.cursor_image.as_ref() != Some(&image) {
-+            self.native.set_cursor(Some(&image.0), image.1, image.2)?;
-+            self.cursor_image = Some(image);
++        let next = CursorPlane::Shown(pixels, size, (hotspot.x, hotspot.y));
++        let changed = match &self.display {
++            Display::Active(active) => active.cursor != next,
++            Display::ChangePending => unreachable!("update_cursor requires Active"),
++        };
++        if changed {
++            if let CursorPlane::Shown(ref bytes, sz, hs) = next {
++                self.native.set_cursor(Some(bytes), sz, hs)?;
++            }
++            if let Display::Active(active) = &mut self.display {
++                active.cursor = next;
++            }
 +        }
 +        Ok(false)
 +    }
 +
 +    pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
++        if matches!(self.display, Display::ChangePending) {
++            let output_state = niri.output_state.get_mut(output).unwrap();
++            output_state.redraw_state = RedrawState::Queued;
++            return RenderResult::Skipped;
++        }
 +        let started = Instant::now();
 +        let result = self.render_frame(niri, output);
-+        self.scheduler.record_render(started.elapsed());
-+        let output_state = niri.output_state.get_mut(output).unwrap();
-+        output_state.redraw_state = if output_state.unfinished_animations_remain {
-+            RedrawState::Queued
-+        } else {
-+            RedrawState::Idle
-+        };
 +        match result {
 +            Ok(result) => {
++                self.scheduler.record_render(started.elapsed());
++                let output_state = niri.output_state.get_mut(output).unwrap();
++                output_state.redraw_state = if output_state.unfinished_animations_remain {
++                    RedrawState::Queued
++                } else {
++                    RedrawState::Idle
++                };
 +                output_state.frame_callback_sequence =
 +                    output_state.frame_callback_sequence.wrapping_add(1);
 +                result
 +            }
++            Err(err) if anyhow_is_change_pending(&err) => {
++                self.transition_display(DisplayEvent::Changed);
++                let output_state = niri.output_state.get_mut(output).unwrap();
++                output_state.redraw_state = RedrawState::Queued;
++                RenderResult::Skipped
++            }
 +            Err(err) => {
++                let output_state = niri.output_state.get_mut(output).unwrap();
++                output_state.redraw_state = RedrawState::Idle;
 +                error!("frame presentation failed: {err:#}");
 +                niri.stop_signal.stop();
 +                RenderResult::Skipped
@@ -1554,6 +1668,7 @@ index 00000000..cd2b22b0
 +    }
 +
 +    fn render_frame(&mut self, niri: &mut Niri, output: &Output) -> anyhow::Result<RenderResult> {
++        assert!(matches!(self.display, Display::Active(_)));
 +        let software_cursor = self.update_cursor(niri)?;
 +        let elements = niri.render_to_vec(
 +            RenderCtx {
@@ -1564,11 +1679,14 @@ index 00000000..cd2b22b0
 +            output,
 +            software_cursor,
 +        );
-+        let mut target = self.renderer.bind(&mut self.texture)?;
-+        let result = self.damage.render_output(
++        let Display::Active(active) = &mut self.display else {
++            unreachable!("render_frame requires Active");
++        };
++        let mut target = self.renderer.bind(&mut active.texture)?;
++        let result = active.damage.render_output(
 +            &mut self.renderer,
 +            &mut target,
-+            usize::from(self.valid_buffer),
++            usize::from(active.buffer_valid),
 +            &elements,
 +            [0.; 4],
 +        )?;
@@ -1597,7 +1715,7 @@ index 00000000..cd2b22b0
 +        }
 +        let presented = self.native.present()?;
 +        let presentation_time = get_monotonic_time();
-+        self.valid_buffer = true;
++        active.buffer_valid = true;
 +        self.frame += 1;
 +        info!(
 +            "FERRION_FRAME frame={} started_us={} completed_us={}",
