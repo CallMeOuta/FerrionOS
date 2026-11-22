@@ -1,0 +1,12 @@
+[package]
+description = "Python 3 script, venv and offline pip install, with Linux's output"
+
+[build]
+template = "custom"
+script = """
+dest="${COOKBOOK_STAGE}/usr/share/linux-lc4"
+mkdir -pv "${dest}"
+cd "${COOKBOOK_RECIPE}/files"
+sha256sum -c SHA256SUMS
+cp -v fixtures.tar expected.stdout expected.stderr expected.status SHA256SUMS "${dest}/"
+"""

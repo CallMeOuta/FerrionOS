@@ -44,5 +44,12 @@ done
 rm -rf usr/share/doc usr/share/man usr/share/info usr/share/locale usr/share/lintian usr/share/bug
 mkdir -p dev proc sys run home root var/tmp tmp
 chmod 1777 tmp var/tmp
+if [[ -d usr/share/ca-certificates ]]; then
+    mkdir -p etc/ssl/certs
+    find usr/share/ca-certificates -name '*.crt' | LC_ALL=C sort | while read -r crt; do
+        cat "$crt"
+        [[ $(tail -c 1 "$crt" | od -An -c | tr -d ' ') == '\n' ]] || echo
+    done > etc/ssl/certs/ca-certificates.crt
+fi
 chmod -R ug-s .
 find . -exec touch -h -d "@$epoch" {} +

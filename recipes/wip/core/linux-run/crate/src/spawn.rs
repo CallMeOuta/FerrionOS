@@ -90,19 +90,23 @@ pub fn start(thread: &Thread, frame: &mut Frame, stack: u64, parent_tid: u64) ->
 }
 
 /// Before the child changes descriptor `fd` (closes, replaces or flags it): keeps a copy.
-pub fn before_fd_change(fd: i32) {
+pub fn before_fd_change(fd: i32) -> bool {
     let mut state = STATE.lock().unwrap();
-    let Some(v) = state.as_mut().filter(|v| v.native == me()) else { return };
+    let Some(v) = state.as_mut().filter(|v| v.native == me()) else { return true };
     if fd < 0 || fd >= SAVED_FDS || v.fds.iter().any(|&(f, _, _)| f == fd) {
-        return;
+        return true;
     }
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         v.fds.push((fd, -1, false));
-        return;
+        return true;
     }
-    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, SAVED_FDS) };
-    v.fds.push((fd, copy, flags & libc::FD_CLOEXEC != 0));
+    let copy = crate::files::dup_at_least(fd, SAVED_FDS, crate::files::RUNTIME_FDS_END, true);
+    if copy < 0 {
+        return false;
+    }
+    v.fds.push((fd, copy as i32, flags & libc::FD_CLOEXEC != 0));
+    true
 }
 
 /// After the child got the new descriptor `fd`: the number was free in the parent.
@@ -217,6 +221,7 @@ pub fn exec(thread: &Thread, frame: &mut Frame, exec: &Exec) -> i64 {
     }
     if pid == 0 {
         unsafe { libc::close(report[0]) };
+        crate::session::forked_child();
         native_child_setup();
         let err = run_exec(exec, thread.mask.load(Ordering::Relaxed)) as i32;
         unsafe {

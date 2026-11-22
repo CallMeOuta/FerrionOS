@@ -1,6 +1,3 @@
-//! A Linux session (plans/linux-compat.md, "The session" and "Files and paths"), started by
-//! `linux-run --session`.
-//!
 //! The launcher asks linux-sessiond (the `linux-session` scheme) for two file systems: the
 //! Debian root, served read-only and shared by all sessions, and an empty one in memory, its own.
 //! It forks a namespace from its own with the native schemes of `SCHEMES` that it holds,
@@ -31,6 +28,13 @@ pub const RUNTIME: &str = "/scheme/linux-mem/runtime/linux-run";
 /// the session inherits it, and the servers end when the last one closes it. Linux programs can
 /// neither close nor replace it (src/files.rs, `reserved`).
 pub const SESSION_FD: i32 = 1023;
+pub const LEADER_FD: i32 = 1022;
+const JOIN: u64 = 1;
+pub const SET_LOCK: u64 = 2;
+pub const GET_LOCK: u64 = 3;
+pub const RELEASE_LOCKS: u64 = 4;
+pub const INET_LISTEN: &str = "/scheme/linux-mem/inet/tcp";
+pub const INET_PEER: &str = "/scheme/linux-mem/inet/peer";
 
 /// Native schemes a session names, each only if the caller's namespace has it: memory, pipes,
 /// events and time, randomness, the null and zero devices, terminals, Unix sockets, and the
@@ -93,10 +97,12 @@ pub static FACTS: LazyLock<Facts> = LazyLock::new(|| {
 /// Whether this process runs in a session: the launcher says so, and a runtime started by
 /// `execve` finds its own copy in the memory file system.
 pub fn active() -> bool {
-    *IN_SESSION.get_or_init(|| {
-        let p = CString::new(RUNTIME).unwrap();
-        unsafe { libc::access(p.as_ptr(), libc::X_OK) == 0 }
-    })
+    *IN_SESSION.get_or_init(inherited)
+}
+
+pub fn inherited() -> bool {
+    let p = CString::new(RUNTIME).unwrap();
+    unsafe { libc::access(p.as_ptr(), libc::X_OK) == 0 }
 }
 
 /// Normalizes an absolute path without looking at the file system: `.` and empty components go,
@@ -123,27 +129,98 @@ fn normalize(p: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The native path for a Linux path in a session. Outside a session, and for relative paths,
-/// the path is used as it is.
-pub fn linux_path(p: CString) -> CString {
-    let b = p.as_bytes();
-    if !b.starts_with(b"/") || !active() {
-        return p;
-    }
-    let n = normalize(b);
+fn map(n: &[u8]) -> Vec<u8> {
     for (linux, native) in MOUNTS {
         let l = linux.as_bytes();
         if n.starts_with(l) && (n.len() == l.len() || n[l.len()] == b'/') {
             let mut out = native.as_bytes().to_vec();
             out.extend_from_slice(&n[l.len()..]);
-            return CString::new(out).unwrap_or(p);
+            return out;
         }
     }
     let mut out = ROOT.as_bytes().to_vec();
     if n != b"/" {
-        out.extend_from_slice(&n);
+        out.extend_from_slice(n);
     }
-    CString::new(out).unwrap_or(p)
+    out
+}
+
+fn mem_link(native: &[u8]) -> Option<Vec<u8>> {
+    if !native.starts_with(MEM.as_bytes()) {
+        return None;
+    }
+    let p = CString::new(native).ok()?;
+    let mut buf = vec![0u8; 4096];
+    let n = unsafe { libc::readlink(p.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some(buf)
+}
+
+fn resolve(n: Vec<u8>, follow: bool) -> Result<Vec<u8>, i64> {
+    let mut n = n;
+    let mut links = 0;
+    'walk: loop {
+        let parts: Vec<Vec<u8>> = n.split(|&b| b == b'/').filter(|c| !c.is_empty()).map(<[u8]>::to_vec).collect();
+        let mut done: Vec<u8> = Vec::new();
+        for (i, c) in parts.iter().enumerate() {
+            let mut candidate = done.clone();
+            candidate.push(b'/');
+            candidate.extend_from_slice(c);
+            let last = i + 1 == parts.len();
+            if !last || follow {
+                if let Some(target) = mem_link(&map(&candidate)) {
+                    links += 1;
+                    if links > 40 {
+                        return Err(ELOOP);
+                    }
+                    let mut next = if target.starts_with(b"/") {
+                        target
+                    } else {
+                        let mut d = done.clone();
+                        d.push(b'/');
+                        d.extend_from_slice(&target);
+                        d
+                    };
+                    for rest in &parts[i + 1..] {
+                        next.push(b'/');
+                        next.extend_from_slice(rest);
+                    }
+                    n = normalize(&next);
+                    continue 'walk;
+                }
+            }
+            done = candidate;
+        }
+        return Ok(if done.is_empty() { b"/".to_vec() } else { done });
+    }
+}
+
+pub fn linux_path(p: CString) -> CString {
+    linux_path_at(p, false)
+}
+
+pub fn linux_path_at(p: CString, follow: bool) -> CString {
+    let b = p.as_bytes();
+    if !b.starts_with(b"/") || !active() {
+        return p;
+    }
+    let n = normalize(b);
+    let n = if touches_mem(&n) {
+        resolve(n.clone(), follow).unwrap_or(n)
+    } else {
+        n
+    };
+    CString::new(map(&n)).unwrap_or(p)
+}
+
+fn touches_mem(n: &[u8]) -> bool {
+    MOUNTS.iter().any(|(linux, native)| {
+        let l = linux.as_bytes();
+        native.starts_with(MEM) && n.starts_with(l) && (n.len() == l.len() || n[l.len()] == b'/')
+    })
 }
 
 /// A native path as the Linux program sees it: the inverse of `linux_path` for the memory file
@@ -309,6 +386,9 @@ pub fn start() -> Result<(), String> {
         ("etc", 0o755),
         ("home", 0o755),
         ("runtime", 0o755),
+        ("inet", 0o755),
+        ("inet/tcp", 0o1777),
+        ("inet/peer", 0o1777),
     ] {
         mkdir(&format!("{MEM}/{dir}"), mode)?;
     }
@@ -352,5 +432,37 @@ pub fn start() -> Result<(), String> {
     for fd in 3..SESSION_FD {
         unsafe { libc::close(fd) };
     }
-    Ok(())
+    let leader = raw(unsafe {
+        redox_openat_v1(SESSION_FD as usize, b"leader".as_ptr(), 6, libc::O_RDONLY as u32, 0)
+    })
+    .map_err(|e| native_err("linux-sessiond gave no leader handle", e))?;
+    if unsafe { libc::dup2(leader as i32, LEADER_FD) } != LEADER_FD {
+        return Err(native_err("cannot keep the leader handle", last_errno()));
+    }
+    unsafe { libc::close(leader as i32) };
+    join().map_err(|e| native_err("cannot join the session", e))
+}
+
+pub fn session_call(metadata: &[u64], payload: &mut [u64; 4]) -> Result<usize, i64> {
+    unsafe extern "C" {
+        fn redox_sys_call_v0(fd: usize, payload: *mut u8, len: usize, flags: usize, metadata: *const u64, n: usize) -> usize;
+    }
+    const READ_WRITE: usize = (1 << 9) | (1 << 10);
+    raw(unsafe {
+        redox_sys_call_v0(SESSION_FD as usize, payload.as_mut_ptr().cast(), 32, READ_WRITE, metadata.as_ptr(), metadata.len())
+    })
+}
+
+fn join() -> Result<(), i64> {
+    session_call(&[JOIN], &mut [0; 4]).map(|_| ())
+}
+
+pub fn forked_child() {
+    if !active() {
+        return;
+    }
+    unsafe { libc::close(LEADER_FD) };
+    if join().is_err() {
+        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+    }
 }

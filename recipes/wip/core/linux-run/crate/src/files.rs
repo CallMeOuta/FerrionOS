@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Mutex;
 
-use crate::{errno::*, mem::user_ok, syscall::{cstr, path}};
+use crate::{errno::*, mem::user_ok, syscall::cstr};
 
 const AT_FDCWD: i64 = -100;
 const L_AT_SYMLINK_NOFOLLOW: u64 = 0x100;
@@ -47,9 +47,9 @@ pub fn dirfd(fd: u64) -> i32 {
 }
 
 /// The native path for a Linux path: /proc/self/exe answered, then the session's mounts.
-pub fn native_path(raw: CString) -> CString {
+pub fn native_path(raw: CString, follow: bool) -> CString {
     let p = exe_alias(&raw).unwrap_or(raw);
-    crate::session::linux_path(p)
+    crate::session::linux_path_at(p, follow)
 }
 
 /// Opening /dev/stdin, /dev/stdout, /dev/stderr, /dev/fd/N or /proc/self/fd/N gives a new
@@ -73,10 +73,32 @@ pub fn open_own_fd(p: &CString, cloexec: bool) -> Option<i64> {
     Some(if r < 0 { -ENOENT } else { new_fd(r as i64) })
 }
 
+pub const RUNTIME_FDS_END: i32 = 4096;
+
+pub fn dup_at_least(fd: i32, min: i32, end: i32, cloexec: bool) -> i64 {
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return -last_errno();
+    }
+    for n in min..end {
+        if unsafe { libc::fcntl(n, libc::F_GETFD) } >= 0 {
+            continue;
+        }
+        if unsafe { libc::dup2(fd, n) } != n {
+            return -last_errno();
+        }
+        unsafe { libc::fcntl(n, libc::F_SETFD, if cloexec { libc::FD_CLOEXEC } else { 0 }) };
+        return n as i64;
+    }
+    -EMFILE
+}
+
 macro_rules! p {
     ($e:expr) => {
-        match path($e) {
-            Ok(p) => p,
+        p!($e, false)
+    };
+    ($e:expr, $follow:expr) => {
+        match cstr($e) {
+            Ok(p) => crate::session::linux_path_at(p, $follow),
             Err(e) => return -e,
         }
     };
@@ -107,10 +129,11 @@ pub fn getdents64(fd: u64, buf: u64, len: u64) -> i64 {
     let mut dirs = DIRS.lock().unwrap();
     let dirs = dirs.get_or_insert_with(HashMap::new);
     if !dirs.contains_key(&fd) {
-        let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        let dup = dup_at_least(fd, RESERVED, RUNTIME_FDS_END, true);
         if dup < 0 {
-            return -last_errno();
+            return dup;
         }
+        let dup = dup as i32;
         let dir = unsafe { libc::fdopendir(dup) };
         if dir.is_null() {
             let e = last_errno();
@@ -175,12 +198,30 @@ pub fn lseek(fd: u64, off: u64, whence: u64) -> i64 {
     ret(unsafe { libc::lseek(fd as i32, off as libc::off_t, whence as i32) } as isize)
 }
 
+fn forget(fd: i32) {
+    forget_dir(fd);
+    if !crate::spawn::active() {
+        crate::locks::before_close(fd);
+        crate::net::closed(fd);
+        crate::wait::closed(fd);
+    }
+}
+
+pub fn duplicated(old: i32, new: i32) {
+    if !crate::spawn::active() {
+        crate::net::duplicated(old, new);
+        crate::wait::duplicated(old, new);
+    }
+}
+
 pub fn close(fd: u64) -> i64 {
     if reserved(fd as i32) {
         return -EBADF;
     }
-    crate::spawn::before_fd_change(fd as i32);
-    forget_dir(fd as i32);
+    if !crate::spawn::before_fd_change(fd as i32) {
+        return -EMFILE;
+    }
+    forget(fd as i32);
     ret(unsafe { libc::close(fd as i32) } as isize)
 }
 
@@ -219,7 +260,11 @@ pub fn dup(old: u64) -> i64 {
     if reserved(old as i32) {
         return -EBADF;
     }
-    new_fd(ret(unsafe { libc::fcntl(old as i32, libc::F_DUPFD, 0) } as isize))
+    let r = new_fd(ret(unsafe { libc::fcntl(old as i32, libc::F_DUPFD, 0) } as isize));
+    if r >= 0 {
+        duplicated(old as i32, r as i32);
+    }
+    r
 }
 
 pub fn dup3(old: u64, new: u64, flags: u64) -> i64 {
@@ -229,12 +274,15 @@ pub fn dup3(old: u64, new: u64, flags: u64) -> i64 {
     if reserved(old as i32) || reserved(new as i32) {
         return -EBADF;
     }
-    crate::spawn::before_fd_change(new as i32);
-    forget_dir(new as i32);
+    if !crate::spawn::before_fd_change(new as i32) {
+        return -EMFILE;
+    }
+    forget(new as i32);
     let r = unsafe { libc::dup2(old as i32, new as i32) };
     if r < 0 {
         return -last_errno();
     }
+    duplicated(old as i32, r);
     if flags != 0 {
         unsafe { libc::fcntl(r, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
@@ -248,13 +296,19 @@ pub fn dup2(old: u64, new: u64) -> i64 {
     if old == new {
         return if unsafe { libc::fcntl(old as i32, libc::F_GETFD) } < 0 { -last_errno() } else { new as i64 };
     }
-    crate::spawn::before_fd_change(new as i32);
-    forget_dir(new as i32);
-    ret(unsafe { libc::dup2(old as i32, new as i32) } as isize)
+    if !crate::spawn::before_fd_change(new as i32) {
+        return -EMFILE;
+    }
+    forget(new as i32);
+    let r = ret(unsafe { libc::dup2(old as i32, new as i32) } as isize);
+    if r >= 0 {
+        duplicated(old as i32, r as i32);
+    }
+    r
 }
 
 pub fn faccessat(fd: u64, p: u64, mode: u64, flags: u64) -> i64 {
-    let p = p!(p);
+    let p = p!(p, flags & L_AT_SYMLINK_NOFOLLOW == 0);
     let mut f = 0;
     if flags & L_AT_EACCESS != 0 {
         f |= libc::AT_EACCESS;
@@ -314,12 +368,12 @@ pub fn symlinkat(target: u64, fd: u64, p: u64) -> i64 {
 }
 
 pub fn fchmodat(fd: u64, p: u64, mode: u64) -> i64 {
-    let p = p!(p);
+    let p = p!(p, true);
     ret(unsafe { libc::fchmodat(dirfd(fd), p.as_ptr(), mode as libc::mode_t, 0) } as isize)
 }
 
 pub fn fchownat(fd: u64, p: u64, uid: u64, gid: u64, flags: u64) -> i64 {
-    let p = p!(p);
+    let p = p!(p, flags & L_AT_SYMLINK_NOFOLLOW == 0);
     if p.as_bytes().is_empty() && flags & L_AT_EMPTY_PATH != 0 {
         return ret(unsafe { libc::fchown(fd as i32, uid as u32, gid as u32) } as isize);
     }
@@ -347,7 +401,7 @@ pub fn utimensat(fd: u64, p: u64, times: u64, flags: u64) -> i64 {
     if p == 0 {
         return ret(unsafe { libc::futimens(fd as i32, t.as_ptr()) } as isize);
     }
-    let p = p!(p);
+    let p = p!(p, flags & L_AT_SYMLINK_NOFOLLOW == 0);
     let f = if flags & L_AT_SYMLINK_NOFOLLOW != 0 { libc::AT_SYMLINK_NOFOLLOW } else { 0 };
     ret(unsafe { libc::utimensat(dirfd(fd), p.as_ptr(), t.as_ptr(), f) } as isize)
 }
@@ -375,7 +429,7 @@ pub fn getcwd(buf: u64, size: u64) -> i64 {
 }
 
 pub fn chdir(p: u64) -> i64 {
-    let p = p!(p);
+    let p = p!(p, true);
     crate::spawn::before_chdir();
     ret(unsafe { libc::chdir(p.as_ptr()) } as isize)
 }
@@ -389,7 +443,7 @@ pub fn fchdir(fd: u64) -> i64 {
 }
 
 pub fn truncate(p: u64, len: u64) -> i64 {
-    let p = p!(p);
+    let p = p!(p, true);
     ret(unsafe { libc::truncate(p.as_ptr(), len as libc::off_t) } as isize)
 }
 
@@ -468,13 +522,6 @@ pub fn readv(fd: u64, iov: u64, n: u64) -> i64 {
         }
     }
     ret(unsafe { libc::readv(fd as i32, iov as *const libc::iovec, n as i32) })
-}
-
-pub fn poll(fds: u64, n: u64, timeout: i64) -> i64 {
-    if n > 4096 || (n != 0 && !user_ok(fds, 8 * n)) {
-        return -EFAULT;
-    }
-    ret(unsafe { libc::poll(fds as *mut libc::pollfd, n as libc::nfds_t, timeout as i32) } as isize)
 }
 
 /// wait4(pid, status, options, rusage). Status words are encoded as on Linux by relibc too.

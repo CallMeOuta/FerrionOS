@@ -377,6 +377,21 @@ pub fn sigsuspend(thread: &Thread, set: u64, size: u64) -> i64 {
     -EINTR
 }
 
+pub fn with_mask(thread: &Thread, set: u64, wait: impl FnOnce() -> i64) -> i64 {
+    if set == 0 {
+        return wait();
+    }
+    let new = unsafe { *(set as *const u64) } & !UNBLOCKABLE;
+    let old = thread.mask.swap(new, Ordering::SeqCst);
+    let r = wait();
+    if r == -EINTR && pending_for(thread) {
+        *thread.suspended_mask.lock().unwrap() = Some(old);
+    } else {
+        thread.mask.store(old, Ordering::SeqCst);
+    }
+    r
+}
+
 /// Bytes of a signal frame: rt_sigframe, the XSAVE image and its trailing magic, alignment.
 pub fn frame_size() -> u64 {
     (8 + UC_SIZE + SIGINFO_SIZE + crate::cpu::xsave_size() as u64 + 4 + 64 + 16)

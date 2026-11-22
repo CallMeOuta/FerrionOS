@@ -59,7 +59,8 @@ pub extern "C" fn lr_dispatch(frame: *mut Frame, data: usize) {
     let number = frame.rax;
     if let Some(r) = call(thread, frame) {
         if TRACE.load(Ordering::Relaxed) && (r < 0 || TRACE_ALL.load(Ordering::Relaxed)) {
-            eprintln!("linux-run: system call {number} ({:#x}, {:#x}, {:#x}) gave {r}", frame.rdi, frame.rsi, frame.rdx);
+            let line = format!("linux-run: [{}] system call {number} ({:#x}, {:#x}, {:#x}) gave {r}\n", pid(), frame.rdi, frame.rsi, frame.rdx);
+            unsafe { libc::write(2, line.as_ptr().cast(), line.len()) };
         }
         // A write to a pipe with no reader raises SIGPIPE on Linux; the native call only fails.
         const EPIPE: i64 = 32;
@@ -216,7 +217,7 @@ fn stat_at(dir: u64, p: u64, flags: u64) -> Result<libc::stat, i64> {
         }
         unsafe { libc::fstat(dir as i32, &mut st) }
     } else {
-        let p = crate::files::native_path(raw);
+        let p = crate::files::native_path(raw, flags & AT_SYMLINK_NOFOLLOW == 0);
         let fl = if flags & AT_SYMLINK_NOFOLLOW != 0 { libc::AT_SYMLINK_NOFOLLOW } else { 0 };
         unsafe { libc::fstatat(crate::files::dirfd(dir), p.as_ptr(), &mut st, fl) }
     };
@@ -286,7 +287,7 @@ fn statfs(fd: Option<i32>, p: u64, out: u64) -> i64 {
         }
         None => {
             let p = match cstr(p) {
-                Ok(p) => crate::files::native_path(p),
+                Ok(p) => crate::files::native_path(p, true),
                 Err(e) => return -e,
             };
             (unsafe { libc::statvfs(p.as_ptr(), &mut v) }, p.as_bytes().to_vec())
@@ -504,7 +505,7 @@ pub fn prepare_exec(frame: &Frame) -> Result<Exec, i64> {
     let mut argv = list(frame.rsi)?;
     let envp = list(frame.rdx)?;
     for level in 0.. {
-        let native = crate::session::linux_path(file.clone());
+        let native = crate::session::linux_path_at(file.clone(), true);
         if unsafe { libc::access(native.as_ptr(), libc::X_OK) } != 0 {
             return Err(last_errno());
         }
@@ -553,6 +554,9 @@ pub fn prepare_exec(frame: &Frame) -> Result<Exec, i64> {
     if signal::handler_of(13) == 1 {
         // SIG_IGN crosses execve; the next runtime cannot see it natively (src/signal.rs, init).
         args.insert(1, CString::new("--sigpipe-ignored").unwrap());
+    }
+    if !crate::session::active() {
+        args.insert(1, CString::new("--native").unwrap());
     }
     args.extend(argv.into_iter().skip(1));
     let envp: Vec<CString> = envp
@@ -707,7 +711,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         60 => thread::exit_thread(thread, a as i32),
         62 => kill(a as i64, b),
         63 => uname(a),
-        72 => fcntl(a, b, c),
+        72 => fcntl(thread, a, b, c),
         102 => unsafe { libc::getuid() as i64 },
         104 => unsafe { libc::getgid() as i64 },
         107 => unsafe { libc::geteuid() as i64 },
@@ -775,7 +779,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
                 _ => (a, b, c, d),
             };
             let p = match cstr(b) {
-                Ok(p) => crate::files::native_path(p),
+                Ok(p) => crate::files::native_path(p, c & 0x20000 == 0 && c & 0xc0 != 0xc0),
                 Err(e) => return Some(-e),
             };
             let flags = match open_flags(c) {
@@ -823,7 +827,75 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
             fill_random(unsafe { core::slice::from_raw_parts_mut(a as *mut u8, n) });
             n as i64
         }
-        7 => crate::files::poll(a, b, c as i64),
+        7 => crate::wait::poll(thread, a, b, c as i64, 0),
+        271 => {
+            let (ms, mask) = match (crate::wait::timespec_ms(c), crate::wait::sigmask_arg(d, f.r8)) {
+                (Ok(ms), Ok(mask)) => (ms, mask),
+                (Err(e), _) | (_, Err(e)) => return Some(-e),
+            };
+            crate::wait::poll(thread, a, b, ms, mask)
+        }
+        23 => {
+            let ms = if f.r8 == 0 {
+                -1
+            } else if !user_ok(f.r8, 16) {
+                return Some(-EFAULT);
+            } else {
+                let (s, us) = unsafe { (*(f.r8 as *const i64), *((f.r8 + 8) as *const i64)) };
+                if s < 0 || !(0..1_000_000).contains(&us) {
+                    return Some(-EINVAL);
+                }
+                s.saturating_mul(1000).saturating_add((us + 999) / 1000)
+            };
+            crate::wait::select(thread, a, b, c, d, ms, 0)
+        }
+        270 => {
+            let ms = match crate::wait::timespec_ms(f.r8) {
+                Ok(ms) => ms,
+                Err(e) => return Some(-e),
+            };
+            let mask = if f.r9 == 0 {
+                0
+            } else if !user_ok(f.r9, 16) {
+                return Some(-EFAULT);
+            } else {
+                let [set, size] = unsafe { *(f.r9 as *const [u64; 2]) };
+                match crate::wait::sigmask_arg(set, size) {
+                    Ok(m) => m,
+                    Err(e) => return Some(-e),
+                }
+            };
+            crate::wait::select(thread, a, b, c, d, ms, mask)
+        }
+        213 => {
+            if a as i32 <= 0 {
+                return Some(-EINVAL);
+            }
+            crate::wait::epoll_create(0)
+        }
+        291 => crate::wait::epoll_create(a),
+        233 => crate::wait::epoll_ctl(a, b, c, d),
+        232 => crate::wait::epoll_wait(thread, a, b, c, d as i32 as i64, 0),
+        281 => match crate::wait::sigmask_arg(f.r8, f.r9) {
+            Ok(mask) => crate::wait::epoll_wait(thread, a, b, c, d as i32 as i64, mask),
+            Err(e) => -e,
+        },
+        441 => match (crate::wait::timespec_ms(d), crate::wait::sigmask_arg(f.r8, f.r9)) {
+            (Ok(ms), Ok(mask)) => crate::wait::epoll_wait(thread, a, b, c, ms, mask),
+            (Err(e), _) | (_, Err(e)) => -e,
+        },
+        25 => mem::mremap(a, b, c, d, f.r8),
+        73 => crate::locks::flock(thread, a as i32, b),
+        74 | 75 => {
+            if crate::files::reserved(a as i32) {
+                return Some(-EBADF);
+            }
+            ret(unsafe { if f.rax == 74 { libc::fsync(a as i32) } else { crate::ffi::fdatasync(a as i32) } } as isize)
+        }
+        162 => {
+            unsafe { crate::ffi::sync() };
+            0
+        }
         17 => crate::files::pread(a, b, c, d, false),
         18 => crate::files::pread(a, b, c, d, true),
         19 => crate::files::readv(a, b, c),
@@ -970,17 +1042,23 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         292 => crate::files::dup3(a, b, c),
         293 => crate::files::pipe2(a, b),
         436 => {
-            // close_range(first, last, flags): CLOSE_RANGE_CLOEXEC is 4. The runtime's own
-            // descriptors stay (src/files.rs, `reserved`).
             if a > b {
                 return Some(-EINVAL);
             }
             for fd in a..=b.min(crate::files::RESERVED as u64 - 1) {
+                if unsafe { libc::fcntl(fd as i32, libc::F_GETFD) } < 0 {
+                    continue;
+                }
                 if c & 4 != 0 {
-                    crate::spawn::before_fd_change(fd as i32);
+                    if !crate::spawn::before_fd_change(fd as i32) {
+                        return Some(-EMFILE);
+                    }
                     unsafe { libc::fcntl(fd as i32, libc::F_SETFD, libc::FD_CLOEXEC) };
                 } else {
-                    crate::files::close(fd);
+                    let r = crate::files::close(fd);
+                    if r == -EMFILE {
+                        return Some(r);
+                    }
                 }
             }
             0
@@ -989,15 +1067,22 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         137 => statfs(None, a, b),
         138 => statfs(Some(a as i32), 0, b),
         188..=199 => xattr(f.rax, a),
-        // Sockets come with the network (LC5): no family is offered yet.
-        41 => -EAFNOSUPPORT,
-        42 => {
-            if unsafe { libc::fcntl(a as i32, libc::F_GETFD) } < 0 {
-                -EBADF
-            } else {
-                -ENOTSOCK
-            }
-        }
+        41 => crate::net::socket(a, b, c),
+        42 => crate::net::connect(a, b, c),
+        43 => crate::net::accept(a, b, c, 0),
+        288 => crate::net::accept(a, b, c, d),
+        44 => crate::net::sendto(a, b, c, d, f.r8, f.r9),
+        45 => crate::net::recvfrom(a, b, c, d, f.r8, f.r9),
+        46 => crate::net::sendmsg(a, b, c),
+        47 => crate::net::recvmsg(a, b, c),
+        307 => crate::net::sendmmsg(a, b, c, d),
+        48 => crate::net::shutdown(a, b),
+        49 => crate::net::bind(a, b, c),
+        50 => crate::net::listen(a, b),
+        51 => crate::net::name(a, b, c, false),
+        52 => crate::net::name(a, b, c, true),
+        54 => crate::net::setsockopt(a, b, c, d, f.r8),
+        55 => crate::net::getsockopt(a, b, c, d, f.r8),
         // fadvise64: advice only.
         221 => {
             if unsafe { libc::fcntl(a as i32, libc::F_GETFD) } < 0 { -EBADF } else { 0 }
@@ -1015,7 +1100,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
     Some(r)
 }
 
-fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
+fn fcntl(thread: &Thread, fd: u64, cmd: u64, arg: u64) -> i64 {
     let fd = fd as i32;
     if crate::files::reserved(fd) {
         return -EBADF;
@@ -1025,9 +1110,13 @@ fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
             if arg >= crate::files::RESERVED as u64 {
                 return -EINVAL;
             }
-            let how = if cmd == 0 { libc::F_DUPFD } else { libc::F_DUPFD_CLOEXEC };
-            crate::files::new_fd(ret(unsafe { libc::fcntl(fd, how, arg as i32) } as isize))
+            let r = crate::files::new_fd(crate::files::dup_at_least(fd, arg as i32, crate::files::RESERVED, cmd == 1030));
+            if r >= 0 {
+                crate::files::duplicated(fd, r as i32);
+            }
+            r
         }
+        5 | 6 | 7 | 36 | 37 | 38 => crate::locks::fcntl(thread, fd, cmd, arg),
         1 => {
             let r = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             if r < 0 {
@@ -1036,14 +1125,12 @@ fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                 (r & libc::FD_CLOEXEC != 0) as i64
             }
         }
-        2 => ret(unsafe {
-            crate::spawn::before_fd_change(fd);
-            libc::fcntl(
-                fd,
-                libc::F_SETFD,
-                if arg & 1 != 0 { libc::FD_CLOEXEC } else { 0 },
-            )
-        } as isize),
+        2 => {
+            if !crate::spawn::before_fd_change(fd) {
+                return -EMFILE;
+            }
+            ret(unsafe { libc::fcntl(fd, libc::F_SETFD, if arg & 1 != 0 { libc::FD_CLOEXEC } else { 0 }) } as isize)
+        }
         3 => {
             let r = unsafe { libc::fcntl(fd, libc::F_GETFL) };
             if r >= 0 {

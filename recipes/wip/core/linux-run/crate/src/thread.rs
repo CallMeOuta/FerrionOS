@@ -445,6 +445,7 @@ fn fork(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, ptid: u64, c
     }
     if pid == 0 {
         crate::syscall::refresh_pid();
+        crate::session::forked_child();
         register(thread.area);
         let tid = crate::syscall::pid();
         thread.tid.store(tid, Ordering::Relaxed);

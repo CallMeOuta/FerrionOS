@@ -1,18 +1,7 @@
-//! linux-run: starts a Linux x86-64 program on FerrionOS (plans/linux-compat.md, LC1 to LC3).
-//!
-//!     linux-run [--session] [--argv0 NAME] [--] PROGRAM [ARGUMENT...]
-//!
 //! The same binary is the runtime: it stays mapped in the process, above the Linux program, and
 //! answers the program's system calls, which the kernel hands back to it through the
 //! foreign-call hook (kernel patch ferrion-foreign-call.patch). A program that names a dynamic
 //! linker (PT_INTERP) gets it loaded beside it.
-//!
-//! Without `--session` the program runs in the caller's namespace with the caller's descriptors
-//! and rights, and its paths are the caller's. With `--session` the launcher first starts a Linux
-//! session (src/session.rs): PROGRAM and every path the program names are paths of the pinned
-//! Debian root, served read-only, with `/tmp`, `/run`, `/home` and `/etc`'s account files in a
-//! memory file system of the session's own; the session names no native file system. An
-//! `execve` inside a session stays in it. Either way linux-run adds no right.
 //!
 //! Exit status: the program's, or 126 when it cannot be started (not an x86-64 Linux program, no
 //! FSGSBASE or XSAVE, no hook in the kernel, no session) and 127 when it cannot be read.
@@ -21,7 +10,9 @@ mod cpu;
 mod elf;
 mod errno;
 mod files;
+mod locks;
 mod mem;
+mod net;
 mod session;
 mod signal;
 mod spawn;
@@ -29,6 +20,7 @@ mod stack;
 mod syscall;
 mod thread;
 mod tty;
+mod wait;
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -44,6 +36,8 @@ pub mod ffi {
     unsafe extern "C" {
         pub fn sigsuspend(mask: *const libc::sigset_t) -> i32;
         pub fn getsid(pid: libc::pid_t) -> libc::pid_t;
+        pub fn fdatasync(fd: libc::c_int) -> libc::c_int;
+        pub fn sync();
     }
     /// relibc's src/header/unistd/sysconf/constants.rs.
     pub const SC_PHYS_PAGES: libc::c_int = 85;
@@ -56,13 +50,13 @@ pub fn fatal(why: &str) -> ! {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: linux-run [--session] [--argv0 NAME] [--] PROGRAM [ARGUMENT...]");
+    eprintln!("usage: linux-run [--native] [--argv0 NAME] [--] PROGRAM [ARGUMENT...]");
     unsafe { libc::_exit(2) }
 }
 
 /// Reads a program file named by a Linux path.
 fn read_linux(path: &[u8]) -> std::io::Result<Vec<u8>> {
-    let native = session::linux_path(CString::new(path).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?);
+    let native = session::linux_path_at(CString::new(path).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?, true);
     std::fs::read(std::ffi::OsStr::from_bytes(native.as_bytes()))
 }
 
@@ -72,7 +66,7 @@ fn main() {
         .map(|a| a.as_bytes().to_vec())
         .collect();
     let mut argv0 = None;
-    let mut new_session = false;
+    let mut native = false;
     let mut sigpipe_ignored = false;
     loop {
         match args.first().map(|a| a.as_slice()) {
@@ -84,8 +78,8 @@ fn main() {
                 sigpipe_ignored = true;
                 args.remove(0);
             }
-            Some(b"--session") => {
-                new_session = true;
+            Some(b"--native") => {
+                native = true;
                 args.remove(0);
             }
             Some(b"--") => {
@@ -135,7 +129,7 @@ fn main() {
     }
     drop(heap);
 
-    // Probing `session::active()` first would fix its answer before the session exists.
+    let new_session = !native && !session::inherited();
     if new_session {
         if let Err(why) = session::start() {
             fatal(&format!("cannot start a Linux session: {why}"));
@@ -153,7 +147,7 @@ fn main() {
         eprintln!("linux-run: {shown}: cannot execute (ENOEXEC): {why}");
         unsafe { libc::_exit(126) }
     }
-    let native = session::linux_path(CString::new(program.clone()).unwrap());
+    let native = session::linux_path_at(CString::new(program.clone()).unwrap(), true);
     let exe = std::fs::canonicalize(std::ffi::OsStr::from_bytes(native.as_bytes()))
         .map(|p| session::linux_view(p.as_os_str().as_bytes()))
         .unwrap_or_else(|_| program.clone());

@@ -1111,7 +1111,7 @@ def test_foreign_call(vm, args):
     time.sleep(3)
     results = {}
     for tag, line in (("fcp", "foreign-call-probe"),
-                      ("lp", "linux-run /usr/share/foreign-call-probe/linux-probe")):
+                      ("lp", "linux-run --native /usr/share/foreign-call-probe/linux-probe")):
         results[tag] = guest_run(vm, tag, line, 180)
     log = vm.out / "foreign-call.txt"
     log.write_text("".join(f"[{tag}] exit {status}\n{output}\n" for tag, (status, output) in results.items()))
@@ -1143,7 +1143,7 @@ def test_linux_hello(vm, args):
     report, problems, log = [], [], []
     for name in LINUX_HELLOS:
         status, out = guest_run(vm, f"lr{len(log)}",
-                                f"linux-run {d}/{name} >/tmp/lh.out 2>/tmp/lh.err; s=$?; "
+                                f"linux-run --native {d}/{name} >/tmp/lh.out 2>/tmp/lh.err; s=$?; "
                                 "[ \"$(cat /tmp/lh.out; echo x)\" = \"$(printf \"hello from linux\\nx\")\" ] && o=same || o=differs; "
                                 "[ -s /tmp/lh.err ] && e=written || e=empty; "
                                 "echo lh-result $s $o $e; head -c 300 /tmp/lh.err; (exit $s)", 120)
@@ -1172,7 +1172,7 @@ def test_linux_hello(vm, args):
             else:
                 report.append(f"direct {name}: status {found.group(1)}, output {found.group(2)}, {found.group(3)}")
         status, out = guest_run(vm, "e32", "printf \"\\177ELF\\001\\001\\001\" >/tmp/e32; head -c 64 /dev/zero >>/tmp/e32; "
-                                "linux-run /tmp/e32", 60)
+                                "linux-run --native /tmp/e32", 60)
         log.append(f"[elf32] exit {status}\n{out}\n")
         if status != 126 or "ENOEXEC" not in out:
             problems.append(f"ELF32 header: exit {status}, no ENOEXEC")
@@ -1197,7 +1197,7 @@ def test_linux_busybox(vm, args):
     d = "/usr/share/linux-busybox"
     report, problems, log = [], [], []
     same = lambda a, b: f"[ \"$(cat {a}; echo x)\" = \"$(cat {b}; echo x)\" ]"
-    status, out = guest_run(vm, "bb", f"cd /tmp && EXPECT_UID=$UID linux-run {d}/busybox sh {d}/lc2.sh >/tmp/bb.out 2>/tmp/bb.err </dev/null; "
+    status, out = guest_run(vm, "bb", f"cd /tmp && EXPECT_UID=$UID linux-run --native {d}/busybox sh {d}/lc2.sh >/tmp/bb.out 2>/tmp/bb.err </dev/null; "
                             "echo $? >/tmp/bb.st; "
                             f"{same('/tmp/bb.out', d + '/expected.stdout')} && o=same || o=differs; "
                             f"{same('/tmp/bb.err', d + '/expected.stderr')} && e=same || e=differs; "
@@ -1210,13 +1210,13 @@ def test_linux_busybox(vm, args):
         problems.append(f"lc2.sh: stdout {verdict[0]}, stderr {verdict[1]}, status {verdict[2]}")
     else:
         report.append("lc2.sh output equals Linux's")
-    status, out = guest_run(vm, "tty", f"linux-run {d}/busybox sh {d}/tty.sh", 120)
+    status, out = guest_run(vm, "tty", f"linux-run --native {d}/busybox sh {d}/tty.sh", 120)
     log.append(f"[tty.sh] exit {status}\n{out}\n")
     if "echo off" not in out or "termios ok" not in out:
         problems.append("stty under busybox: no `echo off` and `termios ok`")
     else:
         report.append("termios round trip")
-    status, out = guest_run(vm, "lp2", "linux-run /usr/share/foreign-call-probe/linux-probe lc2", 300)
+    status, out = guest_run(vm, "lp2", "linux-run --native /usr/share/foreign-call-probe/linux-probe lc2", 300)
     log.append(f"[linux-probe lc2] exit {status}\n{out}\n")
     lines = re.findall(r"linux-probe: (?:pass|FAIL) .*", out)
     failed = [line.strip() for line in lines if ": FAIL " in line]
@@ -1224,9 +1224,9 @@ def test_linux_busybox(vm, args):
         problems.append(f"linux-probe lc2 exit {status}: {'; '.join(failed) or 'no FAIL line'}")
     else:
         report.append(f"linux-probe lc2 {len(lines)} passed")
-    status, out = guest_run(vm, "kl", f"linux-run {d}/busybox sh -c \"sleep 30 & sleep 31\" & l=$!; sleep 3; "
-                            "echo kl-before $(grep -c linux-run /scheme/sys/context); kill -9 $l; sleep 3; "
-                            "echo kl-after $(grep -c linux-run /scheme/sys/context); grep linux-run /scheme/sys/context", 120)
+    status, out = guest_run(vm, "kl", f"linux-run --native {d}/busybox sh -c \"sleep 30 & sleep 31\" & l=$!; sleep 3; "
+                            "echo kl-before $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); kill -9 $l; sleep 3; "
+                            "echo kl-after $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); grep linux- /scheme/sys/context", 120)
     log.append(f"[kill launcher] exit {status}\n{out}\n")
     found = re.search(r"kl-before (\d+).*kl-after (\d+)", out, re.S)
     report.append(f"killed launcher: linux-run processes {found.group(1)} before, {found.group(2)} after" if found
@@ -1238,7 +1238,7 @@ def test_linux_busybox(vm, args):
 
 
 def test_linux_dynamic(vm, args):
-    """Linux layer LC3: as `user`, `linux-run --session` starts a Linux session (linux-sessiond gives it the pinned Debian root read-only and a memory file system) and runs Debian's dash on the LC3 fixture (hash-checked in its recipe stage first), fed on standard input: the dynamic glibc hello, the four-thread program, a posix_spawn of a missing file that must report ENOENT, the session's checks (no DISPLAY, no /tmp/.X11-unix, no /lib/ld-linux.so.2, a write into /usr refused) and the core tools script over 30 tools with find, grep, tar and gzip. Its stdout, stderr and status must equal what Linux gave. Then, from the native login, `ls /scheme` must show neither `linux-root` nor `linux-mem`."""
+    """Linux layer LC3: as `user`, `linux-run` starts a Linux session (linux-sessiond gives it the pinned Debian root read-only and a memory file system) and runs Debian's dash on the LC3 fixture (hash-checked in its recipe stage first), fed on standard input: the dynamic glibc hello, the four-thread program, a posix_spawn of a missing file that must report ENOENT, the session's checks (no DISPLAY, no /tmp/.X11-unix, no /lib/ld-linux.so.2, a write into /usr refused) and the core tools script over 30 tools with find, grep, tar and gzip. Its stdout, stderr and status must equal what Linux gave. Then, from the native login, `ls /scheme` must show neither `linux-root` nor `linux-mem`."""
     stage = ROOT / "recipes/tests/linux-lc3-fixtures/target" / f"{args.arch}-unknown-redox" / "stage/usr/share/linux-lc3"
     sums = subprocess.run(["sha256sum", "-c", "--ignore-missing", "SHA256SUMS"], cwd=stage, capture_output=True, text=True)
     if sums.returncode != 0:
@@ -1249,7 +1249,7 @@ def test_linux_dynamic(vm, args):
     time.sleep(3)
     d = "/usr/share/linux-lc3"
     same = lambda a, b: f"[ \"$(cat {a}; echo x)\" = \"$(cat {b}; echo x)\" ]"
-    status, out = guest_run(vm, "ld", "cd /tmp && linux-run --session /bin/dash -c "
+    status, out = guest_run(vm, "ld", "cd /tmp && linux-run /bin/dash -c "
                             "\"mkdir /tmp/f && tar -xf - -C /tmp/f && /bin/dash /tmp/f/lc3.sh\" "
                             f"<{d}/fixtures.tar >/tmp/ld.out 2>/tmp/ld.err; echo $? >/tmp/ld.st; "
                             f"{same('/tmp/ld.out', d + '/expected.stdout')} && o=same || o=differs; "
@@ -1269,6 +1269,49 @@ def test_linux_dynamic(vm, args):
     if problems:
         return False, "; ".join(problems) + f"; see {vm.out / 'linux-dynamic.txt'}"
     return True, "dynamic hello, threads, posix_spawn ENOENT, session checks and core tools equal Linux's; root not in native /scheme"
+
+
+def test_linux_python(vm, args):
+    """Linux layer LC4: as `user`, `linux-run` (a Linux session by default) runs Debian's dash on the LC4 fixture (hash-checked in its recipe stage first), fed on standard input: Debian's python3 from the root runs a one-liner, then lc4.py (a thread serving a loopback TCP socket with sendto/recvfrom, recvmsg, sendmmsg and socket options; epoll and poll; mremap; pwrite, fsync, fdatasync, dup, close_range, symlink, listxattr; fcntl and SQLite locks that hold across processes; a child process), then `python3 -m venv` and an offline `pip install` of the six wheel, and the venv's Python imports six. Its stdout, stderr and status must equal what Linux gave. Then the launcher of a session running `sh -c "sleep 30 & sleep 31"` is killed with SIGKILL, and no process of the session may remain."""
+    stage = ROOT / "recipes/tests/linux-lc4-fixtures/target" / f"{args.arch}-unknown-redox" / "stage/usr/share/linux-lc4"
+    sums = subprocess.run(["sha256sum", "-c", "--ignore-missing", "SHA256SUMS"], cwd=stage, capture_output=True, text=True)
+    if sums.returncode != 0:
+        return False, f"fixture hashes in {stage} do not match: {sums.stdout.strip()} {sums.stderr.strip()}"
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    d = "/usr/share/linux-lc4"
+    same = lambda a, b: f"[ \"$(cat {a}; echo x)\" = \"$(cat {b}; echo x)\" ]"
+    problems, report, log = [], [], []
+    status, out = guest_run(vm, "py", "cd /tmp && linux-run /bin/dash -c "
+                            "\"mkdir /tmp/f && tar -xf - -C /tmp/f && /bin/dash /tmp/f/lc4.sh\" "
+                            f"<{d}/fixtures.tar >/tmp/py.out 2>/tmp/py.err; echo $? >/tmp/py.st; "
+                            f"{same('/tmp/py.out', d + '/expected.stdout')} && o=same || o=differs; "
+                            f"{same('/tmp/py.err', d + '/expected.stderr')} && e=same || e=differs; "
+                            f"{same('/tmp/py.st', d + '/expected.status')} && s=same || s=differs; "
+                            "echo py-result $o $e $s; echo ==out; cat /tmp/py.out; echo ==err; head -c 3000 /tmp/py.err; "
+                            "echo ==st; cat /tmp/py.st", 900)
+    log.append(f"[lc4.sh] exit {status}\n{out}\n")
+    found = re.search(r"py-result (same|differs) (same|differs) (same|differs)", out)
+    verdict = found.groups() if found else ("none", "none", "none")
+    if verdict != ("same", "same", "same"):
+        problems.append(f"lc4 script: stdout {verdict[0]}, stderr {verdict[1]}, status {verdict[2]}")
+    else:
+        report.append("python3, venv and pip output equals Linux's")
+    status, out = guest_run(vm, "kl", "linux-run /bin/dash -c \"sleep 30 & sleep 31\" & l=$!; sleep 5; "
+                            "echo kl-before $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); kill -9 $l; sleep 3; "
+                            "echo kl-after $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); grep linux- /scheme/sys/context", 120)
+    log.append(f"[kill launcher] exit {status}\n{out}\n")
+    found = re.search(r"kl-before (\d+).*kl-after (\d+)", out, re.S)
+    if not found or int(found.group(1)) < 2 or int(found.group(2)) != 0:
+        problems.append("killed launcher: " + (f"linux-run processes {found.group(1)} before, {found.group(2)} after" if found else "no count"))
+    else:
+        report.append(f"killed launcher took its session's {found.group(1)} processes with it")
+    (vm.out / "linux-python.txt").write_text("".join(log))
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'linux-python.txt'}"
+    return True, "; ".join(report)
 
 
 def test_sudo_notty(vm, args):
@@ -4448,6 +4491,7 @@ TESTS["foreign-call"] = test_foreign_call
 TESTS["linux-hello"] = test_linux_hello
 TESTS["linux-busybox"] = test_linux_busybox
 TESTS["linux-dynamic"] = test_linux_dynamic
+TESTS["linux-python"] = test_linux_python
 TESTS["dso-atexit"] = test_dso_atexit
 TESTS["mesa-cpu"] = test_mesa_cpu
 TESTS["gtk-window"] = test_gtk_window

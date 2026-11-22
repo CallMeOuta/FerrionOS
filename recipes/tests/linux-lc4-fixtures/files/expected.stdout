@@ -1,0 +1,41 @@
+one-liner (3, 13) 1000 /usr
+SO_REUSEADDR True
+SO_TYPE True
+bound 127.0.0.1 True
+TCP_NODELAY True
+reply b'PING'
+acknowledged b'ok'
+sendmmsg 3 [3, 3, 3]
+server's peer is the client True True
+server's own name True
+client's peer True
+recvmsg (b'via sendmsg', 0, 0)
+sendmmsg arrived b'onetwosix'
+closed port ECONNREFUSED
+outside loopback ENETUNREACH
+epoll empty []
+epoll ready [(True, 1)]
+epoll still ready [(True, 1)]
+epoll drained []
+oneshot 1 0
+poll [(False, 4), (True, 1)]
+poll hangup [(False, 0), (True, 17)]
+mremap b'kept bytes' 1048576
+pwrite b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00written at ten'
+dup 24
+close_range closed 3
+symlink f b'\x00\x00\x00\x00'
+listxattr []
+child refused EAGAIN
+child locked
+json b4ff8298cd1066e3
+child: database is locked
+child inserted
+sqlite 42,43,7
+child child 0
+python done (3, 13)
+Processing /tmp/f/six-1.17.0-py2.py3-none-any.whl
+Installing collected packages: six
+Successfully installed six-1.17.0
+six 1.17.0 /tmp/venv /tmp/venv/lib/python3.13/site-packages/six.py
+python script done

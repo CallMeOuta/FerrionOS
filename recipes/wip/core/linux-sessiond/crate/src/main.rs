@@ -134,14 +134,91 @@ fn serve(name: &str, args: &[&str]) -> Result<(Child, usize)> {
     }
 }
 
+struct Lock {
+    key: (u64, u64),
+    whole_file: bool,
+    pid: usize,
+    start: u64,
+    end: u64,
+    write: bool,
+}
+
 struct Session {
     uid: u32,
     memory: Option<Child>,
+    members: Vec<usize>,
+    leader: Option<usize>,
+    ended: bool,
+    locks: Vec<Lock>,
+}
+
+const JOIN: u64 = 1;
+const SET_LOCK: u64 = 2;
+const GET_LOCK: u64 = 3;
+const RELEASE_LOCKS: u64 = 4;
+const READ_LOCK: u64 = 0;
+const WRITE_LOCK: u64 = 1;
+const UNLOCK: u64 = 2;
+const MEMBERS: usize = 4096;
+const LOCKS: usize = 4096;
+
+fn alive(pid: usize) -> bool {
+    let found = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+impl Session {
+    fn conflict(&mut self, key: (u64, u64), whole_file: bool, pid: usize, start: u64, end: u64, write: bool) -> Option<usize> {
+        let clashes = |l: &Lock| {
+            l.key == key && l.whole_file == whole_file && l.pid != pid && l.start < end && start < l.end && (write || l.write)
+        };
+        let dead: Vec<usize> = self.locks.iter().filter(|l| clashes(l) && !alive(l.pid)).map(|l| l.pid).collect();
+        self.locks.retain(|l| !dead.contains(&l.pid));
+        self.locks.iter().position(clashes)
+    }
+
+    fn set_lock(&mut self, key: (u64, u64), whole_file: bool, pid: usize, start: u64, end: u64, kind: u64) -> Result<()> {
+        if kind != UNLOCK && self.conflict(key, whole_file, pid, start, end, kind == WRITE_LOCK).is_some() {
+            return Err(Error::new(EAGAIN));
+        }
+        let mut kept = Vec::with_capacity(self.locks.len() + 2);
+        for l in self.locks.drain(..) {
+            if l.key != key || l.whole_file != whole_file || l.pid != pid || l.end <= start || end <= l.start {
+                kept.push(l);
+                continue;
+            }
+            if l.start < start {
+                kept.push(Lock { end: start, ..l });
+                if l.end > end {
+                    kept.push(Lock { start: end, ..l });
+                }
+            } else if l.end > end {
+                kept.push(Lock { start: end, ..l });
+            }
+        }
+        self.locks = kept;
+        if kind != UNLOCK {
+            if self.locks.len() >= LOCKS {
+                return Err(Error::new(ENOLCK));
+            }
+            self.locks.push(Lock { key, whole_file, pid, start, end, write: kind == WRITE_LOCK });
+        }
+        Ok(())
+    }
+
+    fn end(&mut self) {
+        self.ended = true;
+        for pid in self.members.drain(..) {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        self.locks.clear();
+    }
 }
 
 struct Sessions {
     root: usize,
     sessions: BTreeMap<usize, Session>,
+    leaders: BTreeMap<usize, usize>,
     next: usize,
 }
 
@@ -167,7 +244,10 @@ impl SchemeSync for Sessions {
                 return Err(Error::new(EMFILE));
             }
             self.next += 1;
-            self.sessions.insert(self.next, Session { uid: ctx.uid, memory: None });
+            self.sessions.insert(
+                self.next,
+                Session { uid: ctx.uid, memory: None, members: Vec::new(), leader: None, ended: false, locks: Vec::new() },
+            );
             return Ok(OpenResult::ThisScheme { number: self.next, flags: NewFdFlags::empty() });
         }
         let session = self.sessions.get_mut(&dir).ok_or(Error::new(EBADF))?;
@@ -177,6 +257,15 @@ impl SchemeSync for Sessions {
         if path == "root" {
             let fd = raw(unsafe { redox_dup_v1(self.root, core::ptr::null(), 0) })?;
             return Ok(OpenResult::OtherScheme { fd });
+        }
+        if path == "leader" {
+            if session.leader.is_some() || session.ended {
+                return Err(Error::new(EEXIST));
+            }
+            self.next += 1;
+            session.leader = Some(self.next);
+            self.leaders.insert(self.next, dir);
+            return Ok(OpenResult::ThisScheme { number: self.next, flags: NewFdFlags::empty() });
         }
         let mib = match path {
             "memory" => MEMORY_MIB,
@@ -194,8 +283,73 @@ impl SchemeSync for Sessions {
         Ok(OpenResult::OtherScheme { fd })
     }
 
+    fn call(&mut self, id: usize, payload: &mut [u8], metadata: &[u64], ctx: &CallerCtx) -> Result<usize> {
+        let session = self.sessions.get_mut(&id).ok_or(Error::new(EBADF))?;
+        let pid = ctx.pid;
+        match *metadata {
+            [JOIN, ..] => {
+                if session.ended {
+                    return Err(Error::new(ESRCH));
+                }
+                if !session.members.contains(&pid) {
+                    if session.members.len() >= MEMBERS {
+                        session.members.retain(|&p| alive(p));
+                    }
+                    if session.members.len() >= MEMBERS {
+                        return Err(Error::new(EMFILE));
+                    }
+                    session.members.push(pid);
+                }
+                Ok(0)
+            }
+            [op @ (SET_LOCK | GET_LOCK), a, b, ..] => {
+                let words = payload.get(..32).ok_or(Error::new(EINVAL))?;
+                let w: [u64; 4] = core::array::from_fn(|i| u64::from_ne_bytes(words[8 * i..8 * i + 8].try_into().unwrap()));
+                let [start, len, kind, whole_file] = w;
+                if kind > UNLOCK || (op == GET_LOCK && kind == UNLOCK) {
+                    return Err(Error::new(EINVAL));
+                }
+                let end = if len == 0 { u64::MAX } else { start.checked_add(len).ok_or(Error::new(EOVERFLOW))? };
+                let whole_file = whole_file != 0;
+                if op == SET_LOCK {
+                    return session.set_lock((a, b), whole_file, pid, start, end, kind).map(|_| 0);
+                }
+                let Some(i) = session.conflict((a, b), whole_file, pid, start, end, kind == WRITE_LOCK) else {
+                    return Ok(0);
+                };
+                let l = &session.locks[i];
+                let answer = [
+                    if l.write { WRITE_LOCK } else { READ_LOCK },
+                    l.start,
+                    if l.end == u64::MAX { 0 } else { l.end - l.start },
+                    l.pid as u64,
+                ];
+                let out = payload.get_mut(..32).ok_or(Error::new(EINVAL))?;
+                for (chunk, v) in out.chunks_exact_mut(8).zip(answer) {
+                    chunk.copy_from_slice(&v.to_ne_bytes());
+                }
+                Ok(32)
+            }
+            [RELEASE_LOCKS, a, b, ..] => {
+                session.locks.retain(|l| l.key != (a, b) || l.whole_file || l.pid != pid);
+                Ok(0)
+            }
+            _ => Err(Error::new(EINVAL)),
+        }
+    }
+
     fn on_close(&mut self, id: usize) {
-        if let Some(session) = self.sessions.remove(&id) {
+        if let Some(dir) = self.leaders.remove(&id) {
+            if let Some(session) = self.sessions.get_mut(&dir) {
+                session.end();
+            }
+            return;
+        }
+        if let Some(mut session) = self.sessions.remove(&id) {
+            if let Some(leader) = session.leader {
+                self.leaders.remove(&leader);
+            }
+            session.end();
             if let Some(mut child) = session.memory {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -212,7 +366,7 @@ fn run() -> Result<()> {
     drop_hardware()?;
     let (_root_server, root) = serve("linux-root", &["--read-only", ROOT_IMAGE])?;
     let socket = Socket::create()?;
-    let mut sessions = Sessions { root, sessions: BTreeMap::new(), next: 0 };
+    let mut sessions = Sessions { root, sessions: BTreeMap::new(), leaders: BTreeMap::new(), next: 0 };
     let mut state = SchemeState::new();
     register_sync_scheme(&socket, "linux-session", &mut sessions)?;
     syscall::write(notify, &[0])?;

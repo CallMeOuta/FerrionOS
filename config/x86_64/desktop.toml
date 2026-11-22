@@ -58,23 +58,24 @@ net-call-probe = {}
 # Run as root, it opens and closes the sound driver's shared ring N times (plans/audio.md AU1,
 # issue #8); scripts/vm-test.py audio-ring runs it.
 audio-probe = {}
-# The Linux layer's LC1 (plans/linux-compat.md): linux-run starts a static Linux program as the
-# calling user, in the caller's namespace, adding no right; it relies on the kernel's
-# foreign-call hook. foreign-call-probe checks the hook and the crossing, and linux-hello-fixtures
-# holds the four pinned hello programs; scripts/vm-test.py foreign-call and linux-hello run them.
+# The Linux layer's LC1 (plans/linux-compat.md): linux-run starts a Linux program as the calling
+# user, adding no right, through the kernel's foreign-call hook. foreign-call-probe checks it, and
+# linux-hello-fixtures holds the four pinned hello programs; scripts/vm-test.py foreign-call and
+# linux-hello run them.
 linux-run = {}
 foreign-call-probe = {}
 linux-hello-fixtures = {}
 # LC2: Debian's static busybox, the shell script and the output Linux gave for it;
 # scripts/vm-test.py linux-busybox runs it under linux-run.
 linux-busybox-fixtures = {}
-# LC3: the pinned Debian root (a read-only RedoxFS image) and linux-sessiond, a root service
-# started at boot that serves it and a memory file system to each `linux-run --session`
-# (widened access: a root service; see its recipe). linux-lc3-fixtures holds the dynamic, thread
-# and posix_spawn programs and the core tools script; scripts/vm-test.py linux-dynamic runs them.
+# LC3 and LC4: the pinned Debian root (a read-only RedoxFS image) and linux-sessiond, a root service
+# that serves it and a memory file system to each Linux session (widened access: see its recipe).
+# linux-lc3-fixtures and linux-lc4-fixtures hold programs, scripts and Linux's output for them;
+# scripts/vm-test.py linux-dynamic and linux-python run them.
 linux-root = {}
 linux-sessiond = {}
 linux-lc3-fixtures = {}
+linux-lc4-fixtures = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
 # ferrion-run check uses to show that a profile alone withholds the network.
