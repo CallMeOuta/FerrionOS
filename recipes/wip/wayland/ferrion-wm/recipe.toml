@@ -1,12 +1,39 @@
 [package]
 description = "ferrion-wm, FerrionOS's window manager: a fork of niri (GPL-3.0-or-later, as are these patches) with a free mode beside its columns, carried as niri's commits exported with git format-patch"
+dependencies = ["xkeyboard-config", "mesa"]
 
 [source]
 git = "https://github.com/niri-wm/niri"
 rev = "ef54ab5421d13ffed2b5fc1f0308998cac4808d0"
 patches = [
+    "0001-ferrion-platform.patch",
+    "0002-ferrion-ipc.patch",
     "F4-workspace-mode.patch",
     "F5-placement.patch",
     "F6-minimize.patch",
     "F7-tiling.patch",
 ]
+script = """
+mkdir -p ferrion-vendor
+if [ ! -d ferrion-vendor/smithay/.git ]; then
+    git clone https://github.com/Smithay/smithay.git ferrion-vendor/smithay
+fi
+git -C ferrion-vendor/smithay checkout --force 65aa86fa5236e41775c313408102a5d5c2d1e2ca
+patch --directory=ferrion-vendor/smithay --strip=1 < "../smithay-platform.patch"
+mkdir -p ferrion-vendor/backend
+cp -a "../../../../core/ferrion-wm-backend/crate/." ferrion-vendor/backend/
+"""
+
+[build]
+template = "custom"
+dependencies = ["mesa", "pango", "cairo", "libxkbcommon", "pixman", "libffi"]
+script = """
+DYNAMIC_INIT
+cookbook_cargo --no-default-features --features ferrion
+mkdir -p "${COOKBOOK_STAGE}/etc/ferrion-wm"
+cp "${COOKBOOK_RECIPE}/config.kdl" "${COOKBOOK_RECIPE}/rounded.kdl" "${COOKBOOK_STAGE}/etc/ferrion-wm/"
+mkdir -p "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm"
+cp "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm/LICENSE"
+cp "${COOKBOOK_SOURCE}/ferrion-vendor/smithay/LICENSE.txt" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm/smithay-MIT.txt"
+cp "${COOKBOOK_SOURCE}/ferrion-vendor/backend/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm/backend-MIT.txt"
+"""

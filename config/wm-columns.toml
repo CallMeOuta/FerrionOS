@@ -1,0 +1,42 @@
+# DD2 development compositor on its own inputd virtual terminal.
+include = ["desktop-minimal.toml"]
+
+[general]
+filesystem_size = 1024
+
+[packages]
+ferrion-wm = "source"
+desktop-layout-probe = "source"
+shm-reuse-probe = "source"
+xkeyboard-config = {}
+bash = {}
+mesa = {}
+libffi = {}
+
+# Test-only access: the root compositor inherits init's input/display schemes.
+# Its test command receives the unrestricted compositor IPC and Wayland socket.
+# No account, group or login scheme changes; this configuration is not a release session.
+[[files]]
+path = "/usr/lib/init.d/20_orbital"
+data = """
+requires_weak 30_console.target
+nowait /bin/bash /usr/lib/ferrion-wm-test-session
+"""
+
+[[files]]
+path = "/usr/lib/ferrion-wm-test-session"
+data = """
+mkdir -p /tmp/ferrion-wm
+chmod 700 /tmp/ferrion-wm
+export XDG_RUNTIME_DIR=/tmp/ferrion-wm
+export LIBGL_ALWAYS_SOFTWARE=1
+export RUST_LOG=ferrion_wm=info,niri=info,smithay=warn
+exec ferrion-wm --config /etc/ferrion-wm/config.kdl -- /bin/bash /usr/lib/ferrion-wm-test-ready > /tmp/ferrion-wm.log 2>&1
+"""
+
+[[files]]
+path = "/usr/lib/ferrion-wm-test-ready"
+data = """
+printf 'export XDG_RUNTIME_DIR=%q\\nexport WAYLAND_DISPLAY=%q\\nexport FERRION_WM_SOCKET=%q\\n' "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" "$FERRION_WM_SOCKET" > /tmp/ferrion-wm-session
+printf 'DD2_SESSION_READY\\n'
+"""

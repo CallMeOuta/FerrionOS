@@ -1,0 +1,116 @@
+From e543d3c9b2a3c64ad0a1ecea44aac83b6b36d6da Mon Sep 17 00:00:00 2001
+From: FerrionOS contributors <contributors@ferrion.invalid>
+Date: Sat, 21 Nov 2026 15:05:40 -0800
+Subject: [PATCH] ipc: Retry interrupted socket connections on FerrionOS
+
+The target can interrupt UnixStream::connect during desktop IPC. Retry
+that transient failure in a separate adapter, preserving other errors.
+Name the public socket environment for ferrion-wm. The VM layout check
+uses this client for every arrangement command.
+---
+ niri-ipc/src/socket.rs         | 34 ++++++++++++++++++++++------------
+ niri-ipc/src/socket/ferrion.rs | 14 ++++++++++++++
+ 2 files changed, 36 insertions(+), 12 deletions(-)
+ create mode 100644 niri-ipc/src/socket/ferrion.rs
+
+diff --git a/niri-ipc/src/socket.rs b/niri-ipc/src/socket.rs
+index 790097cb..19fe8c2d 100644
+--- a/niri-ipc/src/socket.rs
++++ b/niri-ipc/src/socket.rs
+@@ -1,4 +1,5 @@
+-//! Helper for blocking communication over the niri socket.
++// Modified for FerrionOS on 2026-11-21; GPL-3.0-or-later (niri).
++//! Helper for blocking communication over the ferrion-wm socket.
+ 
+ use std::env;
+ use std::io::{self, BufRead, BufReader, Write};
+@@ -8,19 +9,23 @@ use std::path::Path;
+ 
+ use crate::{Event, Reply, Request};
+ 
+-/// Name of the environment variable containing the niri IPC socket path.
+-pub const SOCKET_PATH_ENV: &str = "NIRI_SOCKET";
++// FerrionOS 2026-11-21: native blocking connect may be interrupted by a signal.
++#[cfg(target_os = "redox")]
++mod ferrion;
+ 
+-/// Helper for blocking communication over the niri socket.
++/// Name of the environment variable containing the ferrion-wm IPC socket path.
++pub const SOCKET_PATH_ENV: &str = "FERRION_WM_SOCKET";
++
++/// Helper for blocking communication over the ferrion-wm socket.
+ ///
+-/// This struct is used to communicate with the niri IPC server. It handles the socket connection
++/// This struct is used to communicate with the ferrion-wm IPC server. It handles the socket connection
+ /// and serialization/deserialization of messages.
+ pub struct Socket {
+     stream: BufReader<UnixStream>,
+ }
+ 
+ impl Socket {
+-    /// Connects to the default niri IPC socket.
++    /// Connects to the default ferrion-wm IPC socket.
+     ///
+     /// This is equivalent to calling [`Self::connect_to`] with the path taken from the
+     /// [`SOCKET_PATH_ENV`] environment variable.
+@@ -28,26 +33,31 @@ impl Socket {
+         let socket_path = env::var_os(SOCKET_PATH_ENV).ok_or_else(|| {
+             io::Error::new(
+                 io::ErrorKind::NotFound,
+-                format!("{SOCKET_PATH_ENV} is not set, are you running this within niri?"),
++                format!("{SOCKET_PATH_ENV} is not set, are you running this within ferrion-wm?"),
+             )
+         })?;
+         Self::connect_to(socket_path)
+     }
+ 
+-    /// Connects to the niri IPC socket at the given path.
++    /// Connects to the ferrion-wm IPC socket at the given path.
+     pub fn connect_to(path: impl AsRef<Path>) -> io::Result<Self> {
++        // FerrionOS 2026-11-21: retry interrupted native connections.
++        #[cfg(target_os = "redox")]
++        let stream = ferrion::connect(path.as_ref())?;
++        #[cfg(not(target_os = "redox"))]
+         let stream = UnixStream::connect(path.as_ref())?;
+         let stream = BufReader::new(stream);
+         Ok(Self { stream })
+     }
+ 
+-    /// Sends a request to niri and returns the response.
++    /// Sends a request to ferrion-wm and returns the response.
+     ///
+     /// Return values:
+     ///
+-    /// * `Ok(Ok(response))`: successful [`Response`](crate::Response) from niri
+-    /// * `Ok(Err(message))`: error message from niri
+-    /// * `Err(error)`: error communicating with niri
++    // FerrionOS 2026-11-21: adapt the native backend and fork identity.
++    /// * `Ok(Ok(response))`: successful [`Response`](crate::Response) from ferrion-wm
++    /// * `Ok(Err(message))`: error message from ferrion-wm
++    /// * `Err(error)`: error communicating with ferrion-wm
+     pub fn send(&mut self, request: Request) -> io::Result<Reply> {
+         let mut buf = serde_json::to_string(&request).unwrap();
+         buf.push('\n');
+diff --git a/niri-ipc/src/socket/ferrion.rs b/niri-ipc/src/socket/ferrion.rs
+new file mode 100644
+index 00000000..68b85956
+--- /dev/null
++++ b/niri-ipc/src/socket/ferrion.rs
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Added for FerrionOS on 2026-11-21 to niri's IPC client.
++use std::io;
++use std::os::unix::net::UnixStream;
++use std::path::Path;
++
++pub(super) fn connect(path: &Path) -> io::Result<UnixStream> {
++    loop {
++        match UnixStream::connect(path) {
++            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++            result => return result,
++        }
++    }
++}
+-- 
+2.56.1
+
