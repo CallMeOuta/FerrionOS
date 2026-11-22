@@ -36,7 +36,7 @@ fn monotonic_remaining_ns(abs_timeout_nsec: i64) -> i64 {
     }
 }
 
-fn map_two_fd_err(err: syscall::Error) -> Errno {
+pub(super) fn map_two_fd_err(err: syscall::Error) -> Errno {
     if err.errno == syscall::EXDEV || err.errno == syscall::EBADF {
         Errno(EINVAL)
     } else {

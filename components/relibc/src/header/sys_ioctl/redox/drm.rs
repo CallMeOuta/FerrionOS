@@ -199,12 +199,25 @@ impl Dev {
         }
 
         let mut wire = unsafe { data.write() };
-        let res = redox_rt::sys::sys_call_rw(
-            self.fd as usize,
-            &mut wire,
-            syscall::CallFlags::empty(),
-            &[virtgpu::EXECBUFFER],
-        )?;
+        let res = if (data.flags & virtgpu::VIRTGPU_EXECBUF_FENCE_FD_IN) != 0 {
+            if data.fence_fd < 0 {
+                return Err(Errno(EINVAL));
+            }
+            redox_rt::sys::sys_call_rw(
+                &[self.fd as usize, data.fence_fd as usize][..],
+                &mut wire,
+                syscall::CallFlags::empty(),
+                &[virtgpu::EXECBUFFER],
+            )
+            .map_err(super::sync::map_two_fd_err)?
+        } else {
+            redox_rt::sys::sys_call_rw(
+                self.fd as usize,
+                &mut wire,
+                syscall::CallFlags::empty(),
+                &[virtgpu::EXECBUFFER],
+            )?
+        };
         unsafe { data.read_from(&wire) };
 
         if (data.flags & virtgpu::VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0 {

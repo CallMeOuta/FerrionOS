@@ -598,7 +598,6 @@ pub const EXECBUF_MAX_CMD_SIZE: u32 = 4 * 1024 * 1024;
 pub const EXECBUF_MAX_BO_HANDLES: u32 = 1024;
 pub const EXECBUF_MAX_SYNCOBJS: u32 = 1024;
 pub const FENCE_DUP_EXECBUFFER: u64 = EXECBUFFER;
-pub const FENCE_DUP_UNSIGNALED: u64 = 0x4201;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
