@@ -110,7 +110,10 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
         problems.append('serial root shell unavailable')
         save()
         return False, problems[-1]
+    shell_mark = vm.mark()
     vm.type("bash --norc --noprofile --noediting\n")
+    if not vm.wait_serial(r"bash-[\d.]+# ", args.timeout, shell_mark):
+        raise RuntimeError("serial Bash prompt unavailable")
     status, _ = run_status(vm, 'test -n "$BASH_VERSION"', args.timeout)
     if status != 0:
         raise RuntimeError('serial Bash did not start')
