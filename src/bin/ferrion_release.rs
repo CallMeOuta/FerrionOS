@@ -60,6 +60,7 @@ Build options:
   --system-package <NAME>              (repeatable; marks package set = system)
   --default-set <system|app>           (default: system)
   --previous-root <FILE>               (enforce strict monotonic serial/release and keep history)
+  --fresh                              (start a new release chain even if OUT/root.toml exists)
   --previous-index <FILE>              (preserve rev for packages with unchanged head)
   --allow-same-release                 (allow signing another arch for the same release number)";
 
@@ -561,6 +562,20 @@ fn resolve_repo_target_dir(repo: &Path, arch: Arch) -> PathBuf {
     }
 }
 
+enum PrevRoot {
+    Fresh,
+    Chain(RootFile),
+}
+
+impl PrevRoot {
+    fn as_ref(&self) -> Option<&RootFile> {
+        match self {
+            PrevRoot::Fresh => None,
+            PrevRoot::Chain(root) => Some(root),
+        }
+    }
+}
+
 fn cmd_build(args: &[String]) -> Result<(), String> {
     let mut repo_dir: Option<PathBuf> = None;
     let mut out_dir: Option<PathBuf> = None;
@@ -580,6 +595,7 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     let mut system_packages: BTreeSet<String> = BTreeSet::new();
     let mut default_set = PackageSet::System;
     let mut previous_root_path: Option<PathBuf> = None;
+    let mut fresh = false;
     let mut previous_index_path: Option<PathBuf> = None;
     let mut key: Option<String> = None;
     let mut dev_key_dir: Option<PathBuf> = None;
@@ -653,6 +669,7 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
                 previous_root_path =
                     Some(PathBuf::from(next_value(args, &mut i, "--previous-root")?))
             }
+            "--fresh" => fresh = true,
             "--previous-index" => {
                 previous_index_path =
                     Some(PathBuf::from(next_value(args, &mut i, "--previous-index")?))
@@ -674,6 +691,7 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     if serial == 0 {
         return Err("--serial must be >= 1".to_string());
     }
+    let floor_explicit = floor;
     let floor = floor.unwrap_or(release);
     if floor > release {
         return Err(format!("--floor {floor} exceeds --release {release}"));
@@ -697,6 +715,10 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     let signer = Signer::resolve(key, dev_key_dir)?;
     let pubkey = signer.public_key()?;
 
+    if previous_root_path.is_some() && fresh {
+        return Err("--previous-root and --fresh cannot be combined".to_string());
+    }
+    let existing_root = out_dir.join("root.toml");
     let prev_root = match previous_root_path {
         Some(path) => {
             let bytes = fs::read(&path)
@@ -716,9 +738,18 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
                     ));
                 }
             }
-            Some(parsed)
+            PrevRoot::Chain(parsed)
         }
-        None => None,
+        None if fresh => PrevRoot::Fresh,
+        None => {
+            if existing_root.exists() {
+                return Err(format!(
+                    "refusing to overwrite existing {}: pass --previous-root to chain history or --fresh to start a new chain",
+                    existing_root.display()
+                ));
+            }
+            PrevRoot::Fresh
+        }
     };
 
     let prev_pkg_revs: BTreeMap<String, (Blake3Hash, ReleaseNumber)> = match previous_index_path {
@@ -933,18 +964,35 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         .as_ref()
         .map(|r| r.releases.clone())
         .unwrap_or_default();
-    let entry = releases.entry(release).or_insert_with(|| ReleaseEntry {
-        index: BTreeMap::new(),
-        floor,
-        security,
-        via,
-        withdrawn: false,
-        rollout: Vec::new(),
-    });
-    entry.index.insert(arch, index_hash);
-    entry.floor = floor;
-    entry.security = security;
-    entry.via = via;
+    match releases.get_mut(&release) {
+        Some(entry) => {
+            entry.index.insert(arch, index_hash);
+            if let Some(f) = floor_explicit {
+                entry.floor = f;
+            }
+            if security {
+                entry.security = true;
+            }
+            if let Some(v) = via {
+                entry.via = Some(v);
+            }
+        }
+        None => {
+            let mut index = BTreeMap::new();
+            index.insert(arch, index_hash);
+            releases.insert(
+                release,
+                ReleaseEntry {
+                    index,
+                    floor,
+                    security,
+                    via,
+                    withdrawn: false,
+                    rollout: Vec::new(),
+                },
+            );
+        }
+    }
     if releases.len() > MAX_RELEASES_IN_ROOT {
         return Err(format!(
             "root.toml has {} releases, exceeds maximum {MAX_RELEASES_IN_ROOT}",
@@ -975,6 +1023,24 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         keys,
         mirrors: final_mirrors,
     };
+    if let PrevRoot::Chain(prev) = &prev_root {
+        assert!(root.serial > prev.serial);
+        for (prev_rel, prev_entry) in &prev.releases {
+            let cur_entry = root
+                .releases
+                .get(prev_rel)
+                .expect("chained root must keep every earlier release");
+            for (prev_arch, prev_hash) in &prev_entry.index {
+                assert!(cur_entry.index.contains_key(prev_arch));
+                if *prev_rel != release || *prev_arch != arch {
+                    assert_eq!(cur_entry.index.get(prev_arch), Some(prev_hash));
+                }
+            }
+            if prev_entry.security {
+                assert!(cur_entry.security);
+            }
+        }
+    }
     let root_bytes = render_root_toml(&root).into_bytes();
     let root_path = out_dir.join("root.toml");
     let root_sig_path = out_dir.join("root.toml.sig");
