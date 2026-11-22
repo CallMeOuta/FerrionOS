@@ -922,14 +922,7 @@ fn call(thread: &Thread, f: &mut Frame) -> Option<i64> {
         22 => crate::files::pipe2(a, 0),
         32 => crate::files::dup(a),
         33 => crate::files::dup2(a, b),
-        34 => {
-            let mut none: libc::sigset_t = unsafe { core::mem::zeroed() };
-            unsafe { libc::sigemptyset(&mut none) };
-            while !signal::pending_for(thread) {
-                unsafe { crate::ffi::sigsuspend(&none) };
-            }
-            -EINTR
-        }
+        34 => signal::pause(thread),
         37 => unsafe { libc::alarm(a as u32) as i64 },
         40 => crate::files::sendfile(a, b, c, d),
         61 => crate::files::wait4(a, b, c, d),

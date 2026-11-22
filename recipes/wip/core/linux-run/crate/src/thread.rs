@@ -60,6 +60,12 @@ unsafe extern "C" {
 }
 core::arch::global_asm!(include_str!("entry.S"));
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskState {
+    Normal,
+    Temporary { saved: u64 },
+}
+
 /// Runtime state of one Linux thread. THREADS holds one reference and the thread's data page
 /// another (taken with `Arc::into_raw`), which `exit_thread` gives back.
 pub struct Thread {
@@ -75,8 +81,7 @@ pub struct Thread {
     pub altstack: Mutex<(u64, i32, u64)>,
     pub clear_tid: AtomicU64,
     pub robust_list: AtomicU64,
-    /// The mask rt_sigsuspend replaced, which the next handler frame restores.
-    pub suspended_mask: Mutex<Option<u64>>,
+    pub mask_state: Mutex<MaskState>,
     /// The native thread, for waking it with the runtime's kick signal.
     pub native: usize,
 }
@@ -166,7 +171,7 @@ pub fn new_thread(tid: i32, mask: u64) -> &'static Thread {
         altstack: Mutex::new((0, 2 /* SS_DISABLE */, 0)),
         clear_tid: AtomicU64::new(0),
         robust_list: AtomicU64::new(0),
-        suspended_mask: Mutex::new(None),
+        mask_state: Mutex::new(MaskState::Normal),
         native: unsafe { libc::pthread_self() } as usize,
     });
     let data = area + PAGE;

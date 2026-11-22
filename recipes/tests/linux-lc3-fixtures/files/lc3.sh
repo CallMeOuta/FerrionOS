@@ -5,7 +5,7 @@
 # a display, the X11 socket directory, a 32-bit dynamic linker, a writable /usr.
 set -e
 f=$(dirname "$0")
-"$f/hello-dyn"; "$f/threads"; "$f/spawn"
+"$f/hello-dyn"; "$f/threads"; "$f/spawn"; "$f/signals"
 [ -z "${DISPLAY:-}" ] && echo "no DISPLAY"
 [ ! -e /tmp/.X11-unix ] && echo "no X11 socket directory"
 [ ! -e /lib/ld-linux.so.2 ] && echo "no 32-bit dynamic linker"

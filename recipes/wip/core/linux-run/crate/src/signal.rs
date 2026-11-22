@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use crate::{
     errno::*,
     mem::user_ok,
-    thread::{Frame, Thread},
+    thread::{Frame, MaskState, Thread},
 };
 
 #[derive(Clone, Copy, Default)]
@@ -344,26 +344,34 @@ pub fn rt_sigpending(thread: &Thread, set: u64, size: u64) -> i64 {
     0
 }
 
-/// rt_sigsuspend: waits with `mask` until a handler is due; the handler's frame restores the
-/// old mask.
-pub fn sigsuspend(thread: &Thread, set: u64, size: u64) -> i64 {
-    if size != 8 {
-        return -EINVAL;
+fn begin_temporary(thread: &Thread, new_mask: u64) {
+    let mut state = thread.mask_state.lock().unwrap();
+    assert_eq!(*state, MaskState::Normal);
+    let saved = thread.mask.swap(new_mask & !UNBLOCKABLE, Ordering::SeqCst);
+    *state = MaskState::Temporary { saved };
+}
+
+fn end_temporary(thread: &Thread) -> Option<u64> {
+    let mut state = thread.mask_state.lock().unwrap();
+    match *state {
+        MaskState::Normal => None,
+        MaskState::Temporary { saved } => {
+            *state = MaskState::Normal;
+            thread.mask.store(saved, Ordering::SeqCst);
+            Some(saved)
+        }
     }
-    if !user_ok(set, 8) {
-        return -EFAULT;
-    }
-    let new = unsafe { *(set as *const u64) } & !UNBLOCKABLE;
-    let old = thread.mask.swap(new, Ordering::SeqCst);
-    *thread.suspended_mask.lock().unwrap() = Some(old);
+}
+
+fn suspend_with(thread: &Thread, new: u64) -> i64 {
+    let new = new & !UNBLOCKABLE;
+    begin_temporary(thread, new);
     unsafe {
         let mut all: libc::sigset_t = core::mem::zeroed();
         let mut none: libc::sigset_t = core::mem::zeroed();
         libc::sigfillset(&mut all);
         libc::sigemptyset(&mut none);
         loop {
-            // Native signals are held while checking, then released atomically by the wait, so
-            // one that arrives in between still ends it.
             libc::sigprocmask(libc::SIG_SETMASK, &all, core::ptr::null_mut());
             let ready = (thread.pending.load(Ordering::SeqCst) | PROCESS_PENDING.load(Ordering::SeqCst)) & !new;
             if ready != 0 {
@@ -377,17 +385,31 @@ pub fn sigsuspend(thread: &Thread, set: u64, size: u64) -> i64 {
     -EINTR
 }
 
+pub fn sigsuspend(thread: &Thread, set: u64, size: u64) -> i64 {
+    if size != 8 {
+        return -EINVAL;
+    }
+    if !user_ok(set, 8) {
+        return -EFAULT;
+    }
+    let new = unsafe { *(set as *const u64) };
+    suspend_with(thread, new)
+}
+
+pub fn pause(thread: &Thread) -> i64 {
+    let mask = thread.mask.load(Ordering::Relaxed);
+    suspend_with(thread, mask)
+}
+
 pub fn with_mask(thread: &Thread, set: u64, wait: impl FnOnce() -> i64) -> i64 {
     if set == 0 {
         return wait();
     }
-    let new = unsafe { *(set as *const u64) } & !UNBLOCKABLE;
-    let old = thread.mask.swap(new, Ordering::SeqCst);
+    let new = unsafe { *(set as *const u64) };
+    begin_temporary(thread, new);
     let r = wait();
-    if r == -EINTR && pending_for(thread) {
-        *thread.suspended_mask.lock().unwrap() = Some(old);
-    } else {
-        thread.mask.store(old, Ordering::SeqCst);
+    if !(r == -EINTR && pending_for(thread)) {
+        end_temporary(thread);
     }
     r
 }
@@ -461,7 +483,8 @@ pub fn default_action(sig: u64) {
 pub fn deliver(thread: &Thread, frame: &mut Frame) {
     loop {
         let Some((sig, code)) = take(thread) else {
-            *thread.suspended_mask.lock().unwrap() = None;
+            end_temporary(thread);
+            assert_eq!(*thread.mask_state.lock().unwrap(), MaskState::Normal);
             return;
         };
         let action = ACTIONS.lock().unwrap()[sig as usize];
@@ -475,6 +498,7 @@ pub fn deliver(thread: &Thread, frame: &mut Frame) {
         }
         let from = SENDER[sig as usize].load(Ordering::Relaxed);
         enter_handler(thread, frame, sig, &action, Info { code, pid: from, fault: None });
+        assert_eq!(*thread.mask_state.lock().unwrap(), MaskState::Normal);
         return;
     }
 }
@@ -488,15 +512,16 @@ struct Info {
 
 fn enter_handler(thread: &Thread, frame: &mut Frame, sig: u64, action: &Action, info: Info) {
     if action.flags & SA_RESTORER == 0 {
-        // x86-64 Linux requires a restorer; without one the return has nowhere to go.
+        end_temporary(thread);
         default_action(11);
         return;
     }
+    let handler_base_mask = thread.mask.load(Ordering::Relaxed);
     if push_frame(thread, frame, sig, action, &info).is_err() {
         default_action(11);
         return;
     }
-    let mut mask = thread.mask.load(Ordering::Relaxed) | action.mask;
+    let mut mask = handler_base_mask | action.mask;
     if action.flags & SA_NODEFER == 0 {
         mask |= bit(sig);
     }
@@ -555,12 +580,7 @@ fn push_frame(
     action: &Action,
     info: &Info,
 ) -> Result<(), ()> {
-    let old_mask = thread
-        .suspended_mask
-        .lock()
-        .unwrap()
-        .take()
-        .unwrap_or_else(|| thread.mask.load(Ordering::Relaxed));
+    let old_mask = end_temporary(thread).unwrap_or_else(|| thread.mask.load(Ordering::Relaxed));
     let xsize = crate::cpu::xsave_size() as u64;
     let (alt_sp, alt_flags, alt_size) = *thread.altstack.lock().unwrap();
     let on = on_altstack(thread, frame.rsp);
