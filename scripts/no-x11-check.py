@@ -22,8 +22,9 @@ def is_x11(dep):
 
 
 def tracked(*paths):
-    out = subprocess.run(["git", "ls-files", *paths], cwd=ROOT, capture_output=True, text=True, check=True)
-    return [ROOT / p for p in out.stdout.splitlines()]
+    out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", *paths],
+                         cwd=ROOT, capture_output=True, text=True, check=True)
+    return [ROOT / p for p in out.stdout.splitlines() if (ROOT / p).is_file()]
 
 
 def main():
