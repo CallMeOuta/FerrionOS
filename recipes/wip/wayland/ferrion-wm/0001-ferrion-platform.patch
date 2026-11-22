@@ -17,7 +17,7 @@ Use the ferrion-wm name for the executable and visible interface.
  Cargo.toml                                  |  47 +-
  niri-config/Cargo.toml                      |   7 +-
  niri-config/src/input.rs                    |   6 +
- src/backend/ferrion.rs                      | 743 ++++++++++++++++++++
+ src/backend/ferrion.rs                      | 767 ++++++++++++++++++++
  src/backend/headless.rs                     |   3 +-
  src/backend/mod.rs                          | 102 ++-
  src/backend/select.rs                       |  86 +++
@@ -46,7 +46,7 @@ Use the ferrion-wm name for the executable and visible interface.
  src/ui/exit_confirm_dialog.rs               |   7 +-
  src/ui/hotkey_overlay.rs                    |   5 +-
  src/utils/mod.rs                            |   3 +-
- 33 files changed, 1465 insertions(+), 190 deletions(-)
+ 33 files changed, 1489 insertions(+), 190 deletions(-)
  create mode 100644 src/backend/ferrion.rs
  create mode 100644 src/backend/select.rs
 
@@ -1218,16 +1218,17 @@ index fd049b21..f2eb749f 100644
          match value {
 diff --git a/src/backend/ferrion.rs b/src/backend/ferrion.rs
 new file mode 100644
-index 00000000..70852e2c
+index 00000000..0a7f71ca
 --- /dev/null
 +++ b/src/backend/ferrion.rs
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,767 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Added for FerrionOS on 2026-11-21 to niri's backend interface.
 +// Input adapter follows FerrionOS's MIT ferrion-wm-backend; its notices are
 +// retained in ferrion-vendor/backend/LICENSE.
 +use std::collections::{HashMap, VecDeque};
 +use std::io;
++use std::mem;
 +use std::sync::{Arc, Mutex};
 +use std::time::{Duration, Instant};
 +
@@ -1319,6 +1320,17 @@ index 00000000..70852e2c
 +    Reconfigured(ActiveDisplay),
 +}
 +
++enum Pacing {
++    Idle,
++    Armed(RegistrationToken),
++    Due,
++}
++
++enum RedrawGate {
++    Render,
++    Wait,
++}
++
 +fn is_change_pending(err: &io::Error) -> bool {
 +    matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Other)
 +        && err.to_string() == DISPLAY_CHANGE_PENDING_ERR
@@ -1337,8 +1349,7 @@ index 00000000..70852e2c
 +    mode: DisplayMode,
 +    output: Output,
 +    scheduler: FrameScheduler,
-+    timer_token: Option<RegistrationToken>,
-+    render_due: bool,
++    pacing: Pacing,
 +    ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 +    input_epoch: u64,
 +    pending_inputs: VecDeque<u64>,
@@ -1403,8 +1414,7 @@ index 00000000..70852e2c
 +            mode: initial_mode,
 +            output,
 +            scheduler: FrameScheduler::new(initial_mode.scheduler_period(), FRAME_MARGIN),
-+            timer_token: None,
-+            render_due: false,
++            pacing: Pacing::Idle,
 +            ipc_outputs,
 +            input_epoch,
 +            pending_inputs: VecDeque::new(),
@@ -1585,37 +1595,43 @@ index 00000000..70852e2c
 +        })
 +    }
 +
++    fn on_redraw_request(&mut self, niri: &Niri) -> RedrawGate {
++        match self.pacing {
++            Pacing::Due => {
++                self.pacing = Pacing::Idle;
++                RedrawGate::Render
++            }
++            Pacing::Armed(_) => RedrawGate::Wait,
++            Pacing::Idle => {
++                let now = self.native.now_us();
++                let start = self.scheduler.next_start(now);
++                let token = niri
++                    .event_loop
++                    .insert_source(
++                        Timer::from_duration(Duration::from_micros(start - now)),
++                        |_, _, state| {
++                            let backend = state.backend.ferrion();
++                            assert!(matches!(backend.pacing, Pacing::Armed(_)));
++                            backend.pacing = Pacing::Due;
++                            TimeoutAction::Drop
++                        },
++                    )
++                    .expect("register frame deadline");
++                self.pacing = Pacing::Armed(token);
++                RedrawGate::Wait
++            }
++        }
++    }
++
 +    pub fn defer_redraw(&mut self, niri: &Niri) -> bool {
-+        if self.render_due {
-+            self.render_due = false;
-+            return false;
-+        }
-+        if self.timer_token.is_none() {
-+            let now = self.native.now_us();
-+            let start = self.scheduler.next_start(now);
-+            let token = niri
-+                .event_loop
-+                .insert_source(
-+                    Timer::from_duration(Duration::from_micros(start - now)),
-+                    |_, _, state| {
-+                        let backend = state.backend.ferrion();
-+                        backend.timer_token = None;
-+                        backend.render_due = true;
-+                        TimeoutAction::Drop
-+                    },
-+                )
-+                .expect("register frame deadline");
-+            self.timer_token = Some(token);
-+        }
-+        true
++        matches!(self.on_redraw_request(niri), RedrawGate::Wait)
 +    }
 +
 +    fn reconfigure(&mut self, niri: &mut Niri) -> anyhow::Result<()> {
 +        assert!(matches!(self.display, Display::ChangePending));
-+        if let Some(token) = self.timer_token.take() {
++        if let Pacing::Armed(token) = mem::replace(&mut self.pacing, Pacing::Idle) {
 +            niri.event_loop.remove(token);
 +        }
-+        self.render_due = false;
 +        self.native.reconfigure()?;
 +        let mode = DisplayMode::from_native(&self.native);
 +        let active = self.apply_mode(Some(niri), mode)?;
@@ -1705,6 +1721,14 @@ index 00000000..70852e2c
 +    }
 +
 +    pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
++        assert!(!matches!(self.pacing, Pacing::Armed(_)));
++        {
++            let output_state = niri.output_state.get(output).unwrap();
++            assert!(matches!(
++                output_state.redraw_state,
++                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
++            ));
++        }
 +        if matches!(self.display, Display::ChangePending) {
 +            let output_state = niri.output_state.get_mut(output).unwrap();
 +            output_state.redraw_state = RedrawState::Queued;
