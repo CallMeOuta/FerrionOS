@@ -13,6 +13,12 @@
 
 #define TAG "gpu-probe-syncobj"
 
+enum out_result {
+    OUT_REFUSED,
+    OUT_MISSING,
+    OUT_OK,
+};
+
 #define IOC_NR(dir, type, nr, size) \
     ((unsigned long)(((unsigned long)(dir) << 30) | ((unsigned long)(size) << 16) | ((unsigned long)(type) << 8) | (nr)))
 #define DRM_IOWR(nr, t) IOC_NR(3, 'd', nr, sizeof(t))
@@ -186,6 +192,17 @@ static int expect_ok(const char *check, int ret)
         fail(check, detail);
     }
     return ret;
+}
+
+static enum out_result check_out(const char *check, int ret, int has_output, const char *missing_detail)
+{
+    if (expect_ok(check, ret) < 0)
+        return OUT_REFUSED;
+    if (!has_output) {
+        fail(check, missing_detail);
+        return OUT_MISSING;
+    }
+    return OUT_OK;
 }
 
 static void expect_errno(const char *check, int ret, int want)
@@ -546,13 +563,19 @@ int gpu_probe_syncobj(int argc, char **argv)
         }
 
         struct drm_syncobj_handle h2f = {.handle = tl, .flags = 0, .fd = -1};
-        if (expect_ok("syncobj-handle-to-fd",
-                      ioctl(first, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &h2f)) == 0 &&
-            h2f.fd >= 0) {
+        int h2f_ret = ioctl(first, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &h2f);
+        switch (check_out("syncobj-handle-to-fd", h2f_ret, h2f.fd >= 0, "exported fd was negative")) {
+        case OUT_REFUSED:
+        case OUT_MISSING:
+            break;
+        case OUT_OK: {
             struct drm_syncobj_handle f2h = {.handle = 0, .flags = 0, .fd = h2f.fd};
-            if (expect_ok("syncobj-fd-to-handle",
-                          ioctl(second, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &f2h)) == 0 &&
-                f2h.handle != 0) {
+            int f2h_ret = ioctl(second, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &f2h);
+            switch (check_out("syncobj-fd-to-handle", f2h_ret, f2h.handle != 0, "imported handle was 0")) {
+            case OUT_REFUSED:
+            case OUT_MISSING:
+                break;
+            case OUT_OK: {
                 uint64_t qi = 0;
                 if (expect_ok("query-imported-syncobj",
                               syncobj_query(second, f2h.handle, &qi)) == 0 &&
@@ -571,8 +594,12 @@ int gpu_probe_syncobj(int argc, char **argv)
                     fail("syncobj-share", "imported timeline point != 3");
                 }
                 syncobj_destroy(second, f2h.handle);
+                break;
+            }
             }
             close(h2f.fd);
+            break;
+        }
         }
     }
 
@@ -611,10 +638,11 @@ int gpu_probe_syncobj(int argc, char **argv)
             .fd = -1,
             .point = 2,
         };
-        if (expect_ok("export-sync-file-a",
-                      ioctl(first, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &exp_a)) == 0 &&
-            expect_ok("export-sync-file-b",
-                      ioctl(first, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &exp_b)) == 0) {
+        int exp_a_ret = ioctl(first, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &exp_a);
+        enum out_result exp_a_out = check_out("export-sync-file-a", exp_a_ret, exp_a.fd >= 0, "exported fd was negative");
+        int exp_b_ret = ioctl(first, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &exp_b);
+        enum out_result exp_b_out = check_out("export-sync-file-b", exp_b_ret, exp_b.fd >= 0, "exported fd was negative");
+        if (exp_a_out == OUT_OK && exp_b_out == OUT_OK) {
             uint32_t na = 0, nb = 0;
             int sta = sync_file_status(exp_a.fd, &na);
             int stb = sync_file_status(exp_b.fd, &nb);
@@ -629,8 +657,12 @@ int gpu_probe_syncobj(int argc, char **argv)
 
             struct sync_merge_data merge = {.fd2 = exp_b.fd, .fence = -1};
             strncpy(merge.name, "merged", sizeof merge.name - 1);
-            if (expect_ok("sync-file-merge", ioctl(exp_a.fd, SYNC_IOC_MERGE, &merge)) == 0 &&
-                merge.fence >= 0) {
+            int merge_ret = ioctl(exp_a.fd, SYNC_IOC_MERGE, &merge);
+            switch (check_out("sync-file-merge", merge_ret, merge.fence >= 0, "merged fence fd was negative")) {
+            case OUT_REFUSED:
+            case OUT_MISSING:
+                break;
+            case OUT_OK: {
                 uint32_t nm = 0;
                 int stm = sync_file_status(merge.fence, &nm);
                 if (stm == 0 && nm == 2 && poll_readable(merge.fence, 0) == 0)
@@ -656,69 +688,74 @@ int gpu_probe_syncobj(int argc, char **argv)
 
                 struct poll_waiter_args pw = {.fd = merge.fence};
                 pthread_t pth;
-                int pth_ok = (pthread_create(&pth, NULL, poll_waiter_thread, &pw) == 0);
+                if (pthread_create(&pth, NULL, poll_waiter_thread, &pw) != 0) {
+                    fail("merged-poll-thread", "pthread_create failed");
+                } else {
+                    expect_ok("signal-sa-1", syncobj_timeline_signal(first, sa, 1));
+                    sleep_ms(60);
+                    int sta1 = sync_file_status(exp_a.fd, NULL);
+                    int stm1 = sync_file_status(merge.fence, NULL);
+                    if (sta1 == 1 && poll_readable(exp_a.fd, 0) == 1 && stm1 == 0 &&
+                        poll_readable(merge.fence, 0) == 0 && !pw.done)
+                        pass("merged-after-first", "first signaled, merged still active");
+                    else {
+                        snprintf(detail, sizeof detail, "sta1=%d stm1=%d poll_m=%d pw_done=%d", sta1,
+                                 stm1, poll_readable(merge.fence, 0), pw.done);
+                        fail("merged-after-first", detail);
+                    }
 
-                expect_ok("signal-sa-1", syncobj_timeline_signal(first, sa, 1));
-                sleep_ms(60);
-                int sta1 = sync_file_status(exp_a.fd, NULL);
-                int stm1 = sync_file_status(merge.fence, NULL);
-                if (sta1 == 1 && poll_readable(exp_a.fd, 0) == 1 && stm1 == 0 &&
-                    poll_readable(merge.fence, 0) == 0 && (!pth_ok || !pw.done))
-                    pass("merged-after-first", "first signaled, merged still active");
-                else {
-                    snprintf(detail, sizeof detail, "sta1=%d stm1=%d poll_m=%d pw_done=%d", sta1,
-                             stm1, poll_readable(merge.fence, 0), pw.done);
-                    fail("merged-after-first", detail);
-                }
+                    expect_ok("signal-sb-1", syncobj_timeline_signal(first, sb, 1));
+                    sleep_ms(40);
+                    if (sync_file_status(merge.fence, NULL) == 0 &&
+                        poll_readable(merge.fence, 0) == 0 && !pw.done)
+                        pass("merged-before-sb-point-2", "point 1 did not signal point 2");
+                    else
+                        fail("merged-before-sb-point-2", "signaled too early");
 
-                expect_ok("signal-sb-1", syncobj_timeline_signal(first, sb, 1));
-                sleep_ms(40);
-                if (sync_file_status(merge.fence, NULL) == 0 &&
-                    poll_readable(merge.fence, 0) == 0 && (!pth_ok || !pw.done))
-                    pass("merged-before-sb-point-2", "point 1 did not signal point 2");
-                else
-                    fail("merged-before-sb-point-2", "signaled too early");
-
-                int64_t sigb_ns = mono_ns();
-                expect_ok("signal-sb-2", syncobj_timeline_signal(first, sb, 2));
-                if (pth_ok)
+                    int64_t sigb_ns = mono_ns();
+                    expect_ok("signal-sb-2", syncobj_timeline_signal(first, sb, 2));
                     pthread_join(pth, NULL);
 
-                int stm2 = sync_file_status(merge.fence, NULL);
-                int64_t poll_delay_ms = pth_ok ? (pw.wake_ns - sigb_ns) / 1000000LL : 0;
-                if (stm2 == 1 && poll_readable(merge.fence, 0) == 1 &&
-                    (!pth_ok || (pw.ret == 1 && poll_delay_ms <= 50))) {
-                    snprintf(detail, sizeof detail, "merged signaled, poll woke in %lld ms",
-                             (long long)poll_delay_ms);
-                    pass("merged-after-both", detail);
-                } else {
-                    snprintf(detail, sizeof detail, "stm2=%d poll=%d pw_ret=%d delay=%lld", stm2,
-                             poll_readable(merge.fence, 0), pw.ret, (long long)poll_delay_ms);
-                    fail("merged-after-both", detail);
-                }
+                    int stm2 = sync_file_status(merge.fence, NULL);
+                    int64_t poll_delay_ms = (pw.wake_ns - sigb_ns) / 1000000LL;
+                    if (stm2 == 1 && poll_readable(merge.fence, 0) == 1 &&
+                        pw.ret == 1 && poll_delay_ms <= 50) {
+                        snprintf(detail, sizeof detail, "merged signaled, poll woke in %lld ms",
+                                 (long long)poll_delay_ms);
+                        pass("merged-after-both", detail);
+                    } else {
+                        snprintf(detail, sizeof detail, "stm2=%d poll=%d pw_ret=%d delay=%lld", stm2,
+                                 poll_readable(merge.fence, 0), pw.ret, (long long)poll_delay_ms);
+                        fail("merged-after-both", detail);
+                    }
 
-                struct drm_syncobj_handle imp_sf = {
-                    .handle = sc,
-                    .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
-                    .fd = merge.fence,
-                };
-                if (expect_ok("import-sync-file",
-                              ioctl(first, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &imp_sf)) == 0) {
-                    struct drm_syncobj_wait w_sc = {
-                        .handles = (uintptr_t)&sc,
-                        .timeout_nsec = 0,
-                        .count_handles = 1,
-                        .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
+                    struct drm_syncobj_handle imp_sf = {
+                        .handle = sc,
+                        .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
+                        .fd = merge.fence,
                     };
-                    if (expect_ok("wait-imported-sync-file",
-                                  ioctl(first, DRM_IOCTL_SYNCOBJ_WAIT, &w_sc)) == 0)
-                        pass("import-sync-file", "imported signaled fence into syncobj");
+                    if (expect_ok("import-sync-file",
+                                  ioctl(first, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &imp_sf)) == 0) {
+                        struct drm_syncobj_wait w_sc = {
+                            .handles = (uintptr_t)&sc,
+                            .timeout_nsec = 0,
+                            .count_handles = 1,
+                            .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
+                        };
+                        if (expect_ok("wait-imported-sync-file",
+                                      ioctl(first, DRM_IOCTL_SYNCOBJ_WAIT, &w_sc)) == 0)
+                            pass("import-sync-file", "imported signaled fence into syncobj");
+                    }
                 }
                 close(merge.fence);
+                break;
             }
-            close(exp_a.fd);
-            close(exp_b.fd);
+            }
         }
+        if (exp_a.fd >= 0)
+            close(exp_a.fd);
+        if (exp_b.fd >= 0)
+            close(exp_b.fd);
         syncobj_destroy(first, sa);
         syncobj_destroy(first, sb);
         syncobj_destroy(first, sc);
