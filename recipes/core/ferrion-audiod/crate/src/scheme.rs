@@ -13,6 +13,8 @@ const PERIOD: usize = 512;
 const CAPACITY: usize = 2048;
 const RECORD_CAPACITY: usize = 8192;
 const MAX_HANDLES: usize = 1024;
+const MAX_HANDLES_PER_UID: usize = 256;
+const ROOT_RESERVED_HANDLES: usize = 64;
 const MAX_DRAINING: usize = 64;
 const MAX_GRANTS: usize = 256;
 const MAX_GAIN_ENTRIES: usize = 1024;
@@ -172,9 +174,14 @@ enum Handle {
     Stats,
     Apps,
 }
+struct HandleEntry {
+    uid: u32,
+    handle: Handle,
+}
 pub struct State {
-    handles: BTreeMap<usize, Handle>,
+    handles: BTreeMap<usize, HandleEntry>,
     draining: Vec<(usize, Stream)>,
+    tapped_cycles: Vec<(String, f32, [[f32; 2]; PERIOD], usize)>,
     loopback: Option<VecDeque<[f32; 2]>>,
     grants: Vec<(Grant, Option<usize>)>,
     programs: BTreeMap<String, Gain>,
@@ -197,6 +204,7 @@ impl State {
         Self {
             handles: BTreeMap::new(),
             draining: Vec::new(),
+            tapped_cycles: Vec::new(),
             loopback,
             grants,
             programs: BTreeMap::new(),
@@ -214,10 +222,14 @@ impl State {
     fn has_capture(&self) -> bool {
         self.handles
             .values()
-            .any(|handle| matches!(handle, Handle::Grants))
+            .any(|entry| matches!(entry.handle, Handle::Grants))
     }
     fn stream_by_id(&self, id: usize) -> Option<&Stream> {
-        if let Some(Handle::Stream(stream)) = self.handles.get(&id) {
+        if let Some(HandleEntry {
+            handle: Handle::Stream(stream),
+            ..
+        }) = self.handles.get(&id)
+        {
             return Some(stream);
         }
         self.draining
@@ -226,7 +238,11 @@ impl State {
             .map(|(_, stream)| stream)
     }
     fn stream_by_id_mut(&mut self, id: usize) -> Option<&mut Stream> {
-        if let Some(Handle::Stream(stream)) = self.handles.get_mut(&id) {
+        if let Some(HandleEntry {
+            handle: Handle::Stream(stream),
+            ..
+        }) = self.handles.get_mut(&id)
+        {
             return Some(stream);
         }
         self.draining
@@ -234,8 +250,17 @@ impl State {
             .find(|(stream_id, _)| *stream_id == id)
             .map(|(_, stream)| stream)
     }
-    fn insert(&mut self, handle: Handle) -> Result<OpenResult> {
-        if self.handles.len() >= MAX_HANDLES {
+    fn insert(&mut self, uid: u32, handle: Handle) -> Result<OpenResult> {
+        let per_uid = self
+            .handles
+            .values()
+            .filter(|entry| entry.uid == uid)
+            .count();
+        if self.handles.len() >= MAX_HANDLES
+            || (uid != 0
+                && (per_uid >= MAX_HANDLES_PER_UID
+                    || self.handles.len() >= MAX_HANDLES - ROOT_RESERVED_HANDLES))
+        {
             return Err(Error::new(EMFILE));
         }
         let id = self.next;
@@ -248,42 +273,64 @@ impl State {
         } else {
             NewFdFlags::POSITIONED
         };
-        let prev = self.handles.insert(id, handle);
+        let prev = self.handles.insert(id, HandleEntry { uid, handle });
         assert!(prev.is_none());
         Ok(OpenResult::ThisScheme { number: id, flags })
     }
-    fn stream(&mut self, program: String, session: String, float: bool) -> Result<OpenResult> {
-        self.insert(Handle::Stream(Stream {
-            program,
-            session,
-            gain: Gain::UNITY,
-            samples: VecDeque::with_capacity(CAPACITY),
-            float,
-        }))
+    fn stream(
+        &mut self,
+        uid: u32,
+        program: String,
+        session: String,
+        float: bool,
+    ) -> Result<OpenResult> {
+        self.insert(
+            uid,
+            Handle::Stream(Stream {
+                program,
+                session,
+                gain: Gain::UNITY,
+                samples: VecDeque::with_capacity(CAPACITY),
+                float,
+            }),
+        )
     }
-    fn record(&mut self, program: String, session: String, hearing: Hearing) -> Result<OpenResult> {
-        self.insert(Handle::Record(Record {
-            program,
-            session,
-            hearing,
-            allowed: false,
-            cycle: Box::new([[0.0; 2]; PERIOD]),
-            samples: VecDeque::with_capacity(RECORD_CAPACITY),
-            dropped: 0,
-        }))
+    fn record(
+        &mut self,
+        uid: u32,
+        program: String,
+        session: String,
+        hearing: Hearing,
+    ) -> Result<OpenResult> {
+        self.insert(
+            uid,
+            Handle::Record(Record {
+                program,
+                session,
+                hearing,
+                allowed: false,
+                cycle: Box::new([[0.0; 2]; PERIOD]),
+                samples: VecDeque::with_capacity(RECORD_CAPACITY),
+                dropped: 0,
+            }),
+        )
     }
     pub fn mix(&mut self) -> [[i16; 2]; PERIOD] {
-        for handle in self.handles.values_mut() {
-            if let Handle::Record(record) = handle {
+        let mut has_active_tap = false;
+        for entry in self.handles.values_mut() {
+            if let Handle::Record(record) = &mut entry.handle {
                 record.allowed = self.grants.iter().any(|(grant, _)| {
                     grant.allows(&record.program, &record.session, &record.hearing)
                 });
+                if record.allowed && matches!(record.hearing, Hearing::Tap(_)) {
+                    has_active_tap = true;
+                }
             }
         }
         let mut sum = [[0.0f32; 2]; PERIOD];
-        let mut tapped_cycles: Vec<(String, f32, [[f32; 2]; PERIOD], usize)> = Vec::new();
-        for handle in self.handles.values_mut() {
-            let Handle::Stream(stream) = handle else {
+        self.tapped_cycles.clear();
+        for entry in self.handles.values_mut() {
+            let Handle::Stream(stream) = &mut entry.handle else {
                 continue;
             };
             let tapped = stream.gain.factor
@@ -311,8 +358,9 @@ impl State {
                 frame[0] += sample[0] * gain;
                 frame[1] += sample[1] * gain;
             }
-            if count > 0 {
-                tapped_cycles.push((stream.program.clone(), tapped, frames, count));
+            if has_active_tap && count > 0 {
+                self.tapped_cycles
+                    .push((stream.program.clone(), tapped, frames, count));
             }
         }
         for (_, stream) in &mut self.draining {
@@ -341,13 +389,14 @@ impl State {
                 frame[0] += sample[0] * gain;
                 frame[1] += sample[1] * gain;
             }
-            if count > 0 {
-                tapped_cycles.push((stream.program.clone(), tapped, frames, count));
+            if has_active_tap && count > 0 {
+                self.tapped_cycles
+                    .push((stream.program.clone(), tapped, frames, count));
             }
         }
-        for (program, tapped, frames, count) in tapped_cycles {
-            for handle in self.handles.values_mut() {
-                if let Handle::Record(record) = handle {
+        for (program, tapped, frames, count) in self.tapped_cycles.drain(..) {
+            for entry in self.handles.values_mut() {
+                if let Handle::Record(record) = &mut entry.handle {
                     if record.allowed
                         && matches!(&record.hearing, Hearing::Tap(target) if *target == program)
                     {
@@ -368,8 +417,8 @@ impl State {
                 *frame = sample;
             }
         }
-        for handle in self.handles.values_mut() {
-            let Handle::Record(record) = handle else {
+        for entry in self.handles.values_mut() {
+            let Handle::Record(record) = &mut entry.handle else {
                 continue;
             };
             if record.hearing == Hearing::Microphone && record.allowed {
@@ -406,7 +455,7 @@ impl State {
         let open = self
             .handles
             .values()
-            .filter(|h| matches!(h, Handle::Stream(_)))
+            .filter(|entry| matches!(entry.handle, Handle::Stream(_)))
             .count();
         open + self.draining.len()
     }
@@ -414,7 +463,7 @@ impl State {
         let open: usize = self
             .handles
             .values()
-            .filter_map(|h| match h {
+            .filter_map(|entry| match &entry.handle {
                 Handle::Stream(s) => Some(s.samples.len()),
                 _ => None,
             })
@@ -425,8 +474,8 @@ impl State {
     fn record_stats(&self) -> (usize, u64) {
         let mut count = 0usize;
         let mut dropped = 0u64;
-        for handle in self.handles.values() {
-            if let Handle::Record(record) = handle {
+        for entry in self.handles.values() {
+            if let Handle::Record(record) = &entry.handle {
                 count += 1;
                 dropped += record.dropped;
             }
@@ -446,8 +495,8 @@ impl State {
             }
             Handle::Apps => {
                 let mut apps: BTreeMap<&str, usize> = self.programs.keys().map(|key| (key.as_str(), 0)).collect();
-                for handle in self.handles.values() {
-                    if let Handle::Stream(stream) = handle {
+                for entry in self.handles.values() {
+                    if let Handle::Stream(stream) = &entry.handle {
                         *apps.entry(&stream.program).or_default() += 1;
                     }
                 }
@@ -544,19 +593,19 @@ impl SchemeSync for AudioScheme {
         let mut state = self.0.lock().unwrap();
         let path = path.trim_matches('/');
         if dir != 0 {
-            let parent = match state.handles.get(&dir).ok_or(Error::new(EBADF))? {
+            let parent = match &state.handles.get(&dir).ok_or(Error::new(EBADF))?.handle {
                 Handle::Stream(_) if path == "gain" => {
-                    return state.insert(Handle::StreamGain(dir))
+                    return state.insert(ctx.uid, Handle::StreamGain(dir))
                 }
                 Handle::Factory(program, session) => Some((program.clone(), session.clone())),
                 _ => return Err(Error::new(ENOENT)),
             };
             if let Some((program, session)) = parent {
                 if path == "stream" || path.is_empty() {
-                    return state.stream(program, session, path == "stream");
+                    return state.stream(ctx.uid, program, session, path == "stream");
                 }
                 return match hearing(path) {
-                    Some(hearing) => state.record(program, session, hearing),
+                    Some(hearing) => state.record(ctx.uid, program, session, hearing),
                     None => Err(Error::new(ENOENT)),
                 };
             }
@@ -564,16 +613,18 @@ impl SchemeSync for AudioScheme {
         match path {
             "" | "stream" => {
                 return state.stream(
+                    ctx.uid,
                     format!("pid-{}", ctx.pid),
                     format!("uid-{}", ctx.uid),
                     path == "stream",
                 )
             }
-            "volume" => return state.insert(Handle::Volume),
+            "volume" => return state.insert(ctx.uid, Handle::Volume),
             "loopback" if state.loopback.is_none() => return Err(Error::new(ENOENT)),
             _ => {
                 if let Some(hearing) = hearing(path) {
                     return state.record(
+                        ctx.uid,
                         format!("pid-{}", ctx.pid),
                         format!("uid-{}", ctx.uid),
                         hearing,
@@ -601,7 +652,7 @@ impl SchemeSync for AudioScheme {
                 }
             }
         };
-        state.insert(handle)
+        state.insert(ctx.uid, handle)
     }
     fn read(
         &mut self,
@@ -612,7 +663,9 @@ impl SchemeSync for AudioScheme {
         _ctx: &CallerCtx,
     ) -> Result<usize> {
         let mut state = self.0.lock().unwrap();
-        if let Handle::Record(record) = state.handles.get_mut(&id).ok_or(Error::new(EBADF))? {
+        if let Handle::Record(record) =
+            &mut state.handles.get_mut(&id).ok_or(Error::new(EBADF))?.handle
+        {
             if buf.len() % 8 != 0 {
                 return Err(Error::new(EINVAL));
             }
@@ -629,7 +682,7 @@ impl SchemeSync for AudioScheme {
             }
             return Ok(count * 8);
         }
-        let text = state.text(&state.handles[&id])?;
+        let text = state.text(&state.handles[&id].handle)?;
         let source = usize::try_from(offset)
             .ok()
             .and_then(|off| text.as_bytes().get(off..))
@@ -647,10 +700,12 @@ impl SchemeSync for AudioScheme {
         _ctx: &CallerCtx,
     ) -> Result<usize> {
         let mut state = self.0.lock().unwrap();
-        if let Handle::Stream(stream) = state.handles.get_mut(&id).ok_or(Error::new(EBADF))? {
+        if let Handle::Stream(stream) =
+            &mut state.handles.get_mut(&id).ok_or(Error::new(EBADF))?.handle
+        {
             return push_frames(&mut stream.samples, buf, stream.float);
         }
-        match state.handles.get(&id).ok_or(Error::new(EBADF))? {
+        match &state.handles.get(&id).ok_or(Error::new(EBADF))?.handle {
             Handle::Loopback => {
                 let loopback = state.loopback.as_mut().ok_or(Error::new(EBADF))?;
                 return push_frames(loopback, buf, true);
@@ -689,7 +744,7 @@ impl SchemeSync for AudioScheme {
             ProgramGain(String),
             SessionGain(String),
         }
-        let target = match state.handles.get(&id).ok_or(Error::new(EBADF))? {
+        let target = match &state.handles.get(&id).ok_or(Error::new(EBADF))?.handle {
             Handle::Volume => WriteTarget::Volume,
             Handle::StreamGain(stream) => WriteTarget::StreamGain(*stream),
             Handle::ProgramGain(program) => WriteTarget::ProgramGain(program.clone()),
@@ -754,7 +809,7 @@ impl SchemeSync for AudioScheme {
         stat.st_mode = if id == 0 {
             MODE_DIR | 0o755
         } else {
-            match state.handles.get(&id).ok_or(Error::new(EBADF))? {
+            match &state.handles.get(&id).ok_or(Error::new(EBADF))?.handle {
                 Handle::Factory(..) => MODE_DIR | 0o700,
                 Handle::Stream(_) => MODE_CHR | 0o600,
                 Handle::Loopback => MODE_CHR | 0o200,
@@ -769,7 +824,7 @@ impl SchemeSync for AudioScheme {
     }
     fn on_close(&mut self, id: usize) {
         let mut state = self.0.lock().unwrap();
-        let handle = state.handles.remove(&id);
+        let handle = state.handles.remove(&id).map(|entry| entry.handle);
         match handle {
             Some(Handle::Grants) => {
                 state.grants.retain(|(_, lease)| *lease != Some(id));
