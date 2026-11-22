@@ -28,12 +28,8 @@ Read this before changing the Rust code under `src/`.
 ## Conventions in the code
 
 - Errors are `cookbook::Error`, built with `wrap_io_err!`, `wrap_other_err!` and `bail_other_err!` from `src/lib.rs`. An I/O context is a gerund phrase such as `"Reading file"`, because `Display` appends `failed at "<path>"` itself.
-- Tests sit in a `#[cfg(test)] mod tests` at the foot of the module they cover. Under `cfg(test)`, `init_config` in `src/config.rs` uses a fixed mirror table and reads neither `cookbook.toml` nor the environment.
+- Preserved upstream tests sit in `#[cfg(test)] mod tests`. Under `cfg(test)`, `init_config` in `src/config.rs` uses a fixed mirror table and reads neither `cookbook.toml` nor the environment.
 
-## When a test earns its place
+## Regression proof
 
-A test is worth its upkeep only when it catches a regression nothing else would. Before writing one, name the breakage it would catch.
-
-- Test logic: parsing, dependency resolution, rule precedence, the edge case a fix handles. A bug fix with logic in it gets the one test that fails without the fix.
-- Leave out a test that restates the implementation, asserts that a default equals itself, or snapshots output that changes whenever a recipe is added.
-- Extend the `mod tests` of the module you changed, in its style.
+Follow [ADR 0025](../../docs/adr/0025-tests-without-unit-tests.md): prove cookbook changes through a real recipe/CLI differential comparison or a deterministic filesystem/process simulation, red before the fix and green after it. Preserve imported upstream tests; do not extend them with agent-written unit tests. Record an uncovered contract in the local issue tracker.

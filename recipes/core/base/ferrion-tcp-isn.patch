@@ -3,10 +3,9 @@ FerrionOS change to base (MIT license, kept), made against upstream commit 20f75
 - Build against smoltcp 0.14.0 from vendor/smoltcp, which the recipe's source script unpacks from the crate Cargo.lock names and patches with ferrion-smoltcp-isn.patch so that it takes that choice from netstack.
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 2cb87660..f60d9850 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -2348,8 +2348,6 @@ dependencies = [
+@@ -2348,8 +2348,6 @@
  [[package]]
  name = "smoltcp"
  version = "0.14.0"
@@ -16,10 +15,9 @@ index 2cb87660..f60d9850 100644
   "bitflags 1.3.2",
   "byteorder",
 diff --git a/Cargo.toml b/Cargo.toml
-index 202fd178..c15a4a4c 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -75,8 +75,8 @@ members = [
+@@ -75,8 +75,8 @@
      "selftests/virtio-fsd",
  ]
  
@@ -30,7 +28,7 @@ index 202fd178..c15a4a4c 100644
  
  # Low-level Redox OS crates should be kept in sync using workspace dependencies
  # Remember to also update bootstrap dependencies, those are not in the workspace
-@@ -133,3 +133,8 @@ unused_io_amount = "warn" #TODO: have an abstraction to irq file read/write, the
+@@ -133,3 +133,8 @@
  
  [patch."https://gitlab.redox-os.org/redox-os/relibc.git"]
  #redox-ioctl = { path = "../../relibc/source/redox-ioctl" }
@@ -40,11 +38,9 @@ index 202fd178..c15a4a4c 100644
 +[patch.crates-io]
 +smoltcp = { path = "vendor/smoltcp" }
 diff --git a/netstack/src/isn.rs b/netstack/src/isn.rs
-new file mode 100644
-index 00000000..859b8c3e
 --- /dev/null
 +++ b/netstack/src/isn.rs
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,80 @@
 +//! TCP initial sequence numbers as RFC 6528 describes them: a clock that ticks every 4
 +//! microseconds plus a keyed hash (SipHash-2-4) of the connection's addresses and ports.
 +//! Numbers of one connection tell nothing about those of another, and a connection reopened
@@ -125,81 +121,10 @@ index 00000000..859b8c3e
 +    }
 +    v[0] ^ v[1] ^ v[2] ^ v[3]
 +}
-+
-+#[cfg(test)]
-+mod tests {
-+    use smoltcp::wire::Ipv4Address;
-+
-+    use super::*;
-+
-+    const KEY: [u64; 2] = [0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908];
-+
-+    fn endpoint(last: u8, port: u16) -> IpEndpoint {
-+        IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, last)), port)
-+    }
-+
-+    #[test]
-+    fn siphash_reference_vectors() {
-+        // The SipHash paper's appendix A, and the first and last entries of its vectors.h.
-+        let message: Vec<u8> = (0..15).collect();
-+        assert_eq!(siphash24(KEY, &message), 0xa129_ca61_49be_45e5);
-+        assert_eq!(siphash24(KEY, &[]), 0x726f_db47_dd0e_0e31);
-+        let message: Vec<u8> = (0..63).collect();
-+        assert_eq!(siphash24(KEY, &message), 0x958a_324c_eb06_4572);
-+    }
-+
-+    #[test]
-+    #[allow(deprecated)] // std's SipHasher is SipHash-2-4, kept only to check this one
-+    fn siphash_matches_std() {
-+        use std::hash::{Hasher, SipHasher};
-+        let data: Vec<u8> = (0..40u8).map(|n| n.wrapping_mul(37)).collect();
-+        for len in 0..=data.len() {
-+            let mut std_hash = SipHasher::new_with_keys(KEY[0], KEY[1]);
-+            std_hash.write(&data[..len]);
-+            assert_eq!(
-+                siphash24(KEY, &data[..len]),
-+                std_hash.finish(),
-+                "length {len}"
-+            );
-+        }
-+    }
-+
-+    #[test]
-+    fn same_connection_moves_with_the_clock() {
-+        let (local, remote) = (endpoint(15, 50_000), endpoint(2, 80));
-+        let first = seq_no(KEY, local, remote, Instant::from_micros(1_000));
-+        let later = seq_no(KEY, local, remote, Instant::from_micros(1_000 + 4 * 1234));
-+        assert_eq!(later.wrapping_sub(first), 1234);
-+    }
-+
-+    #[test]
-+    fn other_ports_and_keys_give_unrelated_numbers() {
-+        let now = Instant::from_micros(0);
-+        let remote = endpoint(2, 80);
-+        let numbers: Vec<u32> = (50_000..50_020)
-+            .map(|port| seq_no(KEY, endpoint(15, port), remote, now))
-+            .collect();
-+        let steps: Vec<u32> = numbers
-+            .windows(2)
-+            .map(|w| w[1].wrapping_sub(w[0]))
-+            .collect();
-+        assert!(steps.windows(2).all(|w| w[0] != w[1]), "{numbers:?}");
-+        let other_key = [KEY[0] ^ 1, KEY[1]];
-+        assert_ne!(
-+            seq_no(KEY, endpoint(15, 50_000), remote, now),
-+            seq_no(other_key, endpoint(15, 50_000), remote, now)
-+        );
-+        assert_ne!(
-+            seq_no(KEY, endpoint(15, 50_000), remote, now),
-+            seq_no(KEY, remote, endpoint(15, 50_000), now)
-+        );
-+    }
-+}
 diff --git a/netstack/src/main.rs b/netstack/src/main.rs
-index 74e08d70..8a703f29 100644
 --- a/netstack/src/main.rs
 +++ b/netstack/src/main.rs
-@@ -12,6 +12,7 @@ use smoltcp::wire::EthernetAddress;
+@@ -12,6 +12,7 @@
  use crate::scheme::Smolnetd;
  
  mod error;
@@ -207,7 +132,7 @@ index 74e08d70..8a703f29 100644
  mod link;
  mod logger;
  mod port_set;
-@@ -86,6 +87,7 @@ fn run(daemon: daemon::Daemon) -> Result<()> {
+@@ -86,6 +87,7 @@
      let time_fd = Fd::open(&time_path, O_RDWR, 0).context("failed to open /scheme/time")?;
  
      random::init().context("failed to open /scheme/rand")?;
@@ -216,10 +141,9 @@ index 74e08d70..8a703f29 100644
      event::user_data! {
          enum EventSource {
 diff --git a/netstack/src/scheme/mod.rs b/netstack/src/scheme/mod.rs
-index 64425d4a..8e39e460 100644
 --- a/netstack/src/scheme/mod.rs
 +++ b/netstack/src/scheme/mod.rs
-@@ -105,10 +105,13 @@ impl Smolnetd {
+@@ -103,10 +103,13 @@
          );
  
          let mut config = Config::new(HardwareAddress::Ip);

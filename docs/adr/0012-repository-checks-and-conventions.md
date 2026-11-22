@@ -19,7 +19,7 @@ FerrionOS keeps its rules in `AGENTS.md` and `docs/code-policy.md`, and enforces
 
 - `scripts/open-recipe.sh` runs on the host, outside Podman; `scripts/pkg-size.sh`, which prints the size of recipes' `stage.pkgar`, runs inside the container (`make env`).
 - `scripts/recipe-category.sh` writes a category's slashes as dots, which the cookbook reads back as slashes (`--category-<path>`).
-- `scripts/test-vm-graphics.py` bounds the whole screen capture by time, because a server can send Bell messages forever, each well inside the per-read timeout.
+- `scripts/vm-test.py` bounds the whole screen capture by time, because a server can send Bell messages forever, each well inside the per-read timeout. Its former host unit suite was removed under [0025](0025-tests-without-unit-tests.md).
 
 ### Files
 
@@ -40,6 +40,6 @@ FerrionOS keeps its rules in `AGENTS.md` and `docs/code-policy.md`, and enforces
 ## Where
 
 - `scripts/naming-check.py`, `scripts/no-x11-check.py`, `scripts/lint-commit-message.py`, `scripts/comment-check.py`
-- `scripts/open-recipe.sh`, `scripts/pkg-size.sh`, `scripts/recipe-category.sh`, `scripts/test-vm-graphics.py`
+- `scripts/open-recipe.sh`, `scripts/pkg-size.sh`, `scripts/recipe-category.sh`, `scripts/vm-test.py`
 - `.editorconfig`, `.gitignore`
 - `.github/workflows/book.yml`: `concurrency`

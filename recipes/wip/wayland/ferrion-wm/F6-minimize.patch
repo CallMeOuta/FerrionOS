@@ -27,37 +27,28 @@ it was.
 - src/ui/mru.rs needs no change: the switcher lists every window of
   the layout and activates its choice.
 
-Checked: the new randomized-test operation MinimizeWindow with its
-invariants failed against a stub that only set the parked flag, as did 6
-of the first 7 unit tests; with this change they pass, also with
-RUN_SLOW_TESTS=1 and 20000 cases, after three cases that run found were
-handled, each with a unit test; two client tests in
-src/tests/free_mode.rs check the app's request and the capability;
-`cargo test --all --exclude niri-visual-tests` passes.
+
+Agent-written tests and their test-only helpers were removed under ADR 0025.
+The source commit in the header records the original patch provenance;
+this patch is regenerated against the preceding test-free stage. Upstream
+tests remain, with the config snapshots adapted to the production fields.
 ---
- niri-config/src/binds.rs          |   9 +-
- niri-ipc/src/lib.rs               |  17 +-
- src/handlers/free_mode.rs         |  32 ++++
- src/handlers/mod.rs               |  14 ++
- src/handlers/xdg_shell.rs         |  11 +-
- src/input/mod.rs                  |  13 +-
- src/ipc/server.rs                 |   6 +-
- src/layout/floating.rs            |  54 +++++-
- src/layout/floating/stacking.rs   |  91 ++++++++++
- src/layout/free.rs                |  13 +-
- src/layout/mod.rs                 |   4 +-
- src/layout/tests.rs               |  28 +++-
- src/layout/tests/free.rs          | 266 +++++++++++++++++++++++++++++-
- src/layout/workspace.rs           |  29 +++-
- src/layout/workspace/free.rs      |  89 +++++++++-
- src/protocols/foreign_toplevel.rs |  35 +++-
- src/tests/free_mode.rs            |  70 ++++++++
- src/tests/mod.rs                  |   3 +
- src/window/mapped.rs              |  17 ++
- 19 files changed, 768 insertions(+), 33 deletions(-)
- create mode 100644 src/handlers/free_mode.rs
- create mode 100644 src/layout/floating/stacking.rs
- create mode 100644 src/tests/free_mode.rs
+ niri-config/src/binds.rs | 9
+ niri-ipc/src/lib.rs | 17
+ src/handlers/free_mode.rs | 32
+ src/handlers/mod.rs | 14
+ src/handlers/xdg_shell.rs | 11
+ src/input/mod.rs | 13
+ src/ipc/server.rs | 6
+ src/layout/floating.rs | 51
+ src/layout/floating/stacking.rs | 81
+ src/layout/free.rs | 13
+ src/layout/mod.rs | 4
+ src/layout/workspace.rs | 29
+ src/layout/workspace/free.rs | 68
+ src/protocols/foreign_toplevel.rs | 35
+ src/window/mapped.rs | 17
+ 15 files changed, 372 insertions(+), 28 deletions(-)
 
 diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
 index 51d89602..acfb3290 100644
@@ -69,7 +60,7 @@ index 51d89602..acfb3290 100644
  use std::str::FromStr;
  use std::time::Duration;
  
-@@ -498,6 +498,10 @@ pub enum Action {
+@@ -498,6 +498,10 @@
      ToggleWindowFloating,
      #[knuffel(skip)]
      ToggleWindowFloatingById(u64),
@@ -80,7 +71,7 @@ index 51d89602..acfb3290 100644
      MoveWindowToFloating,
      #[knuffel(skip)]
      MoveWindowToFloatingById(u64),
-@@ -872,6 +876,9 @@ impl From<niri_ipc::Action> for Action {
+@@ -872,6 +876,9 @@
              niri_ipc::Action::ToggleWindowFloating { id: Some(id) } => {
                  Self::ToggleWindowFloatingById(id)
              }
@@ -100,7 +91,7 @@ index 03bc8a19..6a44e384 100644
  //! Types for communicating with niri via IPC.
  //!
  //! After connecting to the niri socket, you can send [`Request`]s. Niri will process them one by
-@@ -986,6 +986,17 @@ pub enum Action {
+@@ -986,6 +986,17 @@
          #[cfg_attr(feature = "clap", arg(long))]
          id: Option<u64>,
      },
@@ -118,7 +109,7 @@ index 03bc8a19..6a44e384 100644
      /// Move the focused window to the floating layout.
      MoveWindowToFloating {
          /// Id of the window to move.
-@@ -1544,6 +1555,10 @@ pub struct Window {
+@@ -1544,6 +1555,10 @@
      pub is_floating: bool,
      /// Whether this window requests your attention.
      pub is_urgent: bool,
@@ -180,7 +171,7 @@ index ec857552..276a611a 100644
  pub mod image_copy_capture;
  mod layer_shell;
  pub mod virtual_keyboard;
-@@ -68,6 +71,8 @@ use smithay::wayland::xdg_activation::{
+@@ -68,6 +71,8 @@
      XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
  };
  
@@ -189,10 +180,12 @@ index ec857552..276a611a 100644
  pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
  use crate::input::click_grab::ClickGrab;
  use crate::layout::workspace::WorkspaceId;
-@@ -575,6 +580,15 @@ impl ForeignToplevelHandler for State {
+@@ -573,6 +578,15 @@
+             let window = mapped.window.clone();
+             self.niri.layout.set_maximized(&window, true);
          }
-     }
- 
++    }
++
 +    // ferrion-wm 2026-11-21 (F6): a dock minimizes a window, and brings it back by activating it.
 +    fn set_minimized(&mut self, wl_surface: WlSurface) {
 +        self.minimize_request_for(&wl_surface);
@@ -200,11 +193,9 @@ index ec857552..276a611a 100644
 +
 +    fn unset_minimized(&mut self, wl_surface: WlSurface) {
 +        self.activate(wl_surface);
-+    }
-+
+     }
+ 
      fn unset_maximized(&mut self, wl_surface: WlSurface) {
-         if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
-             let window = mapped.window.clone();
 diff --git a/src/handlers/xdg_shell.rs b/src/handlers/xdg_shell.rs
 index 71889194..4cdf53dd 100644
 --- a/src/handlers/xdg_shell.rs
@@ -215,7 +206,7 @@ index 71889194..4cdf53dd 100644
  use std::cell::Cell;
  
  use calloop::Interest;
-@@ -765,6 +765,11 @@ impl XdgShellHandler for State {
+@@ -765,6 +765,11 @@
          }
      }
  
@@ -227,7 +218,7 @@ index 71889194..4cdf53dd 100644
      fn unfullscreen_request(&mut self, toplevel: ToplevelSurface) {
          if let Some((mapped, _)) = self
              .niri
-@@ -1185,8 +1190,10 @@ impl State {
+@@ -1185,8 +1190,10 @@
  
          let mut is_pending_maximized = false;
          if let Some(ws) = ws {
@@ -249,10 +240,13 @@ index c82af914..35687514 100644
  use std::any::Any;
  use std::collections::hash_map::Entry;
  use std::collections::{HashMap, HashSet};
-@@ -2493,6 +2493,17 @@ impl State {
-                     self.niri.queue_redraw_all();
-                 }
-             }
+@@ -2490,6 +2490,17 @@
+                 if let Some(window) = self.niri.find_window_by_id(id) {
+                     self.niri.layout.toggle_window_floating(Some(&window));
+                     // FIXME: granular
++                    self.niri.queue_redraw_all();
++                }
++            }
 +            // ferrion-wm 2026-11-21 (F6): minimize a window of a free workspace.
 +            Action::MinimizeWindow => {
 +                self.niri.layout.minimize_window(None);
@@ -261,12 +255,9 @@ index c82af914..35687514 100644
 +            Action::MinimizeWindowById(id) => {
 +                if let Some(window) = self.niri.find_window_by_id(MappedId::specific(id)) {
 +                    self.niri.layout.minimize_window(Some(&window));
-+                    self.niri.queue_redraw_all();
-+                }
-+            }
-             Action::MoveWindowToFloating => {
-                 self.niri.layout.set_window_floating(None, true);
-                 // FIXME: granular
+                     self.niri.queue_redraw_all();
+                 }
+             }
 diff --git a/src/ipc/server.rs b/src/ipc/server.rs
 index ee9d3236..84e5ffef 100644
 --- a/src/ipc/server.rs
@@ -277,7 +268,7 @@ index ee9d3236..84e5ffef 100644
  use std::cell::RefCell;
  use std::collections::HashSet;
  use std::ffi::OsStr;
-@@ -531,6 +531,8 @@ fn make_ipc_window(
+@@ -531,6 +531,8 @@
          is_focused: mapped.is_focused(),
          is_floating: mapped.is_floating(),
          is_urgent: mapped.is_urgent(),
@@ -286,7 +277,7 @@ index ee9d3236..84e5ffef 100644
          layout,
          focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
      })
-@@ -729,6 +731,8 @@ impl State {
+@@ -729,6 +731,8 @@
              let workspace_id = ws_id.map(|id| id.get());
              let mut changed =
                  ipc_win.workspace_id != workspace_id || ipc_win.is_floating != mapped.is_floating();
@@ -296,7 +287,7 @@ index ee9d3236..84e5ffef 100644
              changed |= with_toplevel_role(mapped.toplevel(), |role| {
                  ipc_win.title != role.title || ipc_win.app_id != role.app_id
 diff --git a/src/layout/floating.rs b/src/layout/floating.rs
-index db2193a4..0fb4557c 100644
+index db2193a4..c47d3683 100644
 --- a/src/layout/floating.rs
 +++ b/src/layout/floating.rs
 @@ -1,3 +1,4 @@
@@ -304,7 +295,7 @@ index db2193a4..0fb4557c 100644
  use std::cmp::max;
  use std::iter::zip;
  use std::rc::Rc;
-@@ -28,6 +29,9 @@ use crate::utils::{
+@@ -28,6 +29,9 @@
  };
  use crate::window::ResolvedWindowRules;
  
@@ -314,7 +305,7 @@ index db2193a4..0fb4557c 100644
  /// By how many logical pixels the directional move commands move floating windows.
  pub const DIRECTIONAL_MOVE_PX: f64 = 50.;
  
-@@ -93,6 +97,9 @@ struct Data {
+@@ -93,6 +97,9 @@
  
      /// Working area used for conversions.
      working_area: Rectangle<f64, Logical>,
@@ -324,7 +315,7 @@ index db2193a4..0fb4557c 100644
  }
  
  impl Data {
-@@ -106,6 +113,8 @@ impl Data {
+@@ -106,6 +113,8 @@
              logical_pos: Point::default(),
              size: Size::default(),
              working_area,
@@ -333,7 +324,7 @@ index db2193a4..0fb4557c 100644
          };
          rv.update(tile);
          rv.set_logical_pos(logical_pos);
-@@ -396,6 +405,10 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -396,6 +405,10 @@
  
      pub fn active_window(&self) -> Option<&W> {
          let id = self.active_window_id.as_ref()?;
@@ -344,7 +335,7 @@ index db2193a4..0fb4557c 100644
          self.tiles
              .iter()
              .find(|tile| tile.window().id() == id)
-@@ -404,6 +417,10 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -404,6 +417,10 @@
  
      pub fn active_window_mut(&mut self) -> Option<&mut W> {
          let id = self.active_window_id.as_ref()?;
@@ -355,7 +346,7 @@ index db2193a4..0fb4557c 100644
          self.tiles
              .iter_mut()
              .find(|tile| tile.window().id() == id)
-@@ -448,7 +465,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -448,7 +465,8 @@
  
          win.request_size_once(size, true);
  
@@ -365,7 +356,7 @@ index db2193a4..0fb4557c 100644
              self.active_window_id = Some(win.id().clone());
          }
  
-@@ -525,7 +543,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -525,7 +543,8 @@
              self.active_window_id = None;
          } else if Some(tile.window().id()) == self.active_window_id.as_ref() {
              // The active tile was removed, make the topmost tile active.
@@ -375,7 +366,7 @@ index db2193a4..0fb4557c 100644
          }
  
          // Stop interactive resize.
-@@ -572,7 +591,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -572,7 +591,8 @@
      }
  
      pub fn activate_window_without_raising(&mut self, id: &W::Id) -> bool {
@@ -385,7 +376,7 @@ index db2193a4..0fb4557c 100644
              return false;
          }
  
-@@ -585,6 +605,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -585,6 +605,8 @@
              return false;
          };
  
@@ -394,7 +385,7 @@ index db2193a4..0fb4557c 100644
          self.raise_window(idx, 0);
          self.active_window_id = Some(id.clone());
          self.bring_up_descendants_of(0);
-@@ -855,8 +877,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -855,8 +877,9 @@
          let active_idx = self.idx_of(active_id).unwrap();
          let center = self.data[active_idx].center();
  
@@ -405,7 +396,7 @@ index db2193a4..0fb4557c 100644
              .map(|(tile, data)| (tile, distance(center, data.center())))
              .filter(|(_, dist)| *dist > 0.)
              .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b));
-@@ -886,8 +909,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -886,8 +909,9 @@
      }
  
      pub fn focus_leftmost(&mut self) {
@@ -416,7 +407,7 @@ index db2193a4..0fb4557c 100644
              .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
          if let Some((tile, _)) = result {
              let id = tile.window().id().clone();
-@@ -896,8 +920,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -896,8 +920,9 @@
      }
  
      pub fn focus_rightmost(&mut self) {
@@ -427,7 +418,7 @@ index db2193a4..0fb4557c 100644
              .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
          if let Some((tile, _)) = result {
              let id = tile.window().id().clone();
-@@ -906,8 +931,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -906,8 +931,9 @@
      }
  
      pub fn focus_topmost(&mut self) {
@@ -438,7 +429,7 @@ index db2193a4..0fb4557c 100644
              .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
          if let Some((tile, _)) = result {
              let id = tile.window().id().clone();
-@@ -916,8 +942,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -916,8 +942,9 @@
      }
  
      pub fn focus_bottommost(&mut self) {
@@ -449,7 +440,7 @@ index db2193a4..0fb4557c 100644
              .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
          if let Some((tile, _)) = result {
              let id = tile.window().id().clone();
-@@ -1094,6 +1121,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -1094,6 +1121,11 @@
                  continue;
              }
  
@@ -461,7 +452,7 @@ index db2193a4..0fb4557c 100644
              // For the active tile, draw the focus ring.
              let focus_ring = focus_ring && Some(tile.window().id()) == active.as_ref();
  
-@@ -1181,7 +1213,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -1181,7 +1213,8 @@
      }
  
      pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
@@ -471,22 +462,12 @@ index db2193a4..0fb4557c 100644
          for tile in &mut self.tiles {
              let win = tile.window_mut();
  
-@@ -1404,6 +1437,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
-                 "interactive resize window must be present in tiles"
-             );
-         }
-+
-+        // ferrion-wm 2026-11-21 (F6).
-+        self.stacking_verify_invariants();
-     }
- }
- 
 diff --git a/src/layout/floating/stacking.rs b/src/layout/floating/stacking.rs
 new file mode 100644
-index 00000000..242d411f
+index 00000000..0ac777fa
 --- /dev/null
 +++ b/src/layout/floating/stacking.rs
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,81 @@
 +//! The stacking additions of the free mode to the floating layout.
 +//!
 +//! A minimized window stays a tile of the floating layout, parked: it keeps its place and size
@@ -567,16 +548,6 @@ index 00000000..242d411f
 +            data.parked = false;
 +        }
 +    }
-+
-+    #[cfg(test)]
-+    pub(super) fn stacking_verify_invariants(&self) {
-+        if self.has_unparked() {
-+            assert!(
-+                !self.active_is_parked(),
-+                "the active window must not be minimized while another is not"
-+            );
-+        }
-+    }
 +}
 diff --git a/src/layout/free.rs b/src/layout/free.rs
 index bb4db532..d223d814 100644
@@ -589,7 +560,7 @@ index bb4db532..d223d814 100644
  // SPDX-License-Identifier: GPL-3.0-or-later
  
  use niri_ipc::WorkspaceMode;
-@@ -18,6 +18,17 @@ impl<W: LayoutElement> Layout<W> {
+@@ -18,6 +18,17 @@
          }
      }
  
@@ -617,7 +588,7 @@ index 816351ae..e17e9e60 100644
  //! Window layout logic.
  //!
  //! Niri implements scrollable tiling with dynamic workspaces. The scrollable tiling is mostly
-@@ -244,6 +244,8 @@ pub trait LayoutElement {
+@@ -244,6 +244,8 @@
      fn set_activated(&mut self, active: bool);
      fn set_active_in_column(&mut self, active: bool);
      fn set_floating(&mut self, floating: bool);
@@ -626,380 +597,8 @@ index 816351ae..e17e9e60 100644
      fn set_bounds(&self, bounds: Size<i32, Logical>);
      fn is_ignoring_opacity_window_rule(&self) -> bool;
  
-diff --git a/src/layout/tests.rs b/src/layout/tests.rs
-index 01fca65a..8ccc3fca 100644
---- a/src/layout/tests.rs
-+++ b/src/layout/tests.rs
-@@ -1,4 +1,5 @@
--// ferrion-wm: changed from niri's version on 2026-11-21 (F4, F5). Changes are marked "ferrion-wm".
-+// ferrion-wm: changed from niri's version on 2026-11-21 (F4, F5, F6). Changes are marked
-+// "ferrion-wm".
- use std::cell::{Cell, OnceCell, RefCell};
- 
- use insta::{assert_compact_debug_snapshot, assert_snapshot};
-@@ -46,6 +47,8 @@ struct TestWindowInner {
-     animate_next_configure: Cell<bool>,
-     animation_snapshot: RefCell<Option<LayoutElementRenderSnapshot>>,
-     rules: ResolvedWindowRules,
-+    // ferrion-wm 2026-11-21 (F6): whether the window can be minimized, and whether it is.
-+    free_state: Cell<(bool, bool)>,
- }
- 
- #[derive(Debug, Clone)]
-@@ -98,6 +101,8 @@ impl TestWindow {
-             animate_next_configure: Cell::new(false),
-             animation_snapshot: RefCell::new(None),
-             rules: params.rules.unwrap_or_default(),
-+            // ferrion-wm 2026-11-21 (F6).
-+            free_state: Cell::new((false, false)),
-         }))
-     }
- 
-@@ -236,6 +241,11 @@ impl LayoutElement for TestWindow {
- 
-     fn set_floating(&mut self, _floating: bool) {}
- 
-+    // ferrion-wm 2026-11-21 (F6).
-+    fn set_free_state(&mut self, can_minimize: bool, is_minimized: bool) {
-+        self.0.free_state.set((can_minimize, is_minimized));
-+    }
-+
-     fn sizing_mode(&self) -> SizingMode {
-         self.0.sizing_mode.get()
-     }
-@@ -791,6 +801,11 @@ enum Op {
-     AddWindowCheckPlacement {
-         params: TestWindowParams,
-     },
-+    // ferrion-wm 2026-11-21 (F6): minimize a window of a free workspace.
-+    MinimizeWindow {
-+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
-+        id: Option<usize>,
-+    },
-     UpdateConfig {
-         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
-         layout_config: Box<niri_config::LayoutPart>,
-@@ -1704,6 +1719,11 @@ impl Op {
-             Op::AddWindowCheckPlacement { params } => {
-                 free::add_window_and_check_placement(layout, params)
-             }
-+            // ferrion-wm 2026-11-21 (F6).
-+            Op::MinimizeWindow { id } => {
-+                let id = id.filter(|id| layout.has_window(id));
-+                layout.minimize_window(id.as_ref());
-+            }
-             Op::UpdateConfig { layout_config } => {
-                 let options = Options {
-                     layout: niri_config::Layout::from_part(&layout_config),
-@@ -1952,8 +1972,9 @@ fn operations_dont_panic() {
-         Op::ConsumeOrExpelWindowRight { id: None },
-         Op::MoveWorkspaceToOutput(1),
-         Op::ToggleColumnTabbedDisplay,
--        // ferrion-wm 2026-11-21 (F4).
-+        // ferrion-wm 2026-11-21 (F4, F6).
-         Op::ToggleWorkspaceMode,
-+        Op::MinimizeWindow { id: None },
-     ];
- 
-     for third in &every_op {
-@@ -2133,8 +2154,9 @@ fn operations_from_starting_state_dont_panic() {
-         Op::ConsumeOrExpelWindowLeft { id: None },
-         Op::ConsumeOrExpelWindowRight { id: None },
-         Op::ToggleColumnTabbedDisplay,
--        // ferrion-wm 2026-11-21 (F4).
-+        // ferrion-wm 2026-11-21 (F4, F6).
-         Op::ToggleWorkspaceMode,
-+        Op::MinimizeWindow { id: None },
-     ];
- 
-     for third in &every_op {
-diff --git a/src/layout/tests/free.rs b/src/layout/tests/free.rs
-index d301be2d..4df972ca 100644
---- a/src/layout/tests/free.rs
-+++ b/src/layout/tests/free.rs
-@@ -1,4 +1,4 @@
--// Tests of the free mode of ferrion-wm, a fork of niri. Written on 2026-11-21 (F4, F5).
-+// Tests of the free mode of ferrion-wm, a fork of niri. Written on 2026-11-21 (F4, F5, F6).
- // SPDX-License-Identifier: GPL-3.0-or-later
- 
- use niri_ipc::WorkspaceMode;
-@@ -95,7 +95,11 @@ pub(super) fn add_window_and_check_placement(
-         .filter(|ws| ws.is_free())
-         .map(|ws| {
-             let floating = ws.floating();
--            let anchor = floating.tiles_with_offsets().next().map(|(_, pos)| pos);
-+            // The window on top that is not minimized.
-+            let anchor = floating
-+                .tiles_with_offsets()
-+                .find(|(tile, _)| !floating.is_parked(tile.window().id()))
-+                .map(|(_, pos)| pos);
-             (ws.id(), floating.working_area(), anchor)
-         });
- 
-@@ -577,3 +581,261 @@ fn columns_workspace_keeps_niri_placement() {
-     // niri centers a new floating window.
-     assert_pos(floating_pos(active_ws(&layout), 2), 440., 210.);
- }
-+
-+fn free_state(layout: &Layout<TestWindow>, id: usize) -> (bool, bool) {
-+    let (_, win) = layout.windows().find(|(_, win)| *win.id() == id).unwrap();
-+    win.0.free_state.get()
-+}
-+
-+fn focus_id(layout: &Layout<TestWindow>) -> Option<usize> {
-+    layout.focus().map(|win| *win.id())
-+}
-+
-+fn under(ws: &Workspace<TestWindow>, x: f64, y: f64) -> Option<usize> {
-+    ws.window_under(Point::from((x, y)))
-+        .map(|(win, _)| *win.id())
-+}
-+
-+/// A window with a border, which the pointer can hit: test windows have no input region.
-+fn bordered(id: usize) -> TestWindowParams {
-+    let mut params = TestWindowParams::new(id);
-+    params.rules = Some(ResolvedWindowRules {
-+        border: niri_config::BorderRule {
-+            on: true,
-+            width: Some(FloatOrInt(4.)),
-+            ..Default::default()
-+        },
-+        ..Default::default()
-+    });
-+    params
-+}
-+
-+/// The bottom right pixel of a window's border.
-+fn corner(ws: &Workspace<TestWindow>, id: usize) -> (f64, f64) {
-+    let (tile, pos) = ws
-+        .floating()
-+        .tiles_with_offsets()
-+        .find(|(tile, _)| *tile.window().id() == id)
-+        .unwrap();
-+    let size = tile.tile_size();
-+    (pos.x + size.w - 1., pos.y + size.h - 1.)
-+}
-+
-+/// Two free windows with borders, 2 on top of 1 and a title strip lower and to the right.
-+fn two_free_windows() -> Layout<TestWindow> {
-+    check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: bordered(1),
-+            },
-+            Op::AddWindow {
-+                params: bordered(2),
-+            },
-+        ],
-+    )
-+}
-+
-+#[test]
-+fn minimizing_hides_the_window_and_focuses_the_next() {
-+    let mut layout = two_free_windows();
-+    let (x, y) = corner(active_ws(&layout), 2);
-+    assert_eq!(under(active_ws(&layout), x, y), Some(2));
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [
-+            Op::MinimizeWindow { id: None },
-+            Op::Refresh { is_active: true },
-+        ],
-+    );
-+    let ws = active_ws(&layout);
-+    assert!(ws.floating().is_parked(&2));
-+    assert_eq!(focus_id(&layout), Some(1));
-+    // The pointer finds nothing where only the minimized window was.
-+    assert_eq!(under(ws, x, y), None);
-+    assert_eq!(free_state(&layout, 2), (true, true));
-+    assert_eq!(free_state(&layout, 1), (true, false));
-+    // It is still a window of the layout, which the recent-windows switcher lists.
-+    assert!(layout.windows().any(|(_, win)| *win.id() == 2));
-+}
-+
-+#[test]
-+fn focusing_a_minimized_window_brings_it_back_where_it_was() {
-+    let mut layout = two_free_windows();
-+    let pos = floating_pos(active_ws(&layout), 1);
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [
-+            Op::MinimizeWindow { id: Some(1) },
-+            Op::FocusWindow(2),
-+            Op::FocusWindow(1),
-+        ],
-+    );
-+    let ws = active_ws(&layout);
-+    assert!(!ws.floating().is_parked(&1));
-+    assert_eq!(focus_id(&layout), Some(1));
-+    assert_eq!(floating_pos(ws, 1), pos);
-+    // On top again: its corner lies over window 2.
-+    let (x, y) = corner(ws, 1);
-+    assert_eq!(under(ws, x, y), Some(1));
-+}
-+
-+#[test]
-+fn minimizing_the_last_window_leaves_no_focus() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(1),
-+            },
-+            Op::MinimizeWindow { id: None },
-+            Op::Refresh { is_active: true },
-+        ],
-+    );
-+    assert_eq!(focus_id(&layout), None);
-+    let (_, win) = layout.windows().next().unwrap();
-+    assert!(!win.0.pending_activated.get());
-+}
-+
-+#[test]
-+fn minimizing_a_floating_window_focuses_a_fullscreen_one() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(1),
-+            },
-+            Op::FullscreenWindow(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(2),
-+            },
-+            Op::FocusWindow(2),
-+            Op::MinimizeWindow { id: None },
-+        ],
-+    );
-+    assert_eq!(focus_id(&layout), Some(1));
-+}
-+
-+#[test]
-+fn columns_workspace_has_no_minimize() {
-+    let layout = check_ops([
-+        Op::AddOutput(1),
-+        Op::AddWindow {
-+            params: TestWindowParams::new(1),
-+        },
-+        Op::AddWindow {
-+            params: TestWindowParams {
-+                is_floating: true,
-+                ..TestWindowParams::new(2)
-+            },
-+        },
-+        Op::MinimizeWindow { id: Some(2) },
-+        Op::Refresh { is_active: true },
-+    ]);
-+    let ws = active_ws(&layout);
-+    assert!(!ws.floating().is_parked(&2));
-+    assert_eq!(free_state(&layout, 1), (false, false));
-+    assert_eq!(free_state(&layout, 2), (false, false));
-+}
-+
-+#[test]
-+fn switching_to_columns_brings_minimized_windows_back() {
-+    let mut layout = two_free_windows();
-+    check_ops_on_layout(
-+        &mut layout,
-+        [Op::MinimizeWindow { id: Some(2) }, Op::ToggleWorkspaceMode],
-+    );
-+    let ws = active_ws(&layout);
-+    assert_eq!(column_ids(ws), [1, 2]);
-+}
-+
-+#[test]
-+fn minimized_window_moved_to_another_workspace_shows() {
-+    let mut layout = two_free_windows();
-+    check_ops_on_layout(
-+        &mut layout,
-+        [
-+            Op::MinimizeWindow { id: Some(2) },
-+            Op::MoveWindowToWorkspace {
-+                window_id: Some(2),
-+                workspace_idx: 1,
-+            },
-+            Op::FocusWorkspace(1),
-+        ],
-+    );
-+    let ws = active_ws(&layout);
-+    assert!(ws.has_window(&2));
-+    assert!(!ws.floating().is_parked(&2));
-+}
-+
-+#[test]
-+fn minimized_window_going_fullscreen_comes_back_focused() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(1),
-+            },
-+            Op::MinimizeWindow { id: None },
-+            Op::SetFullscreenWindow {
-+                window: 1,
-+                is_fullscreen: true,
-+            },
-+        ],
-+    );
-+    assert_eq!(column_ids(active_ws(&layout)), [1]);
-+    assert_eq!(focus_id(&layout), Some(1));
-+}
-+
-+#[test]
-+fn window_arriving_beside_minimized_windows_takes_the_focus() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(1),
-+            },
-+            Op::AddWindow {
-+                params: TestWindowParams::new(2),
-+            },
-+            Op::MoveWindowToWorkspace {
-+                window_id: Some(2),
-+                workspace_idx: 1,
-+            },
-+            Op::MinimizeWindow { id: Some(1) },
-+            Op::FocusWorkspace(1),
-+            Op::MaximizeWindowToEdges { id: Some(2) },
-+            Op::MoveWindowToWorkspaceUp(false),
-+            Op::FocusWorkspace(0),
-+        ],
-+    );
-+    assert_eq!(focus_id(&layout), Some(2));
-+}
-+
-+#[test]
-+fn dialog_of_a_minimized_window_opens_as_a_new_window() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(1),
-+            },
-+            Op::MinimizeWindow { id: None },
-+            Op::AddWindowNextTo {
-+                params: TestWindowParams::new(2),
-+                next_to_id: 1,
-+            },
-+        ],
-+    );
-+    let ws = active_ws(&layout);
-+    assert!(ws.floating().is_parked(&1));
-+    assert_eq!(focus_id(&layout), Some(2));
-+}
 diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
-index c838642c..5b19a061 100644
+index a2c28f49..6439c834 100644
 --- a/src/layout/workspace.rs
 +++ b/src/layout/workspace.rs
 @@ -1,4 +1,5 @@
@@ -1009,7 +608,7 @@ index c838642c..5b19a061 100644
  use std::cmp::max;
  use std::rc::Rc;
  use std::time::Duration;
-@@ -750,6 +751,9 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -750,6 +751,9 @@
                  }
              }
          }
@@ -1019,7 +618,7 @@ index c838642c..5b19a061 100644
      }
  
      pub fn add_tile_to_column(
-@@ -793,7 +797,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -793,7 +797,10 @@
  
      fn update_focus_floating_tiling_after_removing(&mut self, removed_from_floating: bool) {
          if removed_from_floating {
@@ -1031,7 +630,7 @@ index c838642c..5b19a061 100644
                  self.floating_is_active = FloatingActive::No;
              }
          } else {
-@@ -1488,6 +1495,9 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1488,6 +1495,9 @@
      }
  
      pub fn toggle_window_floating(&mut self, id: Option<&W::Id>) {
@@ -1041,7 +640,7 @@ index c838642c..5b19a061 100644
          let active_id = self.active_window().map(|win| win.id().clone());
          let target_is_active = id.is_none_or(|id| Some(id) == active_id.as_ref());
          let Some(id) = id.cloned().or(active_id) else {
-@@ -1575,7 +1585,8 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1575,7 +1585,8 @@
      }
  
      pub fn switch_focus_floating_tiling(&mut self) {
@@ -1051,7 +650,7 @@ index c838642c..5b19a061 100644
              // If floating is empty, keep focus on scrolling.
              return;
          } else if self.scrolling.is_empty() {
-@@ -1695,7 +1706,12 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1695,7 +1706,12 @@
  
          let floating = self.floating.tiles_with_render_positions();
          let visible = self.is_floating_visible();
@@ -1065,7 +664,7 @@ index c838642c..5b19a061 100644
  
          floating.chain(scrolling)
      }
-@@ -1872,9 +1888,11 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1872,9 +1888,11 @@
      pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
          // This logic is consistent with tiles_with_render_positions().
          if self.is_floating_visible() {
@@ -1077,7 +676,7 @@ index c838642c..5b19a061 100644
                  .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
              {
                  return Some(rv);
-@@ -1927,6 +1945,9 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1927,6 +1945,9 @@
      }
  
      pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
@@ -1088,7 +687,7 @@ index c838642c..5b19a061 100644
              .refresh(is_active && !self.floating_is_active.get(), is_focused);
          self.floating
 diff --git a/src/layout/workspace/free.rs b/src/layout/workspace/free.rs
-index f9efebef..c186f5d9 100644
+index efb6b1de..96574c43 100644
 --- a/src/layout/workspace/free.rs
 +++ b/src/layout/workspace/free.rs
 @@ -18,7 +18,7 @@
@@ -1100,7 +699,7 @@ index f9efebef..c186f5d9 100644
  // SPDX-License-Identifier: GPL-3.0-or-later
  
  use niri_ipc::WorkspaceMode;
-@@ -147,6 +147,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -147,6 +147,10 @@
  
          let target = match target {
              WorkspaceAddWindowTarget::NewColumnAt(_) => WorkspaceAddWindowTarget::Auto,
@@ -1111,7 +710,7 @@ index f9efebef..c186f5d9 100644
              target => target,
          };
          // A window opening next to another, such as a dialog, keeps niri's place over it.
-@@ -168,7 +172,7 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -168,7 +172,7 @@
              return;
          }
  
@@ -1120,10 +719,11 @@ index f9efebef..c186f5d9 100644
              return;
          };
  
-@@ -186,6 +190,17 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -185,6 +189,17 @@
+     pub(super) fn free_after_adding_to_columns(&mut self) {
          if self.is_free() {
              self.float_columns();
-         }
++        }
 +        self.free_focus_away_from_parked();
 +    }
 +
@@ -1134,11 +734,10 @@ index f9efebef..c186f5d9 100644
 +            && !self.scrolling.is_empty()
 +        {
 +            self.floating_is_active = FloatingActive::No;
-+        }
+         }
      }
  
-     /// Whether moving a window from the floating layout to the columns is refused: on a free
-@@ -272,6 +287,9 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -272,6 +287,9 @@
      /// Moves the floating windows into columns, in the order they sit from left to right, except
      /// the ones niri floats by itself.
      fn tile_floating_into_columns(&mut self) {
@@ -1148,10 +747,11 @@ index f9efebef..c186f5d9 100644
          let mut moving: Vec<(W::Id, f64, f64)> = self
              .floating
              .tiles_with_offsets()
-@@ -335,8 +353,75 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -334,4 +352,50 @@
+             tile.animate_move_from(old_render_pos - new_render_pos);
          }
      }
- 
++
 +    /// Minimizes a floating window of a free workspace. Windows elsewhere have no minimize.
 +    pub fn minimize_window(&mut self, id: Option<&W::Id>) {
 +        if !self.is_free() {
@@ -1197,33 +797,7 @@ index f9efebef..c186f5d9 100644
 +            tile.window_mut().set_free_state(is_free, parked);
 +        }
 +    }
-+
-     #[cfg(test)]
-     pub(super) fn free_verify_invariants(&self) {
-+        if let Some(win) = self.active_window() {
-+            assert!(
-+                !self.floating.is_parked(win.id()),
-+                "a minimized window must not be the active one"
-+            );
-+        }
-+        if self.floating_is_active.get() && !self.scrolling.is_empty() {
-+            assert!(
-+                self.floating.has_unparked(),
-+                "the focus cannot stay on minimized windows while columns hold one"
-+            );
-+        }
-+        if !self.is_free() {
-+            for tile in self.floating.tiles() {
-+                assert!(
-+                    !self.floating.is_parked(tile.window().id()),
-+                    "only a free workspace has minimized windows"
-+                );
-+            }
-+        }
-+
-         assert_eq!(
-             self.free.mode,
-             self.wanted_mode(),
+ }
 diff --git a/src/protocols/foreign_toplevel.rs b/src/protocols/foreign_toplevel.rs
 index 0f563211..cd2e937b 100644
 --- a/src/protocols/foreign_toplevel.rs
@@ -1233,7 +807,7 @@ index 0f563211..cd2e937b 100644
  use std::collections::hash_map::Entry;
  use std::collections::{HashMap, HashSet};
  use std::sync::Arc;
-@@ -53,13 +54,17 @@ pub trait ForeignToplevelHandler {
+@@ -53,13 +54,17 @@
      fn unset_fullscreen(&mut self, wl_surface: WlSurface);
      fn set_maximized(&mut self, wl_surface: WlSurface);
      fn unset_maximized(&mut self, wl_surface: WlSurface);
@@ -1252,7 +826,7 @@ index 0f563211..cd2e937b 100644
      output: Option<Output>,
  
      ext_list_instances: HashSet<ExtForeignToplevelHandleV1>,
-@@ -151,6 +156,9 @@ pub fn refresh(state: &mut State) {
+@@ -151,6 +156,9 @@
                      cur,
                      output,
                      false,
@@ -1262,7 +836,7 @@ index 0f563211..cd2e937b 100644
                  );
              }
          });
-@@ -174,6 +182,8 @@ pub fn refresh(state: &mut State) {
+@@ -174,6 +182,8 @@
                  cur,
                  output.as_ref(),
                  true,
@@ -1271,7 +845,7 @@ index 0f563211..cd2e937b 100644
              );
          });
      }
-@@ -204,6 +214,8 @@ pub fn on_output_bound(state: &mut State, output: &Output, wl_output: &WlOutput)
+@@ -204,6 +214,8 @@
      }
  }
  
@@ -1280,7 +854,7 @@ index 0f563211..cd2e937b 100644
  fn refresh_toplevel(
      protocol_state: &mut ForeignToplevelManagerState,
      wl_surface: &WlSurface,
-@@ -212,8 +224,10 @@ fn refresh_toplevel(
+@@ -212,8 +224,10 @@
      current: &ToplevelState,
      output: Option<&Output>,
      has_focus: bool,
@@ -1292,7 +866,7 @@ index 0f563211..cd2e937b 100644
  
      match protocol_state.toplevels.entry(wl_surface.clone()) {
          Entry::Occupied(entry) => {
-@@ -655,8 +669,11 @@ where
+@@ -655,8 +669,11 @@
              zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
                  state.unset_maximized(surface)
              }
@@ -1306,7 +880,7 @@ index 0f563211..cd2e937b 100644
              zwlr_foreign_toplevel_handle_v1::Request::Activate { .. } => {
                  state.activate(surface);
              }
-@@ -683,8 +700,16 @@ where
+@@ -683,8 +700,16 @@
      }
  }
  
@@ -1324,100 +898,6 @@ index 0f563211..cd2e937b 100644
      if states.contains(xdg_toplevel::State::Maximized) {
          rv.push(zwlr_foreign_toplevel_handle_v1::State::Maximized as u32);
      }
-diff --git a/src/tests/free_mode.rs b/src/tests/free_mode.rs
-new file mode 100644
-index 00000000..5df3aebf
---- /dev/null
-+++ b/src/tests/free_mode.rs
-@@ -0,0 +1,70 @@
-+// Client tests of the free mode of ferrion-wm, a fork of niri. Written on 2026-11-21 (F6).
-+// SPDX-License-Identifier: GPL-3.0-or-later
-+
-+use client::ClientId;
-+use niri_config::Config;
-+use niri_ipc::WorkspaceMode;
-+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::WmCapabilities;
-+use wayland_client::protocol::wl_surface::WlSurface;
-+
-+use super::*;
-+
-+fn set_up(mode: WorkspaceMode) -> (Fixture, ClientId, WlSurface) {
-+    let mut config = Config::default();
-+    config.layout.workspace_mode = mode;
-+
-+    let mut f = Fixture::with_config(config);
-+    f.add_output(1, (1920, 1080));
-+
-+    let id = f.add_client();
-+    let window = f.client(id).create_window();
-+    let surface = window.surface.clone();
-+    window.commit();
-+    f.roundtrip(id);
-+
-+    let window = f.client(id).window(&surface);
-+    window.attach_new_buffer();
-+    window.set_size(100, 100);
-+    window.ack_last_and_commit();
-+    f.double_roundtrip(id);
-+
-+    (f, id, surface)
-+}
-+
-+/// Whether the window floats, whether it was offered minimize, and whether it is minimized.
-+fn state(f: &mut Fixture) -> (bool, bool, bool) {
-+    let niri = f.niri();
-+    let (_, mapped) = niri.layout.windows().next().unwrap();
-+    let can_minimize = mapped
-+        .toplevel()
-+        .with_pending_state(|state| state.capabilities.contains(WmCapabilities::Minimize));
-+    let ws = niri.layout.active_workspace().unwrap();
-+    (
-+        ws.is_floating(&mapped.window),
-+        can_minimize,
-+        mapped.is_minimized(),
-+    )
-+}
-+
-+#[test]
-+fn free_window_floats_and_minimizes_at_its_request() {
-+    let (mut f, id, surface) = set_up(WorkspaceMode::Free);
-+    assert_eq!(state(&mut f), (true, true, false));
-+
-+    f.client(id).window(&surface).xdg_toplevel.set_minimized();
-+    f.double_roundtrip(id);
-+
-+    assert_eq!(state(&mut f), (true, true, true));
-+    assert!(f.niri().layout.focus().is_none());
-+}
-+
-+#[test]
-+fn columns_window_is_not_offered_minimize() {
-+    let (mut f, id, surface) = set_up(WorkspaceMode::Columns);
-+    assert_eq!(state(&mut f), (false, false, false));
-+
-+    f.client(id).window(&surface).xdg_toplevel.set_minimized();
-+    f.double_roundtrip(id);
-+
-+    assert_eq!(state(&mut f), (false, false, false));
-+}
-diff --git a/src/tests/mod.rs b/src/tests/mod.rs
-index ad66c822..4213489e 100644
---- a/src/tests/mod.rs
-+++ b/src/tests/mod.rs
-@@ -1,3 +1,4 @@
-+// ferrion-wm: changed from niri's version on 2026-11-21 (F6). Changes are marked "ferrion-wm".
- use fixture::Fixture;
- 
- mod client;
-@@ -8,6 +9,8 @@ mod test_input_backend;
- mod animations;
- mod binds;
- mod floating;
-+// ferrion-wm 2026-11-21 (F6): client tests of the free mode.
-+mod free_mode;
- mod fullscreen;
- mod layer_shell;
- mod remove_output;
 diff --git a/src/window/mapped.rs b/src/window/mapped.rs
 index 8e754856..0e87b131 100644
 --- a/src/window/mapped.rs
@@ -1427,7 +907,7 @@ index 8e754856..0e87b131 100644
  use std::cell::{Cell, Ref, RefCell};
  use std::time::Duration;
  
-@@ -97,6 +98,9 @@ pub struct Mapped {
+@@ -97,6 +98,9 @@
      /// Whether this window is floating.
      is_floating: bool,
  
@@ -1437,7 +917,7 @@ index 8e754856..0e87b131 100644
      /// Whether this window is a target of a window cast.
      is_window_cast_target: bool,
  
-@@ -293,6 +297,8 @@ impl Mapped {
+@@ -293,6 +297,8 @@
              is_focused: false,
              is_active_in_column: true,
              is_floating: false,
@@ -1446,28 +926,28 @@ index 8e754856..0e87b131 100644
              is_window_cast_target: false,
              ignore_opacity_window_rule: false,
              block_out_buffer: RefCell::new(SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.])),
-@@ -383,6 +389,11 @@ impl Mapped {
-         self.is_floating
-     }
+@@ -381,6 +387,11 @@
  
+     pub fn is_floating(&self) -> bool {
+         self.is_floating
++    }
++
 +    // ferrion-wm 2026-11-21 (F6).
 +    pub fn is_minimized(&self) -> bool {
 +        self.is_minimized
-+    }
-+
-     pub fn is_window_cast_target(&self) -> bool {
-         self.is_window_cast_target
-     }
-@@ -1009,6 +1020,12 @@ impl LayoutElement for Mapped {
-         self.need_to_recompute_rules |= changed;
      }
  
+     pub fn is_window_cast_target(&self) -> bool {
+@@ -1007,6 +1018,12 @@
+         let changed = self.is_floating != floating;
+         self.is_floating = floating;
+         self.need_to_recompute_rules |= changed;
++    }
++
 +    // ferrion-wm 2026-11-21 (F6): advertise minimize on free workspaces only.
 +    fn set_free_state(&mut self, can_minimize: bool, is_minimized: bool) {
 +        self.is_minimized = is_minimized;
 +        crate::handlers::set_minimize_capability(self.toplevel(), can_minimize);
-+    }
-+
+     }
+ 
      fn set_bounds(&self, bounds: Size<i32, Logical>) {
-         self.toplevel().with_pending_state(|state| {
-             state.bounds = Some(bounds);

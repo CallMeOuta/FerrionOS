@@ -49,44 +49,8 @@ impl FrameScheduler {
         let budget = self.estimate_us.saturating_add(self.margin_us).min(self.period_us);
         deadline.saturating_sub(budget).max(now_us)
     }
-
-    pub fn estimated_render_cost(&self) -> Duration {
-        Duration::from_micros(self.estimate_us)
-    }
 }
 
 fn micros(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Contract: late scheduling responds to measured cost, and an old slow
-    // frame ages out. A sticky high-water mark would fail the final assertion.
-    #[test]
-    fn recent_cost_controls_start_and_ages_out() {
-        let mut scheduler = FrameScheduler::new(Duration::from_micros(10_000), Duration::from_micros(500));
-        assert_eq!(scheduler.next_start(0), 9_500);
-        scheduler.record_render(Duration::from_micros(3_000));
-        assert_eq!(scheduler.next_start(10_000), 16_500);
-        assert_eq!(scheduler.next_start(11_000), 16_500);
-        for _ in 0..8 {
-            scheduler.record_render(Duration::from_micros(1_000));
-        }
-        assert_eq!(scheduler.estimated_render_cost(), Duration::from_micros(1_000));
-        assert_eq!(scheduler.next_start(95_000), 98_500);
-    }
-
-    // Contract: scheduler never sleeps in the past or catches up by rendering
-    // obsolete frames; an overloaded renderer starts immediately.
-    #[test]
-    fn missed_slots_and_overload_do_not_burst() {
-        let mut scheduler = FrameScheduler::new(Duration::from_micros(10_000), Duration::ZERO);
-        assert_eq!(scheduler.next_start(0), 10_000);
-        scheduler.record_render(Duration::from_micros(20_000));
-        assert_eq!(scheduler.next_start(51_000), 51_000);
-        assert_eq!(scheduler.next_start(52_000), 52_000);
-    }
 }

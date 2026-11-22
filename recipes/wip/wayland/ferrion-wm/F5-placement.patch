@@ -15,24 +15,22 @@ window on a columns workspace.
 The placement is made where F4 already sends a free workspace's new
 windows to the floating layout, so floating.rs is not changed.
 
-Checked: the new randomized-test operation AddWindowCheckPlacement,
-which checks the rule against its own computation, and three unit
-tests failed before the placement code and pass with it, also with
-RUN_SLOW_TESTS=1 and 20000 cases; `cargo test --all --exclude
-niri-visual-tests` passes.
+
+Agent-written tests and their test-only helpers were removed under ADR 0025.
+The source commit in the header records the original patch provenance;
+this patch is regenerated against the preceding test-free stage. Upstream
+tests remain, with the config snapshots adapted to the production fields.
 ---
- src/layout/free.rs           |   6 +-
- src/layout/tests.rs          |  10 ++-
- src/layout/tests/free.rs     | 146 ++++++++++++++++++++++++++++++++++-
- src/layout/workspace.rs      |   6 +-
- src/layout/workspace/free.rs |  41 +++++++++-
- 5 files changed, 201 insertions(+), 8 deletions(-)
+ src/layout/free.rs | 6
+ src/layout/workspace.rs | 6
+ src/layout/workspace/free.rs | 41
+ 3 files changed, 47 insertions(+), 6 deletions(-)
 
 diff --git a/src/layout/free.rs b/src/layout/free.rs
 index 9040c22c..bb4db532 100644
 --- a/src/layout/free.rs
 +++ b/src/layout/free.rs
-@@ -1,11 +1,15 @@
+@@ -1,10 +1,14 @@
  //! The actions of the free mode on the layout as a whole.
 -// Part of ferrion-wm, a fork of niri. Written on 2026-11-21.
 +// Part of ferrion-wm, a fork of niri. Written on 2026-11-21 (F4, F5).
@@ -41,213 +39,15 @@ index 9040c22c..bb4db532 100644
  use niri_ipc::WorkspaceMode;
  
  use super::{Layout, LayoutElement};
- 
++
 +/// How far each new window of a free workspace opens below and to the right of the one in use:
 +/// the height of a title strip.
 +pub const CASCADE_STEP: f64 = 32.;
-+
+ 
  impl<W: LayoutElement> Layout<W> {
      /// Switches the focused workspace between arranging its windows freely and in columns.
-     pub fn toggle_workspace_mode(&mut self) {
-diff --git a/src/layout/tests.rs b/src/layout/tests.rs
-index 842dd975..01fca65a 100644
---- a/src/layout/tests.rs
-+++ b/src/layout/tests.rs
-@@ -1,4 +1,4 @@
--// ferrion-wm: changed from niri's version on 2026-11-21 (F4). Changes are marked "ferrion-wm".
-+// ferrion-wm: changed from niri's version on 2026-11-21 (F4, F5). Changes are marked "ferrion-wm".
- use std::cell::{Cell, OnceCell, RefCell};
- 
- use insta::{assert_compact_debug_snapshot, assert_snapshot};
-@@ -787,6 +787,10 @@ enum Op {
-     // ferrion-wm 2026-11-21 (F4): switch how the focused workspace arranges its windows.
-     ToggleWorkspaceMode,
-     SetWorkspaceMode(#[proptest(strategy = "arbitrary_workspace_mode()")] niri_ipc::WorkspaceMode),
-+    // ferrion-wm 2026-11-21 (F5): add a window and check where a free workspace placed it.
-+    AddWindowCheckPlacement {
-+        params: TestWindowParams,
-+    },
-     UpdateConfig {
-         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
-         layout_config: Box<niri_config::LayoutPart>,
-@@ -1696,6 +1700,10 @@ impl Op {
-             // ferrion-wm 2026-11-21 (F4).
-             Op::ToggleWorkspaceMode => layout.toggle_workspace_mode(),
-             Op::SetWorkspaceMode(mode) => layout.set_workspace_mode(mode),
-+            // ferrion-wm 2026-11-21 (F5).
-+            Op::AddWindowCheckPlacement { params } => {
-+                free::add_window_and_check_placement(layout, params)
-+            }
-             Op::UpdateConfig { layout_config } => {
-                 let options = Options {
-                     layout: niri_config::Layout::from_part(&layout_config),
-diff --git a/src/layout/tests/free.rs b/src/layout/tests/free.rs
-index 750f7048..d301be2d 100644
---- a/src/layout/tests/free.rs
-+++ b/src/layout/tests/free.rs
-@@ -1,4 +1,4 @@
--// Tests of the free mode of ferrion-wm, a fork of niri. Written on 2026-11-21.
-+// Tests of the free mode of ferrion-wm, a fork of niri. Written on 2026-11-21 (F4, F5).
- // SPDX-License-Identifier: GPL-3.0-or-later
- 
- use niri_ipc::WorkspaceMode;
-@@ -76,6 +76,64 @@ fn move_to_x(id: usize, x: f64) -> Op {
-     }
- }
- 
-+/// Adds a window as [`Op::AddWindow`] does, and checks the placement of a free workspace: the
-+/// first window opens centered, each next one a title strip lower and to the right of the one on
-+/// top, and back at the top left of the working area when it would leave it.
-+pub(super) fn add_window_and_check_placement(
-+    layout: &mut Layout<TestWindow>,
-+    mut params: TestWindowParams,
-+) {
-+    if layout.has_window(&params.id) {
-+        return;
-+    }
-+    // A window with a parent is placed over the parent instead.
-+    params.parent_id = None;
-+    let id = params.id;
-+
-+    let before = layout
-+        .active_workspace()
-+        .filter(|ws| ws.is_free())
-+        .map(|ws| {
-+            let floating = ws.floating();
-+            let anchor = floating.tiles_with_offsets().next().map(|(_, pos)| pos);
-+            (ws.id(), floating.working_area(), anchor)
-+        });
-+
-+    Op::AddWindow { params }.apply(layout);
-+
-+    let Some((ws_id, area, anchor)) = before else {
-+        return;
-+    };
-+    let Some((_, ws)) = layout.find_workspace_by_id(ws_id) else {
-+        return;
-+    };
-+    let Some((tile, pos)) = ws
-+        .floating()
-+        .tiles_with_offsets()
-+        .find(|(tile, _)| *tile.window().id() == id)
-+    else {
-+        return;
-+    };
-+
-+    let size = tile.tile_size();
-+    let expected = match anchor {
-+        None => crate::utils::center_preferring_top_left_in_area(area, size),
-+        Some(anchor) => {
-+            let step = crate::layout::free::CASCADE_STEP;
-+            let pos = anchor + Point::from((step, step));
-+            if pos.x + size.w > area.loc.x + area.size.w
-+                || pos.y + size.h > area.loc.y + area.size.h
-+            {
-+                area.loc
-+            } else {
-+                pos
-+            }
-+        }
-+    };
-+    approx::assert_abs_diff_eq!(pos.x, expected.x, epsilon = 1e-3);
-+    approx::assert_abs_diff_eq!(pos.y, expected.y, epsilon = 1e-3);
-+}
-+
- #[test]
- fn new_window_opens_floating_on_free_workspace() {
-     let ops = [
-@@ -433,3 +491,89 @@ fn new_workspace_follows_the_default() {
-     let modes: Vec<_> = layout.workspaces().map(|(_, _, ws)| ws.mode()).collect();
-     assert_eq!(modes, [WorkspaceMode::Columns, WorkspaceMode::Free]);
- }
-+
-+fn assert_pos(pos: Point<f64, Logical>, x: f64, y: f64) {
-+    approx::assert_abs_diff_eq!(pos.x, x, epsilon = 1e-3);
-+    approx::assert_abs_diff_eq!(pos.y, y, epsilon = 1e-3);
-+}
-+
-+fn add_sized(id: usize, w: i32, h: i32) -> Op {
-+    let mut params = TestWindowParams::new(id);
-+    params.bbox = Rectangle::from_size(Size::from((w, h)));
-+    Op::AddWindowCheckPlacement { params }
-+}
-+
-+#[test]
-+fn first_free_window_opens_centered_then_they_cascade() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            add_sized(1, 400, 300),
-+            add_sized(2, 400, 300),
-+            add_sized(3, 400, 300),
-+        ],
-+    );
-+
-+    let ws = active_ws(&layout);
-+    assert_pos(floating_pos(ws, 1), 440., 210.);
-+    assert_pos(floating_pos(ws, 2), 472., 242.);
-+    assert_pos(floating_pos(ws, 3), 504., 274.);
-+}
-+
-+#[test]
-+fn cascade_returns_to_the_top_left() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            add_sized(1, 1000, 600),
-+            add_sized(2, 1000, 600),
-+            add_sized(3, 1000, 600),
-+            add_sized(4, 1000, 600),
-+        ],
-+    );
-+
-+    let ws = active_ws(&layout);
-+    // Centered at (140, 60); the next fits at (172, 92); the one after would leave the screen.
-+    assert_pos(floating_pos(ws, 1), 140., 60.);
-+    assert_pos(floating_pos(ws, 2), 172., 92.);
-+    assert_pos(floating_pos(ws, 3), 0., 0.);
-+    assert_pos(floating_pos(ws, 4), 32., 32.);
-+}
-+
-+#[test]
-+fn cascade_follows_the_window_in_use() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            add_sized(1, 400, 300),
-+            add_sized(2, 400, 300),
-+            Op::FocusWindow(1),
-+            add_sized(3, 400, 300),
-+        ],
-+    );
-+
-+    let ws = active_ws(&layout);
-+    let pos = floating_pos(ws, 2);
-+    assert_pos(floating_pos(ws, 3), pos.x, pos.y);
-+}
-+
-+#[test]
-+fn columns_workspace_keeps_niri_placement() {
-+    let mut dialog = TestWindowParams::new(2);
-+    dialog.is_floating = true;
-+    dialog.bbox = Rectangle::from_size(Size::from((400, 300)));
-+
-+    let layout = check_ops([
-+        Op::AddOutput(1),
-+        Op::AddWindow {
-+            params: TestWindowParams::new(1),
-+        },
-+        Op::AddWindow { params: dialog },
-+    ]);
-+
-+    // niri centers a new floating window.
-+    assert_pos(floating_pos(active_ws(&layout), 2), 440., 210.);
-+}
 diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
-index 970d3dd8..c838642c 100644
+index 9436d1ce..a2c28f49 100644
 --- a/src/layout/workspace.rs
 +++ b/src/layout/workspace.rs
 @@ -1,4 +1,4 @@
@@ -256,7 +56,7 @@ index 970d3dd8..c838642c 100644
  use std::cmp::max;
  use std::rc::Rc;
  use std::time::Duration;
-@@ -658,8 +658,8 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -658,8 +658,8 @@
          is_floating: bool,
          anim: Option<niri_config::Animation>,
      ) {
@@ -268,7 +68,7 @@ index 970d3dd8..c838642c 100644
          self.enter_output_for_window(tile.window());
          tile.restore_to_floating = is_floating;
 diff --git a/src/layout/workspace/free.rs b/src/layout/workspace/free.rs
-index 9ee1f3d1..f9efebef 100644
+index 03e7837b..efb6b1de 100644
 --- a/src/layout/workspace/free.rs
 +++ b/src/layout/workspace/free.rs
 @@ -14,13 +14,19 @@
@@ -292,7 +92,7 @@ index 9ee1f3d1..f9efebef 100644
  use crate::layout::{LayoutElement, Options};
  use crate::utils::transaction::Transaction;
  
-@@ -127,11 +133,13 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -127,11 +133,13 @@
      }
  
      /// Where a window added to a free workspace goes: always to the floating layout, which niri's
@@ -307,7 +107,7 @@ index 9ee1f3d1..f9efebef 100644
      ) -> (WorkspaceAddWindowTarget<'a, W>, bool) {
          if !self.is_free() {
              return (target, is_floating);
-@@ -141,9 +149,38 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -141,7 +149,36 @@
              WorkspaceAddWindowTarget::NewColumnAt(_) => WorkspaceAddWindowTarget::Auto,
              target => target,
          };
@@ -316,8 +116,8 @@ index 9ee1f3d1..f9efebef 100644
 +            self.place_new_floating_tile(tile);
 +        }
          (target, true)
-     }
- 
++    }
++
 +    /// Cascades a window that has no place of its own: a title strip lower and to the right of the
 +    /// window on top, or at the top left of the working area when it would leave it there. The
 +    /// first window is left to niri, which centers it.
@@ -341,8 +141,6 @@ index 9ee1f3d1..f9efebef 100644
 +            pos = area.loc;
 +        }
 +        tile.floating_pos = Some(self.floating.logical_to_size_frac(pos));
-+    }
-+
+     }
+ 
      /// Floats the windows that arrived in the columns of a free workspace as a column.
-     pub(super) fn free_after_adding_to_columns(&mut self) {
-         if self.is_free() {

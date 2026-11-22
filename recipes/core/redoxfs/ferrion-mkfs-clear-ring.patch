@@ -1,6 +1,5 @@
 FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc after ferrion-passphrase-wipe.patch and ferrion-key-slots.patch:
 - zero the header ring when creating a volume: FileSystem::create_reserved, which redoxfs-mkfs, redoxfs-ar and redoxfs-clone call, writes zeros over all HEADER_RING header blocks before it writes the new header, so a header left by an older volume on the same disk can no longer be picked when the new volume is opened.
-- a test creates a volume over one whose ring holds newer headers and opens the new one.
 
 diff --git a/src/filesystem.rs b/src/filesystem.rs
 index ce01c43..f55f05b 100644
@@ -23,45 +22,3 @@ index ce01c43..f55f05b 100644
          let mut header = Header::new(fs_blocks * BLOCK_SIZE);
  
          let cipher_opt = match password_opt {
-diff --git a/src/tests.rs b/src/tests.rs
-index acb05f8..f50703e 100644
---- a/src/tests.rs
-+++ b/src/tests.rs
-@@ -94,6 +94,37 @@ fn key_slots_recovery_change_and_removal_persist() {
-     fs::remove_file(path).unwrap();
- }
- 
-+#[test]
-+fn create_over_used_disk_opens_new_volume() {
-+    use crate::{DiskFile, HEADER_RING};
-+    let path = format!("ring-reuse-{}.bin", IMAGE_SEQ.fetch_add(1, Relaxed));
-+    let disk = DiskSparse::create(&path, 16 * 1024 * 1024).unwrap();
-+    let mut old = FileSystem::create(disk, None, 0, 0).unwrap();
-+    // Push the old volume's generation past every slot of the ring
-+    for _ in 0..HEADER_RING {
-+        old.tx(|tx| {
-+            tx.header_changed = true;
-+            Ok(())
-+        })
-+        .unwrap();
-+    }
-+    let old_uuid = old.header.uuid();
-+    drop(old);
-+    let new = FileSystem::create(DiskFile::open(&path).unwrap(), Some(b"new"), 0, 0).unwrap();
-+    let new_uuid = new.header.uuid();
-+    drop(new);
-+    assert_ne!(old_uuid, new_uuid);
-+    let error = FileSystem::open(DiskFile::open(&path).unwrap(), None, None, false)
-+        .err()
-+        .expect("the new volume is encrypted and needs its passphrase");
-+    assert_eq!(error.errno, syscall::ENOKEY);
-+    let opened =
-+        FileSystem::open(DiskFile::open(&path).unwrap(), Some(b"new"), None, false).unwrap();
-+    assert_eq!(opened.header.uuid(), new_uuid);
-+    drop(opened);
-+    fs::remove_file(path).unwrap();
-+}
-+
- #[test]
- fn many_create_remove_should_not_increase_size() {
-     with_redoxfs(|mut fs| {

@@ -1,21 +1,21 @@
 diff --git a/dhcpd/src/main.rs b/dhcpd/src/main.rs
 --- a/dhcpd/src/main.rs
 +++ b/dhcpd/src/main.rs
-@@ -98,6 +98,14 @@
+@@ -96,6 +96,14 @@
+             self.bytes[5]
+         )
      }
- }
- 
++}
++
 +fn first_dns_server(data: &[u8]) -> Option<[u8; 4]> {
 +    // Option 6 contains one or more IPv4 addresses in preference order.
 +    if data.is_empty() || data.len() % 4 != 0 {
 +        return None;
 +    }
 +    Some([data[0], data[1], data[2], data[3]])
-+}
-+
- fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
-     let current_mac = MacAddr::from_str(get_iface_cfg_value(iface, "mac")?.trim());
+ }
  
+ fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
 @@ -243,8 +251,8 @@
                                  if verbose {
                                      println!("DHCP: Domain Name Server: {data:?}");
@@ -42,21 +42,9 @@ diff --git a/dhcpd/src/main.rs b/dhcpd/src/main.rs
 -                }
 -                dns = quad9;
 -            }
-+        let dns = dns_option.unwrap_or([9, 9, 9, 9]);
-+        let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
- 
+-
 -            let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
-+        try_fmt!(
-+            set_cfg_value("resolv/nameserver", &nameserver),
-+            "failed to set name server"
-+        );
-+        // User namespaces cannot open netcfg. Publish the same server through
-+        // the resolver's existing, world-readable configuration file.
-+        try_fmt!(
-+            std::fs::write("/etc/net/dns", &nameserver),
-+            "failed to publish name server"
-+        );
- 
+-
 -            try_fmt!(
 -                set_cfg_value("resolv/nameserver", &nameserver),
 -                "failed to set name server"
@@ -68,28 +56,22 @@ diff --git a/dhcpd/src/main.rs b/dhcpd/src/main.rs
 -            }
 -        } else {
 -            println!("DHCP: No DNS resolver");
++        let dns = dns_option.unwrap_or([9, 9, 9, 9]);
++        let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
++
++        try_fmt!(
++            set_cfg_value("resolv/nameserver", &nameserver),
++            "failed to set name server"
++        );
++        // User namespaces cannot open netcfg. Publish the same server through
++        // the resolver's existing, world-readable configuration file.
++        try_fmt!(
++            std::fs::write("/etc/net/dns", &nameserver),
++            "failed to publish name server"
++        );
++
 +        if verbose {
 +            println!("DHCP: New DNS: {nameserver}");
          }
      }
  
-@@ -465,6 +464,19 @@
- #[cfg(test)]
- mod test {
-     use super::MacAddr;
-+
-+    #[test]
-+    fn dns_option_uses_first_server() {
-+        use super::first_dns_server;
-+        assert_eq!(first_dns_server(&[10, 0, 2, 3]), Some([10, 0, 2, 3]));
-+        assert_eq!(
-+            first_dns_server(&[127, 0, 0, 1, 9, 9, 9, 9]),
-+            Some([127, 0, 0, 1])
-+        );
-+        assert_eq!(first_dns_server(&[]), None);
-+        assert_eq!(first_dns_server(&[10, 0, 2]), None);
-+        assert_eq!(first_dns_server(&[10, 0, 2, 3, 9]), None);
-+    }
- 
-     #[test]
-     fn from_str_test() {

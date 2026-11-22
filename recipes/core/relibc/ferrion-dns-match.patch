@@ -4,10 +4,9 @@ FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b
 - Stop reading a name after 127 compression pointers, and continue after the first pointer of a name.
 
 diff --git a/src/header/netdb/dns/mod.rs b/src/header/netdb/dns/mod.rs
-index 1c2a0ce7..ddcbcbb7 100644
 --- a/src/header/netdb/dns/mod.rs
 +++ b/src/header/netdb/dns/mod.rs
-@@ -100,13 +100,22 @@ impl Dns {
+@@ -100,13 +100,22 @@
          macro_rules! pop_name {
              () => {{
                  let mut name = String::new();
@@ -32,7 +31,7 @@ index 1c2a0ce7..ddcbcbb7 100644
                          continue;
                      }
                      if name_len == 0 {
-@@ -120,8 +129,8 @@ impl Dns {
+@@ -120,8 +129,8 @@
                      }
                  }
  
@@ -44,10 +43,9 @@ index 1c2a0ce7..ddcbcbb7 100644
  
                  name
 diff --git a/src/header/netdb/lookup.rs b/src/header/netdb/lookup.rs
-index a6249ec2..cdcccd6d 100644
 --- a/src/header/netdb/lookup.rs
 +++ b/src/header/netdb/lookup.rs
-@@ -9,11 +9,12 @@ use crate::{
+@@ -9,11 +9,12 @@
  
  use crate::header::{
      bits_arpainet::htons,
@@ -61,7 +59,7 @@ index a6249ec2..cdcccd6d 100644
  
  use super::{
      dns::{Dns, DnsQuery},
-@@ -37,61 +38,7 @@ pub fn lookup_host(host: &str) -> Result<LookupHost, Errno> {
+@@ -37,61 +38,7 @@
  
      let dns_addr = parse_ipv4_string(&dns_string).ok_or(Errno(EINVAL))?;
  
@@ -124,7 +122,7 @@ index a6249ec2..cdcccd6d 100644
      let addrs: Vec<_> = response
          .answers
          .into_iter()
-@@ -115,58 +62,118 @@ pub fn lookup_host(host: &str) -> Result<LookupHost, Errno> {
+@@ -115,58 +62,118 @@
      Ok(addrs)
  }
  
@@ -133,11 +131,7 @@ index a6249ec2..cdcccd6d 100644
 -        return Ok(vec![]);
 -    }
 -    let dns_string = get_dns_server()?;
-+/// How long a lookup waits for its answer.
-+const QUERY_TIMEOUT_SECS: i64 = 7; // TODO: hardcoded, make it configurable?
-+/// The source ports a query is sent from, chosen at random: the dynamic range of RFC 6335.
-+const SOURCE_PORTS: core::ops::RangeInclusive<u16> = 49152..=65535;
- 
+-
 -    if let Some(dns_addr) = parse_ipv4_string(&dns_string) {
 -        let addr: [u8; 4] = addr.s_addr.to_ne_bytes();
 -        // Address intentionally backwards for reverse lookup
@@ -145,9 +139,7 @@ index a6249ec2..cdcccd6d 100644
 -            "{}.{}.{}.{}.in-addr.arpa",
 -            addr[3], addr[2], addr[1], addr[0]
 -        );
-+/// Closes the query's socket however the query ends.
-+struct QuerySocket(c_int);
- 
+-
 -        let mut timespec = timespec::default();
 -        if let Ok(()) = Sys::clock_gettime(
 -            time::constants::CLOCK_REALTIME,
@@ -165,6 +157,19 @@ index a6249ec2..cdcccd6d 100644
 -            }],
 -            answers: vec![],
 -        };
+-
+-        let packet_data = packet.compile();
+-
+-        let mut dest_addr = [0_u8; size_of::<sockaddr_in>()];
+-        *plain::from_mut_bytes(&mut dest_addr).unwrap() = sockaddr_in {
++/// How long a lookup waits for its answer.
++const QUERY_TIMEOUT_SECS: i64 = 7; // TODO: hardcoded, make it configurable?
++/// The source ports a query is sent from, chosen at random: the dynamic range of RFC 6335.
++const SOURCE_PORTS: core::ops::RangeInclusive<u16> = 49152..=65535;
++
++/// Closes the query's socket however the query ends.
++struct QuerySocket(c_int);
++
 +impl Drop for QuerySocket {
 +    fn drop(&mut self) {
 +        let _ = Sys::close(self.0);
@@ -178,16 +183,13 @@ index a6249ec2..cdcccd6d 100644
 +    }
 +    Ok(bytes)
 +}
- 
--        let packet_data = packet.compile();
++
 +fn monotonic_now() -> Result<timespec, Errno> {
 +    let mut now = timespec::default();
 +    Sys::clock_gettime(time::constants::CLOCK_MONOTONIC, Out::from_mut(&mut now))?;
 +    Ok(now)
 +}
- 
--        let mut dest_addr = [0_u8; size_of::<sockaddr_in>()];
--        *plain::from_mut_bytes(&mut dest_addr).unwrap() = sockaddr_in {
++
 +/// Binds `sock` to a random source port, trying again while the port is taken.
 +fn bind_random_port(sock: c_int) -> Result<(), Errno> {
 +    let span = u32::from(SOURCE_PORTS.end() - SOURCE_PORTS.start()) + 1;
@@ -204,14 +206,16 @@ index a6249ec2..cdcccd6d 100644
 +            sin_addr: in_addr { s_addr: 0 },
              ..Default::default()
          };
+-
+-        let sock = Sys::socket(AF_INET, SOCK_DGRAM, i32::from(IPPROTO_UDP))?;
+-
 +        match Sys::bind(sock, &local) {
 +            Err(Errno(EADDRINUSE)) if tries < 16 => tries += 1,
 +            result => return result,
 +        }
 +    }
 +}
- 
--        let sock = Sys::socket(AF_INET, SOCK_DGRAM, i32::from(IPPROTO_UDP))?;
++
 +/// Whether `reply` answers the query with ID `id` for `name`'s records of type
 +/// `q_type`: a response with the same ID and the same single question, the name
 +/// compared without regard to case (RFC 5452, section 9.1).
@@ -229,7 +233,7 @@ index a6249ec2..cdcccd6d 100644
 +            _ => false,
 +        }
 +}
- 
++
 +/// Sends a query for `name`'s records of type `q_type` to the server at `dns_addr`
 +/// from a random source port with a random ID, and returns the first reply that
 +/// answers it. The socket is connected to the server's address and port 53, so the
@@ -282,7 +286,7 @@ index a6249ec2..cdcccd6d 100644
              sys_socket::constants::SOL_SOCKET,
              sys_socket::constants::SO_RCVTIMEO,
              unsafe {
-@@ -177,34 +184,51 @@ pub fn lookup_addr(addr: &in_addr) -> Result<Vec<Vec<u8>>, Errno> {
+@@ -177,34 +184,51 @@
              },
          );
  
@@ -313,6 +317,7 @@ index a6249ec2..cdcccd6d 100644
 -                Ok(names)
 -            }
 -            Err(_err) => Err(Errno(EINVAL)),
+-        }
 +        let count = match Sys::recvfrom(sock.0, Out::from_mut(&mut buf), 0, None) {
 +            Ok((count, _)) => count,
 +            Err(Errno(EAGAIN | EWOULDBLOCK | ETIMEDOUT)) => return Err(Errno(ETIMEDOUT)),
@@ -322,7 +327,7 @@ index a6249ec2..cdcccd6d 100644
 +            && answers_query(&reply, id, name, q_type)
 +        {
 +            return Ok(reply);
-         }
++        }
 +    }
 +}
 +
@@ -361,61 +366,3 @@ index a6249ec2..cdcccd6d 100644
      } else {
          Err(Errno(EINVAL))
      }
-@@ -285,6 +309,57 @@ mod tests {
-         }
-     }
- 
-+    /// A reply with ID `id`, flags `flags` and one question for `name` of type
-+    /// `q_type`, answered with 192.0.2.7.
-+    fn reply(id: u16, flags: u16, name: &[u8], q_type: u16) -> alloc::vec::Vec<u8> {
-+        let mut data = alloc::vec::Vec::new();
-+        for word in [id, flags, 1, 1, 0, 0] {
-+            data.extend_from_slice(&word.to_be_bytes());
-+        }
-+        for label in name.split(|byte| *byte == b'.') {
-+            data.push(label.len() as u8);
-+            data.extend_from_slice(label);
-+        }
-+        data.push(0);
-+        data.extend_from_slice(&q_type.to_be_bytes());
-+        data.extend_from_slice(&1u16.to_be_bytes());
-+        // The answer names the question by a pointer to offset 12.
-+        data.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 7]);
-+        data
-+    }
-+
-+    #[test]
-+    fn only_the_reply_to_this_query_is_taken() {
-+        use super::{Dns, answers_query};
-+        let matches =
-+            |data: &[u8]| answers_query(&Dns::parse(data).unwrap(), 0x1234, "Host.Test", 1);
-+        assert!(matches(&reply(0x1234, 0x8180, b"host.test", 1)));
-+        assert!(matches(&reply(0x1234, 0x8183, b"HOST.TEST", 1)));
-+        // Wrong ID, not a response, another opcode, another name or type.
-+        assert!(!matches(&reply(0x1235, 0x8180, b"host.test", 1)));
-+        assert!(!matches(&reply(0x1234, 0x0100, b"host.test", 1)));
-+        assert!(!matches(&reply(0x1234, 0x8980, b"host.test", 1)));
-+        assert!(!matches(&reply(0x1234, 0x8180, b"other.test", 1)));
-+        assert!(!matches(&reply(0x1234, 0x8180, b"host.test", 28)));
-+        let answer = Dns::parse(&reply(0x1234, 0x8180, b"host.test", 1)).unwrap();
-+        assert_eq!(answer.answers[0].name, "host.test");
-+        assert_eq!(answer.answers[0].data, [192, 0, 2, 7]);
-+    }
-+
-+    #[test]
-+    fn a_name_pointer_loop_is_an_error() {
-+        use super::Dns;
-+        let mut data = reply(0x1234, 0x8180, b"host.test", 1);
-+        // The answer's name points at itself.
-+        let at = data.len() - 16;
-+        data[at + 1] = at as u8;
-+        assert!(Dns::parse(&data).is_err());
-+        // Two names that point at each other.
-+        let mut data = reply(0x1234, 0x8180, b"host.test", 1);
-+        data[12..14].copy_from_slice(&[0xc0, at as u8]);
-+        assert!(Dns::parse(&data).is_err());
-+    }
-+
-     // Actual response from a query
-     const DNS_GOOGLE: &[u8] = &[3, 100, 110, 115, 6, 103, 111, 111, 103, 108, 101, 0];
-     const EXPECTED_DNS_GOOGLE: &str = "dns.google\0";

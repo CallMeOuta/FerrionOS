@@ -1,8 +1,7 @@
 diff --git a/src/bin/tar.rs b/src/bin/tar.rs
-index bafd9ff..555f9c9 100644
 --- a/src/bin/tar.rs
 +++ b/src/bin/tar.rs
-@@ -13,34 +13,33 @@ use std::{env, process};
+@@ -13,34 +13,33 @@
  
  use bzip2::read::BzDecoder;
  use filetime::FileTime;
@@ -21,6 +20,7 @@ index bafd9ff..555f9c9 100644
 -                println!("{}", entry.path().display());
 -                ar.append_path(entry.path())?;
 -            }
+-        }
 +fn create_inner<T: Write>(inputs: &[(PathBuf, String)], ar: &mut Builder<T>, verbose: bool) -> Result<()> {
 +    for (directory, input) in inputs {
 +        env::set_current_dir(directory)?;
@@ -31,19 +31,11 @@ index bafd9ff..555f9c9 100644
 +            ar.append_dir_all(input, input)?;
 +        } else {
 +            ar.append_path(input)?;
-         }
--    } else {
--        println!("{}", input);
--        ar.append_path(input)?;
-     }
--
--    Ok(())
++        }
++    }
 +    ar.finish()
- }
- 
--fn create(input: &str, tar: &str) -> Result<()> {
--    if tar == "-" {
--        create_inner(input, &mut Builder::new(stdout()))
++}
++
 +fn create<T: Write>(output: T, inputs: &[(PathBuf, String)], gzip: bool, verbose: bool) -> Result<()> {
 +    if gzip {
 +        let mut encoder = GzipEncoder::new(output)?;
@@ -51,12 +43,23 @@ index bafd9ff..555f9c9 100644
 +        encoder.finish().into_result()?;
 +        Ok(())
      } else {
+-        println!("{}", input);
+-        ar.append_path(input)?;
+-    }
+-
+-    Ok(())
+-}
+-
+-fn create(input: &str, tar: &str) -> Result<()> {
+-    if tar == "-" {
+-        create_inner(input, &mut Builder::new(stdout()))
+-    } else {
 -        create_inner(input, &mut Builder::new(File::create(tar)?))
 +        create_inner(inputs, &mut Builder::new(output), verbose)
      }
  }
  
-@@ -54,11 +53,11 @@ fn list_inner<T: Read>(ar: &mut Archive<T>) -> Result<()> {
+@@ -54,11 +53,11 @@
      Ok(())
  }
  
@@ -72,7 +75,7 @@ index bafd9ff..555f9c9 100644
      }
  }
  
-@@ -133,11 +132,18 @@ fn extract_inner<T: Read>(ar: &mut Archive<T>, verbose: bool, strip: usize) -> R
+@@ -133,11 +132,18 @@
      Ok(())
  }
  
@@ -93,31 +96,10 @@ index bafd9ff..555f9c9 100644
          let mut magic = [0; 6];
          file.read_exact(&mut magic)?;
          file.rewind()?;
-@@ -166,86 +172,91 @@ fn extract(tar: &Path, verbose: bool, strip: usize) -> Result<()> {
+@@ -166,86 +172,91 @@
      }
  }
  
--fn main() {
--    let mut args = env::args().skip(1);
--    if let Some(op) = args.next() {
--        match op.as_str() {
--            "c" => {
--                if let Some(input) = args.next() {
--                    if let Err(err) = create(&input, "-") {
--                        eprintln!("tar: create: failed: {}", err);
--                        process::exit(1);
--                    }
--                } else {
--                    eprintln!("tar: create: no input specified: {}", op);
--                    process::exit(1);
--                }
--            }
--            "cf" => {
--                if let Some(tar) = args.next() {
--                    if let Some(input) = args.next() {
--                        if let Err(err) = create(&input, &tar) {
--                            eprintln!("tar: create: failed: {}", err);
--                            process::exit(1);
 +fn run() -> Result<()> {
 +    let invalid = |message| Error::new(ErrorKind::InvalidInput, message);
 +    let origin = env::current_dir()?;
@@ -151,14 +133,8 @@ index bafd9ff..555f9c9 100644
 +                    'c' | 'x' | 't' => {
 +                        if operation.replace(flag).is_some() {
 +                            return Err(invalid("specify exactly one of c, x or t"));
-                         }
--                    } else {
--                        eprintln!("tar: create: no input specified: {}", op);
--                        process::exit(1);
-                     }
--                } else {
--                    eprintln!("tar: create: no tarfile specified: {}", op);
--                    process::exit(1);
++                        }
++                    }
 +                    'z' => gzip = true,
 +                    'v' => verbose = true,
 +                    'f' => {
@@ -170,14 +146,8 @@ index bafd9ff..555f9c9 100644
 +                        archive = if name == "-" { PathBuf::from("-") } else { origin.join(name) };
 +                    }
 +                    _ => return Err(invalid("unknown option; use -c, -x, -t, -z, -v, -f or -C")),
-                 }
-             }
--            "t" | "tf" => {
--                let tar = args.next().unwrap_or_else(|| "-".to_string());
--                if let Err(err) = list(&tar) {
--                    eprintln!("tar: list: failed: {}", err);
--                    process::exit(1);
--                }
++                }
++            }
 +        } else {
 +            inputs.push((directory.clone(), arg));
 +        }
@@ -187,7 +157,69 @@ index bafd9ff..555f9c9 100644
 +        Some('c') => {
 +            if inputs.is_empty() {
 +                return Err(invalid("no input specified"));
-             }
++            }
++            if archive == Path::new("-") {
++                create(stdout(), &inputs, gzip, verbose)
++            } else {
++                create(File::create(archive)?, &inputs, gzip, verbose)
++            }
++        }
++        Some('x') => {
++            if !inputs.is_empty() {
++                return Err(invalid("selective extraction is not supported"));
++            }
++            env::set_current_dir(directory)?;
++            extract(&archive, gzip, verbose, strip)
++        }
++        Some('t') => {
++            if archive == Path::new("-") {
++                list(stdin(), gzip)
++            } else {
++                list(File::open(archive)?, gzip)
++            }
++        }
++        _ => Err(invalid("specify one of -c, -x or -t")),
++    }
++}
++
+ fn main() {
+-    let mut args = env::args().skip(1);
+-    if let Some(op) = args.next() {
+-        match op.as_str() {
+-            "c" => {
+-                if let Some(input) = args.next() {
+-                    if let Err(err) = create(&input, "-") {
+-                        eprintln!("tar: create: failed: {}", err);
+-                        process::exit(1);
+-                    }
+-                } else {
+-                    eprintln!("tar: create: no input specified: {}", op);
+-                    process::exit(1);
+-                }
+-            }
+-            "cf" => {
+-                if let Some(tar) = args.next() {
+-                    if let Some(input) = args.next() {
+-                        if let Err(err) = create(&input, &tar) {
+-                            eprintln!("tar: create: failed: {}", err);
+-                            process::exit(1);
+-                        }
+-                    } else {
+-                        eprintln!("tar: create: no input specified: {}", op);
+-                        process::exit(1);
+-                    }
+-                } else {
+-                    eprintln!("tar: create: no tarfile specified: {}", op);
+-                    process::exit(1);
+-                }
+-            }
+-            "t" | "tf" => {
+-                let tar = args.next().unwrap_or_else(|| "-".to_string());
+-                if let Err(err) = list(&tar) {
+-                    eprintln!("tar: list: failed: {}", err);
+-                    process::exit(1);
+-                }
+-            }
 -            "x" | "xf" | "xvf" => {
 -                let mut tar = None;
 -                let mut strip = 0;
@@ -220,86 +252,18 @@ index bafd9ff..555f9c9 100644
 -                    eprintln!("tar: extract: failed: {}", err);
 -                    process::exit(1);
 -                }
-+            if archive == Path::new("-") {
-+                create(stdout(), &inputs, gzip, verbose)
-+            } else {
-+                create(File::create(archive)?, &inputs, gzip, verbose)
-+            }
-+        }
-+        Some('x') => {
-+            if !inputs.is_empty() {
-+                return Err(invalid("selective extraction is not supported"));
-             }
+-            }
 -            _ => {
 -                eprintln!("tar: {}: unknown operation\n", op);
 -                eprintln!("tar: need to specify c[f] (create), t[f] (list), or x[f] (extract)");
 -                process::exit(1);
-+            env::set_current_dir(directory)?;
-+            extract(&archive, gzip, verbose, strip)
-+        }
-+        Some('t') => {
-+            if archive == Path::new("-") {
-+                list(stdin(), gzip)
-+            } else {
-+                list(File::open(archive)?, gzip)
-             }
-         }
+-            }
+-        }
 -    } else {
 -        eprintln!("tar: no operation");
 -        eprintln!("tar: need to specify cf (create), tf (list), or xf (extract)");
-+        _ => Err(invalid("specify one of -c, -x or -t")),
-+    }
-+}
-+
-+fn main() {
 +    if let Err(err) = run() {
 +        eprintln!("tar: {}", err);
          process::exit(1);
      }
  }
-diff --git a/tests/tar.rs b/tests/tar.rs
-new file mode 100644
-index 0000000..204fd95
---- /dev/null
-+++ b/tests/tar.rs
-@@ -0,0 +1,40 @@
-+extern crate assert_cmd;
-+extern crate tempfile;
-+
-+use assert_cmd::Command;
-+use std::fs;
-+use tempfile::tempdir;
-+
-+#[test]
-+fn gzip_round_trip_with_directory_and_relative_archive() {
-+    let work = tempdir().unwrap();
-+    let root = work.path();
-+    fs::create_dir_all(root.join("input/empty")).unwrap();
-+    fs::create_dir(root.join("output")).unwrap();
-+    fs::write(root.join("input/message"), b"archive payload\n").unwrap();
-+    fs::write(root.join("second"), b"second payload\n").unwrap();
-+    Command::cargo_bin("tar").unwrap().current_dir(root)
-+        .args(&["-czf", "bundle.tar.gz", "-C", "input", ".", "-C", "..", "second"])
-+        .assert().success();
-+    let archive = fs::read(root.join("bundle.tar.gz")).unwrap();
-+    assert_eq!(&archive[..2], &[0x1f, 0x8b]);
-+    Command::cargo_bin("tar").unwrap().current_dir(root)
-+        .args(&["-xzf", "bundle.tar.gz", "-C", "output"])
-+        .assert().success();
-+    assert_eq!(fs::read(root.join("output/message")).unwrap(), b"archive payload\n");
-+    assert_eq!(fs::read(root.join("output/second")).unwrap(), b"second payload\n");
-+    assert!(root.join("output/empty").is_dir());
-+}
-+
-+#[test]
-+fn gzip_standard_streams_and_legacy_flags() {
-+    let work = tempdir().unwrap();
-+    fs::write(work.path().join("message"), b"stream payload\n").unwrap();
-+    let output = Command::cargo_bin("tar").unwrap().current_dir(work.path())
-+        .args(&["czf", "-", "message"]).output().unwrap();
-+    assert!(output.status.success());
-+    assert_eq!(&output.stdout[..2], &[0x1f, 0x8b]);
-+    Command::cargo_bin("tar").unwrap()
-+        .args(&["-tzf", "-"]).write_stdin(output.stdout)
-+        .assert().success().stdout("message\n");
-+}

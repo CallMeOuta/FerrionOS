@@ -6,7 +6,6 @@ FerrionOS change to base (MIT license, kept), made against upstream commit 20f75
 - dhcpd: use a random transaction ID; take only replies that carry it, the client's hardware address, the expected message type and well-formed options; ask for broadcast replies and configure the address once it is acknowledged.
 
 diff --git a/dhcpd/src/main.rs b/dhcpd/src/main.rs
-index 95fe229f..78c69a0d 100644
 --- a/dhcpd/src/main.rs
 +++ b/dhcpd/src/main.rs
 @@ -1,8 +1,8 @@
@@ -20,7 +19,7 @@ index 95fe229f..78c69a0d 100644
  
  use dhcp::Dhcp;
  
-@@ -106,6 +106,165 @@ fn first_dns_server(data: &[u8]) -> Option<[u8; 4]> {
+@@ -106,6 +106,165 @@
      Some([data[0], data[1], data[2], data[3]])
  }
  
@@ -186,7 +185,7 @@ index 95fe229f..78c69a0d 100644
  fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
      let current_mac = MacAddr::from_str(get_iface_cfg_value(iface, "mac")?.trim());
  
-@@ -123,321 +282,140 @@ fn dhcp(iface: &str, verbose: bool) -> Result<(), String> {
+@@ -123,11 +282,7 @@
          );
      }
  
@@ -199,19 +198,18 @@ index 95fe229f..78c69a0d 100644
  
      let socket = try_fmt!(UdpSocket::bind(("0.0.0.0", 68)), "failed to bind udp");
      try_fmt!(
-         socket.connect(SocketAddr::from(([255, 255, 255, 255], 67))),
+@@ -135,309 +290,132 @@
          "failed to connect udp"
      );
--    try_fmt!(
+     try_fmt!(
 -        socket.set_read_timeout(Some(Duration::new(30, 0))),
 -        "failed to set read timeout"
 -    );
-     try_fmt!(
+-    try_fmt!(
          socket.set_write_timeout(Some(Duration::new(30, 0))),
          "failed to set write timeout"
      );
-+    let deadline = Instant::now() + Duration::new(30, 0);
- 
+-
 -    {
 -        let mut discover = Dhcp {
 -            op: 1,
@@ -242,7 +240,56 @@ index 95fe229f..78c69a0d 100644
 -                0x00,
 -                0x00,
 -                0x00,
--            ],
++    let deadline = Instant::now() + Duration::new(30, 0);
++
++    send(
++        &socket,
++        &message(xid, current_mac, &[53, 1, DHCPDISCOVER, 255]),
++    )
++    .map_err(|err| format!("discover: {err}"))?;
++    if verbose {
++        println!("DHCP: Sent Discover");
++    }
++
++    let offer = receive(&socket, deadline, verbose, |data| {
++        parse_reply(data, xid, current_mac.bytes).and_then(accept_offer)
++    })
++    .map_err(|err| format!("offer: {err}"))?;
++    if verbose {
++        println!("DHCP: Offer: {offer:?}");
++    }
++
++    // If the offer named no server, use "0.0.0.0"
++    let server_id = offer.server_id.unwrap_or([0, 0, 0, 0]);
++    let [a, b, c, d] = offer.yiaddr;
++    let [s0, s1, s2, s3] = server_id;
++    send(
++        &socket,
++        &message(
++            xid,
++            current_mac,
++            &[
++                // DHCP Message Type (Request)
++                53,
++                1,
++                DHCPREQUEST,
++                // Requested IP Address
++                50,
++                4,
++                a,
++                b,
++                c,
++                d,
++                // Server Identifier - use Option 54 from the Offer
++                54,
++                4,
++                s0,
++                s1,
++                s2,
++                s3,
++                // End
++                255,
+             ],
 -            sname: [0; 64],
 -            file: [0; 128],
 -            magic: 0x63825363u32.to_be(),
@@ -265,34 +312,70 @@ index 95fe229f..78c69a0d 100644
 -        };
 -
 -        let _sent = try_fmt!(socket.send(discover_data), "failed to send discover");
--
--        if verbose {
++        ),
++    )
++    .map_err(|err| format!("request: {err}"))?;
++    if verbose {
++        println!("DHCP: Sent Request");
++    }
++
++    let ack = receive(&socket, deadline, verbose, |data| {
++        parse_reply(data, xid, current_mac.bytes).and_then(|reply| accept_answer(reply, &offer))
++    })
++    .map_err(|err| format!("ack: {err}"))?;
++    if ack.message_type == DHCPNAK {
++        return Err("the server refused the offered address".to_string());
++    }
++    if verbose {
++        println!("DHCP: Ack: {ack:?}");
++    }
++
++    // The address is configured only once the server has acknowledged it. The
++    // acknowledgment's parameters come first, the offer's fill what it leaves out.
++    let mask_len = if let Some(subnet) = ack.subnet.or(offer.subnet) {
++        (!u32::from_be_bytes(subnet)).leading_zeros()
++    } else {
++        println!("DHCP: No subnet mask");
++        0
++    };
++
++    let new_ips = format!("{a}.{b}.{c}.{d}/{mask_len}\n");
++    try_fmt!(
++        set_iface_cfg_value(iface, "addr/set", &new_ips),
++        "failed to set ip"
++    );
++
++    if verbose {
++        let new_ip = try_fmt!(get_iface_cfg_value(iface, "addr/list"), "failed to get ip");
++        println!("DHCP: New IP: {}", new_ip.trim());
++    }
++
++    if let Some(router) = ack.router.or(offer.router) {
++        let default_route = format!(
++            "default via {}.{}.{}.{}",
++            router[0], router[1], router[2], router[3]
++        );
++
++        try_fmt!(
++            set_cfg_value("route/add", &default_route),
++            "failed to set default route"
++        );
+ 
+         if verbose {
 -            println!("DHCP: Sent Discover");
 -        }
-+    send(
-+        &socket,
-+        &message(xid, current_mac, &[53, 1, DHCPDISCOVER, 255]),
-+    )
-+    .map_err(|err| format!("discover: {err}"))?;
-+    if verbose {
-+        println!("DHCP: Sent Discover");
-     }
- 
+-    }
+-
 -    let mut offer_data = [0; 65536];
 -    try_fmt!(socket.recv(&mut offer_data), "failed to receive offer");
 -    let offer = unsafe { &*(offer_data.as_ptr() as *const Dhcp) };
-+    let offer = receive(&socket, deadline, verbose, |data| {
-+        parse_reply(data, xid, current_mac.bytes).and_then(accept_offer)
-+    })
-+    .map_err(|err| format!("offer: {err}"))?;
-     if verbose {
+-    if verbose {
 -        println!(
 -            "DHCP: Offer IP: {:?}, Server IP: {:?}",
 -            offer.yiaddr, offer.siaddr
 -        );
-+        println!("DHCP: Offer: {offer:?}");
-     }
- 
+-    }
+-
 -    let mut subnet_option = None;
 -    let mut router_option = None;
 -    let mut dns_option = None;
@@ -391,73 +474,18 @@ index 95fe229f..78c69a0d 100644
 -            let new_ip = try_fmt!(get_iface_cfg_value(iface, "addr/list"), "failed to get ip");
 -            println!("DHCP: New IP: {}", new_ip.trim());
 -        }
-+    // If the offer named no server, use "0.0.0.0"
-+    let server_id = offer.server_id.unwrap_or([0, 0, 0, 0]);
-+    let [a, b, c, d] = offer.yiaddr;
-+    let [s0, s1, s2, s3] = server_id;
-+    send(
-+        &socket,
-+        &message(
-+            xid,
-+            current_mac,
-+            &[
-+                // DHCP Message Type (Request)
-+                53,
-+                1,
-+                DHCPREQUEST,
-+                // Requested IP Address
-+                50,
-+                4,
-+                a,
-+                b,
-+                c,
-+                d,
-+                // Server Identifier - use Option 54 from the Offer
-+                54,
-+                4,
-+                s0,
-+                s1,
-+                s2,
-+                s3,
-+                // End
-+                255,
-+            ],
-+        ),
-+    )
-+    .map_err(|err| format!("request: {err}"))?;
-+    if verbose {
-+        println!("DHCP: Sent Request");
-+    }
- 
+-
 -        if let Some(router) = router_option {
 -            let default_route = format!(
 -                "default via {}.{}.{}.{}",
 -                router[0], router[1], router[2], router[3]
 -            );
-+    let ack = receive(&socket, deadline, verbose, |data| {
-+        parse_reply(data, xid, current_mac.bytes).and_then(|reply| accept_answer(reply, &offer))
-+    })
-+    .map_err(|err| format!("ack: {err}"))?;
-+    if ack.message_type == DHCPNAK {
-+        return Err("the server refused the offered address".to_string());
-+    }
-+    if verbose {
-+        println!("DHCP: Ack: {ack:?}");
-+    }
- 
+-
 -            try_fmt!(
 -                set_cfg_value("route/add", &default_route),
 -                "failed to set default route"
 -            );
-+    // The address is configured only once the server has acknowledged it. The
-+    // acknowledgment's parameters come first, the offer's fill what it leaves out.
-+    let mask_len = if let Some(subnet) = ack.subnet.or(offer.subnet) {
-+        (!u32::from_be_bytes(subnet)).leading_zeros()
-+    } else {
-+        println!("DHCP: No subnet mask");
-+        0
-+    };
- 
+-
 -            if verbose {
 -                let new_router = try_fmt!(get_cfg_value("route/list"), "failed to get ip router");
 -                println!("DHCP: New Router: {}", new_router.trim());
@@ -465,46 +493,26 @@ index 95fe229f..78c69a0d 100644
 -        } else {
 -            println!("DHCP: No router");
 -        }
-+    let new_ips = format!("{a}.{b}.{c}.{d}/{mask_len}\n");
-+    try_fmt!(
-+        set_iface_cfg_value(iface, "addr/set", &new_ips),
-+        "failed to set ip"
-+    );
- 
+-
 -        let dns = dns_option.unwrap_or([9, 9, 9, 9]);
 -        let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
-+    if verbose {
-+        let new_ip = try_fmt!(get_iface_cfg_value(iface, "addr/list"), "failed to get ip");
-+        println!("DHCP: New IP: {}", new_ip.trim());
-+    }
- 
+-
 -        try_fmt!(
 -            set_cfg_value("resolv/nameserver", &nameserver),
 -            "failed to set name server"
-+    if let Some(router) = ack.router.or(offer.router) {
-+        let default_route = format!(
-+            "default via {}.{}.{}.{}",
-+            router[0], router[1], router[2], router[3]
-         );
+-        );
 -        // User namespaces cannot open netcfg. Publish the same server through
 -        // the resolver's existing, world-readable configuration file.
-+
-         try_fmt!(
+-        try_fmt!(
 -            std::fs::write("/etc/net/dns", &nameserver),
 -            "failed to publish name server"
-+            set_cfg_value("route/add", &default_route),
-+            "failed to set default route"
-         );
- 
-         if verbose {
+-        );
+-
+-        if verbose {
 -            println!("DHCP: New DNS: {nameserver}");
-+            let new_router = try_fmt!(get_cfg_value("route/list"), "failed to get ip router");
-+            println!("DHCP: New Router: {}", new_router.trim());
-         }
-+    } else {
-+        println!("DHCP: No router");
-     }
- 
+-        }
+-    }
+-
 -    {
 -        let mut request = Dhcp {
 -            op: 1,
@@ -578,24 +586,12 @@ index 95fe229f..78c69a0d 100644
 -        };
 -
 -        let _sent = try_fmt!(socket.send(request_data), "failed to send request");
-+    let dns = ack.dns.or(offer.dns).unwrap_or([9, 9, 9, 9]);
-+    let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
- 
+-
 -        if verbose {
 -            println!("DHCP: Sent Request");
 -        }
 -    }
-+    try_fmt!(
-+        set_cfg_value("resolv/nameserver", &nameserver),
-+        "failed to set name server"
-+    );
-+    // User namespaces cannot open netcfg. Publish the same server through
-+    // the resolver's existing, world-readable configuration file.
-+    try_fmt!(
-+        std::fs::write("/etc/net/dns", &nameserver),
-+        "failed to publish name server"
-+    );
- 
+-
 -    {
 -        let mut ack_data = [0; 65536];
 -        try_fmt!(socket.recv(&mut ack_data), "failed to receive ack");
@@ -606,114 +602,36 @@ index 95fe229f..78c69a0d 100644
 -                ack.yiaddr, ack.siaddr
 -            );
 -        }
++            let new_router = try_fmt!(get_cfg_value("route/list"), "failed to get ip router");
++            println!("DHCP: New Router: {}", new_router.trim());
++        }
++    } else {
++        println!("DHCP: No router");
++    }
++
++    let dns = ack.dns.or(offer.dns).unwrap_or([9, 9, 9, 9]);
++    let nameserver = format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
++
++    try_fmt!(
++        set_cfg_value("resolv/nameserver", &nameserver),
++        "failed to set name server"
++    );
++    // User namespaces cannot open netcfg. Publish the same server through
++    // the resolver's existing, world-readable configuration file.
++    try_fmt!(
++        std::fs::write("/etc/net/dns", &nameserver),
++        "failed to publish name server"
++    );
++
 +    if verbose {
 +        println!("DHCP: New DNS: {nameserver}");
      }
  
      Ok(())
-@@ -478,6 +456,97 @@ mod test {
-         assert_eq!(first_dns_server(&[10, 0, 2, 3, 9]), None);
-     }
- 
-+    const XID: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
-+    const MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
-+
-+    fn reply(kind: u8, options: &[u8]) -> Vec<u8> {
-+        let mut data = vec![0; 240];
-+        data[..3].copy_from_slice(&[2, 1, 6]);
-+        data[4..8].copy_from_slice(&XID);
-+        data[16..20].copy_from_slice(&[10, 0, 2, 15]);
-+        data[28..34].copy_from_slice(&MAC);
-+        data[236..240].copy_from_slice(&super::MAGIC_COOKIE);
-+        data.extend_from_slice(&[53, 1, kind]);
-+        data.extend_from_slice(options);
-+        data.push(255);
-+        data
-+    }
-+
-+    #[test]
-+    fn a_reply_for_this_client_is_parsed() {
-+        use super::{DHCPOFFER, Reply, parse_reply};
-+        let options = [
-+            1, 4, 255, 255, 255, 0, 3, 4, 10, 0, 2, 2, 6, 8, 10, 0, 2, 3, 9, 9, 9, 9, 54, 4, 10, 0,
-+            2, 2,
-+        ];
-+        assert_eq!(
-+            parse_reply(&reply(DHCPOFFER, &options), XID, MAC),
-+            Some(Reply {
-+                message_type: DHCPOFFER,
-+                yiaddr: [10, 0, 2, 15],
-+                subnet: Some([255, 255, 255, 0]),
-+                router: Some([10, 0, 2, 2]),
-+                dns: Some([10, 0, 2, 3]),
-+                server_id: Some([10, 0, 2, 2]),
-+            })
-+        );
-+    }
-+
-+    #[test]
-+    fn replies_for_other_requests_or_malformed_are_ignored() {
-+        use super::{DHCPOFFER, parse_reply};
-+        let good = reply(DHCPOFFER, &[]);
-+        assert!(parse_reply(&good, XID, MAC).is_some());
-+
-+        let mut other_xid = good.clone();
-+        other_xid[7] ^= 1;
-+        let mut other_mac = good.clone();
-+        other_mac[33] ^= 1;
-+        let mut request = good.clone();
-+        request[0] = 1;
-+        let mut no_cookie = good.clone();
-+        no_cookie[239] = 0;
-+        let short = good[..239].to_vec();
-+        // An option whose length runs past the end of the datagram.
-+        let mut overrun = good[..good.len() - 1].to_vec();
-+        overrun.extend_from_slice(&[6, 8, 10, 0, 2, 3]);
-+        for bad in [other_xid, other_mac, request, no_cookie, short, overrun] {
-+            assert_eq!(parse_reply(&bad, XID, MAC), None);
-+        }
-+        // Known options of the wrong length, and a message without a type.
-+        for options in [
-+            &[1, 3, 255, 255, 255][..],
-+            &[54, 2, 10, 0],
-+            &[3, 5, 10, 0, 2, 2, 1],
-+        ] {
-+            assert_eq!(parse_reply(&reply(DHCPOFFER, options), XID, MAC), None);
-+        }
-+        let mut untyped = good.clone();
-+        untyped[240] = 0;
-+        untyped[241] = 0;
-+        untyped[242] = 0;
-+        assert_eq!(parse_reply(&untyped, XID, MAC), None);
-+    }
-+
-+    #[test]
-+    fn only_the_offering_servers_answer_to_the_offered_address_is_taken() {
-+        use super::{DHCPACK, DHCPNAK, DHCPOFFER, accept_answer, accept_offer, parse_reply};
-+        let server = [54, 4, 10, 0, 2, 2];
-+        let offer = parse_reply(&reply(DHCPOFFER, &server), XID, MAC).unwrap();
-+        let offer = accept_offer(offer).unwrap();
-+        let ack = parse_reply(&reply(DHCPACK, &server), XID, MAC).unwrap();
-+        assert!(accept_offer(ack.clone()).is_none());
-+        assert_eq!(accept_answer(ack.clone(), &offer), Some(ack.clone()));
-+        let nak = parse_reply(&reply(DHCPNAK, &server), XID, MAC).unwrap();
-+        assert!(accept_answer(nak, &offer).is_some());
-+        let other_server = parse_reply(&reply(DHCPACK, &[54, 4, 10, 0, 2, 9]), XID, MAC).unwrap();
-+        assert!(accept_answer(other_server, &offer).is_none());
-+        let mut other_address = ack.clone();
-+        other_address.yiaddr = [10, 0, 2, 16];
-+        assert!(accept_answer(other_address, &offer).is_none());
-+        assert!(accept_answer(offer.clone(), &offer).is_none());
-+    }
-+
-     #[test]
-     fn from_str_test() {
-         let mac = MacAddr {
 diff --git a/drivers/net/virtio-netd/src/scheme.rs b/drivers/net/virtio-netd/src/scheme.rs
-index 73acf46f..962f40ff 100644
 --- a/drivers/net/virtio-netd/src/scheme.rs
 +++ b/drivers/net/virtio-netd/src/scheme.rs
-@@ -15,6 +15,9 @@ pub struct VirtioNet {
+@@ -15,6 +15,9 @@
  
      /// Transmiter Queue.
      tx: Arc<Queue>,
@@ -723,7 +641,7 @@ index 73acf46f..962f40ff 100644
  }
  
  impl VirtioNet {
-@@ -38,33 +41,55 @@ impl VirtioNet {
+@@ -38,33 +41,55 @@
              mac_address,
              rx,
              tx,
@@ -741,15 +659,6 @@ index 73acf46f..962f40ff 100644
 -            // The read would block.
 -            return 0;
 -        };
--
--        let payload_size = used.written as usize - header_size;
--
--        // XXX: The header and packet are added as one output descriptor to the transmit queue,
--        //      and the device is notified of the new entry (see 5.1.5 Device Initialization).
--        let buffer = used.buffers[0].owner::<Dma<[u8]>>().unwrap();
--        // TODO: Check the header.
--        let _header = unsafe { &*(buffer.as_ptr() as *const VirtHeader) };
--        let packet = &buffer[header_size..(header_size + payload_size)];
 +        while let Some(used) = self.rx.pop_completed() {
 +            let copied = {
 +                // XXX: The header and packet are added as one output descriptor to the transmit queue,
@@ -780,8 +689,7 @@ index 73acf46f..962f40ff 100644
 +                }
 +            };
  
--        // Copy the packet into the buffer.
--        target[..payload_size].copy_from_slice(&packet);
+-        let payload_size = used.written as usize - header_size;
 +            // Hand the buffer back to the device for the next packet.
 +            self.rx.post(used.buffers);
 +            if copied != 0 {
@@ -789,6 +697,16 @@ index 73acf46f..962f40ff 100644
 +            }
 +        }
  
+-        // XXX: The header and packet are added as one output descriptor to the transmit queue,
+-        //      and the device is notified of the new entry (see 5.1.5 Device Initialization).
+-        let buffer = used.buffers[0].owner::<Dma<[u8]>>().unwrap();
+-        // TODO: Check the header.
+-        let _header = unsafe { &*(buffer.as_ptr() as *const VirtHeader) };
+-        let packet = &buffer[header_size..(header_size + payload_size)];
+-
+-        // Copy the packet into the buffer.
+-        target[..payload_size].copy_from_slice(&packet);
+-
 -        // Hand the buffer back to the device for the next packet.
 -        self.rx.post(used.buffers);
 -        payload_size
@@ -798,10 +716,9 @@ index 73acf46f..962f40ff 100644
  }
  
 diff --git a/netstack/src/link/ethernet.rs b/netstack/src/link/ethernet.rs
-index 477bec66..068151f2 100644
 --- a/netstack/src/link/ethernet.rs
 +++ b/netstack/src/link/ethernet.rs
-@@ -8,7 +8,7 @@ use smoltcp::storage::PacketMetadata;
+@@ -8,7 +8,7 @@
  use smoltcp::time::{Duration, Instant};
  use smoltcp::wire::{
      ArpOperation, ArpPacket, ArpRepr, EthernetAddress, EthernetFrame, EthernetProtocol,
@@ -810,10 +727,12 @@ index 477bec66..068151f2 100644
  };
  
  use super::LinkDevice;
-@@ -18,6 +18,33 @@ struct Neighbor {
+@@ -16,6 +16,33 @@
+ struct Neighbor {
+     hardware_address: EthernetAddress,
      expires_at: Instant,
- }
- 
++}
++
 +/// The most neighbors the cache holds; senders choose their own addresses, so the
 +/// cache must not grow with them.
 +const MAX_NEIGHBORS: usize = 256;
@@ -839,12 +758,10 @@ index 477bec66..068151f2 100644
 +        }
 +    }
 +    cache.insert(ip, neighbor);
-+}
-+
+ }
+ 
  #[derive(Debug, Default)]
- enum ArpState {
-     #[default]
-@@ -43,6 +70,7 @@ pub struct EthernetLink {
+@@ -43,6 +70,7 @@
      network_file: File,
      hardware_address: Option<EthernetAddress>,
      ip_address: Option<Ipv4Cidr>,
@@ -852,7 +769,7 @@ index 477bec66..068151f2 100644
  }
  
  impl EthernetLink {
-@@ -50,6 +78,8 @@ impl EthernetLink {
+@@ -50,6 +78,8 @@
      const MAX_WAITING_PACKET_COUNT: usize = 10;
      const MTU: usize = 1500;
      const WAITING_PACKET_BUFFER_SIZE: usize = Self::MTU * Self::MAX_WAITING_PACKET_COUNT;
@@ -861,7 +778,7 @@ index 477bec66..068151f2 100644
  
      const NEIGHBOR_LIVE_TIME: Duration = Duration::from_secs(60);
      const ARP_SILENCE_TIME: Duration = Duration::from_secs(1);
-@@ -66,10 +96,13 @@ impl EthernetLink {
+@@ -66,10 +96,13 @@
              waiting_packets,
              hardware_address: None,
              ip_address: None,
@@ -876,7 +793,7 @@ index 477bec66..068151f2 100644
          }
      }
  
-@@ -150,12 +183,14 @@ impl EthernetLink {
+@@ -150,12 +183,14 @@
                      return;
                  }
  
@@ -892,7 +809,7 @@ index 477bec66..068151f2 100644
                  );
  
                  if let ArpOperation::Request = operation {
-@@ -347,17 +382,32 @@ impl LinkDevice for EthernetLink {
+@@ -347,17 +382,32 @@
  
          let mut input_buffer = std::mem::take(&mut self.input_buffer);
          loop {
@@ -902,6 +819,11 @@ index 477bec66..068151f2 100644
 -                } else {
 -                    // No packet to read but we check if we have arp to send
 -                    self.send_arp(now);
+-                }
+-                self.input_buffer = input_buffer;
+-                return None;
+-            }
+-            let packet = EthernetFrame::new_unchecked(&input_buffer[..]);
 +            let len = match self.network_file.read(&mut input_buffer) {
 +                Ok(len) if len > 0 => len,
 +                result => {
@@ -913,9 +835,7 @@ index 477bec66..068151f2 100644
 +                    }
 +                    self.input_buffer = input_buffer;
 +                    return None;
-                 }
--                self.input_buffer = input_buffer;
--                return None;
++                }
 +            };
 +            if len > Self::MAX_FRAME_LEN {
 +                self.oversized_frames += 1;
@@ -928,13 +848,12 @@ index 477bec66..068151f2 100644
 +                    );
 +                }
 +                continue;
-             }
--            let packet = EthernetFrame::new_unchecked(&input_buffer[..]);
++            }
 +            let packet = EthernetFrame::new_unchecked(&input_buffer[..len]);
              let Ok(repr) = EthernetRepr::parse(&packet) else {
                  debug!("Dropped incomming frame on {} (Malformed)", self.name);
                  continue;
-@@ -375,7 +425,7 @@ impl LinkDevice for EthernetLink {
+@@ -375,7 +425,7 @@
              match repr.ethertype {
                  EthernetProtocol::Ipv4 => {
                      self.input_buffer = input_buffer;
@@ -943,79 +862,10 @@ index 477bec66..068151f2 100644
                  }
                  EthernetProtocol::Arp => self.process_arp(packet.payload(), now),
                  _ => continue,
-@@ -409,3 +459,67 @@ impl LinkDevice for EthernetLink {
-         self.ip_address = Some(addr);
-     }
- }
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    fn neighbor(expires_at: u64) -> Neighbor {
-+        Neighbor {
-+            hardware_address: EthernetAddress([2, 0, 0, 0, 0, 1]),
-+            expires_at: Instant::from_secs(expires_at as i64),
-+        }
-+    }
-+
-+    fn ip(n: u32) -> IpAddress {
-+        IpAddress::Ipv4(Ipv4Address::from_bits(0x0a00_0000 + n))
-+    }
-+
-+    #[test]
-+    fn the_neighbor_cache_stays_bounded() {
-+        let mut cache = BTreeMap::new();
-+        let now = Instant::from_secs(10);
-+        for n in 0..10_000 {
-+            insert_neighbor(&mut cache, ip(n), neighbor(70 + u64::from(n)), now);
-+            assert!(cache.len() <= MAX_NEIGHBORS);
-+        }
-+        // The newest entries stayed; the ones closest to expiring left first.
-+        assert!(cache.contains_key(&ip(9_999)));
-+        assert!(!cache.contains_key(&ip(0)));
-+    }
-+
-+    #[test]
-+    fn expired_neighbors_leave_before_live_ones() {
-+        let mut cache = BTreeMap::new();
-+        for n in 0..MAX_NEIGHBORS as u32 {
-+            // Entry 7 alone is still alive at time 100.
-+            let expires_at = if n == 7 { 200 } else { 50 };
-+            insert_neighbor(
-+                &mut cache,
-+                ip(n),
-+                neighbor(expires_at),
-+                Instant::from_secs(0),
-+            );
-+        }
-+        insert_neighbor(
-+            &mut cache,
-+            ip(1_000),
-+            neighbor(160),
-+            Instant::from_secs(100),
-+        );
-+        assert_eq!(cache.len(), 2);
-+        assert!(cache.contains_key(&ip(7)) && cache.contains_key(&ip(1_000)));
-+    }
-+
-+    #[test]
-+    fn a_known_neighbor_is_updated_without_eviction() {
-+        let mut cache = BTreeMap::new();
-+        let now = Instant::from_secs(0);
-+        for n in 0..MAX_NEIGHBORS as u32 {
-+            insert_neighbor(&mut cache, ip(n), neighbor(60), now);
-+        }
-+        insert_neighbor(&mut cache, ip(3), neighbor(120), now);
-+        assert_eq!(cache.len(), MAX_NEIGHBORS);
-+        assert_eq!(cache[&ip(3)].expires_at, Instant::from_secs(120));
-+    }
-+}
 diff --git a/netstack/src/main.rs b/netstack/src/main.rs
-index 86498410..74e08d70 100644
 --- a/netstack/src/main.rs
 +++ b/netstack/src/main.rs
-@@ -15,6 +15,7 @@ mod error;
+@@ -15,6 +15,7 @@
  mod link;
  mod logger;
  mod port_set;
@@ -1023,17 +873,16 @@ index 86498410..74e08d70 100644
  mod router;
  mod scheme;
  
-@@ -84,6 +85,8 @@ fn run(daemon: daemon::Daemon) -> Result<()> {
+@@ -83,6 +84,8 @@
+ 
      let time_path = format!("/scheme/time/{}", syscall::CLOCK_MONOTONIC);
      let time_fd = Fd::open(&time_path, O_RDWR, 0).context("failed to open /scheme/time")?;
- 
-+    random::init().context("failed to open /scheme/rand")?;
 +
++    random::init().context("failed to open /scheme/rand")?;
+ 
      event::user_data! {
          enum EventSource {
-             Network,
 diff --git a/netstack/src/port_set.rs b/netstack/src/port_set.rs
-index 88011ec3..20124ee8 100644
 --- a/netstack/src/port_set.rs
 +++ b/netstack/src/port_set.rs
 @@ -1,9 +1,11 @@
@@ -1050,7 +899,7 @@ index 88011ec3..20124ee8 100644
      ports: BTreeMap<u16, usize>,
  }
  
-@@ -14,28 +16,35 @@ impl PortSet {
+@@ -14,28 +16,35 @@
          }
          Some(PortSet {
              from,
@@ -1099,59 +948,7 @@ index 88011ec3..20124ee8 100644
      }
  
      pub fn claim_port(&mut self, port: u16) -> bool {
-@@ -60,3 +69,49 @@ impl PortSet {
-         }
-     }
- }
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::PortSet;
-+
-+    #[test]
-+    fn ports_start_where_the_random_value_points() {
-+        let mut set = PortSet::new(49_152, 65_535).unwrap();
-+        assert_eq!(set.get_port_from(0), Some(49_152));
-+        assert_eq!(set.get_port_from(16_383), Some(65_535));
-+        // u32::MAX lands on 65,535, which is taken, and wraps past the taken 49,152.
-+        assert_eq!(set.get_port_from(u32::MAX), Some(49_153));
-+        assert_eq!(set.get_port_from(16_384 + 7), Some(49_159));
-+    }
-+
-+    #[test]
-+    fn a_taken_port_moves_to_the_next_free_one_and_wraps() {
-+        let mut set = PortSet::new(49_152, 65_535).unwrap();
-+        assert!(set.claim_port(65_535));
-+        assert_eq!(set.get_port_from(16_383), Some(49_152));
-+        assert_eq!(set.get_port_from(16_383), Some(49_153));
-+    }
-+
-+    #[test]
-+    fn released_ports_are_free_again_and_a_full_set_gives_none() {
-+        let mut set = PortSet::new(10, 12).unwrap();
-+        let ports: Vec<_> = (0..3).map(|i| set.get_port_from(i).unwrap()).collect();
-+        assert_eq!(ports, [10, 11, 12]);
-+        assert_eq!(set.get_port_from(0), None);
-+        set.release_port(11);
-+        assert_eq!(set.get_port_from(0), Some(11));
-+        // A port shared by a duplicated socket stays taken until its last release.
-+        set.acquire_port(12);
-+        set.release_port(12);
-+        assert_eq!(set.get_port_from(2), None);
-+        set.release_port(12);
-+        assert_eq!(set.get_port_from(2), Some(12));
-+    }
-+
-+    #[test]
-+    fn the_whole_icmp_identifier_range_is_usable() {
-+        let mut set = PortSet::new(1, 0xffff).unwrap();
-+        assert_eq!(set.get_port_from(0xfffe), Some(0xffff));
-+        assert_eq!(set.get_port_from(0xfffe), Some(1));
-+    }
-+}
 diff --git a/netstack/src/random.rs b/netstack/src/random.rs
-new file mode 100644
-index 00000000..806b429a
 --- /dev/null
 +++ b/netstack/src/random.rs
 @@ -0,0 +1,38 @@
@@ -1194,10 +991,9 @@ index 00000000..806b429a
 +    Ok(u64::from_ne_bytes(bytes))
 +}
 diff --git a/netstack/src/router/mod.rs b/netstack/src/router/mod.rs
-index 3cfd0a2f..c6d6b1e1 100644
 --- a/netstack/src/router/mod.rs
 +++ b/netstack/src/router/mod.rs
-@@ -39,7 +39,7 @@ impl Router {
+@@ -39,7 +39,7 @@
          }
      }
  
@@ -1206,7 +1002,7 @@ index 3cfd0a2f..c6d6b1e1 100644
  
      pub fn can_recv(&self) -> bool {
          let mut can_recv = false;
-@@ -64,10 +64,13 @@ impl Router {
+@@ -64,10 +64,13 @@
                      break;
                  };
  
@@ -1225,10 +1021,9 @@ index 3cfd0a2f..c6d6b1e1 100644
          }
      }
 diff --git a/netstack/src/scheme/mod.rs b/netstack/src/scheme/mod.rs
-index ce7e3db8..e25b7faf 100644
 --- a/netstack/src/scheme/mod.rs
 +++ b/netstack/src/scheme/mod.rs
-@@ -101,7 +101,10 @@ impl Smolnetd {
+@@ -101,7 +101,10 @@
              |_timestamp, printer| trace!("{}", printer),
          );
  

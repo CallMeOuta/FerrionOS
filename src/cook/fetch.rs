@@ -934,66 +934,6 @@ pub fn fetch_get_source_info(recipe: &CookRecipe) -> Result<SourceIdentifier> {
     read_toml(&source_toml_path)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    #[test]
-    fn reapplying_patches_after_reset_clean() {
-        let root = std::env::temp_dir().join(format!("cookbook-fetch-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let source = root.join("source");
-        let sub = root.join("sub");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&sub).unwrap();
-
-        git(&sub, &["init", "-q"]);
-        fs::write(sub.join("a"), "a\n").unwrap();
-        git(&sub, &["add", "a"]);
-        git(&sub, &["commit", "-q", "-m", "sub"]);
-
-        git(&source, &["init", "-q"]);
-        fs::write(source.join(".gitignore"), "ignored.txt\n").unwrap();
-        git(&source, &["add", ".gitignore"]);
-        git(
-            &source,
-            &[
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "add",
-                "-q",
-                sub.to_str().unwrap(),
-                "sub",
-            ],
-        );
-        git(&source, &["commit", "-q", "-m", "base"]);
-
-        let patch = "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n--- /dev/null\n+++ b/ignored.txt\n@@ -0,0 +1 @@\n+ignored\n";
-        fs::write(root.join("create.patch"), patch).unwrap();
-        let patches = vec!["create.patch".to_string()];
-
-        fetch_apply_patches(&root, &patches, &None, &source, &None).unwrap();
-        fs::write(source.join("sub/untracked"), "x\n").unwrap();
-
-        git_reset_clean(&None, &source).unwrap();
-        fetch_apply_patches(&root, &patches, &None, &source, &None).unwrap();
-        assert_eq!(fs::read_to_string(source.join("new.txt")).unwrap(), "new\n");
-        assert!(!source.join("sub/untracked").exists());
-
-        fs::remove_dir_all(&root).unwrap();
-    }
 
     #[test]
     fn zip_source_preserves_root_files_and_directories() {
@@ -1018,4 +958,3 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
-}

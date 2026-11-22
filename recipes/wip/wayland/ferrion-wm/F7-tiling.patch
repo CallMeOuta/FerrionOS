@@ -19,26 +19,22 @@ Dragging a floating window of a free workspace so that the pointer is
 within 16 pixels of a side edge draws niri's insert hint as the outline
 of that half, and dropping it there tiles it.
 
-Checked: the new randomized-test operations TileFloatingWindow,
-UntileFloatingWindow and TileAndReturnCheck, which tiles a window,
-checks its place and checks that returning gives back its place and
-size, and 8 unit tests: against stubs of the tiling, the key mapping
-and the edge offer, the random test and 5 of the unit tests failed;
-with the code they pass, also with RUN_SLOW_TESTS=1 and 20000 cases;
-`cargo test --all --exclude niri-visual-tests` passes.
+
+Agent-written tests and their test-only helpers were removed under ADR 0025.
+The source commit in the header records the original patch provenance;
+this patch is regenerated against the preceding test-free stage. Upstream
+tests remain, with the config snapshots adapted to the production fields.
 ---
- niri-config/src/binds.rs        |  29 +++-
- niri-ipc/src/lib.rs             |  78 ++++++++-
- src/input/mod.rs                |  24 ++-
- src/layout/floating.rs          |   8 +-
- src/layout/floating/stacking.rs |  99 ++++++++++-
- src/layout/free.rs              |  26 ++-
- src/layout/mod.rs               |  26 ++-
- src/layout/tests.rs             |  58 ++++++-
- src/layout/tests/free.rs        | 297 +++++++++++++++++++++++++++++++-
- src/layout/workspace.rs         |  31 +++-
- src/layout/workspace/free.rs    | 107 +++++++++++-
- 11 files changed, 760 insertions(+), 23 deletions(-)
+ niri-config/src/binds.rs | 29
+ niri-ipc/src/lib.rs | 78
+ src/input/mod.rs | 24
+ src/layout/floating.rs | 8
+ src/layout/floating/stacking.rs | 99
+ src/layout/free.rs | 26
+ src/layout/mod.rs | 26
+ src/layout/workspace.rs | 31
+ src/layout/workspace/free.rs | 107
+ 9 files changed, 409 insertions(+), 19 deletions(-)
 
 diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
 index acfb3290..10cafcf0 100644
@@ -62,7 +58,7 @@ index acfb3290..10cafcf0 100644
      WorkspaceReferenceArg,
  };
  use smithay::input::keyboard::keysyms::KEY_NoSymbol;
-@@ -502,6 +503,16 @@ pub enum Action {
+@@ -502,6 +503,16 @@
      MinimizeWindow,
      #[knuffel(skip)]
      MinimizeWindowById(u64),
@@ -79,7 +75,7 @@ index acfb3290..10cafcf0 100644
      MoveWindowToFloating,
      #[knuffel(skip)]
      MoveWindowToFloatingById(u64),
-@@ -879,6 +890,18 @@ impl From<niri_ipc::Action> for Action {
+@@ -879,6 +890,18 @@
              // ferrion-wm 2026-11-21 (F6).
              niri_ipc::Action::MinimizeWindow { id: None } => Self::MinimizeWindow,
              niri_ipc::Action::MinimizeWindow { id: Some(id) } => Self::MinimizeWindowById(id),
@@ -109,7 +105,7 @@ index 6a44e384..e2a4c83d 100644
  //! Types for communicating with niri via IPC.
  //!
  //! After connecting to the niri socket, you can send [`Request`]s. Niri will process them one by
-@@ -997,6 +998,32 @@ pub enum Action {
+@@ -997,6 +998,32 @@
          #[cfg_attr(feature = "clap", arg(long))]
          id: Option<u64>,
      },
@@ -142,10 +138,14 @@ index 6a44e384..e2a4c83d 100644
      /// Move the focused window to the floating layout.
      MoveWindowToFloating {
          /// Id of the window to move.
-@@ -2125,6 +2152,55 @@ impl FromStr for WorkspaceMode {
-     }
- }
- 
+@@ -2121,6 +2148,55 @@
+             "columns" => Ok(Self::Columns),
+             "free" => Ok(Self::Free),
+             _ => Err(r#"invalid workspace mode, can be "free" or "columns""#),
++        }
++    }
++}
++
 +// ferrion-wm 2026-11-21 (F7): where a window of a free workspace is tiled.
 +/// Where a window of a free workspace is tiled, in its working area.
 +#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,13 +191,9 @@ index 6a44e384..e2a4c83d 100644
 +            _ => Err(
 +                r#"invalid window tile, can be "left-half", "right-half", "top-half", "bottom-half", "top-left", "top-right", "bottom-left", "bottom-right", "fill" or "center""#,
 +            ),
-+        }
-+    }
-+}
-+
- impl FromStr for Transform {
-     type Err = &'static str;
- 
+         }
+     }
+ }
 diff --git a/src/input/mod.rs b/src/input/mod.rs
 index 35687514..06685184 100644
 --- a/src/input/mod.rs
@@ -209,10 +205,13 @@ index 35687514..06685184 100644
  use std::any::Any;
  use std::collections::hash_map::Entry;
  use std::collections::{HashMap, HashSet};
-@@ -2504,6 +2505,27 @@ impl State {
-                     self.niri.queue_redraw_all();
-                 }
-             }
+@@ -2501,6 +2502,27 @@
+             Action::MinimizeWindowById(id) => {
+                 if let Some(window) = self.niri.find_window_by_id(MappedId::specific(id)) {
+                     self.niri.layout.minimize_window(Some(&window));
++                    self.niri.queue_redraw_all();
++                }
++            }
 +            // ferrion-wm 2026-11-21 (F7): tile a window of a free workspace.
 +            Action::TileFloatingWindow(target) => {
 +                self.niri.layout.tile_floating_window(None, target);
@@ -231,14 +230,11 @@ index 35687514..06685184 100644
 +            Action::UntileFloatingWindowById(id) => {
 +                if let Some(window) = self.niri.find_window_by_id(MappedId::specific(id)) {
 +                    self.niri.layout.untile_floating_window(Some(&window));
-+                    self.niri.queue_redraw_all();
-+                }
-+            }
-             Action::MoveWindowToFloating => {
-                 self.niri.layout.set_window_floating(None, true);
-                 // FIXME: granular
+                     self.niri.queue_redraw_all();
+                 }
+             }
 diff --git a/src/layout/floating.rs b/src/layout/floating.rs
-index 0fb4557c..d590c089 100644
+index c47d3683..a65febf2 100644
 --- a/src/layout/floating.rs
 +++ b/src/layout/floating.rs
 @@ -1,4 +1,4 @@
@@ -247,7 +243,7 @@ index 0fb4557c..d590c089 100644
  use std::cmp::max;
  use std::iter::zip;
  use std::rc::Rc;
-@@ -100,6 +100,9 @@ struct Data {
+@@ -100,6 +100,9 @@
  
      // ferrion-wm 2026-11-21 (F6): whether the window is minimized, parked out of sight.
      parked: bool,
@@ -257,7 +253,7 @@ index 0fb4557c..d590c089 100644
  }
  
  impl Data {
-@@ -113,8 +116,9 @@ impl Data {
+@@ -113,8 +116,9 @@
              logical_pos: Point::default(),
              size: Size::default(),
              working_area,
@@ -269,7 +265,7 @@ index 0fb4557c..d590c089 100644
          rv.update(tile);
          rv.set_logical_pos(logical_pos);
 diff --git a/src/layout/floating/stacking.rs b/src/layout/floating/stacking.rs
-index 242d411f..cff67a66 100644
+index 0ac777fa..28c9e859 100644
 --- a/src/layout/floating/stacking.rs
 +++ b/src/layout/floating/stacking.rs
 @@ -3,16 +3,32 @@
@@ -308,10 +304,11 @@ index 242d411f..cff67a66 100644
  
  impl<W: LayoutElement> FloatingSpace<W> {
      /// Whether this window is minimized.
-@@ -79,6 +95,83 @@ impl<W: LayoutElement> FloatingSpace<W> {
+@@ -78,4 +94,81 @@
+             data.parked = false;
          }
      }
- 
++
 +    /// Where a window of this tile size tiles to in the working area.
 +    pub fn tile_rect(
 +        &self,
@@ -388,10 +385,7 @@ index 242d411f..cff67a66 100644
 +        let pos = self.scale_by_working_area(tiled.pos);
 +        self.move_to(idx, pos, true);
 +    }
-+
-     #[cfg(test)]
-     pub(super) fn stacking_verify_invariants(&self) {
-         if self.has_unparked() {
+ }
 diff --git a/src/layout/free.rs b/src/layout/free.rs
 index d223d814..707ec7df 100644
 --- a/src/layout/free.rs
@@ -407,7 +401,7 @@ index d223d814..707ec7df 100644
  
  use super::{Layout, LayoutElement};
  
-@@ -29,6 +29,28 @@ impl<W: LayoutElement> Layout<W> {
+@@ -29,6 +29,28 @@
          }
      }
  
@@ -447,7 +441,7 @@ index e17e9e60..9fe1a8ef 100644
  //! Window layout logic.
  //!
  //! Niri implements scrollable tiling with dynamic workspaces. The scrollable tiling is mostly
-@@ -2892,6 +2893,10 @@ impl<W: LayoutElement> Layout<W> {
+@@ -2892,6 +2893,10 @@
          for mon in self.monitors_mut() {
              mon.insert_hint = None;
          }
@@ -458,21 +452,21 @@ index e17e9e60..9fe1a8ef 100644
  
          if !matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_))) {
              return;
-@@ -2921,6 +2926,13 @@ impl<W: LayoutElement> Layout<W> {
+@@ -2920,6 +2925,13 @@
+                     } else {
                          ws.scrolling_insert_position(pos_within_workspace)
                      };
- 
++
 +                    // ferrion-wm 2026-11-21 (F7): at a side edge of a free workspace, a floating
 +                    // window is offered that half.
 +                    if move_.is_floating {
 +                        let tile = ws.free_drop_tile(pos_within_workspace);
 +                        ws.free_offer_drop_tile(tile);
 +                    }
-+
+ 
                      let border_width = move_.tile.effective_border_width().unwrap_or(0.);
                      let corner_radius = move_
-                         .tile
-@@ -4378,6 +4390,18 @@ impl<W: LayoutElement> Layout<W> {
+@@ -4378,6 +4390,18 @@
                              true,
                              None,
                          );
@@ -491,429 +485,8 @@ index e17e9e60..9fe1a8ef 100644
                      }
                  }
  
-diff --git a/src/layout/tests.rs b/src/layout/tests.rs
-index 8ccc3fca..d2b1ddcc 100644
---- a/src/layout/tests.rs
-+++ b/src/layout/tests.rs
-@@ -1,4 +1,4 @@
--// ferrion-wm: changed from niri's version on 2026-11-21 (F4, F5, F6). Changes are marked
-+// ferrion-wm: changed from niri's version on 2026-11-21 (F4, F5, F6, F7). Changes are marked
- // "ferrion-wm".
- use std::cell::{Cell, OnceCell, RefCell};
- 
-@@ -419,6 +419,23 @@ fn arbitrary_column_display() -> impl Strategy<Value = ColumnDisplay> {
-     prop_oneof![Just(ColumnDisplay::Normal), Just(ColumnDisplay::Tabbed)]
- }
- 
-+// ferrion-wm 2026-11-21 (F7).
-+fn arbitrary_window_tile() -> impl Strategy<Value = niri_ipc::WindowTile> {
-+    use niri_ipc::WindowTile;
-+    prop_oneof![
-+        Just(WindowTile::LeftHalf),
-+        Just(WindowTile::RightHalf),
-+        Just(WindowTile::TopHalf),
-+        Just(WindowTile::BottomHalf),
-+        Just(WindowTile::TopLeft),
-+        Just(WindowTile::TopRight),
-+        Just(WindowTile::BottomLeft),
-+        Just(WindowTile::BottomRight),
-+        Just(WindowTile::Fill),
-+        Just(WindowTile::Center),
-+    ]
-+}
-+
- // ferrion-wm 2026-11-21 (F4).
- fn arbitrary_workspace_mode() -> impl Strategy<Value = niri_ipc::WorkspaceMode> {
-     prop_oneof![
-@@ -806,6 +823,25 @@ enum Op {
-         #[proptest(strategy = "proptest::option::of(1..=5usize)")]
-         id: Option<usize>,
-     },
-+    // ferrion-wm 2026-11-21 (F7): tile a window of a free workspace, and return it.
-+    TileFloatingWindow {
-+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
-+        id: Option<usize>,
-+        #[proptest(strategy = "arbitrary_window_tile()")]
-+        target: niri_ipc::WindowTile,
-+    },
-+    UntileFloatingWindow {
-+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
-+        id: Option<usize>,
-+    },
-+    // ferrion-wm 2026-11-21 (F7): tile and return a window, and check where it went and came
-+    // back.
-+    TileAndReturnCheck {
-+        #[proptest(strategy = "1..=5usize")]
-+        id: usize,
-+        #[proptest(strategy = "arbitrary_window_tile()")]
-+        target: niri_ipc::WindowTile,
-+    },
-     UpdateConfig {
-         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
-         layout_config: Box<niri_config::LayoutPart>,
-@@ -1724,6 +1760,18 @@ impl Op {
-                 let id = id.filter(|id| layout.has_window(id));
-                 layout.minimize_window(id.as_ref());
-             }
-+            // ferrion-wm 2026-11-21 (F7).
-+            Op::TileFloatingWindow { id, target } => {
-+                let id = id.filter(|id| layout.has_window(id));
-+                layout.tile_floating_window(id.as_ref(), target);
-+            }
-+            Op::UntileFloatingWindow { id } => {
-+                let id = id.filter(|id| layout.has_window(id));
-+                layout.untile_floating_window(id.as_ref());
-+            }
-+            Op::TileAndReturnCheck { id, target } => {
-+                free::tile_and_return_check(layout, id, target)
-+            }
-             Op::UpdateConfig { layout_config } => {
-                 let options = Options {
-                     layout: niri_config::Layout::from_part(&layout_config),
-@@ -1972,9 +2020,11 @@ fn operations_dont_panic() {
-         Op::ConsumeOrExpelWindowRight { id: None },
-         Op::MoveWorkspaceToOutput(1),
-         Op::ToggleColumnTabbedDisplay,
--        // ferrion-wm 2026-11-21 (F4, F6).
-+        // ferrion-wm 2026-11-21 (F4, F6, F7).
-         Op::ToggleWorkspaceMode,
-         Op::MinimizeWindow { id: None },
-+        Op::MoveColumnLeft { focus: true },
-+        Op::MaximizeColumn,
-     ];
- 
-     for third in &every_op {
-@@ -2154,9 +2204,11 @@ fn operations_from_starting_state_dont_panic() {
-         Op::ConsumeOrExpelWindowLeft { id: None },
-         Op::ConsumeOrExpelWindowRight { id: None },
-         Op::ToggleColumnTabbedDisplay,
--        // ferrion-wm 2026-11-21 (F4, F6).
-+        // ferrion-wm 2026-11-21 (F4, F6, F7).
-         Op::ToggleWorkspaceMode,
-         Op::MinimizeWindow { id: None },
-+        Op::MoveColumnLeft { focus: true },
-+        Op::MaximizeColumn,
-     ];
- 
-     for third in &every_op {
-diff --git a/src/layout/tests/free.rs b/src/layout/tests/free.rs
-index 4df972ca..7254350b 100644
---- a/src/layout/tests/free.rs
-+++ b/src/layout/tests/free.rs
-@@ -1,4 +1,4 @@
--// Tests of the free mode of ferrion-wm, a fork of niri. Written on 2026-11-21 (F4, F5, F6).
-+// Tests of the free mode of ferrion-wm, a fork of niri. Written on 2026-11-21 (F4, F5, F6, F7).
- // SPDX-License-Identifier: GPL-3.0-or-later
- 
- use niri_ipc::WorkspaceMode;
-@@ -138,6 +138,54 @@ pub(super) fn add_window_and_check_placement(
-     approx::assert_abs_diff_eq!(pos.y, expected.y, epsilon = 1e-3);
- }
- 
-+/// Tiles a floating window of a free workspace and returns it, and checks that it went to the
-+/// target's place and came back to the place and size it had.
-+pub(super) fn tile_and_return_check(
-+    layout: &mut Layout<TestWindow>,
-+    id: usize,
-+    target: niri_ipc::WindowTile,
-+) {
-+    let Some(ws) = layout
-+        .workspaces()
-+        .map(|(_, _, ws)| ws)
-+        .find(|ws| ws.has_window(&id))
-+    else {
-+        return;
-+    };
-+    let floating = ws.floating();
-+    if !ws.is_free() || floating.is_parked(&id) || floating.tile_of(&id).is_some() {
-+        return;
-+    }
-+    let Some((tile, pos)) = floating
-+        .tiles_with_offsets()
-+        .find(|(tile, _)| *tile.window().id() == id)
-+    else {
-+        return;
-+    };
-+    let ws_id = ws.id();
-+    let rect = floating.tile_rect(target, tile.tile_size());
-+    let win = tile.window();
-+    let size = win.expected_size().unwrap_or_else(|| win.size());
-+
-+    let floating_pos_of = |layout: &Layout<TestWindow>| {
-+        let (_, ws) = layout.find_workspace_by_id(ws_id).unwrap();
-+        floating_pos(ws, id)
-+    };
-+
-+    layout.tile_floating_window(Some(&id), target);
-+    layout.verify_invariants();
-+    let tiled = floating_pos_of(layout);
-+    approx::assert_abs_diff_eq!(tiled.x, rect.loc.x, epsilon = 1e-3);
-+    approx::assert_abs_diff_eq!(tiled.y, rect.loc.y, epsilon = 1e-3);
-+
-+    layout.untile_floating_window(Some(&id));
-+    let back = floating_pos_of(layout);
-+    approx::assert_abs_diff_eq!(back.x, pos.x, epsilon = 1e-3);
-+    approx::assert_abs_diff_eq!(back.y, pos.y, epsilon = 1e-3);
-+    let (_, win) = layout.windows().find(|(_, win)| *win.id() == id).unwrap();
-+    assert_eq!(win.expected_size(), Some(size));
-+}
-+
- #[test]
- fn new_window_opens_floating_on_free_workspace() {
-     let ops = [
-@@ -839,3 +887,250 @@ fn dialog_of_a_minimized_window_opens_as_a_new_window() {
-     assert!(ws.floating().is_parked(&1));
-     assert_eq!(focus_id(&layout), Some(2));
- }
-+
-+fn one_free_window() -> Layout<TestWindow> {
-+    check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(1),
-+            },
-+            Op::Communicate(1),
-+        ],
-+    )
-+}
-+
-+fn tile_op(target: niri_ipc::WindowTile) -> Op {
-+    Op::TileFloatingWindow { id: None, target }
-+}
-+
-+#[test]
-+fn tiling_to_a_half_and_returning() {
-+    let mut layout = one_free_window();
-+    let pos = floating_pos(active_ws(&layout), 1);
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [tile_op(niri_ipc::WindowTile::LeftHalf), Op::Communicate(1)],
-+    );
-+    assert_pos(floating_pos(active_ws(&layout), 1), 0., 0.);
-+    assert_eq!(window_size(&layout, 1), Size::from((640, 720)));
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [
-+            tile_op(niri_ipc::WindowTile::BottomRight),
-+            Op::Communicate(1),
-+        ],
-+    );
-+    assert_pos(floating_pos(active_ws(&layout), 1), 640., 360.);
-+    assert_eq!(window_size(&layout, 1), Size::from((640, 360)));
-+
-+    // Returning gives back the place and size from before the first tiling.
-+    check_ops_on_layout(
-+        &mut layout,
-+        [Op::UntileFloatingWindow { id: None }, Op::Communicate(1)],
-+    );
-+    assert_pos(floating_pos(active_ws(&layout), 1), pos.x, pos.y);
-+    assert_eq!(window_size(&layout, 1), Size::from((100, 200)));
-+}
-+
-+#[test]
-+fn move_keys_tile_in_a_free_workspace() {
-+    let mut layout = one_free_window();
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [Op::MoveColumnRight { focus: true }, Op::Communicate(1)],
-+    );
-+    assert_pos(floating_pos(active_ws(&layout), 1), 640., 0.);
-+    assert_eq!(window_size(&layout, 1), Size::from((640, 720)));
-+
-+    check_ops_on_layout(&mut layout, [Op::MoveWindowUp(true), Op::Communicate(1)]);
-+    assert_pos(floating_pos(active_ws(&layout), 1), 0., 0.);
-+    assert_eq!(window_size(&layout, 1), Size::from((1280, 720)));
-+
-+    check_ops_on_layout(&mut layout, [Op::MoveWindowDown(true), Op::Communicate(1)]);
-+    assert_pos(floating_pos(active_ws(&layout), 1), 590., 260.);
-+    assert_eq!(window_size(&layout, 1), Size::from((100, 200)));
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [Op::MoveColumnLeft { focus: true }, Op::Communicate(1)],
-+    );
-+    assert_pos(floating_pos(active_ws(&layout), 1), 0., 0.);
-+    assert_eq!(window_size(&layout, 1), Size::from((640, 720)));
-+}
-+
-+#[test]
-+fn fill_fills_the_desktop_or_returns() {
-+    let mut layout = one_free_window();
-+
-+    check_ops_on_layout(&mut layout, [Op::MaximizeColumn, Op::Communicate(1)]);
-+    assert_eq!(window_size(&layout, 1), Size::from((1280, 720)));
-+    assert_eq!(
-+        active_ws(&layout).floating().tile_of(&1),
-+        Some(niri_ipc::WindowTile::Fill)
-+    );
-+
-+    check_ops_on_layout(&mut layout, [Op::MaximizeColumn, Op::Communicate(1)]);
-+    assert_eq!(window_size(&layout, 1), Size::from((100, 200)));
-+    assert_eq!(active_ws(&layout).floating().tile_of(&1), None);
-+}
-+
-+#[test]
-+fn center_keeps_the_size() {
-+    let mut layout = one_free_window();
-+    check_ops_on_layout(
-+        &mut layout,
-+        [
-+            move_to_x(1, 0.),
-+            tile_op(niri_ipc::WindowTile::Center),
-+            Op::Communicate(1),
-+        ],
-+    );
-+    assert_pos(floating_pos(active_ws(&layout), 1), 590., 260.);
-+    assert_eq!(window_size(&layout, 1), Size::from((100, 200)));
-+}
-+
-+#[test]
-+fn columns_workspace_has_no_tiling() {
-+    let layout = check_ops([
-+        Op::AddOutput(1),
-+        Op::AddWindow {
-+            params: TestWindowParams::new(1),
-+        },
-+        Op::AddWindow {
-+            params: TestWindowParams::new(2),
-+        },
-+        Op::AddWindow {
-+            params: TestWindowParams {
-+                is_floating: true,
-+                ..TestWindowParams::new(3)
-+            },
-+        },
-+        tile_op(niri_ipc::WindowTile::LeftHalf),
-+        Op::FocusWindow(2),
-+        Op::MoveColumnLeft { focus: true },
-+    ]);
-+    let ws = active_ws(&layout);
-+    assert_eq!(ws.floating().tile_of(&3), None);
-+    // niri's own move.
-+    assert_eq!(column_ids(ws), [2, 1]);
-+}
-+
-+#[test]
-+fn minimized_window_is_not_tiled() {
-+    let layout = check_ops_with_options(
-+        free_options(),
-+        [
-+            Op::AddOutput(1),
-+            Op::AddWindow {
-+                params: TestWindowParams::new(1),
-+            },
-+            Op::MinimizeWindow { id: None },
-+            Op::TileFloatingWindow {
-+                id: Some(1),
-+                target: niri_ipc::WindowTile::Fill,
-+            },
-+        ],
-+    );
-+    assert_eq!(active_ws(&layout).floating().tile_of(&1), None);
-+}
-+
-+/// Drags window 1 by its middle with the pointer to this point of the output.
-+fn drag_to(x: f64, y: f64) -> [Op; 2] {
-+    [
-+        Op::InteractiveMoveBegin {
-+            window: 1,
-+            output_idx: 1,
-+            px: 640.,
-+            py: 360.,
-+        },
-+        Op::InteractiveMoveUpdate {
-+            window: 1,
-+            dx: x - 640.,
-+            dy: y - 360.,
-+            output_idx: 1,
-+            px: x,
-+            py: y,
-+        },
-+    ]
-+}
-+
-+fn offered_hint(layout: &mut Layout<TestWindow>) -> Option<Rectangle<f64, Logical>> {
-+    layout.update_insert_hint(None);
-+    let mon = layout.monitors().next().unwrap();
-+    let hint = mon.insert_hint.as_ref()?;
-+    mon.workspaces[mon.active_workspace_idx()].insert_hint_area(hint.position)
-+}
-+
-+#[test]
-+fn dragging_to_a_side_edge_offers_that_half_and_tiles_on_drop() {
-+    let mut layout = one_free_window();
-+
-+    check_ops_on_layout(&mut layout, drag_to(1279., 400.));
-+    assert_eq!(
-+        offered_hint(&mut layout),
-+        Some(Rectangle::new(
-+            Point::from((640., 0.)),
-+            Size::from((640., 720.))
-+        ))
-+    );
-+
-+    // Away from the edge, nothing is offered.
-+    check_ops_on_layout(
-+        &mut layout,
-+        [Op::InteractiveMoveUpdate {
-+            window: 1,
-+            dx: -600.,
-+            dy: 0.,
-+            output_idx: 1,
-+            px: 679.,
-+            py: 400.,
-+        }],
-+    );
-+    assert_eq!(offered_hint(&mut layout), None);
-+
-+    check_ops_on_layout(
-+        &mut layout,
-+        [
-+            Op::InteractiveMoveUpdate {
-+                window: 1,
-+                dx: -678.,
-+                dy: 0.,
-+                output_idx: 1,
-+                px: 1.,
-+                py: 400.,
-+            },
-+            Op::InteractiveMoveEnd { window: 1 },
-+            Op::Communicate(1),
-+        ],
-+    );
-+    assert_eq!(offered_hint(&mut layout), None);
-+    let ws = active_ws(&layout);
-+    assert_eq!(
-+        ws.floating().tile_of(&1),
-+        Some(niri_ipc::WindowTile::LeftHalf)
-+    );
-+    assert_pos(floating_pos(ws, 1), 0., 0.);
-+    assert_eq!(window_size(&layout, 1), Size::from((640, 720)));
-+}
-+
-+#[test]
-+fn dragging_on_a_columns_workspace_offers_no_half() {
-+    let mut layout = check_ops([
-+        Op::AddOutput(1),
-+        Op::AddWindow {
-+            params: TestWindowParams {
-+                is_floating: true,
-+                ..TestWindowParams::new(1)
-+            },
-+        },
-+    ]);
-+    check_ops_on_layout(&mut layout, drag_to(1., 400.));
-+    assert_eq!(offered_hint(&mut layout), None);
-+    check_ops_on_layout(&mut layout, [Op::InteractiveMoveEnd { window: 1 }]);
-+    assert_eq!(active_ws(&layout).floating().tile_of(&1), None);
-+}
 diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
-index 5b19a061..1f61ad59 100644
+index 6439c834..04f57d9a 100644
 --- a/src/layout/workspace.rs
 +++ b/src/layout/workspace.rs
 @@ -1,5 +1,5 @@
@@ -924,7 +497,7 @@ index 5b19a061..1f61ad59 100644
  use std::cmp::max;
  use std::rc::Rc;
  use std::time::Duration;
-@@ -8,7 +8,8 @@ use niri_config::utils::MergeWith as _;
+@@ -8,7 +8,8 @@
  use niri_config::{
      CenterFocusedColumn, CornerRadius, OutputName, PresetSize, Workspace as WorkspaceConfig,
  };
@@ -934,7 +507,7 @@ index 5b19a061..1f61ad59 100644
  use smithay::backend::renderer::element::Kind;
  use smithay::backend::renderer::gles::GlesRenderer;
  use smithay::desktop::{layer_map_for_output, Window};
-@@ -1111,6 +1112,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1111,6 +1112,10 @@
      }
  
      pub fn move_left(&mut self, focus: bool) -> bool {
@@ -945,7 +518,7 @@ index 5b19a061..1f61ad59 100644
          if self.floating_is_active.get() {
              self.floating.move_left();
              true
-@@ -1120,6 +1125,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1120,6 +1125,10 @@
      }
  
      pub fn move_right(&mut self, focus: bool) -> bool {
@@ -956,7 +529,7 @@ index 5b19a061..1f61ad59 100644
          if self.floating_is_active.get() {
              self.floating.move_right();
              true
-@@ -1150,6 +1159,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1150,6 +1159,10 @@
      }
  
      pub fn move_down(&mut self, focus: bool) -> bool {
@@ -967,7 +540,7 @@ index 5b19a061..1f61ad59 100644
          if self.floating_is_active.get() {
              self.floating.move_down();
              true
-@@ -1159,6 +1172,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1159,6 +1172,10 @@
      }
  
      pub fn move_up(&mut self, focus: bool) -> bool {
@@ -978,18 +551,18 @@ index 5b19a061..1f61ad59 100644
          if self.floating_is_active.get() {
              self.floating.move_up();
              true
-@@ -1272,6 +1289,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1270,6 +1287,10 @@
+     pub fn toggle_full_width(&mut self) {
+         // ferrion-wm 2026-11-21 (F4): a free workspace keeps its columns fullscreen or maximized.
          if self.free_refuses_column_op(None) {
-             return;
-         }
-+        // ferrion-wm 2026-11-21 (F7): Fill in a free workspace fills the desktop, or returns.
-+        if self.free_toggle_fill() {
 +            return;
 +        }
++        // ferrion-wm 2026-11-21 (F7): Fill in a free workspace fills the desktop, or returns.
++        if self.free_toggle_fill() {
+             return;
+         }
          if self.floating_is_active.get() {
-             // Leave this unimplemented for now. For good UX, this probably needs moving the tile
-             // to be against the left edge of the working area while it is full-width.
-@@ -2002,6 +2023,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -2002,6 +2023,10 @@
          &self,
          position: InsertPosition,
      ) -> Option<Rectangle<f64, Logical>> {
@@ -1001,7 +574,7 @@ index 5b19a061..1f61ad59 100644
      }
  
 diff --git a/src/layout/workspace/free.rs b/src/layout/workspace/free.rs
-index c186f5d9..bae931fc 100644
+index 96574c43..475ccd03 100644
 --- a/src/layout/workspace/free.rs
 +++ b/src/layout/workspace/free.rs
 @@ -18,14 +18,20 @@
@@ -1028,7 +601,7 @@ index c186f5d9..bae931fc 100644
  use crate::layout::tile::Tile;
  use crate::layout::{LayoutElement, Options};
  use crate::utils::transaction::Transaction;
-@@ -40,6 +46,8 @@ pub(super) struct FreeState {
+@@ -40,6 +46,8 @@
      /// The default mode the workspace took: when it was created, or at a config change while it
      /// had no window.
      default: WorkspaceMode,
@@ -1037,7 +610,7 @@ index c186f5d9..bae931fc 100644
  }
  
  impl FreeState {
-@@ -50,10 +58,14 @@ impl FreeState {
+@@ -50,9 +58,13 @@
              mode: own.and_then(|part| part.workspace_mode).unwrap_or(default),
              chosen: None,
              default,
@@ -1045,14 +618,13 @@ index c186f5d9..bae931fc 100644
          }
      }
  }
- 
++
 +/// How close to a side edge the pointer drags a window for that half to be offered.
 +pub const EDGE_DROP_PX: f64 = 16.;
-+
+ 
  /// Whether niri would float this window by itself, also in columns: a window with a parent, a
  /// window of fixed height, and a window whose rules say so (`compute_open_floating`).
- fn floats_by_itself<'a, W: LayoutElement + 'a>(
-@@ -373,6 +385,95 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -373,6 +385,95 @@
          self.free_focus_away_from_parked();
      }
  

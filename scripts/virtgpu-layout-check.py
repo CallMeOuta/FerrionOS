@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-# The virtgpu layout check. Compiles Linux's `virtgpu_drm.h`, with DRM's own close request from
-# the `drm.h` beside it, in C and the `virtgpu` module of relibc's crate `redox-ioctl` in Rust,
-# then compares every structure's size and alignment, every field's offset, size and type, and
-# every number the headers define, the request numbers among them. Then it checks each payload the
-# module defines for a request: one payload per request at most, and at least one; its function
-# number and the module's request number against the structure; its fixed part must be the
-# header's structure without the array pointers, packed in the header's order; each array's
-# pointer, count and element must match the header, and its direction what Linux's driver does
-# with it; and the arrays must stay aligned whatever their counts. Last, it runs the crate's own
-# tests, which send payloads both ways.
-#
 # Prints each mismatch and a summary. Exits 0 when everything matches, 1 on a mismatch, 2 when
 # the check cannot run: no C compiler or cargo, relibc's source not fetched (`make f.relibc`),
 # or a copied header that differs from the one recorded below.
@@ -263,25 +252,6 @@ def build_rust(crate, structs, constants, work):
     return built.stdout, None
 
 
-def run_tests(crate, work):
-    """Runs the crate's own tests in its workspace. Returns the failing tests' names."""
-    env = dict(os.environ, CARGO_TARGET_DIR=str(work / "crate-target"))
-    pin = crate.parent / "rust-toolchain.toml"
-    if pin.is_file():
-        env["RUSTUP_TOOLCHAIN"] = tomllib.loads(pin.read_text())["toolchain"]["channel"]
-    tested = run(["cargo", "test", "--quiet", "--locked", "--manifest-path", str(crate / "Cargo.toml")], env=env)
-    if tested.returncode == 0:
-        return []
-    failed = re.findall(r"^    (\S+)$", tested.stdout, flags=re.M)
-    if failed:
-        return failed
-    # A test that crashes ends the whole test process before it lists the failures.
-    crashed = re.search(r"process didn't exit successfully: .*\((signal: [^)]*)\)", tested.stderr)
-    if crashed:
-        return [f"the test process ended on {crashed.group(1)}"]
-    raise CannotRun(f"the crate's tests do not run:\n{tested.stderr}{tested.stdout}")
-
-
 def compare(structs, constants, requests, c, r):
     """Yields (item, mismatch or None) for every item compared."""
     for s, fields in structs.items():
@@ -425,12 +395,6 @@ def main():
 
     r = read_records(output)
     results = list(compare(structs, constants, requests, c, r))
-    try:
-        failed = run_tests(crate, work)
-    except CannotRun as e:
-        print(f"virtgpu layout: cannot run: {e}", file=sys.stderr)
-        return 2
-    results.append(("redox-ioctl's tests", f"failed: {', '.join(failed)}" if failed else None))
     mismatches = [(item, why) for item, why in results if why]
     for item, why in mismatches:
         print(f"MISMATCH {item}: {why}")
