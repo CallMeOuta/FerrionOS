@@ -266,6 +266,7 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
         0x0D => unsafe { dev.write_ioctl::<drm_set_client_cap>(buf, SET_CLIENT_CAP) },
         0x2D => unsafe { dev.prime_handle_to_fd(buf) },
         0x2E => unsafe { dev.prime_fd_to_handle(buf) },
+        0x3A => unsafe { dev.read_write_ioctl::<drm_wait_vblank>(buf, WAIT_VBLANK) },
         0x41 => unsafe { dev.read_write_ioctl::<virtgpu::drm_virtgpu_map>(buf, virtgpu::MAP) },
         0x42 => unsafe { dev.virtgpu_execbuffer(buf) },
         0x43 => unsafe {
