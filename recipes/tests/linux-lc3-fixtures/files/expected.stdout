@@ -6,6 +6,8 @@ sigsuspend mask kept 2000/2000
 sigsuspend ign mask kept 20/20
 ppoll mask kept 1/1
 pause ok 500/500
+pthread_kill after create 200/200
+main-exit worker ran 200/200
 no DISPLAY
 no X11 socket directory
 no 32-bit dynamic linker

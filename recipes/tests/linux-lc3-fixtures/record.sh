@@ -20,13 +20,13 @@ dpkg-query -W -f="\${Package}\t\${Version}\t\${Architecture}\n" binutils gcc gcc
 diff -u /work/toolchain.tsv /tmp/actual.tsv
 export LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=1794787200
 cd /work
-for name in hello-dyn threads spawn signals; do
+for name in hello-dyn threads spawn signals thread-reg; do
     gcc -O2 -Wl,--build-id=none -pthread -o "$name" "${name}.c"
 done
 '
 
 tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner --mode=a+rX,u+w,go-w \
-    -cf fixtures.tar hello-dyn threads spawn signals lc3.sh
+    -cf fixtures.tar hello-dyn threads spawn signals thread-reg lc3.sh
 
 scratch=$(mktemp -d /tmp/ferrion-lc3-record.XXXXXX)
 trap 'podman unshare rm -rf "$scratch"' EXIT
@@ -52,5 +52,5 @@ podman run --rm -i --user 1000:1000 --network=none \
 cp "$scratch/out/stdout" expected.stdout
 cp "$scratch/out/stderr" expected.stderr
 cp "$scratch/out/status" expected.status
-sha256sum hello-dyn threads spawn signals lc3.sh fixtures.tar expected.status expected.stderr expected.stdout >SHA256SUMS
+sha256sum hello-dyn threads spawn signals thread-reg lc3.sh fixtures.tar expected.status expected.stderr expected.stdout >SHA256SUMS
 cat expected.stdout expected.stderr expected.status

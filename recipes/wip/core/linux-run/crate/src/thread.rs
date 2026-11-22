@@ -2,7 +2,8 @@
 //! `clone`.
 
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::{LINUX_TOP, NATIVE_END, errno::*, mem::user_ok};
 
@@ -111,7 +112,8 @@ impl Thread {
 }
 
 /// Threads by Linux thread id, for tgkill.
-pub static THREADS: Mutex<Vec<(i32, Arc<Thread>)>> = Mutex::new(Vec::new());
+pub static THREADS: Mutex<Vec<Arc<Thread>>> = Mutex::new(Vec::new());
+const THREAD_START_LIMIT: Duration = Duration::from_secs(30);
 static NEXT_TID: AtomicU64 = AtomicU64::new(0);
 
 /// Linux thread ids: the process id for the first thread, then a counter. They name threads of
@@ -188,7 +190,7 @@ pub fn new_thread(tid: i32, mask: u64) -> &'static Thread {
         *((data + D_XSAVE + 24) as *mut u32) = 0x1f80;
     }
     register(area);
-    THREADS.lock().unwrap().push((tid, thread));
+    THREADS.lock().unwrap().push(thread);
     current(data)
 }
 
@@ -298,6 +300,13 @@ pub fn current(data: usize) -> &'static Thread {
     unsafe { &*(*((data + D_THREAD) as *const u64) as *const Thread) }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartState {
+    Starting,
+    Registered,
+    Acked,
+}
+
 struct ChildStart {
     frame: Frame,
     fs: u64,
@@ -305,6 +314,7 @@ struct ChildStart {
     mask: u64,
     clear_tid: u64,
     xsave: Vec<u8>,
+    started: Arc<(Mutex<StartState>, Condvar)>,
 }
 
 extern "C" fn child_start(arg: *mut libc::c_void) -> *mut libc::c_void {
@@ -313,6 +323,23 @@ extern "C" fn child_start(arg: *mut libc::c_void) -> *mut libc::c_void {
     thread.set_linux_fs(start.fs);
     thread.clear_tid.store(start.clear_tid, Ordering::Relaxed);
     thread.xsave().copy_from_slice(&start.xsave);
+    {
+        let (lock, cvar) = &*start.started;
+        let mut state = lock.lock().unwrap();
+        *state = StartState::Registered;
+        cvar.notify_one();
+        let deadline = Instant::now() + THREAD_START_LIMIT;
+        while *state != StartState::Acked {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                crate::fatal("parent did not acknowledge cloned thread in time");
+            };
+            let (guard, timeout) = cvar.wait_timeout(state, remaining).unwrap();
+            state = guard;
+            if timeout.timed_out() && *state != StartState::Acked {
+                crate::fatal("parent did not acknowledge cloned thread in time");
+            }
+        }
+    }
     let frame = start.frame;
     drop(start);
     enter(thread, &frame)
@@ -396,6 +423,7 @@ pub fn clone_with(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, pt
     if stack != 0 {
         child.rsp = stack;
     }
+    let started = Arc::new((Mutex::new(StartState::Starting), Condvar::new()));
     let start = Box::new(ChildStart {
         frame: child,
         fs: if flags & CLONE_SETTLS != 0 {
@@ -411,6 +439,7 @@ pub fn clone_with(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, pt
             0
         },
         xsave: thread.xsave().to_vec(),
+        started: Arc::clone(&started),
     });
     let mut handle: libc::pthread_t = unsafe { core::mem::zeroed() };
     let arg = Box::into_raw(start) as *mut libc::c_void;
@@ -420,6 +449,23 @@ pub fn clone_with(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, pt
         return -linux_errno(r);
     }
     unsafe { libc::pthread_detach(handle) };
+    let deadline = Instant::now() + THREAD_START_LIMIT;
+    let (lock, cvar) = &*started;
+    let mut state = lock.lock().unwrap();
+    while *state == StartState::Starting {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            crate::fatal("cloned thread did not register in time");
+        };
+        let (guard, timeout) = cvar.wait_timeout(state, remaining).unwrap();
+        state = guard;
+        if timeout.timed_out() && *state == StartState::Starting {
+            crate::fatal("cloned thread did not register in time");
+        }
+    }
+    assert!(find(tid).is_some());
+    *state = StartState::Acked;
+    cvar.notify_one();
+    drop(state);
     tid as i64
 }
 
@@ -451,13 +497,16 @@ fn fork(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, ptid: u64, c
     if pid == 0 {
         crate::syscall::refresh_pid();
         crate::session::forked_child();
+        if set_mmap_min(LINUX_TOP).is_err() {
+            crate::fatal("could not set mmap-min-addr in forked child");
+        }
         register(thread.area);
         let tid = crate::syscall::pid();
         thread.tid.store(tid, Ordering::Relaxed);
-        THREADS.lock().unwrap().retain(|(_, t)| core::ptr::eq(&**t, thread));
-        if let Some(entry) = THREADS.lock().unwrap().first_mut() {
-            entry.0 = tid;
-        }
+        let mut threads = THREADS.lock().unwrap();
+        threads.retain(|t| core::ptr::eq(&**t, thread));
+        assert_eq!(threads.len(), 1);
+        drop(threads);
         if flags & CLONE_CHILD_SETTID != 0 {
             unsafe { *(ctid as *mut i32) = tid }
         }
@@ -488,11 +537,12 @@ fn fork(thread: &Thread, frame: &mut Frame, flags: u64, stack: u64, ptid: u64, c
 
 /// The exit call: ends this thread only.
 pub fn exit_thread(thread: &Thread, status: i32) -> ! {
-    THREADS
-        .lock()
-        .unwrap()
-        .retain(|&(tid, _)| tid != thread.tid());
-    if THREADS.lock().unwrap().is_empty() {
+    let empty = {
+        let mut threads = THREADS.lock().unwrap();
+        threads.retain(|t| t.tid() != thread.tid());
+        threads.is_empty()
+    };
+    if empty {
         crate::syscall::exit_group(status);
     }
     let ctid = thread.clear_tid.load(Ordering::Relaxed);
@@ -513,6 +563,6 @@ pub fn find(tid: i32) -> Option<Arc<Thread>> {
         .lock()
         .unwrap()
         .iter()
-        .find(|(t, _)| *t == tid)
-        .map(|(_, t)| Arc::clone(t))
+        .find(|t| t.tid() == tid)
+        .cloned()
 }

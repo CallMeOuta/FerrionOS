@@ -298,7 +298,7 @@ fn kick(thread: &Thread) {
 
 /// Wakes every thread but `except`, so that one with the signal unblocked takes it.
 fn kick_others(except: Option<&Thread>) {
-    let threads: Vec<_> = crate::thread::THREADS.lock().unwrap().iter().map(|(_, t)| std::sync::Arc::clone(t)).collect();
+    let threads: Vec<_> = crate::thread::THREADS.lock().unwrap().iter().cloned().collect();
     let me = unsafe { libc::pthread_self() };
     for t in threads {
         if except.is_some_and(|e| core::ptr::eq(e, &*t)) || unsafe { libc::pthread_equal(t.native as libc::pthread_t, me) } != 0 {
