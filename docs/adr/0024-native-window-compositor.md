@@ -20,7 +20,9 @@ Frame callbacks and presentation feedback follow the synchronous DRM handoff. Th
 
 The three independent `desktop-layout-probe` processes draw fixture windows. The terminal process delays its draws so the pointer check also runs beside a slow client. A shared mapping supplies three buffer slots, each written only after its previous use is released. The harness floats and places each window through the compositor's existing IPC, then compares the three window regions using the same fixture loader as `desktop-regions`. It measures both layouts with corners disabled and enabled. Shadows are disabled; the single rounded title-corner sample excluded by the harness is named in its result.
 
-The frame-time condition uses the first presented client frame containing each injected key's visible counter change. Client commit-to-handoff, cursor input-to-ioctl completion and output cadence are separate series. Each case saves individual events as well as median, 99th percentile and maximum. Functional checks require the windows and timing samples; the latency condition is recorded separately and does not turn a correctly drawn layout into a failed functional check.
+The frame-time condition uses the first presented client frame containing each injected key's visible counter change. The probe advances its drawn counter by at most one per frame callback, retaining every key even when several arrive together. The harness waits within its step timeout for the ten presentations and hundred pointer samples; a fixed grace period would make long frame latency an accidental functional gate. Client commit-to-handoff, cursor input-to-ioctl completion and output cadence are separate series. Each case saves individual events as well as median, 99th percentile and maximum, plus host load and an uptime snapshot at boot. Functional checks require the windows and timing samples; the latency condition is recorded separately and does not turn a correctly drawn layout into a failed functional check.
+
+Timing evidence on the shared build host uses the separate `desktop-columns-timing` check. Its gate is a one-minute load average no higher than half the CPUs, observed before boot, every ten seconds, at each case end and after shutdown. A sample above the limit marks the timing `HOST_LIMITED` and triggers another attempt, retaining the functional result. The wait and collection budgets are bounded. Exhausting them leaves the compositor's timing condition blocked; a busy host cannot establish that the compositor meets or misses the limit.
 
 ## Consequences
 
@@ -35,3 +37,4 @@ Source and test code carry their respective GPL and MIT notices. The package ins
 - `config/wm-columns.toml`, `scripts/ferrion-wm-config.py`
 - `recipes/tests/desktop-layout-probe/`, `recipes/tests/shm-reuse-probe/`
 - `scripts/desktop_columns.py`, `scripts/desktop_fixtures.py`, `scripts/vm-test.py`
+- `scripts/desktop_load.py`, `scripts/test_desktop_load.py`

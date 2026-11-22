@@ -1672,8 +1672,14 @@ def run_wayland_client(args, out, *, pointer_latency=False, desktop_columns=Fals
     with tempfile.TemporaryDirectory(prefix="ferrion-dd-qmp-") as directory:
         path = Path(directory) / "qmp.sock"
         boot_load = os.getloadavg()
-        vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off", make=("gpu=virtio",))
+        monitor = None
+        if desktop_columns:
+            from desktop_load import HostLoadMonitor
+
+            monitor = HostLoadMonitor(out)
+        vm = None
         try:
+            vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off", make=("gpu=virtio",))
             with socket.socket(socket.AF_UNIX) as connection:
                 connection.settimeout(args.timeout)
                 connection.connect(str(path))
@@ -1711,7 +1717,10 @@ def run_wayland_client(args, out, *, pointer_latency=False, desktop_columns=Fals
                         note += f"; series has {completions} cursor completions inside frame intervals"
                     return ok, note
         finally:
-            vm.close()
+            if vm is not None:
+                vm.close()
+            if monitor is not None:
+                monitor.close()
 
 def run_pointer_latency(args, out):
     return run_wayland_client(args, out, pointer_latency=True)
@@ -1858,6 +1867,13 @@ def test_desktop_columns(vm, args, qmp, boot_load):
 def run_desktop_columns(args, out):
     """Checks ferrion-wm's layouts and per-frame timing; use --config wm-columns --repeat 10."""
     return run_wayland_client(args, out, desktop_columns=True)
+
+
+def run_desktop_columns_timing(args, out):
+    """Collects --repeat native desktop boots below --host-load-limit; exits BLOCKED when the wait budget expires."""
+    from desktop_load import run_gated
+
+    return run_gated(args, out, run_desktop_columns, Blocked)
 
 
 def test_desktop_regions(vm, args):
@@ -6130,6 +6146,7 @@ OWN_IMAGE["one-password"] = test_one_password
 OWN_IMAGE["wayland-client"] = run_wayland_client
 OWN_IMAGE["pointer-latency"] = run_pointer_latency
 OWN_IMAGE["desktop-columns"] = run_desktop_columns
+OWN_IMAGE["desktop-columns-timing"] = run_desktop_columns_timing
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
@@ -6152,6 +6169,12 @@ def main():
     parser.add_argument("--config", default="desktop")
     parser.add_argument("--repeat", type=int, default=1, help="boot this many times per test")
     parser.add_argument("--timeout", type=float, default=60, help="seconds a step may take")
+    parser.add_argument("--host-load-limit", type=float, default=(os.cpu_count() or 1) / 2,
+                        help="desktop-columns-timing: maximum load1 for eligible timings")
+    parser.add_argument("--host-load-wait", type=float, default=600,
+                        help="desktop-columns-timing: seconds to obtain each eligible boot")
+    parser.add_argument("--timing-budget", type=float, default=1800,
+                        help="desktop-columns-timing: total seconds allowed across all boots")
     parser.add_argument("--out", type=Path, default=None, help="default: build/vm-test/<arch>/<config>")
     parser.add_argument("--make", action="append", default=[], metavar="VAR=VALUE",
                         help="extra make variable for `make qemu`, such as net=no; repeatable")
@@ -6182,6 +6205,8 @@ def main():
         parser.error(f"unknown tests {unknown}" if unknown else "name a test, or --check-wav")
     if "rand-seed" in args.tests and args.arch != "x86_64":
         parser.error("rand-seed requires x86_64 with KVM and a host CPU RNG")
+    if args.host_load_limit < 0 or args.host_load_wait <= 0 or args.timing_budget <= 0:
+        parser.error("load limit must be nonnegative and timing budgets must be positive")
     for assignment in args.make:
         if not re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", assignment):
             parser.error("--make requires VAR=VALUE, not a make target or option")
@@ -6253,10 +6278,21 @@ def main():
             result = {"test": name, "run": run, "verdict": verdict, "note": note, "host": host,
                       "make": [*args.make, *make], "capture_sources": captures, "last_capture_source": last_capture,
                       "trace_events": run_args.trace, "trace_lines": trace_lines}
-            if name == "desktop-columns" and (out / "measurements.json").exists():
+            if name in ("desktop-columns", "desktop-columns-timing") and (out / "measurements.json").exists():
                 result["desktop_columns"] = json.loads((out / "measurements.json").read_text())
+                if (out / "host-load.json").exists():
+                    from desktop_load import annotate, load_status
+
+                    samples = json.loads((out / "host-load.json").read_text())
+                    status = load_status(samples, result["desktop_columns"], args.host_load_limit)
+                    annotate(result["desktop_columns"], status)
+                    result["desktop_columns"]["host_load_monitor"] = samples
+            if name == "desktop-columns-timing" and (out / "timing-status.json").exists():
+                result["timing_host_gate"] = json.loads((out / "timing-status.json").read_text())
             (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
             print(f"{verdict} {name} {run}/{args.repeat}: {note}", flush=True)
+            if name == "desktop-columns-timing" and verdict == "BLOCKED":
+                break
     sys.exit(1 if failures else 2 if blocked else 0)
 
 

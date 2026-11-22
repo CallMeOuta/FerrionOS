@@ -8,6 +8,7 @@ import statistics
 import time
 
 from desktop_fixtures import compare_probes, load_regions
+from desktop_load import sample_host
 
 ROLES = ('files', 'editor', 'terminal')
 
@@ -81,6 +82,9 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
                                   'reason': 'fixture samples the rounded title corner; DD2 permits different corner treatment'}],
               'decoration_note': 'Shadows are disabled. No shadow probes occur in the three selected regions.',
               'performance_is_functional_gate': False}
+    boot_record = vm.out / 'host-boot.json'
+    if boot_record.exists():
+        result['host_boot'] = json.loads(boot_record.read_text())
     problems = result['problems']
 
     def save():
@@ -117,6 +121,18 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
             except ValueError:
                 pass
         raise RuntimeError('window query returned no JSON array: ' + output[-1000:])
+
+    def log_counts():
+        counts = run("for log in ferrion-wm dd2-files dd2-editor dd2-terminal; do "
+                     "printf 'DD2_LOG_LINES=%s:%s\\n' \"$log\" \"$(wc -l < /tmp/$log.log)\"; done")
+        values = {name: int(count) for name, count in re.findall(
+            r'(?m)^DD2_LOG_LINES=([\w-]+):\s*(\d+)', counts)}
+        if len(values) != 4:
+            raise RuntimeError('missing timing log boundary')
+        return values
+
+    def log_snapshot(name, start, end):
+        return run(f'head -n {end} /tmp/{name}.log | tail -n +{start + 1}')
 
     if not root_shell(vm, args.timeout):
         problems.append('serial root shell unavailable')
@@ -193,12 +209,7 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
                       ('; '.join(differences) if differences else f'{len(points)} probes match'), flush=True)
                 if differences:
                     problems.append(f'{name} window-{role}: ' + '; '.join(differences))
-            counts = run("for log in ferrion-wm dd2-files dd2-editor dd2-terminal; do "
-                         "printf 'DD2_LOG_LINES=%s:%s\\n' \"$log\" \"$(wc -l < /tmp/$log.log)\"; done")
-            marks = {name: int(count) for name, count in re.findall(
-                r'(?m)^DD2_LOG_LINES=([\w-]+):\s*(\d+)', counts)}
-            if len(marks) != 4:
-                raise RuntimeError('missing timing log boundary')
+            marks = log_counts()
             for step in range(100):
                 qmp('input-send-event', {'events': [
                     {'type': 'abs', 'data': {'axis': 'x', 'value': 1000 + step * 100}},
@@ -206,13 +217,26 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
                 if step % 10 == 0:
                     vm.command('sendkey a')
                 time.sleep(.05)
-            time.sleep(.5)
-            text = run(f"tail -n +{marks['ferrion-wm'] + 1} /tmp/ferrion-wm.log")
-            for role in ROLES:
-                client_log = run(f"tail -n +{marks['dd2-' + role] + 1} /tmp/dd2-{role}.log")
-                text += '\n'.join(line for line in client_log.splitlines() if line.startswith('DD2_')) + '\n'
-            (vm.out / f"{name}-timings.log").write_text(text)
-            case.update(timings(text))
+            drain_started = time.monotonic()
+            while True:
+                ends = log_counts()
+                text = log_snapshot('ferrion-wm', marks['ferrion-wm'], ends['ferrion-wm'])
+                for role in ROLES:
+                    log = 'dd2-' + role
+                    client_log = log_snapshot(log, marks[log], ends[log])
+                    text += '\n'.join(line for line in client_log.splitlines() if line.startswith('DD2_')) + '\n'
+                (vm.out / f"{name}-timings.log").write_text(text)
+                case.update(timings(text))
+                present_ids = {f['frame'] for f in case['present_intervals']}
+                presented = [f for f in case['frames'] if f['output_frame'] in present_ids]
+                if (len(case['key_updates']) >= 10 and len(case['pointers']) >= 100
+                        and len(presented) >= 60
+                        and sum(f['role'] == 'terminal' for f in presented) >= 2):
+                    break
+                if time.monotonic() - drain_started >= args.timeout:
+                    break
+                time.sleep(.1)
+            case['timing_drain_seconds'] = time.monotonic() - drain_started
             present_ids = {f['frame'] for f in case['present_intervals']}
             case['frames'] = [f for f in case['frames'] if f['output_frame'] in present_ids]
             case['commit_to_present_us'] = summary(f['commit_to_present_us'] for f in case['frames'])
@@ -227,7 +251,7 @@ def check(vm, args, qmp, boot_load, root_shell, run_status):
                 problems.append(f'{name}: no keyboard update presented by editor')
             if sum(f['role'] == 'terminal' for f in case['frames']) < 2:
                 problems.append(f'{name}: slow client did not keep presenting')
-            result['host_load'].append({'phase': name, 'load_average': os.getloadavg()})
+            result['host_load'].append(sample_host(name))
             save()
     save()
     return not problems, '; '.join(problems) if problems else 'four layouts match; timing recorded in result.json'
