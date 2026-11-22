@@ -27,13 +27,13 @@ tests remain, with the config snapshots adapted to the production fields.
  niri-config/src/binds.rs        |  29 ++++++++-
  niri-ipc/src/lib.rs             |  78 ++++++++++++++++++++++-
  src/input/mod.rs                |  24 ++++++-
- src/layout/floating.rs          |   8 ++-
- src/layout/floating/stacking.rs |  99 ++++++++++++++++++++++++++++-
+ src/layout/floating.rs          |   5 +-
+ src/layout/floating/stacking.rs |  93 ++++++++++++++++++++++++++-
  src/layout/free.rs              |  26 +++++++-
  src/layout/mod.rs               |  26 +++++++-
  src/layout/workspace.rs         |  31 ++++++++-
  src/layout/workspace/free.rs    | 107 +++++++++++++++++++++++++++++++-
- 9 files changed, 409 insertions(+), 19 deletions(-)
+ 9 files changed, 402 insertions(+), 17 deletions(-)
 
 diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
 index acfb3290..10cafcf0 100644
@@ -233,7 +233,7 @@ index ee199c7c..7e56e0f0 100644
                  self.niri.layout.set_window_floating(None, true);
                  // FIXME: granular
 diff --git a/src/layout/floating.rs b/src/layout/floating.rs
-index c47d3683..a65febf2 100644
+index 2bc7d837..d24202ba 100644
 --- a/src/layout/floating.rs
 +++ b/src/layout/floating.rs
 @@ -1,4 +1,4 @@
@@ -242,41 +242,28 @@ index c47d3683..a65febf2 100644
  use std::cmp::max;
  use std::iter::zip;
  use std::rc::Rc;
-@@ -100,6 +100,9 @@ struct Data {
+@@ -100,6 +100,8 @@ struct Data {
+     working_area: Rectangle<f64, Logical>,
  
-     // ferrion-wm 2026-11-21 (F6): whether the window is minimized, parked out of sight.
-     parked: bool,
+     visibility: stacking::Visibility,
 +
-+    // ferrion-wm 2026-11-21 (F7): where the window was before it was tiled.
 +    tiled: Option<stacking::Tiled>,
  }
  
  impl Data {
-@@ -113,8 +116,9 @@ impl Data {
-             logical_pos: Point::default(),
+@@ -114,6 +116,7 @@ impl Data {
              size: Size::default(),
              working_area,
--            // ferrion-wm 2026-11-21 (F6).
-+            // ferrion-wm 2026-11-21 (F6, F7).
-             parked: false,
+             visibility: stacking::Visibility::Shown,
 +            tiled: None,
          };
          rv.update(tile);
          rv.set_logical_pos(logical_pos);
 diff --git a/src/layout/floating/stacking.rs b/src/layout/floating/stacking.rs
-index 0ac777fa..28c9e859 100644
+index e2858841..ae1e3daf 100644
 --- a/src/layout/floating/stacking.rs
 +++ b/src/layout/floating/stacking.rs
-@@ -3,16 +3,32 @@
- //! A minimized window stays a tile of the floating layout, parked: it keeps its place and size
- //! and every operation on it, but it is not drawn, cannot be hit by the pointer, and never has
- //! the focus. Activating it again unparks it on top.
--// Part of ferrion-wm, a fork of niri. Written on 2026-11-21 (F6).
-+//!
-+//! A window can be tiled to a half, a quarter, the whole working area or its middle, as on the
-+//! Mac. It remembers the place and size it had before, which untiling returns it to.
-+// Part of ferrion-wm, a fork of niri. Written on 2026-11-21 (F6, F7).
- // SPDX-License-Identifier: GPL-3.0-or-later
+@@ -3,11 +3,13 @@
  
  use std::iter::zip;
  
@@ -289,8 +276,13 @@ index 0ac777fa..28c9e859 100644
 -use crate::layout::LayoutElement;
 +use crate::layout::{LayoutElement, SizeFrac};
 +use crate::utils::center_preferring_top_left_in_area;
-+
-+/// Where a tiled window was before it was tiled.
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(super) enum Visibility {
+@@ -39,6 +41,17 @@ pub(super) enum MinimizeEvent<Id> {
+     LeaveFree,
+ }
+ 
 +#[derive(Debug, Clone, Copy, PartialEq)]
 +pub(super) struct Tiled {
 +    /// Where the window is tiled.
@@ -300,15 +292,16 @@ index 0ac777fa..28c9e859 100644
 +    /// Its window size before.
 +    size: Size<i32, Logical>,
 +}
- 
++
++
  impl<W: LayoutElement> FloatingSpace<W> {
-     /// Whether this window is minimized.
-@@ -78,4 +94,81 @@ impl<W: LayoutElement> FloatingSpace<W> {
-             data.parked = false;
-         }
+     pub fn is_free_mode(&self) -> bool {
+         self.workspace_is_free
+@@ -145,4 +158,80 @@ impl<W: LayoutElement> FloatingSpace<W> {
+     pub fn unpark_all(&mut self) {
+         self.apply_minimize(MinimizeEvent::LeaveFree);
      }
 +
-+    /// Where a window of this tile size tiles to in the working area.
 +    pub fn tile_rect(
 +        &self,
 +        target: WindowTile,
@@ -430,7 +423,7 @@ index d223d814..707ec7df 100644
      pub fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
          if let Some(ws) = self.active_workspace_mut() {
 diff --git a/src/layout/mod.rs b/src/layout/mod.rs
-index e17e9e60..9fe1a8ef 100644
+index edbef60c..b88f5dc1 100644
 --- a/src/layout/mod.rs
 +++ b/src/layout/mod.rs
 @@ -1,4 +1,5 @@
@@ -440,7 +433,7 @@ index e17e9e60..9fe1a8ef 100644
  //! Window layout logic.
  //!
  //! Niri implements scrollable tiling with dynamic workspaces. The scrollable tiling is mostly
-@@ -2892,6 +2893,10 @@ impl<W: LayoutElement> Layout<W> {
+@@ -2894,6 +2895,10 @@ impl<W: LayoutElement> Layout<W> {
          for mon in self.monitors_mut() {
              mon.insert_hint = None;
          }
@@ -451,7 +444,7 @@ index e17e9e60..9fe1a8ef 100644
  
          if !matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_))) {
              return;
-@@ -2921,6 +2926,13 @@ impl<W: LayoutElement> Layout<W> {
+@@ -2923,6 +2928,13 @@ impl<W: LayoutElement> Layout<W> {
                          ws.scrolling_insert_position(pos_within_workspace)
                      };
  
@@ -465,7 +458,7 @@ index e17e9e60..9fe1a8ef 100644
                      let border_width = move_.tile.effective_border_width().unwrap_or(0.);
                      let corner_radius = move_
                          .tile
-@@ -4378,6 +4390,18 @@ impl<W: LayoutElement> Layout<W> {
+@@ -4380,6 +4392,18 @@ impl<W: LayoutElement> Layout<W> {
                              true,
                              None,
                          );
@@ -485,7 +478,7 @@ index e17e9e60..9fe1a8ef 100644
                  }
  
 diff --git a/src/layout/workspace.rs b/src/layout/workspace.rs
-index f4c4d90b..a95704aa 100644
+index b2937cd9..10d41d2d 100644
 --- a/src/layout/workspace.rs
 +++ b/src/layout/workspace.rs
 @@ -1,5 +1,5 @@
@@ -506,7 +499,7 @@ index f4c4d90b..a95704aa 100644
  use smithay::backend::renderer::element::Kind;
  use smithay::backend::renderer::gles::GlesRenderer;
  use smithay::desktop::{layer_map_for_output, Window};
-@@ -1111,6 +1112,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1117,6 +1118,10 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn move_left(&mut self, focus: bool) -> bool {
@@ -517,7 +510,7 @@ index f4c4d90b..a95704aa 100644
          if self.floating_is_active.get() {
              self.floating.move_left();
              true
-@@ -1120,6 +1125,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1126,6 +1131,10 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn move_right(&mut self, focus: bool) -> bool {
@@ -528,7 +521,7 @@ index f4c4d90b..a95704aa 100644
          if self.floating_is_active.get() {
              self.floating.move_right();
              true
-@@ -1150,6 +1159,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1156,6 +1165,10 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn move_down(&mut self, focus: bool) -> bool {
@@ -539,7 +532,7 @@ index f4c4d90b..a95704aa 100644
          if self.floating_is_active.get() {
              self.floating.move_down();
              true
-@@ -1159,6 +1172,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1165,6 +1178,10 @@ impl<W: LayoutElement> Workspace<W> {
      }
  
      pub fn move_up(&mut self, focus: bool) -> bool {
@@ -550,7 +543,7 @@ index f4c4d90b..a95704aa 100644
          if self.floating_is_active.get() {
              self.floating.move_up();
              true
-@@ -1276,6 +1293,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -1282,6 +1299,10 @@ impl<W: LayoutElement> Workspace<W> {
          if self.column_op(free::ColumnOp::SizeChange(None)).is_err() {
              return;
          }
@@ -561,7 +554,7 @@ index f4c4d90b..a95704aa 100644
          if self.floating_is_active.get() {
              // Leave this unimplemented for now. For good UX, this probably needs moving the tile
              // to be against the left edge of the working area while it is full-width.
-@@ -2007,6 +2028,10 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -2013,6 +2034,10 @@ impl<W: LayoutElement> Workspace<W> {
          &self,
          position: InsertPosition,
      ) -> Option<Rectangle<f64, Logical>> {
@@ -573,7 +566,7 @@ index f4c4d90b..a95704aa 100644
      }
  
 diff --git a/src/layout/workspace/free.rs b/src/layout/workspace/free.rs
-index e51c1c0a..d0ce578e 100644
+index 4d0c7348..8f2707ad 100644
 --- a/src/layout/workspace/free.rs
 +++ b/src/layout/workspace/free.rs
 @@ -18,14 +18,20 @@
@@ -609,7 +602,7 @@ index e51c1c0a..d0ce578e 100644
  }
  
  impl FreeState {
-@@ -69,10 +77,14 @@ impl FreeState {
+@@ -72,10 +80,14 @@ impl FreeState {
              mode: own.and_then(|part| part.workspace_mode).unwrap_or(default),
              chosen: None,
              default,
@@ -624,7 +617,7 @@ index e51c1c0a..d0ce578e 100644
  /// Whether niri would float this window by itself, also in columns: a window with a parent, a
  /// window of fixed height, and a window whose rules say so (`compute_open_floating`).
  fn floats_by_itself<'a, W: LayoutElement + 'a>(
-@@ -453,6 +465,95 @@ impl<W: LayoutElement> Workspace<W> {
+@@ -457,6 +469,95 @@ impl<W: LayoutElement> Workspace<W> {
          self.free_focus_away_from_parked();
      }
  
