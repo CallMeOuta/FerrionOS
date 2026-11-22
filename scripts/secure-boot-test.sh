@@ -74,14 +74,7 @@ fi
 mkdir -p "$OUT" "$KEYS"
 WORK="$(mktemp -d "$OUT/work.XXXXXX")"
 BOOT_WORK="$WORK"
-MOUNTED=0
-cleanup() {
-    if [ "$MOUNTED" = 1 ]; then
-        $BOOT_FUMOUNT "$WORK/mnt" || true
-    fi
-    rm -rf "$WORK"
-}
-trap cleanup EXIT
+trap boot_cleanup EXIT
 
 for name in PK KEK db; do
     sb_make_cert "$KEYS" "$name" "/CN=FerrionOS Secure Boot test $name/"
@@ -121,7 +114,6 @@ EOF
 tamper() {
     local name="$1"
     cp --reflink=auto "$WORK/harddrive.img" "$WORK/$name.img"
-    MOUNTED=1
     boot_mount "$REDOXFS_BIN" "$WORK/$name.img" "$WORK/mnt"
     local boot="$WORK/mnt/usr/lib/boot"
     case "$name" in
@@ -132,9 +124,7 @@ tamper() {
             boot_sign_manifest "$WORK/other-boot.key" "$boot/manifest" "$boot/manifest.sig"
             ;;
     esac
-    sync
-    $BOOT_FUMOUNT "$WORK/mnt"
-    MOUNTED=0
+    boot_unmount "$WORK/mnt"
 }
 
 flip_byte() {

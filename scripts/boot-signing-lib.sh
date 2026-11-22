@@ -14,21 +14,102 @@ else
     BOOT_FUMOUNT="fusermount -u"
 fi
 
+BOOT_MOUNT_TRIES=100
+BOOT_UNMOUNT_TRIES=20
+BOOT_MOUNT_STATE=none
+BOOT_MOUNT_DIR=
+BOOT_MOUNT_PID=
+
+boot_assert_mount_state() {
+    case "$BOOT_MOUNT_STATE" in
+        none|mounting|mounted) ;;
+        *) boot_die "assertion failed: invalid BOOT_MOUNT_STATE '$BOOT_MOUNT_STATE'" ;;
+    esac
+}
+
+boot_is_mounted() {
+    local dir="$1"
+    [ -d "$dir" ] || return 1
+    if command -v mountpoint >/dev/null 2>&1; then
+        mountpoint -q "$dir"
+        return $?
+    fi
+    local real
+    real="$(cd "$dir" && pwd -P)"
+    mount | grep -Fq " on ${real} "
+}
+
 boot_mount() {
     local redoxfs="$1" image="$2" dir="$3"
+    boot_assert_mount_state
+    [ "$BOOT_MOUNT_STATE" = none ] || boot_die "assertion failed: boot_mount called in state '$BOOT_MOUNT_STATE'"
     [ -x "$redoxfs" ] || BOOT_EXIT=2 boot_die "$redoxfs is not executable"
     mkdir -p "$dir"
+    BOOT_MOUNT_DIR="$dir"
+    BOOT_MOUNT_STATE=mounting
     local -a key_args=()
     if [ -n "${REDOXFS_KEY_FILE:-}" ]; then
         key_args=(--key-file "$REDOXFS_KEY_FILE")
     fi
     "$redoxfs" --flush-on-unmount "${key_args[@]}" "$image" "$dir" >"$dir.log" 2>&1 &
-    for _ in $(seq 100); do
-        [ -f "$dir/usr/lib/boot/kernel" ] && return 0
+    BOOT_MOUNT_PID="$!"
+    local step
+    for ((step = 0; step < BOOT_MOUNT_TRIES; step++)); do
+        if boot_is_mounted "$dir" && [ -f "$dir/usr/lib/boot/kernel" ]; then
+            BOOT_MOUNT_STATE=mounted
+            return 0
+        fi
         sleep 0.1
     done
     cat "$dir.log" >&2
     boot_die "could not mount $image"
+}
+
+boot_unmount() {
+    local dir="${1:-$BOOT_MOUNT_DIR}" step
+    boot_assert_mount_state
+    if [ -n "$dir" ] && boot_is_mounted "$dir"; then
+        sync
+        for ((step = 0; step < BOOT_UNMOUNT_TRIES; step++)); do
+            $BOOT_FUMOUNT "$dir" 2>/dev/null || true
+            if ! boot_is_mounted "$dir"; then
+                break
+            fi
+            sleep 0.1
+        done
+        if boot_is_mounted "$dir"; then
+            echo "$BOOT_PROG: could not unmount $dir after $BOOT_UNMOUNT_TRIES attempts" >&2
+            return 1
+        fi
+    fi
+    if [ -n "$dir" ] && [ -d "$dir" ]; then
+        rmdir "$dir" 2>/dev/null || true
+    fi
+    BOOT_MOUNT_STATE=none
+    BOOT_MOUNT_PID=
+    return 0
+}
+
+boot_cleanup() {
+    boot_assert_mount_state
+    [ -n "${BOOT_WORK:-}" ] || return 0
+    rm -f "$BOOT_WORK/redoxfs.key"
+    local mnt="${BOOT_MOUNT_DIR:-$BOOT_WORK/mnt}"
+    if ! boot_is_mounted "$mnt" && [ "$BOOT_MOUNT_STATE" = mounting ] && [ -n "$BOOT_MOUNT_PID" ]; then
+        kill "$BOOT_MOUNT_PID" 2>/dev/null || true
+        wait "$BOOT_MOUNT_PID" 2>/dev/null || true
+    fi
+    if boot_is_mounted "$mnt"; then
+        if ! boot_unmount "$mnt"; then
+            echo "$BOOT_PROG: refusing to remove $BOOT_WORK while $mnt is still mounted" >&2
+            return 1
+        fi
+    elif [ -d "$mnt" ]; then
+        rmdir "$mnt" 2>/dev/null || true
+    fi
+    BOOT_MOUNT_STATE=none
+    BOOT_MOUNT_PID=
+    rm -rf --one-file-system "$BOOT_WORK"
 }
 
 boot_esp_range() {

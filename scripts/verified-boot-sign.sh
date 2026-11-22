@@ -61,19 +61,7 @@ fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ferrion-verified-boot.XXXXXX")"
 BOOT_WORK="$WORK"
-MOUNTED=0
-cleanup() {
-    rm -f "$WORK/redoxfs.key"
-    if [ "$MOUNTED" = 1 ]; then
-        $BOOT_FUMOUNT "$WORK/mnt" || return
-    fi
-    if [ -d "$WORK/mnt" ]; then
-        rmdir "$WORK/mnt" || return
-    fi
-    rm -f "$WORK"/*
-    rmdir "$WORK"
-}
-trap cleanup EXIT
+trap boot_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -116,7 +104,6 @@ esac
 ESP_RANGE="$(boot_esp_range "$IMAGE")"
 read -r ESP_OFFSET ESP_SIZE <<< "$ESP_RANGE"
 
-MOUNTED=1
 boot_mount "$REDOXFS_BIN" "$IMAGE" "$WORK/mnt"
 BOOT="$WORK/mnt/usr/lib/boot"
 [ -f "$BOOT/bootloader.efi" ] || boot_die "$IMAGE has no UEFI bootloader (usr/lib/boot/bootloader.efi); verified boot requires a UEFI bootloader"
@@ -168,8 +155,6 @@ with open(image_path, "r+b") as f:
     f.write(key)
 EOF
 cp "$WORK/bootloader.efi" "$BOOT/bootloader.efi"
-sync
-$BOOT_FUMOUNT "$WORK/mnt"
-MOUNTED=0
+boot_unmount "$WORK/mnt"
 
 echo "verified-boot-sign: $IMAGE signed for verified boot with $KEY_NAME"

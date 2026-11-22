@@ -61,14 +61,7 @@ boot_need python3 "Python 3"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ferrion-secure-boot-keys.XXXXXX")"
 BOOT_WORK="$WORK"
-MOUNTED=0
-cleanup() {
-    if [ "$MOUNTED" = 1 ]; then
-        $BOOT_FUMOUNT "$WORK/mnt" || true
-    fi
-    rm -rf "$WORK"
-}
-trap cleanup EXIT
+trap boot_cleanup EXIT
 
 key() {
     local uri
@@ -120,16 +113,13 @@ sign() {
     loader="$(boot_esp_loader "$image" "$offset")"
     mcopy -n -i "$image@@$offset" "$loader" "$WORK/unsigned.efi"
     ! sb_is_signed "$WORK/unsigned.efi" || boot_die "the bootloader of $image is already signed; sign an image as built"
-    MOUNTED=1
     boot_mount "$REDOXFS_BIN" "$image" "$WORK/mnt"
     cmp -s "$WORK/unsigned.efi" "$WORK/mnt/usr/lib/boot/bootloader.efi" \
         || boot_die "the bootloader in the EFI system partition differs from usr/lib/boot/bootloader.efi"
     sb_sign_efi "$(key db)" "$KEYS/db.crt" "$WORK/unsigned.efi" "$WORK/signed.efi"
     sb_verify_efi "$KEYS/db.crt" "$WORK/signed.efi"
     cp "$WORK/signed.efi" "$WORK/mnt/usr/lib/boot/bootloader.efi"
-    sync
-    $BOOT_FUMOUNT "$WORK/mnt"
-    MOUNTED=0
+    boot_unmount "$WORK/mnt"
     mcopy -o -i "$image@@$offset" "$WORK/signed.efi" "$loader"
     echo "secure-boot-keys: the bootloader of $image is signed with $KEYS/db.crt"
 }

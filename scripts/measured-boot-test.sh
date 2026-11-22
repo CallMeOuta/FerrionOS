@@ -74,14 +74,7 @@ fi
 mkdir -p "$OUT"
 WORK="$(mktemp -d "$OUT/work.XXXXXX")"
 BOOT_WORK="$WORK"
-MOUNTED=0
-cleanup() {
-    if [ "$MOUNTED" = 1 ]; then
-        $BOOT_FUMOUNT "$WORK/mnt" || true
-    fi
-    rm -rf "$WORK"
-}
-trap cleanup EXIT
+trap boot_cleanup EXIT
 
 range="$(boot_esp_range "$IMAGE")"
 read -r ESP_OFFSET _ <<< "$range"
@@ -103,7 +96,6 @@ prepare() {
     local name="$1"
     cp --reflink=auto "$WORK/harddrive.img" "$WORK/$name.img"
     mkdir -p "$WORK/$name.files"
-    MOUNTED=1
     boot_mount "$REDOXFS_BIN" "$WORK/$name.img" "$WORK/mnt"
     local boot="$WORK/mnt/usr/lib/boot"
     if [ "$name" = tpm-initfs ]; then
@@ -124,9 +116,7 @@ prepare() {
     fi
     cp "$boot/kernel" "$boot/initfs" "$WORK/$name.files/"
     [ "$VERIFIED" = 0 ] || cp "$boot/manifest" "$WORK/$name.files/"
-    sync
-    $BOOT_FUMOUNT "$WORK/mnt"
-    MOUNTED=0
+    boot_unmount "$WORK/mnt"
 }
 
 KVM=0
