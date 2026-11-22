@@ -106,43 +106,52 @@ pub fn execute(action: &Action, yes: bool) -> Result<Value> {
     }
 }
 
-pub fn print(data: &Value) {
-    if let Some(apps) = data["apps"].as_array() {
-        if apps.is_empty() {
-            println!("No audio apps.");
+pub fn print(action: &Action, data: &Value) {
+    match action {
+        Action::Apps => {
+            if let Some(apps) = data["apps"].as_array() {
+                if apps.is_empty() {
+                    println!("No audio apps.");
+                }
+                for app in apps {
+                    println!(
+                        "{}  {}  {} streams",
+                        app["identity"].as_str().unwrap_or(""),
+                        gain(&app["gain_db"]),
+                        app["streams"]
+                    );
+                }
+            }
         }
-        for app in apps {
+        Action::Status => {
             println!(
-                "{}  {}  {} streams",
-                app["identity"].as_str().unwrap_or(""),
-                gain(&app["gain_db"]),
-                app["streams"]
+                "{} Hz, {}, {} channels",
+                data["rate"],
+                data["format"].as_str().unwrap_or(""),
+                data["channels"]
+            );
+            println!("Volume: {}%", data["volume"]);
+            println!("Streams: {}", data["streams"]);
+            println!(
+                "Bit-perfect: {} ({})",
+                data["bit_perfect"],
+                data["reason"].as_str().unwrap_or("")
+            );
+            println!("Limiter frames: {}", data["limiter_frames"]);
+        }
+        Action::Volume {
+            target: Some(_), ..
+        } => {
+            println!(
+                "{} {}: {}",
+                data["target"].as_str().unwrap_or(""),
+                data["identity"].as_str().unwrap_or(""),
+                gain(&data["gain_db"])
             );
         }
-    } else if data.get("rate").is_some() {
-        println!(
-            "{} Hz, {}, {} channels",
-            data["rate"],
-            data["format"].as_str().unwrap_or(""),
-            data["channels"]
-        );
-        println!("Volume: {}%", data["volume"]);
-        println!("Streams: {}", data["streams"]);
-        println!(
-            "Bit-perfect: {} ({})",
-            data["bit_perfect"],
-            data["reason"].as_str().unwrap_or("")
-        );
-        println!("Limiter frames: {}", data["limiter_frames"]);
-    } else if data.get("gain_db").is_some() {
-        println!(
-            "{} {}: {}",
-            data["target"].as_str().unwrap_or(""),
-            data["identity"].as_str().unwrap_or(""),
-            gain(&data["gain_db"])
-        );
-    } else if let Some(volume) = data.get("volume") {
-        println!("Volume: {volume}%");
+        Action::Volume { target: None, .. } => {
+            println!("Volume: {}%", data["volume"]);
+        }
     }
 }
 

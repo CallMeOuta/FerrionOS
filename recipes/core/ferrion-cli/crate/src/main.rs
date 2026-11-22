@@ -470,62 +470,86 @@ fn response(command: &str, result: Result<Value>) -> (i32, Value) {
     }
 }
 
-fn print_text(value: &Value) {
+fn print_text(action: Option<&Action>, value: &Value) {
     if let Some(error) = value["error"].as_str() {
         eprintln!("ferrion: {error}");
     }
+    let Some(action) = action else {
+        return;
+    };
     let data = &value["data"];
-    if let Some(help) = data["help"].as_str() {
-        println!("{help}");
-    } else if value["command"]
-        .as_str()
-        .is_some_and(|name| name.starts_with("audio "))
-    {
-        audio::print(data);
-    } else if data.get("stdout").is_some() {
-        print!("{}", data["stdout"].as_str().unwrap_or(""));
-        eprint!("{}", data["stderr"].as_str().unwrap_or(""));
-    } else if let Some(shells) = data["shells"].as_array() {
-        for shell in shells {
-            println!(
-                "{}  {}{}{}",
-                shell["name"].as_str().unwrap_or(""),
-                shell["path"].as_str().unwrap_or(""),
-                if shell["path"] == data["current"] {
-                    " (current)"
-                } else {
-                    ""
-                },
-                if shell["installed"] == false {
-                    " (not installed)"
-                } else {
-                    ""
-                }
-            );
+    if value["ok"] != true {
+        if let Action::Package(..) = action
+            && data.get("stdout").is_some()
+        {
+            print!("{}", data["stdout"].as_str().unwrap_or(""));
+            eprint!("{}", data["stderr"].as_str().unwrap_or(""));
         }
-    } else if let Some(shell) = data["shell"].as_str() {
-        println!(
-            "Login shell: {shell}{}",
-            if data["changed"] == true {
-                " (next login)"
-            } else {
-                " (unchanged)"
+        return;
+    }
+    match action {
+        Action::Help => {
+            if let Some(help) = data["help"].as_str() {
+                println!("{help}");
             }
-        );
-    } else if let Some(version) = data["version"].as_str() {
-        println!("FerrionOS {version}");
-        for (key, label) in [
-            ("verified_boot", "Verified boot"),
-            ("measured_boot", "Measured boot"),
-            ("lockdown", "Lockdown"),
-            ("disk_encryption", "Disk encryption"),
-            ("seeded_randomness", "Seeded randomness"),
-        ] {
-            println!(
-                "{label}: {} — {}",
-                data[key]["state"].as_str().unwrap_or("unknown"),
-                data[key]["detail"].as_str().unwrap_or("")
-            );
+        }
+        Action::Audio(audio_action) => audio::print(audio_action, data),
+        Action::Package(..) => {
+            if data.get("stdout").is_some() {
+                print!("{}", data["stdout"].as_str().unwrap_or(""));
+                eprint!("{}", data["stderr"].as_str().unwrap_or(""));
+            }
+        }
+        Action::ShellList => {
+            if let Some(shells) = data["shells"].as_array() {
+                for shell in shells {
+                    println!(
+                        "{}  {}{}{}",
+                        shell["name"].as_str().unwrap_or(""),
+                        shell["path"].as_str().unwrap_or(""),
+                        if shell["path"] == data["current"] {
+                            " (current)"
+                        } else {
+                            ""
+                        },
+                        if shell["installed"] == false {
+                            " (not installed)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+        }
+        Action::ShellSet(_) => {
+            if let Some(shell) = data["shell"].as_str() {
+                println!(
+                    "Login shell: {shell}{}",
+                    if data["changed"] == true {
+                        " (next login)"
+                    } else {
+                        " (unchanged)"
+                    }
+                );
+            }
+        }
+        Action::Status => {
+            if let Some(version) = data["version"].as_str() {
+                println!("FerrionOS {version}");
+                for (key, label) in [
+                    ("verified_boot", "Verified boot"),
+                    ("measured_boot", "Measured boot"),
+                    ("lockdown", "Lockdown"),
+                    ("disk_encryption", "Disk encryption"),
+                    ("seeded_randomness", "Seeded randomness"),
+                ] {
+                    println!(
+                        "{label}: {} — {}",
+                        data[key]["state"].as_str().unwrap_or("unknown"),
+                        data[key]["detail"].as_str().unwrap_or("")
+                    );
+                }
+            }
         }
     }
 }
@@ -533,17 +557,21 @@ fn print_text(value: &Value) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut json = args.iter().any(|s| s == "--json");
-    let (code, value) = match parse(&args) {
+    let (action, code, value) = match parse(&args) {
         Ok(options) => {
             json = options.json;
-            response(command_name(&options.action), execute(&options))
+            let (code, value) = response(command_name(&options.action), execute(&options));
+            (Some(options.action), code, value)
         }
-        Err(error) => response("invalid", Err(error)),
+        Err(error) => {
+            let (code, value) = response("invalid", Err(error));
+            (None, code, value)
+        }
     };
     if json {
         println!("{value}");
     } else {
-        print_text(&value);
+        print_text(action.as_ref(), &value);
     }
     std::process::exit(code);
 }
