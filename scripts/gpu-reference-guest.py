@@ -510,11 +510,20 @@ def run_guest(args, kernel, initrd, name, directory):
     if not events.get("virtio_gpu_cmd_ctx_create") or "virtio_gpu_features virgl 1" not in trace_text:
         result["status"] = "FAIL"
         result["trace"]["error"] = "No host proof of virgl negotiation and context creation."
-    if name != "virgl" and not all(events.get(event) for event in ("virtio_gpu_cmd_ctx_submit",
-                                                                  "virtio_gpu_cmd_res_create_blob",
-                                                                  "virtio_gpu_cmd_res_map_blob")):
-        result["status"] = "FAIL"
-        result["trace"]["error"] = "No host proof of submissions and mapped blobs on the Venus device."
+    if name != "virgl":
+        mapping = result.get("guest", {}).get("mapped_blob", {})
+        mapped_resource = re.search(
+            rf"\bvirtio_gpu_cmd_res_create_blob res 0x{mapping.get('resource_id', 0):x}, size {mapping.get('bytes', 0)}\b",
+            trace_text,
+        )
+        mapped_bytes = mapping.get("status") == "PASS" and mapped_resource is not None
+        mapping_evidence = ("qemu-map-event" if events.get("virtio_gpu_cmd_res_map_blob") else
+                            "guest-blob-roundtrip" if mapped_bytes else None)
+        result["trace"]["mapping_evidence"] = mapping_evidence
+        if not all((events.get("virtio_gpu_cmd_ctx_submit"), events.get("virtio_gpu_cmd_res_create_blob"),
+                    mapping_evidence)):
+            result["status"] = "FAIL"
+            result["trace"]["error"] = "No proof of submissions, blob creation and mapping on the Venus device."
     return result
 
 

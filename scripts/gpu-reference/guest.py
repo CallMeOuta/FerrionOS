@@ -128,6 +128,14 @@ def main():
     result["gl"].append(gl_test("llvmpipe", {"LIBGL_ALWAYS_SOFTWARE": "1", "GALLIUM_DRIVER": "llvmpipe"}))
     result["vulkan"].append(vulkan_test("venus", "virtio"))
     if venus:
+        mapping = run(["/tmp/probe", "mapped-blob"])
+        match = re.search(r"^mapped_blob\t(\d+)\t(\d+)\t(\d+)\t(\d+)$", mapping["stdout"], re.M)
+        proof = {"run": mapping, "status": "FAIL"}
+        if match:
+            proof.update(zip(("resource_id", "bytes", "passes", "mismatches"), map(int, match.groups())))
+            if mapping["exit_code"] == 0 and proof["bytes"] > 0 and proof["passes"] >= 2 and proof["mismatches"] == 0:
+                proof["status"] = "PASS"
+        result["mapped_blob"] = proof
         result["gl"].append(gl_test("zink-venus", {"MESA_LOADER_DRIVER_OVERRIDE": "zink", "GALLIUM_DRIVER": "zink",
                                                   "VK_DRIVER_FILES": icd("virtio")}))
     if "gpu_reference=native" in Path("/proc/cmdline").read_text():
@@ -152,6 +160,7 @@ def main():
     good = good and expected.issubset({c["id"] for c in capsets})
     if mode != "virgl":
         good = good and result["vulkan"][0]["run"]["exit_code"] == 0 and bool(devices)
+        good = good and result.get("mapped_blob", {}).get("status") == "PASS"
         good = good and all(d["driver_name"] == "venus" and len(d["extensions"]) == d["extension_count"] for d in devices)
     else:
         good = good and not devices

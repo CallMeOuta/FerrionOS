@@ -100,10 +100,12 @@ int vulkan_exact(void)
         fputs("GPU_ERROR no Mesa Venus Vulkan device\n", stderr);
         goto cleanup;
     }
+    uint32_t extension_count = 0;
+    CHECK(vkEnumerateDeviceExtensionProperties(gpu, NULL, &extension_count, NULL));
     uint32_t api = chosen_properties.properties.apiVersion;
-    printf("GPU_VK device=\"%s\" api=%u.%u.%u driver=\"%s\" version=\"%s\"\n",
+    printf("GPU_VK device=\"%s\" api=%u.%u.%u driver=\"%s\" version=\"%s\" extensions=%u\n",
            chosen_properties.properties.deviceName, VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
-           VK_API_VERSION_PATCH(api), chosen_driver.driverName, chosen_driver.driverInfo);
+           VK_API_VERSION_PATCH(api), chosen_driver.driverName, chosen_driver.driverInfo, extension_count);
     fflush(stdout);
 
     uint32_t family_count = 0, family = UINT32_MAX;

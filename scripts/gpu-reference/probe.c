@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 static int gl_info(void) {
@@ -106,10 +107,63 @@ static int caps(const char *size_arg) {
     return 0;
 }
 
+#define MAPPED_BLOB_BYTES 4096
+#define MAPPED_BLOB_PASSES 2
+
+static int mapped_blob(void) {
+    int result = 1;
+    int fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    if (fd < 0) { perror("mapped blob render node"); return 1; }
+    void *first = MAP_FAILED, *second = MAP_FAILED;
+    struct drm_virtgpu_context_set_param param = {
+        .param = VIRTGPU_CONTEXT_PARAM_CAPSET_ID, .value = VIRTGPU_DRM_CAPSET_VENUS,
+    };
+    struct drm_virtgpu_context_init context = {
+        .num_params = 1, .ctx_set_params = (uintptr_t)&param,
+    };
+    if (ioctl(fd, DRM_IOCTL_VIRTGPU_CONTEXT_INIT, &context) < 0) {
+        perror("mapped blob context"); goto cleanup;
+    }
+    struct drm_virtgpu_resource_create_blob blob = {
+        .blob_mem = VIRTGPU_BLOB_MEM_HOST3D,
+        .blob_flags = VIRTGPU_BLOB_FLAG_USE_MAPPABLE,
+        .size = MAPPED_BLOB_BYTES,
+    };
+    if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, &blob) < 0) {
+        perror("mapped blob create"); goto cleanup;
+    }
+    struct drm_virtgpu_map mapping = {.handle = blob.bo_handle};
+    if (ioctl(fd, DRM_IOCTL_VIRTGPU_MAP, &mapping) < 0) {
+        perror("mapped blob offset"); goto cleanup;
+    }
+    first = mmap(NULL, MAPPED_BLOB_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mapping.offset);
+    if (first == MAP_FAILED) { perror("mapped blob first mmap"); goto cleanup; }
+    second = mmap(NULL, MAPPED_BLOB_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mapping.offset);
+    if (second == MAP_FAILED) { perror("mapped blob second mmap"); goto cleanup; }
+    size_t mismatches = 0;
+    for (unsigned pass = 0; pass < MAPPED_BLOB_PASSES; pass++) {
+        volatile uint8_t *writer = pass ? second : first;
+        volatile uint8_t *reader = pass ? first : second;
+        for (size_t i = 0; i < MAPPED_BLOB_BYTES; i++)
+            writer[i] = (uint8_t)i ^ (pass ? 0xa5 : 0x5a);
+        for (size_t i = 0; i < MAPPED_BLOB_BYTES; i++)
+            mismatches += reader[i] != ((uint8_t)i ^ (pass ? 0xa5 : 0x5a));
+    }
+    printf("mapped_blob\t%u\t%u\t%u\t%zu\n", blob.res_handle,
+           MAPPED_BLOB_BYTES, MAPPED_BLOB_PASSES, mismatches);
+    result = mismatches ? 1 : 0;
+cleanup:
+    if (second != MAP_FAILED) munmap(second, MAPPED_BLOB_BYTES);
+    if (first != MAP_FAILED) munmap(first, MAPPED_BLOB_BYTES);
+    close(fd);
+    return result;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 1;
     if (!strcmp(argv[1], "gl")) return gl_info();
     if (!strcmp(argv[1], "vulkan")) return vulkan_info();
     if (!strcmp(argv[1], "caps")) return caps(argc > 2 ? argv[2] : NULL);
+    if (!strcmp(argv[1], "mapped-blob")) return mapped_blob();
     return 1;
 }
