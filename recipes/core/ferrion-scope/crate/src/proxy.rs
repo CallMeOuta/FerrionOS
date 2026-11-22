@@ -19,7 +19,7 @@ use syscall::flag::{
 };
 use syscall::schemev2::NewFdFlags;
 
-use crate::overlay::{Lookup, Overlay, WHITEOUTS, rel_parent};
+use crate::overlay::{Lookup, MAX_ENTRIES, Overlay, WHITEOUTS, rel_parent};
 use crate::scope::{
     Access, DirCache, Kind, MAX_LINKS, MAX_PATH, Place, Scope, View, Walked, join, parent, retarget,
 };
@@ -273,6 +273,7 @@ pub struct Proxy {
     next: usize,
     sessions: BTreeMap<u32, Session>,
     next_session: u32,
+    next_stage: u64,
     dirs: DirCache,
     maps: BTreeMap<(usize, u64), (usize, usize)>,
 }
@@ -368,6 +369,18 @@ fn copy_new(from: &str, to: &str, mode: u32) -> Result<()> {
     check(unsafe { libc::fchmod(dst.as_raw_fd(), mode as libc::mode_t) })
 }
 
+fn remove_path(path: &str) {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => {
+            let _ = fs::remove_dir(path);
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(path);
+        }
+        Err(_) => {}
+    }
+}
+
 fn save_overlay(layer: &str, overlay: &Overlay) -> Result<()> {
     let state = parent(layer);
     let tmp = join(state, ".whiteouts.new");
@@ -385,9 +398,16 @@ impl Proxy {
             next: CONTROL + 1,
             sessions: BTreeMap::new(),
             next_session: 1,
+            next_stage: 0,
             dirs: DirCache::default(),
             maps: BTreeMap::new(),
         }
+    }
+
+    fn stage_path(&mut self, layer: &str) -> String {
+        let seq = self.next_stage;
+        self.next_stage = self.next_stage.wrapping_add(1);
+        join(parent(layer), &format!(".stage-{seq}"))
     }
 
     fn insert(&mut self, handle: Handle) -> Result<usize> {
@@ -619,9 +639,12 @@ impl Proxy {
         let (ov, lower, layer) = self.overlay_parts(session, grant)?;
         let mut chain: Vec<&str> = Vec::new();
         let mut cur = rel;
-        while !cur.is_empty() && !ov.upper.contains(cur) {
+        while !cur.is_empty() && !ov.has_upper(cur) {
             chain.push(cur);
             cur = rel_parent(cur);
+        }
+        if ov.upper_len().saturating_add(chain.len()) > MAX_ENTRIES {
+            return Err(err(EIO));
         }
         for dir in chain.into_iter().rev() {
             let mode = fs::symlink_metadata(join(&lower, dir))
@@ -639,32 +662,59 @@ impl Proxy {
             }
             let _ = fs::set_permissions(&target, fs::Permissions::from_mode(mode));
             ov.created(dir, true).map_err(err)?;
+            assert_eq!(ov.has_upper(dir), exists(&target));
+            ov.check_invariants();
         }
         Ok(())
     }
 
     fn copy_up(&mut self, session: u32, grant: usize, rel: &str) -> Result<()> {
-        {
-            let (ov, _, _) = self.overlay_parts(session, grant)?;
-            if ov.upper.contains(rel) {
+        let (lower, layer) = {
+            let (ov, lower, layer) = self.overlay_parts(session, grant)?;
+            if ov.has_upper(rel) {
                 return Ok(());
             }
-        }
+            ov.can_add_upper(rel).map_err(err)?;
+            (lower, layer)
+        };
         self.copy_up_dirs(session, grant, rel_parent(rel))?;
-        let (ov, lower, layer) = self.overlay_parts(session, grant)?;
+        let staged = self.stage_path(&layer);
         let (from, to) = (join(&lower, rel), join(&layer, rel));
         let io = |e: std::io::Error| err(e.raw_os_error().unwrap_or(EIO));
         let meta = fs::symlink_metadata(&from).map_err(io)?;
-        if meta.file_type().is_symlink() {
-            symlink(fs::read_link(&from).map_err(io)?, &to).map_err(io)?;
+        let stage_res = if meta.file_type().is_symlink() {
+            fs::read_link(&from)
+                .and_then(|target| symlink(target, &staged))
+                .map_err(io)
         } else if meta.is_dir() {
-            fs::create_dir(&to).map_err(io)?;
-            fs::set_permissions(&to, meta.permissions()).map_err(io)?;
+            fs::create_dir(&staged)
+                .and_then(|()| fs::set_permissions(&staged, meta.permissions()))
+                .map_err(io)
         } else {
-            copy_new(&from, &to, meta.permissions().mode() & 0o7777)?;
+            copy_new(&from, &staged, meta.permissions().mode() & 0o7777)
+        };
+        if let Err(e) = stage_res {
+            remove_path(&staged);
+            return Err(e);
         }
-        ov.upper.insert(rel.to_owned());
-        save_overlay(&layer, ov)
+        if let Err(e) = fs::rename(&staged, &to).map_err(io) {
+            remove_path(&staged);
+            return Err(e);
+        }
+        let (ov, _, layer) = self.overlay_parts(session, grant)?;
+        let mut next_ov = ov.clone();
+        if let Err(e) = next_ov
+            .copy_up_done(rel)
+            .map_err(err)
+            .and_then(|()| save_overlay(&layer, &next_ov))
+        {
+            remove_path(&to);
+            return Err(e);
+        }
+        *ov = next_ov;
+        assert_eq!(ov.has_upper(rel), exists(&to));
+        ov.check_invariants();
+        Ok(())
     }
 
     fn open_clone(
@@ -725,21 +775,36 @@ impl Proxy {
                 if flags & O_CREAT == 0 {
                     return Err(err(ENOENT));
                 }
+                {
+                    let (ov, _, _) = self.overlay_parts(session, grant)?;
+                    ov.can_add_upper(rel).map_err(err)?;
+                }
                 self.copy_up_dirs(session, grant, rel_parent(rel))?;
                 let (_, _, layer) = self.overlay_parts(session, grant)?;
+                let target = join(&layer, rel);
                 let opened = self.open_real(
                     session,
                     vpath,
                     grant,
-                    &join(&layer, rel),
+                    &target,
                     true,
                     flags | O_EXCL,
                     follow,
                     false,
                 )?;
                 let (ov, _, layer) = self.overlay_parts(session, grant)?;
-                ov.created(rel, flags & O_DIRECTORY != 0).map_err(err)?;
-                save_overlay(&layer, ov)?;
+                let mut next_ov = ov.clone();
+                if let Err(e) = next_ov
+                    .created(rel, flags & O_DIRECTORY != 0)
+                    .map_err(err)
+                    .and_then(|()| save_overlay(&layer, &next_ov))
+                {
+                    remove_path(&target);
+                    return Err(e);
+                }
+                *ov = next_ov;
+                assert_eq!(ov.has_upper(rel), exists(&target));
+                ov.check_invariants();
                 Ok(opened)
             }
         }
@@ -768,7 +833,7 @@ impl Proxy {
             };
             names.retain(|name, _| !ov.lower_hidden(&format!("{prefix}{name}")));
         }
-        if rel.is_empty() || ov.upper.contains(rel) {
+        if rel.is_empty() || ov.has_upper(rel) {
             let upper = join(g.layer.as_ref().ok_or(err(EINVAL))?, rel);
             if lkind(&upper).is_ok_and(|k| k == Kind::Dir) {
                 list_real(&upper, &mut names)?;
@@ -979,18 +1044,26 @@ impl Proxy {
         }
         let (ov, lower, layer) = self.overlay_parts(session, grant)?;
         let lower_had = !ov.lower_hidden(&rel) && exists(&join(&lower, &rel));
+        let mut next_ov = ov.clone();
+        next_ov.removed(&rel, lower_had).map_err(err)?;
+        save_overlay(&layer, &next_ov)?;
         if upper {
             let c = cpath(&real)?;
-            check(unsafe {
+            if let Err(e) = check(unsafe {
                 if rmdir {
                     libc::rmdir(c.as_ptr())
                 } else {
                     libc::unlink(c.as_ptr())
                 }
-            })?;
+            }) {
+                let _ = save_overlay(&layer, ov);
+                return Err(e);
+            }
         }
-        ov.removed(&rel, lower_had).map_err(err)?;
-        save_overlay(&layer, ov)
+        *ov = next_ov;
+        assert_eq!(ov.has_upper(&rel), exists(&join(&layer, &rel)));
+        ov.check_invariants();
+        Ok(())
     }
 
     fn rename(
@@ -1073,14 +1146,22 @@ impl Proxy {
             return Err(err(ENOTDIR));
         }
         let (a, b) = (cpath(&from)?, cpath(&to)?);
-        check(unsafe { libc::rename(a.as_ptr(), b.as_ptr()) })?;
-        ov.moved(&old_rel, &new_rel);
-        ov.removed(&old_rel, lower_had_old).map_err(err)?;
-        ov.created(&new_rel, is_dir).map_err(err)?;
+        let mut next_ov = ov.clone();
+        next_ov.moved(&old_rel, &new_rel);
+        next_ov.removed(&old_rel, lower_had_old).map_err(err)?;
+        next_ov.created(&new_rel, is_dir).map_err(err)?;
         if new_lower_dir {
-            ov.opaque.insert(new_rel.clone());
+            next_ov.mark_opaque(&new_rel);
         }
-        save_overlay(&layer, ov)
+        check(unsafe { libc::rename(a.as_ptr(), b.as_ptr()) })?;
+        if let Err(e) = save_overlay(&layer, &next_ov) {
+            let _ = unsafe { libc::rename(b.as_ptr(), a.as_ptr()) };
+            return Err(e);
+        }
+        *ov = next_ov;
+        assert_eq!(ov.has_upper(&new_rel), exists(&to));
+        ov.check_invariants();
+        Ok(())
     }
 
     fn exists_in_view(&mut self, session: u32, grant: usize, rel: &str) -> bool {
@@ -1124,6 +1205,10 @@ impl Proxy {
                 scope.real_path(grant, &new_rel),
             )
         } else {
+            {
+                let (ov, _, _) = self.overlay_parts(session, grant)?;
+                ov.can_add_upper(&new_rel).map_err(err)?;
+            }
             self.copy_up(session, grant, &old_rel)?;
             self.copy_up_dirs(session, grant, rel_parent(&new_rel))?;
             let (_, _, layer) = self.overlay_parts(session, grant)?;
@@ -1139,8 +1224,18 @@ impl Proxy {
         }
         if access == Access::Clone {
             let (ov, _, layer) = self.overlay_parts(session, grant)?;
-            ov.created(&new_rel, false).map_err(err)?;
-            save_overlay(&layer, ov)?;
+            let mut next_ov = ov.clone();
+            if let Err(e) = next_ov
+                .created(&new_rel, false)
+                .map_err(err)
+                .and_then(|()| save_overlay(&layer, &next_ov))
+            {
+                remove_path(&to);
+                return Err(e);
+            }
+            *ov = next_ov;
+            assert_eq!(ov.has_upper(&new_rel), exists(&to));
+            ov.check_invariants();
         }
         Ok(())
     }

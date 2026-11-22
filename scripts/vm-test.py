@@ -6808,6 +6808,30 @@ def test_agent_clone(vm, args):
         problems.append("control: clone-escape could not change its descriptor's mode without the launcher")
     if stale != "REFUSED" or left.split()[-1:] != ["0"]:
         problems.append(f"route clone-stale {stale} under ferrion-run --clone, {left.split()[-1:]} files written outside the folder")
+
+    run("clen0", "rm -rf /home/user/cl-enospc /home/user/.ballast /home/user/.reserve && mkdir -p /home/user/cl-enospc && ferrion-run-probe fill /home/user/cl-enospc/big.bin 2048")
+    _, big_before = run("clen1", "sha256sum /home/user/cl-enospc/big.bin")
+    big_before_hash = re.search(r"([0-9a-f]{64})", big_before)
+    enospc_sess = None
+    en_status = None
+    try:
+        run("clen2", "ferrion-run-probe fill-disk /home/user/.ballast /home/user/.reserve; df -k /home/user | tail -n 1", 180)
+        en_status, en_out = run("clen4", "ferrion-run --clone /home/user/cl-enospc bash -c \"echo x >> /home/user/cl-enospc/big.bin\"", 120)
+        enospc_sess = re.search(r"session (\d+-\d+) keeps", en_out)
+    finally:
+        run("clen5", "rm -f /home/user/.ballast /home/user/.reserve")
+    if en_status == 0:
+        problems.append("clone copy-up with full disk unexpectedly succeeded")
+    if enospc_sess:
+        _, en_diff = run("clen6", f"ferrion-run diff {enospc_sess.group(1)}")
+        if "big.bin" in en_diff:
+            problems.append(f"failed copy-up listed in diff: {en_diff.strip()[-160:]}")
+        run("clen7", f"ferrion-run apply {enospc_sess.group(1)}")
+    _, big_after = run("clen8", "sha256sum /home/user/cl-enospc/big.bin")
+    big_after_hash = re.search(r"([0-9a-f]{64})", big_after)
+    if not big_before_hash or not big_after_hash or big_before_hash.group(1) != big_after_hash.group(1):
+        problems.append(f"failed copy-up corrupted lower file ({big_before_hash.group(1) if big_before_hash else None} -> {big_after_hash.group(1) if big_after_hash else None})")
+
     (vm.out / "agent-clone.txt").write_text("".join(log))
     summary = (f"seed {seed}; direct {direct}; after the session {after}; after apply {applied}; after discard {discarded}; "
                f"clone-stale {stale}")

@@ -21,9 +21,9 @@ pub enum Lookup {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Overlay {
-    pub upper: BTreeSet<String>,
-    pub whiteouts: BTreeSet<String>,
-    pub opaque: BTreeSet<String>,
+    upper: BTreeSet<String>,
+    whiteouts: BTreeSet<String>,
+    opaque: BTreeSet<String>,
 }
 
 fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
@@ -48,6 +48,41 @@ fn under(path: &str, base: &str) -> bool {
 }
 
 impl Overlay {
+    pub fn has_upper(&self, rel: &str) -> bool {
+        self.upper.contains(rel)
+    }
+
+    pub fn upper_len(&self) -> usize {
+        self.upper.len()
+    }
+
+    pub fn can_add_upper(&self, rel: &str) -> Result<(), i32> {
+        if !self.upper.contains(rel) && self.upper.len() >= MAX_ENTRIES {
+            return Err(crate::scope::EIO);
+        }
+        Ok(())
+    }
+
+    pub fn check_invariants(&self) {
+        assert!(self.whiteouts.is_disjoint(&self.upper));
+        assert!(self.upper.len() <= MAX_ENTRIES);
+        assert!(self.whiteouts.len() <= MAX_ENTRIES);
+    }
+
+    pub fn copy_up_done(&mut self, rel: &str) -> Result<(), i32> {
+        self.can_add_upper(rel)?;
+        assert!(!self.whiteouts.contains(rel));
+        self.upper.insert(rel.to_owned());
+        self.check_invariants();
+        Ok(())
+    }
+
+    pub fn mark_opaque(&mut self, rel: &str) {
+        assert!(self.upper.contains(rel));
+        assert!(!self.whiteouts.contains(rel));
+        self.opaque.insert(rel.to_owned());
+    }
+
     pub fn lower_hidden(&self, rel: &str) -> bool {
         if rel.is_empty() {
             return false;
@@ -75,13 +110,12 @@ impl Overlay {
     }
 
     pub fn created(&mut self, rel: &str, dir: bool) -> Result<(), i32> {
-        if self.upper.len() >= MAX_ENTRIES {
-            return Err(crate::scope::EIO);
-        }
+        self.can_add_upper(rel)?;
         self.upper.insert(rel.to_owned());
         if self.whiteouts.remove(rel) && dir {
             self.opaque.insert(rel.to_owned());
         }
+        self.check_invariants();
         Ok(())
     }
 
@@ -92,11 +126,12 @@ impl Overlay {
         self.whiteouts.retain(|p| !p.starts_with(&below));
         self.opaque.retain(|p| p != rel && !p.starts_with(&below));
         if lower_had {
-            if self.whiteouts.len() >= MAX_ENTRIES {
+            if !self.whiteouts.contains(rel) && self.whiteouts.len() >= MAX_ENTRIES {
                 return Err(crate::scope::EIO);
             }
             self.whiteouts.insert(rel.to_owned());
         }
+        self.check_invariants();
         Ok(())
     }
 
@@ -109,8 +144,11 @@ impl Overlay {
             .collect();
         for p in moved {
             self.upper.remove(&p);
-            self.upper.insert(format!("{to}{}", &p[from.len()..]));
+            let dst = format!("{to}{}", &p[from.len()..]);
+            self.whiteouts.remove(&dst);
+            self.upper.insert(dst);
         }
+        self.check_invariants();
     }
 
     pub fn encode(&self) -> Vec<u8> {

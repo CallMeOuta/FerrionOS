@@ -66,11 +66,78 @@ mod probe {
             ["home"] => ferrion_run::escape::home_report(),
             ["foreign-filetable"] => ferrion_run::escape::foreign_filetable(),
             ["hold-filetable", program, ref rest @ ..] => hold_filetable(program, rest),
+            ["fill", path, kib] => fill_file(path, kib.parse().unwrap_or(0)),
+            ["fill-disk", path, reserve] => fill_disk(path, reserve),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
             }
         }
+    }
+
+    fn fill_random_chunk(state: &mut u64, buf: &mut [u8]) {
+        for word in buf.chunks_exact_mut(8) {
+            let mut x = *state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *state = x;
+            word.copy_from_slice(&x.to_le_bytes());
+        }
+    }
+
+    fn fill_file(path: &str, kib: usize) -> i32 {
+        let mut file = match std::fs::File::create(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: create {path}: {e}");
+                return 1;
+            }
+        };
+        let mut chunk = [0u8; 65536];
+        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut remaining = kib.saturating_mul(1024);
+        while remaining > 0 {
+            fill_random_chunk(&mut rng, &mut chunk);
+            let n = remaining.min(chunk.len());
+            if let Err(e) = file.write_all(&chunk[..n]) {
+                eprintln!("ferrion-run-probe: write {path}: {e}");
+                return 1;
+            }
+            remaining -= n;
+        }
+        let _ = file.sync_all();
+        0
+    }
+
+    fn fill_disk(ballast: &str, reserve: &str) -> i32 {
+        if fill_file(reserve, 512) != 0 {
+            return 1;
+        }
+        let mut file = match std::fs::File::create(ballast) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: create {ballast}: {e}");
+                let _ = std::fs::remove_file(reserve);
+                return 1;
+            }
+        };
+        let mut chunk = [0u8; 65536];
+        let mut rng: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut total_kib = 0usize;
+        const MAX_CHUNKS: usize = 32768;
+        for _ in 0..MAX_CHUNKS {
+            fill_random_chunk(&mut rng, &mut chunk);
+            match file.write_all(&chunk) {
+                Ok(()) => total_kib += 64,
+                Err(_) => break,
+            }
+        }
+        let _ = file.sync_all();
+        drop(file);
+        let _ = std::fs::remove_file(reserve);
+        println!("FILLED {total_kib}");
+        0
     }
 
     fn hold_socket(address: &str, rest: &[&str]) -> i32 {
