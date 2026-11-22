@@ -1,0 +1,35 @@
+--- a/third_party/wayland-proxy/wayland-proxy.cpp
++++ b/third_party/wayland-proxy/wayland-proxy.cpp
+@@ -193,6 +193,16 @@
+     return;
+   }
+ 
++#ifdef __redox__
++  if (ret == 0) {
++    mFailed = true;
++    return;
++  }
++  if (ret < 0 && (errno == EAGAIN || errno == EINTR)) {
++    mData.clear();
++    return;
++  }
++#endif
+   if (ret < 1) {
+     switch (errno) {
+       case EAGAIN:
+@@ -392,6 +402,7 @@
+   }
+ 
+   while (true) {
++#ifndef __redox__
+     int availableData = 0;
+     if (ioctl(aSourceSocket, FIONREAD, &availableData) < 0) {
+       // Broken connection, we're finished here
+@@ -401,6 +412,7 @@
+     if (availableData == 0) {
+       return true;
+     }
++#endif
+ 
+     auto message = std::make_unique<WaylandMessage>(aSourceSocket);
+     if (message->Failed()) {

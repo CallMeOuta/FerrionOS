@@ -1,0 +1,10 @@
+[package]
+description = "Checks the descriptor behaviour Wayland clients rely on: a keymap in shared memory read back through every mapping, and poll and epoll readiness of idle Unix sockets"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/wayland-fd-probe" "${COOKBOOK_RECIPE}/wayland-fd-probe.c" ${LDFLAGS}
+"""

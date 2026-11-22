@@ -1,6 +1,8 @@
 include = ["firefox-window.toml", "../wayland.toml"]
 
 [packages]
+cosmic-comp = "source"
+wayland-fd-probe = "source"
 cosmic-app-library = "ignore"
 libcosmic-wayland = "ignore"
 iced-wayland = "ignore"
@@ -20,4 +22,23 @@ set -eu
 printf 'export WAYLAND_DISPLAY=%q\\nexport XDG_RUNTIME_DIR=%q\\n' \
     "$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR" > /tmp/gtk-window-session
 exec sleep 3600
+"""
+
+[[files]]
+path = "/usr/bin/orbital-wayland"
+mode = 0o755
+data = """
+#!/usr/bin/env bash
+set -e
+unset DISPLAY
+export COSMIC_BACKEND=winit
+export HOME=/root
+export RUST_BACKTRACE=full
+export XCURSOR_THEME=Pop
+export XDG_RUNTIME_DIR=/tmp/run/user/0
+mkdir -p /tmp/run
+mkdir -p /tmp/run/user
+mkdir -p /tmp/run/user/0
+glib-compile-schemas /usr/share/glib-2.0/schemas/
+exec cosmic-comp wayland-session
 """

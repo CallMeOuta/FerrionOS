@@ -1561,6 +1561,10 @@ def test_screenshots(vm, args):
     return True, f"saved {len(saved)} screenshots in {vm.out}: {saved}"
 
 
+GTK_SESSION_WAIT = 300
+GTK_DISPLAY_WAIT = 360
+
+
 def test_gtk_window(vm, args, *, backend="orbital"):
     """Checks a GTK3 Orbital window's blue background, white label and timed exit (use --config firefox-window)."""
     if backend == "orbital":
@@ -1574,6 +1578,7 @@ def test_gtk_window(vm, args, *, backend="orbital"):
         settle(vm, 20)
     if not vm.wait_serial(r"login: ", args.timeout):
         return False, "no serial login"
+    timings = {"serial_login_s": round(vm.elapsed(), 1)}
     login_mark = vm.mark()
     vm.type("root\n" if backend == "wayland" else "user\n")
     if backend == "wayland":
@@ -1588,18 +1593,29 @@ def test_gtk_window(vm, args, *, backend="orbital"):
     if not vm.wait_serial(r"\nGTK-SHELL-42\s", 20, since):
         return False, "no serial shell"
 
-    since = vm.mark()
+    def record():
+        (vm.out / "gtk-window-timings.json").write_text(json.dumps(timings, indent=2) + "\n")
+
     # Serial logins do not inherit the compositor's graphical environment.
     if backend == "wayland":
-        environment = ("until test -f /tmp/gtk-window-session; do sleep 1; done; "
-                       ". /tmp/gtk-window-session; GDK_BACKEND=wayland ")
+        since = vm.mark()
+        vm.type("bash -c 'until test -f /tmp/gtk-window-session; do sleep 1; done; echo GTK-SESSION-$((40+2))'\n")
+        if not vm.wait_serial(r"\nGTK-SESSION-42\s", GTK_SESSION_WAIT, since):
+            record()
+            return False, f"cosmic-comp wrote no session file within {GTK_SESSION_WAIT}s of the shell"
+        timings["session_file_s"] = round(vm.elapsed(), 1)
+        environment = ". /tmp/gtk-window-session; GDK_BACKEND=wayland "
     else:
         environment = "GDK_BACKEND=orbital ORBITAL_DISPLAY=/scheme/orbital "
+    since, started = vm.mark(), time.monotonic()
     vm.type(f"bash -c '{environment}gtk-window-probe; echo GTKRC-$((40+2))=$?'\n")
-    opened = vm.wait_serial(r"GTK-WINDOW: display=(\S+) type=(\S+)", 30, since)
+    opened = vm.wait_serial(r"GTK-WINDOW: display=(\S+) type=(\S+)", GTK_DISPLAY_WAIT, since)
     if not opened:
+        record()
         vm.screenshot().save_png(vm.out / "gtk-window-failed.png")
-        return False, "GTK did not open a display; see serial.log"
+        return False, f"GTK did not open a display within {GTK_DISPLAY_WAIT}s; see serial.log"
+    timings["display_s"] = round(time.monotonic() - started, 1)
+    record()
     if opened.group(2) != {"orbital": "GdkOrbitalDisplay", "wayland": "GdkWaylandDisplay"}[backend]:
         return False, f"wrong GTK backend: {opened.group(2)}"
 
@@ -1643,7 +1659,7 @@ def test_gtk_window(vm, args, *, backend="orbital"):
     remaining = sum(closed.rgb[i:i + 3] in blue for i in range(0, len(closed.rgb), 3))
     if remaining > 100:
         return False, f"GTK window left {remaining} blue pixels after exit"
-    return True, f"{backend} GTK window painted and closed: {counts}; see gtk-window.png"
+    return True, f"{backend} GTK window painted and closed: {counts}; {timings}; see gtk-window.png"
 
 
 def test_gtk_window_wayland(vm, args):
@@ -2723,6 +2739,173 @@ def test_firefox_cjk(vm, args):
                 failures.append(f"{lang} {char}: glyph overlap {best:.3f} < 0.70")
     (vm.out / "cjk-glyphs.json").write_text(json.dumps(scores, ensure_ascii=False, indent=2) + "\n")
     return not failures, "; ".join(failures) if failures else "all CJK glyphs match the host reference; all regional fc-match families pass"
+
+
+FIREFOX_WINDOW_DIR = "/tmp/firefox-window"
+FIREFOX_WINDOW_PAGES = {"first": ("1f8a4c", "First page"), "second": ("c2185b", "Second page")}
+FIREFOX_WINDOW_KEYS = {" ": "spc", "-": "minus", ".": "dot", "/": "slash", ":": "shift-semicolon", "\n": "ret"}
+FIREFOX_WINDOW_UNITS = {"KB": 1 / 1024, "MB": 1, "GB": 1024}
+FIREFOX_WINDOW_PREFS = [
+    'user_pref("datareporting.policy.firstRunURL", "");',
+    'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
+    'user_pref("browser.startup.homepage_override.mstone", "ignore");',
+    'user_pref("browser.aboutwelcome.enabled", false);',
+    'user_pref("browser.shell.checkDefaultBrowser", false);',
+    'user_pref("ui.prefersReducedMotion", 1);',
+]
+
+
+def firefox_window_used(run):
+    """Returns the guest's memory in use in MB as `free` reads it from /scheme/memory, or None when it cannot be read."""
+    _, output = run("free | awk '/^Mem:/ {print \"FWUSED\", $3}'", 30)
+    found = re.search(r"FWUSED (\d+)", output)
+    return round(int(found.group(1)) / 1024, 1) if found else None
+
+
+def firefox_window_page(frame, color):
+    """Returns the bounds and pixel count of `color` on `frame`, or None when it covers no page-sized area."""
+    wanted = bytes.fromhex(color)
+    near = {bytes((r, g, b)) for r in range(wanted[0] - 2, wanted[0] + 3)
+            for g in range(wanted[1] - 2, wanted[1] + 3) for b in range(wanted[2] - 2, wanted[2] + 3)}
+    points = [i // 3 for i in range(0, len(frame.rgb), 3) if frame.rgb[i:i + 3] in near]
+    if not points:
+        return None
+    xs = [p % frame.width for p in points]
+    ys = [p // frame.width for p in points]
+    left, top, right, bottom = min(xs), min(ys), max(xs), max(ys)
+    if right - left < 300 or bottom - top < 200 or len(points) < (right - left + 1) * (bottom - top + 1) * 0.8:
+        return None
+    return {"bounds": [left, top, right, bottom], "pixels": len(points)}
+
+
+def firefox_window_chrome(frame, page):
+    """Counts the distinct colors in the band above the page area, where Firefox draws its tabs and address bar."""
+    left, top, right, _ = page["bounds"]
+    if top < 40:
+        return 0
+    return len({frame.rgb[(y * frame.width + x) * 3:(y * frame.width + x) * 3 + 3]
+                for y in range(top - 40, top) for x in range(left, right + 1)})
+
+
+def test_firefox_window(vm, args):
+    """Opens Firefox in cosmic-comp's nested Wayland session on a colored local page, finds the page and Firefox's toolbar in a screenshot, types a second local page's address in the address bar and finds its color, then loads https://example.com/ the same way (use --config firefox-wayland)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, "no serial login"
+    login_mark = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no root password prompt"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, login_mark):
+        return False, "serial shell did not become ready"
+    vm.type("bash --norc --noprofile --noediting\n")
+    time.sleep(1)
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo FWRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)FWRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    def keys(text):
+        for char in text:
+            vm.command(f"sendkey {FIREFOX_WINDOW_KEYS.get(char) or char}")
+            time.sleep(0.05)
+
+    def wait_page(color, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            frame = vm.screenshot()
+            page = firefox_window_page(frame, color)
+            if page:
+                return frame, page
+            time.sleep(0.2)
+        return vm.screenshot(), None
+
+    pages = " ".join(
+        f"&& printf '%s' '<!doctype html><title>{title}</title><body style=\"margin:0;background:#{color}\">"
+        f"<h1 style=\"color:#fff;font:64px sans-serif;margin:40px\">{title}</h1></body>' > {FIREFOX_WINDOW_DIR}/{name}.html"
+        for name, (color, title) in FIREFOX_WINDOW_PAGES.items())
+    prefs = " ".join(f"'{pref}'" for pref in FIREFOX_WINDOW_PREFS)
+    status, _ = run(f"rm -rf {FIREFOX_WINDOW_DIR}; mkdir -p {FIREFOX_WINDOW_DIR}/profile {pages} "
+                    f"&& printf '%s\\n' {prefs} > {FIREFOX_WINDOW_DIR}/profile/user.js", 30)
+    if status != 0:
+        return False, f"could not write the test pages (status {status})"
+    status, _ = run("until test -f /tmp/gtk-window-session; do sleep 1; done; . /tmp/gtk-window-session; unset MOZ_HEADLESS",
+                    GTK_SESSION_WAIT)
+    if status != 0:
+        return False, f"cosmic-comp wrote no session file within {GTK_SESSION_WAIT}s of the shell"
+    session_file = vm.elapsed()
+    used_before = firefox_window_used(run)
+
+    first_color = FIREFOX_WINDOW_PAGES["first"][0]
+    started = time.monotonic()
+    status, _ = run(f"GDK_BACKEND=wayland MOZ_ENABLE_WAYLAND=1 firefox --no-remote --profile {FIREFOX_WINDOW_DIR}/profile "
+                    f"file://{FIREFOX_WINDOW_DIR}/first.html > {FIREFOX_WINDOW_DIR}/firefox.log 2>&1 & true", 30)
+    frame, page = wait_page(first_color, 600)
+    first_paint = time.monotonic() - started
+    frame.save_png(vm.out / "firefox-window-first.png")
+    results = {"session_file_s": round(session_file, 1), "first_paint_s": round(first_paint, 1), "first": page,
+               "used_before_mb": used_before}
+
+    def finish(ok, note):
+        _, log = run(f"tail -n 60 {FIREFOX_WINDOW_DIR}/firefox.log", 30)
+        (vm.out / "firefox.log").write_text(log)
+        results["used_with_firefox_mb"] = firefox_window_used(run)
+        _, memory = run("ps | awk 'NR == 1 || (/firefox|cosmic-comp/ && !seen[$1]++)'", 60)
+        (vm.out / "memory.txt").write_text(memory)
+        results["memory"] = [line.split() for line in memory.splitlines() if "/" in line]
+        firefox = [float(row[8]) * FIREFOX_WINDOW_UNITS[row[9]] for row in results["memory"]
+                   if len(row) == 13 and row[9] in FIREFOX_WINDOW_UNITS and row[12].endswith("firefox")]
+        results["firefox_allocated_mb"] = round(sum(firefox), 1)
+        used = results["used_with_firefox_mb"]
+        results["firefox_used_mb"] = round(used - used_before, 1) if used is not None and used_before is not None else None
+        (vm.out / "firefox-window.json").write_text(json.dumps(results, indent=2) + "\n")
+        run("pkill firefox; sleep 2", 30)
+        return ok, (f"{note}; memory in use {used_before} MB before Firefox and {used} MB with it "
+                    f"(+{results['firefox_used_mb']} MB); its {len(firefox)} processes hold "
+                    f"{results['firefox_allocated_mb']} MB of allocated address space")
+
+    if not page:
+        return finish(False, f"no Firefox page of #{first_color} after {first_paint:.0f}s; see firefox-window-first.png")
+    results["first_chrome_colors"] = firefox_window_chrome(frame, page)
+    if results["first_chrome_colors"] < 8:
+        return finish(False, f"page painted but no Firefox toolbar above it: {results}")
+    print(f"FIREFOX first page painted after {first_paint:.1f}s: {page}", flush=True)
+
+    second_color = FIREFOX_WINDOW_PAGES["second"][0]
+    time.sleep(5)
+    vm.command("sendkey ctrl-l")
+    time.sleep(1)
+    typed = time.monotonic()
+    keys(f"file://{FIREFOX_WINDOW_DIR}/second.html\n")
+    frame, page = wait_page(second_color, 300)
+    results["second_load_s"] = round(time.monotonic() - typed, 1)
+    results["second"] = page
+    frame.save_png(vm.out / "firefox-window-second.png")
+    if not page:
+        return finish(False, f"typing the second page's address did not show #{second_color}; see firefox-window-second.png")
+    print(f"FIREFOX second page loaded after {results['second_load_s']}s: {page}", flush=True)
+
+    vm.command("sendkey ctrl-l")
+    time.sleep(1)
+    typed = time.monotonic()
+    keys("https://example.com/\n")
+    deadline = time.monotonic() + 600
+    while time.monotonic() < deadline and firefox_window_page(vm.screenshot(), second_color):
+        time.sleep(0.5)
+    frame = settle(vm, 60, still=5)
+    results["https_load_s"] = round(time.monotonic() - typed, 1)
+    frame.save_png(vm.out / "firefox-window-https.png")
+    left, top, right, bottom = results["second"]["bounds"]
+    area = [frame.rgb[(y * frame.width + x) * 3:(y * frame.width + x) * 3 + 3]
+            for y in range(top, bottom + 1, 4) for x in range(left, right + 1, 4)]
+    light = sum(min(pixel) >= 200 for pixel in area)
+    results["https"] = {"distinct_colors": len(set(area)), "light_share": round(light / len(area), 2)}
+    if firefox_window_page(frame, second_color) or results["https"]["light_share"] < 0.5 or len(set(area)) < 3:
+        return finish(False, f"https://example.com/ did not replace the second page: {results['https']}; see firefox-window-https.png")
+    return finish(True, f"first paint {first_paint:.1f}s, toolbar colors {results['first_chrome_colors']}, "
+                        f"second page {results['second_load_s']}s, example.com {results['https_load_s']}s; see {vm.out}")
 
 
 # `make qemu` appends -cpu host after QEMUFLAGS, so a -cpu option there is overridden.
@@ -5428,6 +5611,7 @@ TESTS["mesa-cpu"] = test_mesa_cpu
 TESTS["gl-exact"] = test_gl_exact
 TESTS["gtk-window"] = test_gtk_window
 TESTS["gtk-window-wayland"] = test_gtk_window_wayland
+TESTS["firefox-window"] = test_firefox_window
 TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
 TESTS["file-locks"] = test_file_locks
