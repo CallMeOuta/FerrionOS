@@ -99,6 +99,7 @@ where
 
     // Cleanup on unmount
     scheme.fs.cleanup()?;
+    scheme.fs.disk.flush()?;
 
     Ok(res)
 }

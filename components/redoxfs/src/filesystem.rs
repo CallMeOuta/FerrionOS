@@ -33,6 +33,7 @@ pub struct FileSystem<D: Disk> {
     /// A file system that is only read: transactions are dropped instead of committed, so that
     /// nothing (an access time included) is written to the disk. Set after `open`.
     pub read_only: bool,
+    pub barriers: bool,
 }
 
 impl<D: Disk> FileSystem<D> {
@@ -55,6 +56,9 @@ impl<D: Disk> FileSystem<D> {
                 tx.header_changed = true;
                 Ok(())
             })?;
+        }
+        if !self.barriers {
+            self.disk.flush()?;
         }
         Ok(())
     }
@@ -123,6 +127,7 @@ impl<D: Disk> FileSystem<D> {
                 compress_cache: compress_cache(),
                 node_usages: BTreeMap::new(),
                 read_only: false,
+                barriers: true,
             };
 
             unsafe { fs.reset_allocator()? };
@@ -194,14 +199,17 @@ impl<D: Disk> FileSystem<D> {
         }
         old_headers.sort_unstable();
         let zero = [0; BLOCK_SIZE as usize];
-        let slots = old_headers.iter().map(|&(_, slot)| slot).chain(0..HEADER_RING);
-        for slot in slots {
+        let old_slots = old_headers.iter().map(|&(_, slot)| (slot, true));
+        for (slot, valid) in old_slots.chain((0..HEADER_RING).map(|slot| (slot, false))) {
             let count = unsafe { disk.write_at(block_offset + slot, &zero)? };
             if count != zero.len() {
                 return Err(Error::new(syscall::error::EIO));
             }
-            disk.flush()?;
+            if valid {
+                disk.flush()?;
+            }
         }
+        disk.flush()?;
 
         let mut header = Header::new(fs_blocks * BLOCK_SIZE);
 
@@ -229,6 +237,7 @@ impl<D: Disk> FileSystem<D> {
             compress_cache: compress_cache(),
             node_usages: BTreeMap::new(),
             read_only: false,
+            barriers: true,
         };
 
         // Set tree and alloc pointers and write header generation one

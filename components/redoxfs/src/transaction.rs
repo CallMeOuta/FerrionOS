@@ -299,7 +299,9 @@ impl<'a, D: Disk> Transaction<'a, D> {
                 log::error!("SYNC WRITE_CACHE: WRONG NUMBER OF BYTES");
                 return Err(Error::new(EIO));
             }
-            self.fs.disk.flush()?;
+            if self.fs.barriers {
+                self.fs.disk.flush()?;
+            }
         }
         self.write_cache.clear();
 
@@ -327,7 +329,9 @@ impl<'a, D: Disk> Transaction<'a, D> {
             log::error!("SYNC: WRONG NUMBER OF BYTES");
             return Err(Error::new(EIO));
         }
-        self.fs.disk.flush()?;
+        if self.fs.barriers {
+            self.fs.disk.flush()?;
+        }
 
         self.header_changed = false;
         Ok(true)

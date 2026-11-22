@@ -162,7 +162,7 @@ fn print_usage_exit() -> ! {
 
 fn usage() {
     eprintln!(
-        "redoxfs [--no-daemon|-d] [--key-file PATH] [--read-only] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
+        "redoxfs [--no-daemon|-d] [--key-file PATH] [--read-only] [--flush-on-unmount] [--uuid] [disk or uuid] [mountpoint] [block in hex]"
     );
     eprintln!("redoxfs [--no-daemon|-d] --memory MIB [mountpoint]");
 }
@@ -409,6 +409,7 @@ fn daemon(
     block_opt: Option<u64>,
     mut write: Option<File>,
     key_file: Option<&str>,
+    flush_on_unmount: bool,
 ) -> ! {
     setsig();
 
@@ -429,7 +430,8 @@ fn daemon(
     };
     drop(boot_password);
 
-    if let Some((path, filesystem)) = filesystem_opt {
+    if let Some((path, mut filesystem)) = filesystem_opt {
+        filesystem.barriers = !flush_on_unmount;
         match mount(filesystem, mountpoint, |mounted_path| {
             capability_mode();
 
@@ -492,11 +494,13 @@ fn main() {
     let mut block_opt: Option<u64> = None;
     let mut key_file = None;
     let mut read_only = false;
+    let mut flush_on_unmount = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--no-daemon" | "-d" => daemonise = false,
             "--read-only" => read_only = true,
+            "--flush-on-unmount" => flush_on_unmount = true,
             "--memory" if disk_id.is_none() => {
                 let mib = args
                     .next()
@@ -564,6 +568,7 @@ fn main() {
                     block_opt,
                     Some(write),
                     key_file.as_deref(),
+                    flush_on_unmount,
                 );
             } else if pid > 0 {
                 drop(write);
@@ -583,6 +588,13 @@ fn main() {
         }
     } else {
         log::info!("running in foreground");
-        daemon(&disk_id, &mountpoint, block_opt, None, key_file.as_deref());
+        daemon(
+            &disk_id,
+            &mountpoint,
+            block_opt,
+            None,
+            key_file.as_deref(),
+            flush_on_unmount,
+        );
     }
 }

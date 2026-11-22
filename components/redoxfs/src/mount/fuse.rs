@@ -72,6 +72,7 @@ where
 
     // Cleanup on unmount
     filesystem.cleanup()?;
+    filesystem.disk.flush()?;
 
     Ok(res)
 }
