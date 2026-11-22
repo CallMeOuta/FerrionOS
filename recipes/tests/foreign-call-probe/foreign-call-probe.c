@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@ extern uintptr_t redox_close_v1(uintptr_t fd);
 #define SYS_YIELD 158
 #define SYS_CLOCK_GETTIME 265
 #define MARK 0x5ec0de
+#define OTHER_WAIT_LIMIT_MS 30000
 
 static int failures;
 
@@ -162,22 +164,64 @@ static uint64_t native_yield_from_page(void) {
     return r;
 }
 
-static volatile uintptr_t other_thread_fd;
-static volatile int other_go, other_done;
-static volatile uint64_t other_result, other_entries_delta;
+enum other_phase {
+    OTHER_STARTING,
+    OTHER_READY,
+    OTHER_GO,
+    OTHER_DONE,
+};
+
+struct other_result {
+    uintptr_t thread_fd;
+    int hook_zero;
+    uint64_t yield_result;
+    uint64_t entries_delta;
+};
+
+static atomic_int other_phase = OTHER_STARTING;
+static struct other_result other_res;
+
+static int64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int wait_other_phase(int want, int64_t limit_ms) {
+    int64_t deadline = now_ms() + limit_ms;
+    for (int i = 0; i < 4096; i++) {
+        if (atomic_load(&other_phase) == want)
+            return 1;
+        if ((i & 255) == 255) {
+            if (now_ms() >= deadline)
+                return 0;
+            sched_yield();
+        }
+    }
+    for (int64_t step = 0; step < limit_ms; step++) {
+        if (atomic_load(&other_phase) == want)
+            return 1;
+        if (now_ms() >= deadline)
+            return 0;
+        usleep(1000);
+    }
+    return atomic_load(&other_phase) == want;
+}
 
 static void *other_thread(void *arg) {
     (void)arg;
-    other_thread_fd = redox_cur_thrfd_v0();
-    while (!other_go) sched_yield();
+    other_res.thread_fd = redox_cur_thrfd_v0();
+    atomic_store(&other_phase, OTHER_READY);
+    if (!wait_other_phase(OTHER_GO, OTHER_WAIT_LIMIT_MS))
+        return NULL;
     long fd = open_hook(redox_cur_thrfd_v0());
     uintptr_t w[3] = {1, 1, 1};
     if (fd >= 0) get_hook(fd, w), redox_close_v1(fd);
     uint64_t before = seen.entries;
-    other_result = native_yield_from_page();
-    other_entries_delta = seen.entries - before;
-    other_go = (w[0] | w[1] | w[2]) == 0 ? 2 : 3;
-    other_done = 1;
+    other_res.yield_result = native_yield_from_page();
+    other_res.entries_delta = seen.entries - before;
+    other_res.hook_zero = (w[0] | w[1] | w[2]) == 0;
+    atomic_store(&other_phase, OTHER_DONE);
     return NULL;
 }
 
@@ -255,12 +299,19 @@ int main(int argc, char **argv) {
            "accepted an entry outside the range");
 
     pthread_t other;
-    pthread_create(&other, NULL, other_thread, NULL);
-    while (!other_thread_fd) sched_yield();
-    long ofd = open_hook(other_thread_fd);
-    report(ofd >= 0 && set_hook(ofd, entry, start, end) == -EPERM, "refuse-other-thread",
-           "another thread's registration was accepted");
-    if (ofd >= 0) redox_close_v1(ofd);
+    int other_started = (pthread_create(&other, NULL, other_thread, NULL) == 0);
+    int other_ready = 0;
+    if (!other_started) {
+        report(0, "refuse-other-thread", "pthread_create failed");
+    } else if (!wait_other_phase(OTHER_READY, OTHER_WAIT_LIMIT_MS)) {
+        report(0, "refuse-other-thread", "other thread did not become ready in time");
+    } else {
+        other_ready = 1;
+        long ofd = open_hook(other_res.thread_fd);
+        report(ofd >= 0 && set_hook(ofd, entry, start, end) == -EPERM, "refuse-other-thread",
+               "another thread's registration was accepted");
+        if (ofd >= 0) redox_close_v1(ofd);
+    }
 
     if (set_hook(fd, entry, start, end) != 24) {
         report(0, "register", "a valid registration was refused");
@@ -281,30 +332,43 @@ int main(int argc, char **argv) {
     report(r == 0 && ts.sec > 0 && seen.entries == before, "native-inside-range",
            "a call inside the range was not dispatched");
 
-    other_go = 1;
-    while (!other_done) sched_yield();
-    pthread_join(other, NULL);
-    report(other_go == 2 && other_entries_delta == 0 && other_result == 0, "other-thread-unaffected",
-           "an unregistered thread was redirected or started registered");
+    if (!other_started) {
+        report(0, "other-thread-unaffected", "other thread did not start");
+    } else if (!other_ready) {
+        report(0, "other-thread-unaffected", "other thread did not become ready in time");
+    } else {
+        atomic_store(&other_phase, OTHER_GO);
+        if (!wait_other_phase(OTHER_DONE, OTHER_WAIT_LIMIT_MS)) {
+            report(0, "other-thread-unaffected", "other thread did not finish in time");
+        } else {
+            pthread_join(other, NULL);
+            report(other_res.hook_zero && other_res.entries_delta == 0 && other_res.yield_result == 0,
+                   "other-thread-unaffected",
+                   "an unregistered thread was redirected or started registered");
+        }
+    }
 
     struct sigaction sa = {0};
     sa.sa_handler = on_usr1;
     sigaction(SIGUSR1, &sa, NULL);
     pthread_t self = pthread_self(), sig_thread;
-    pthread_create(&sig_thread, NULL, signaller, &self);
-    const char *sig_bad = NULL;
-    double until = now_ns() + 5e9;
-    unsigned long calls = 0;
-    while (!sig_bad && (calls < 20000 || (sig_count < 200 && now_ns() < until))) {
-        sig_bad = one_foreign(why, sizeof why);
-        calls++;
+    if (pthread_create(&sig_thread, NULL, signaller, &self) != 0) {
+        report(0, "signals-at-boundary", "pthread_create failed");
+    } else {
+        const char *sig_bad = NULL;
+        double until = now_ns() + 5e9;
+        unsigned long calls = 0;
+        while (!sig_bad && (calls < 20000 || (sig_count < 200 && now_ns() < until))) {
+            sig_bad = one_foreign(why, sizeof why);
+            calls++;
+        }
+        stop_signals = 1;
+        pthread_join(sig_thread, NULL);
+        if (!sig_bad && sig_count < 200) sig_bad = "fewer than 200 signals arrived during the loop";
+        report(!sig_bad, "signals-at-boundary", sig_bad);
+        printf("foreign-call-probe: %llu signals handled during %lu foreign calls\n",
+               (unsigned long long)sig_count, calls);
     }
-    stop_signals = 1;
-    pthread_join(sig_thread, NULL);
-    if (!sig_bad && sig_count < 200) sig_bad = "fewer than 200 signals arrived during the loop";
-    report(!sig_bad, "signals-at-boundary", sig_bad);
-    printf("foreign-call-probe: %llu signals handled during %lu foreign calls\n",
-           (unsigned long long)sig_count, calls);
 
     bench(1);
 
@@ -317,18 +381,20 @@ int main(int argc, char **argv) {
     fflush(stdout);
     char *args[] = {argv[0], "--after-exec", NULL};
     pid_t child = fork();
-    if (child == 0) {
+    if (child < 0) {
+        report(0, "cleared-by-exec", strerror(errno));
+    } else if (child == 0) {
         long cfd = open_hook(redox_cur_thrfd_v0());
         if (cfd < 0 || set_hook(cfd, entry, start, end) != 24) _exit(90);
         execv("/usr/bin/foreign-call-probe", args);
         _exit(91);
-    }
-    int status = 0;
-    waitpid(child, &status, 0);
-    if (!WIFEXITED(status) || WEXITSTATUS(status) >= 90) {
-        report(0, "cleared-by-exec", "the exec child did not run");
     } else {
-        failures += WEXITSTATUS(status);
+        int status = 0;
+        if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) >= 90) {
+            report(0, "cleared-by-exec", "the exec child did not run");
+        } else {
+            failures += WEXITSTATUS(status);
+        }
     }
     printf("foreign-call-probe: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures;
