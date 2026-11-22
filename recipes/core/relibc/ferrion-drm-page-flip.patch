@@ -1,0 +1,197 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the FerrionOS patches before it in recipe.toml applied, ferrion-gpu-syncobj.patch last among them:
+- redox-ioctl: add WAIT_VBLANK (0x3A) and DrmWaitVblank wire payload for union drm_wait_vblank, with unit tests and size assertions for drm_wait_vblank and drm_mode_crtc_page_flip_target.
+- sys_ioctl/redox/drm.rs: forward DRM_IOCTL_WAIT_VBLANK (0x3A) to the display scheme alongside existing DRM_IOCTL_MODE_PAGE_FLIP (0xB0).
+
+diff --git a/redox-ioctl/src/drm.rs b/redox-ioctl/src/drm.rs
+index b86eb0db..7a6bc9a3 100644
+--- a/redox-ioctl/src/drm.rs
++++ b/redox-ioctl/src/drm.rs
+@@ -1,7 +1,7 @@
+ use alloc::vec::Vec;
+ use core::{
+     cmp,
+-    ffi::{c_char, c_int, c_uint},
++    ffi::{c_char, c_int, c_long, c_uint},
+     iter, mem, slice,
+ };
+ 
+@@ -14,6 +14,7 @@ pub use drm_sys::{
+     drm_mode_get_plane_res, drm_mode_get_property, drm_mode_map_dumb, drm_mode_modeinfo,
+     drm_mode_obj_get_properties, drm_mode_property_enum, drm_mode_set_plane, drm_prime_handle,
+     drm_set_client_cap, drm_set_client_name, drm_set_version, drm_unique, drm_version,
++    drm_wait_vblank, drm_wait_vblank_reply, drm_wait_vblank_request,
+ };
+ 
+ pub const VERSION: u64 = 0;
+@@ -376,3 +377,159 @@ define_ioctl_data! {
+         name: u64 [array<u8, name_len>],
+     }
+ }
++
++pub const WAIT_VBLANK: u64 = 0x3A;
++
++const _: () = assert!(mem::size_of::<drm_wait_vblank>() == 24);
++const _: () = assert!(mem::size_of::<drm_mode_crtc_page_flip_target>() == 24);
++
++impl crate::ioctl_data::IoctlData for drm_wait_vblank {
++    unsafe fn write(&self) -> Vec<u8> {
++        let req = unsafe { self.request };
++        let mut data = Vec::with_capacity(24);
++        data.extend_from_slice(&req.type_.to_ne_bytes());
++        data.extend_from_slice(&req.sequence.to_ne_bytes());
++        data.extend_from_slice(&(req.signal as u64).to_ne_bytes());
++        data.extend_from_slice(&0u64.to_ne_bytes());
++        data
++    }
++
++    unsafe fn read_from(&mut self, buf: &[u8]) {
++        assert_eq!(buf.len(), 24);
++        let type_ = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
++        let sequence = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
++        let tval_sec = i64::from_ne_bytes(buf[8..16].try_into().unwrap());
++        let tval_usec = i64::from_ne_bytes(buf[16..24].try_into().unwrap());
++        self.reply = drm_wait_vblank_reply {
++            type_,
++            sequence,
++            tval_sec: tval_sec as c_long,
++            tval_usec: tval_usec as c_long,
++        };
++    }
++}
++
++pub struct DrmWaitVblank<'a> {
++    req_type: u32,
++    req_sequence: u32,
++    req_signal: u64,
++    reply_type: u32,
++    reply_sequence: u32,
++    reply_tval_sec: i64,
++    reply_tval_usec: i64,
++    bytes: &'a mut [u8],
++    written: bool,
++}
++
++impl Drop for DrmWaitVblank<'_> {
++    fn drop(&mut self) {
++        if !self.written {
++            return;
++        }
++        self.bytes[0..4].copy_from_slice(&self.reply_type.to_ne_bytes());
++        self.bytes[4..8].copy_from_slice(&self.reply_sequence.to_ne_bytes());
++        self.bytes[8..16].copy_from_slice(&self.reply_tval_sec.to_ne_bytes());
++        self.bytes[16..24].copy_from_slice(&self.reply_tval_usec.to_ne_bytes());
++    }
++}
++
++impl<'a> DrmWaitVblank<'a> {
++    pub fn with(
++        buf: &'a mut [u8],
++        f: impl FnOnce(DrmWaitVblank<'a>) -> syscall::Result<usize>,
++    ) -> syscall::Result<usize> {
++        if buf.len() != 24 {
++            return Err(syscall::Error::new(syscall::EINVAL));
++        }
++        let req_type = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
++        let req_sequence = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
++        let req_signal = u64::from_ne_bytes(buf[8..16].try_into().unwrap());
++        f(Self {
++            req_type,
++            req_sequence,
++            req_signal,
++            reply_type: 0,
++            reply_sequence: 0,
++            reply_tval_sec: 0,
++            reply_tval_usec: 0,
++            bytes: buf,
++            written: false,
++        })
++    }
++
++    pub fn request_type(&self) -> u32 {
++        self.req_type
++    }
++
++    pub fn request_sequence(&self) -> u32 {
++        self.req_sequence
++    }
++
++    pub fn request_signal(&self) -> u64 {
++        self.req_signal
++    }
++
++    pub fn set_reply_type(&mut self, value: u32) {
++        self.reply_type = value;
++        self.written = true;
++    }
++
++    pub fn set_reply_sequence(&mut self, value: u32) {
++        self.reply_sequence = value;
++        self.written = true;
++    }
++
++    pub fn set_reply_tval_sec(&mut self, value: i64) {
++        self.reply_tval_sec = value;
++        self.written = true;
++    }
++
++    pub fn set_reply_tval_usec(&mut self, value: i64) {
++        self.reply_tval_usec = value;
++        self.written = true;
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{
++        DrmWaitVblank, drm_wait_vblank, drm_wait_vblank_request,
++    };
++    use crate::IoctlData;
++
++    #[test]
++    fn wait_vblank_round_trip() {
++        let mut req = drm_wait_vblank {
++            request: drm_wait_vblank_request {
++                type_: 0x0400_0001,
++                sequence: 7,
++                signal: 0x1122_3344_5566_7788,
++            },
++        };
++        let mut wire = unsafe { req.write() };
++        assert_eq!(wire.len(), 24);
++        DrmWaitVblank::with(&mut wire, |mut data| {
++            assert_eq!(data.request_type(), 0x0400_0001);
++            assert_eq!(data.request_sequence(), 7);
++            assert_eq!(data.request_signal(), 0x1122_3344_5566_7788);
++            data.set_reply_type(1);
++            data.set_reply_sequence(42);
++            data.set_reply_tval_sec(123);
++            data.set_reply_tval_usec(456789);
++            Ok(0)
++        })
++        .unwrap();
++        unsafe { req.read_from(&wire) };
++        let reply = unsafe { req.reply };
++        assert_eq!(reply.type_, 1);
++        assert_eq!(reply.sequence, 42);
++        assert_eq!(reply.tval_sec, 123);
++        assert_eq!(reply.tval_usec, 456789);
++    }
++
++    #[test]
++    fn wait_vblank_wrong_size_refused() {
++        let mut short = [0u8; 16];
++        assert!(DrmWaitVblank::with(&mut short, |_| Ok(0)).is_err());
++    }
++}
+diff --git a/src/header/sys_ioctl/redox/drm.rs b/src/header/sys_ioctl/redox/drm.rs
+index f84cabad..946d56ce 100644
+--- a/src/header/sys_ioctl/redox/drm.rs
++++ b/src/header/sys_ioctl/redox/drm.rs
+@@ -266,6 +266,7 @@ pub(super) unsafe fn ioctl(fd: c_int, func: u8, buf: IoctlBuffer) -> Result<c_in
+         0x0D => unsafe { dev.write_ioctl::<drm_set_client_cap>(buf, SET_CLIENT_CAP) },
+         0x2D => unsafe { dev.prime_handle_to_fd(buf) },
+         0x2E => unsafe { dev.prime_fd_to_handle(buf) },
++        0x3A => unsafe { dev.read_write_ioctl::<drm_wait_vblank>(buf, WAIT_VBLANK) },
+         0x41 => unsafe { dev.read_write_ioctl::<virtgpu::drm_virtgpu_map>(buf, virtgpu::MAP) },
+         0x42 => unsafe { dev.virtgpu_execbuffer(buf) },
+         0x43 => unsafe {
