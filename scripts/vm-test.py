@@ -4968,6 +4968,43 @@ def test_gpu_flip(vm, args):
                   f"even match {even_ratio:.4f} ({even_src}), odd match {odd_ratio:.4f} ({odd_src})")
 
 
+VK_EXACT_TRACE = ("virtio_gpu_*",)
+
+
+def test_vk_exact(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe vk-exact against Venus's ICD with debug logs on a 3D device (gpu=venus unless --make names another)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    icd = f"/usr/share/vulkan/icd.d/virtio_icd.{args.arch}.json"
+    cmd = (f"VK_DRIVER_FILES={icd} MESA_LOG_LEVEL=debug VN_DEBUG=init,result "
+           "gpu-probe vk-exact 2>&1")
+    status, output = guest_run(vm, "vk", cmd, 120)
+    log = vm.out / "vk-exact.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    time.sleep(0.5)
+    trace = [line for line in vm.trace() if "virtio_gpu" in line]
+    trace_log = vm.out / "vk-exact-trace.txt"
+    trace_log.write_text("\n".join(trace) + ("\n" if trace else ""))
+    reasons = []
+    if status != 0:
+        reasons.append(f"probe exit {status}")
+    expected_pixels = "GPU_PIXELS api=vulkan triangle=17540 mismatches=0 hash=47972063c7a47bfb"
+    if expected_pixels not in output:
+        reasons.append("missing exact vulkan pixels")
+    if "GPU_VK_EXACT_OK" not in output:
+        reasons.append("missing GPU_VK_EXACT_OK")
+    if not any(re.search(r"\bvirtio_gpu_features\b.*\bvirgl 1\b", line) for line in trace):
+        reasons.append("QEMU trace has no virtio_gpu_features virgl 1")
+    if not any("virtio_gpu_cmd_ctx_submit" in line for line in trace):
+        reasons.append("QEMU trace has no virtio_gpu_cmd_ctx_submit")
+    if reasons:
+        venus_lines = [line.strip() for line in output.splitlines() if "MESA-VIRTIO:" in line or "GPU_VK" in line or "GPU_ERROR" in line]
+        summary = " | ".join(venus_lines[:8])
+        extra = f" ({summary})" if summary else ""
+        return False, "; ".join(reasons) + extra + f"; see {log} and {trace_log}"
+    return True, f"Venus rendered exact vulkan frame with host submit trace; see {log} and {trace_log}"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -5010,6 +5047,7 @@ TESTS["gpu-blob"] = test_gpu_blob
 TESTS["gpu-submit"] = test_gpu_submit
 TESTS["gpu-syncobj"] = test_gpu_syncobj
 TESTS["gpu-flip"] = test_gpu_flip
+TESTS["vk-exact"] = test_vk_exact
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
@@ -5096,6 +5134,10 @@ def main():
             elif name == "gpu-flip":
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=virtio",)
+            elif name == "vk-exact":
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=venus",)
+                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *VK_EXACT_TRACE]})
             try:
                 qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
                 host = host_versions(qemu)

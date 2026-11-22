@@ -158,6 +158,7 @@ static int egl_dispatch(int require_current)
 
 int sdl_lifecycle(void);
 int vulkan_cpu(void);
+int vulkan_exact(void);
 
 int main(int argc, char **argv)
 {
@@ -174,6 +175,9 @@ int main(int argc, char **argv)
             puts("GPU_MESA_CPU_OK");
         return gl || vk;
     }
-    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle|mesa-cpu\n", stderr);
+    if (argc == 2 && strcmp(argv[1], "vk-exact") == 0) {
+        return vulkan_exact();
+    }
+    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle|mesa-cpu|vk-exact\n", stderr);
     return 2;
 }
