@@ -16,23 +16,48 @@ say("bound", host, 1024 <= port < 65536)
 seen = {}
 
 
-def serve():
-    conn, peer = srv.accept()
-    seen["peer"] = peer
-    seen["name"] = conn.getsockname()
-    seen["getpeername"] = conn.getpeername()
-    conn.sendall(conn.recv(64).upper())
-    data, ancillary, flags = b"", [], 0
-    while len(data) < 11:
-        part, ancillary, flags, _ = conn.recvmsg(64)
-        data += part
-    seen["recvmsg"] = (data, len(ancillary), flags)
-    conn.sendall(b"ok")
+SERVE_TIMEOUT_S = 10
+
+
+def recv_exactly(conn, n):
     got = b""
-    while len(got) < 9:
-        got += conn.recv(64)
-    seen["sendmmsg"] = got
-    conn.close()
+    while len(got) < n:
+        part = conn.recv(n - len(got))
+        if not part:
+            raise EOFError("short recv")
+        got += part
+    return got
+
+
+def recvmsg_exactly(conn, n):
+    data, ancillary, flags = b"", [], 0
+    while len(data) < n:
+        part, ancillary, flags, _ = conn.recvmsg(n - len(data))
+        if not part:
+            raise EOFError("short recvmsg")
+        data += part
+    return data, ancillary, flags
+
+
+def serve():
+    conn = None
+    try:
+        srv.settimeout(SERVE_TIMEOUT_S)
+        conn, peer = srv.accept()
+        conn.settimeout(SERVE_TIMEOUT_S)
+        seen["peer"] = peer
+        seen["name"] = conn.getsockname()
+        seen["getpeername"] = conn.getpeername()
+        conn.sendall(recv_exactly(conn, 4).upper())
+        data, ancillary, flags = recvmsg_exactly(conn, 11)
+        seen["recvmsg"] = (data, len(ancillary), flags)
+        conn.sendall(b"ok")
+        seen["sendmmsg"] = recv_exactly(conn, 9)
+    except (TimeoutError, EOFError, OSError) as err:
+        seen["error"] = err
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 thread = threading.Thread(target=serve)
@@ -70,7 +95,12 @@ for i in range(3):
     msgs[i].hdr.iovlen = 1
 sent = libc.sendmmsg(cli.fileno(), msgs, 3, 0)
 say("sendmmsg", sent, [msgs[i].len for i in range(3)])
-thread.join()
+thread.join(SERVE_TIMEOUT_S)
+if thread.is_alive() or "error" in seen:
+    say("serve timed out")
+    cli.close()
+    srv.close()
+    sys.exit(1)
 say("server's peer is the client", seen["peer"] == cli.getsockname(), seen["getpeername"] == seen["peer"])
 say("server's own name", seen["name"] == (host, port))
 say("client's peer", cli.getpeername() == (host, port))
