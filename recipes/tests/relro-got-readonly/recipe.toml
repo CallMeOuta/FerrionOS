@@ -1,0 +1,26 @@
+[package]
+description = "Checks RELRO and immediate binding enforcement"
+
+[build]
+template = "custom"
+dependencies = ["relibc"]
+script = """
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+    -Wl,-z,relro -Wl,-z,now \
+    "${COOKBOOK_RECIPE}/helper.c" ${LDFLAGS} -o librelro-helper.so
+${CC} ${CFLAGS} -std=c11 -Wall -Wextra -Werror -fPIE -pie \
+    -Wl,-z,relro -Wl,-z,now \
+    -Wl,-rpath,/usr/lib/relro-got-readonly \
+    "${COOKBOOK_RECIPE}/main.c" -L. -lrelro-helper ${LDFLAGS} -o relro-probe-full
+${CC} ${CFLAGS} -std=c11 -Wall -Wextra -Werror -fPIE -pie \
+    -Wl,-z,relro -Wl,-z,lazy \
+    -Wl,-rpath,/usr/lib/relro-got-readonly \
+    "${COOKBOOK_RECIPE}/main.c" -L. -lrelro-helper ${LDFLAGS} -o relro-probe-partial
+${CC} ${CFLAGS} -std=c11 -Wall -Wextra -Werror -static \
+    -Wl,-z,relro \
+    "${COOKBOOK_RECIPE}/static_main.c" -L"${COOKBOOK_SYSROOT}/lib" -o relro-probe-static
+mkdir -p "${COOKBOOK_STAGE}/usr/bin" "${COOKBOOK_STAGE}/usr/lib/relro-got-readonly"
+cp relro-probe-full relro-probe-partial relro-probe-static "${COOKBOOK_STAGE}/usr/bin/"
+cp librelro-helper.so "${COOKBOOK_STAGE}/usr/lib/relro-got-readonly/"
+"""

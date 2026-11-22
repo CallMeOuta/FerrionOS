@@ -5351,6 +5351,106 @@ def test_dso_atexit(vm, args):
     return True, "; ".join(results) + "; callback once, at exit when kept open and at dlclose when closed"
 
 
+def test_relro_got_readonly(vm, args):
+    """Checks RELRO and immediate binding enforcement on full-RELRO, partial-RELRO and static probes (use --config relro)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+
+    def run_probe(tag, cmd):
+        since = vm.mark()
+        vm.type(f"{cmd}\n")
+        if not vm.wait_serial(
+            r"(?:RELRO_INFO|STATIC_RELRO_INFO|RELRO_WRITE_SUCCEEDED|RELRO_ERROR|ended by signal [A-Z0-9]+)[\s\S]*?root:.*# ",
+            args.timeout,
+            since,
+        ):
+            output = vm.text(since)
+            (vm.out / f"{tag}.txt").write_text(output)
+            return None, output
+        status_since = vm.mark()
+        vm.type(f"echo RELRO-EXIT-{tag}-$?\n")
+        found = vm.wait_serial(rf"RELRO-EXIT-{tag}-(\d+)[\s\S]*?root:.*# ", args.timeout, status_since)
+        output = vm.text(since)
+        (vm.out / f"{tag}.txt").write_text(output)
+        if not found:
+            return None, output
+        return int(found.group(1)), output
+
+    def faulted(status, out):
+        if "RELRO_BEFORE_WRITE" not in out or "RELRO_WRITE_SUCCEEDED" in out:
+            return False
+        return "ended by signal SIGSEGV" in out or status in (11, 139)
+
+    failures = []
+    results = []
+
+    status, out = run_probe("full-info", "relro-probe-full info")
+    expected_full = (
+        "RELRO_INFO bind_now=1 has_relro=1 slot_in_relro=1 ptr_in_relro=1 "
+        "bound_before_call=1 value=42 match=1 mutable=99"
+    )
+    if status != 0 or expected_full not in out:
+        failures.append(f"full-info status={status}")
+    else:
+        results.append("full-info ok")
+
+    for tag, cmd in (
+        ("full-write-got", "relro-probe-full write-got"),
+        ("full-write-relro", "relro-probe-full write-relro"),
+        ("full-write-dso", "relro-probe-full write-dso"),
+    ):
+        status, out = run_probe(tag, cmd)
+        if status is None:
+            failures.append(f"{tag}: no exit status")
+        elif not faulted(status, out):
+            failures.append(f"{tag}: write did not fault (status={status})")
+        else:
+            results.append(f"{tag} SIGSEGV")
+
+    status, out = run_probe("partial-info", "relro-probe-partial info")
+    expected_lazy = 0 if args.arch == "x86_64" else 1
+    expected_partial = (
+        f"RELRO_INFO bind_now=0 has_relro=1 slot_in_relro=0 ptr_in_relro=1 "
+        f"bound_before_call={expected_lazy} value=42 match=1 mutable=99"
+    )
+    if status != 0 or expected_partial not in out:
+        failures.append(f"partial-info status={status}")
+    else:
+        results.append("partial-info ok")
+
+    status, out = run_probe("partial-write-relro", "relro-probe-partial write-relro")
+    if status is None:
+        failures.append("partial-write-relro: no exit status")
+    elif not faulted(status, out):
+        failures.append(f"partial-write-relro: write did not fault (status={status})")
+    else:
+        results.append("partial-write-relro SIGSEGV")
+
+    status, out = run_probe("partial-write-got", "relro-probe-partial write-got")
+    if status != 0 or "RELRO_WRITE_SUCCEEDED" not in out:
+        failures.append(f"partial-write-got: unexpected status={status}")
+    else:
+        results.append("partial-write-got writable")
+
+    status, out = run_probe("static-info", "relro-probe-static info")
+    if status != 0 or "STATIC_RELRO_INFO value=42 mutable=99" not in out:
+        failures.append(f"static-info status={status}")
+    else:
+        results.append("static-info ok")
+
+    status, out = run_probe("static-write-relro", "relro-probe-static write-relro")
+    if status is None:
+        failures.append("static-write-relro: no exit status")
+    elif not faulted(status, out):
+        failures.append(f"static-write-relro: write did not fault (status={status})")
+    else:
+        results.append("static-write-relro SIGSEGV")
+
+    if failures:
+        return False, "; ".join(failures)
+    return True, "; ".join(results)
+
+
 # The rig of plans/audio.md: QEMU's `wav` backend records what the guest's sound device plays,
 # and the checker compares the recording with its source frame by frame. QEMU leaves the header's
 # lengths at 0 when the guest powers off, so every sample past the 44-byte header is read.
@@ -7471,6 +7571,7 @@ TESTS["linux-dynamic"] = test_linux_dynamic
 TESTS["linux-python"] = test_linux_python
 TESTS["linux-net"] = test_linux_net
 TESTS["dso-atexit"] = test_dso_atexit
+TESTS["relro-got-readonly"] = test_relro_got_readonly
 TESTS["mesa-cpu"] = test_mesa_cpu
 TESTS["gl-exact"] = test_gl_exact
 TESTS["gtk-window"] = test_gtk_window
