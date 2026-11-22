@@ -3679,12 +3679,35 @@ def screen_kind_within(vm, kinds, timeout):
 
 
 def test_one_password(args, out):
-    """DE6a: the installer's one password opens the disk at the bootloader, whose prompt names the account, and reaches that account's desktop with no second prompt; the recovery key reaches the login screen with nobody logged in; a logout and a second login ask; after passwd as that account and a reboot the old password is refused and the new one opens the disk and logs in (use --config disk-encryption-test after `make live`)."""
+    """DE6a + issues 01/02: the installer's one password opens the disk at the bootloader, whose prompt names the account, and reaches that account's desktop with no second prompt; the recovery key reaches the login screen with nobody logged in; a logout and a second login ask; after passwd as that account and a reboot the old password is refused and the new one opens the disk and logs in; after root resets the account's password, passwd asks for the previous disk password and rewraps the slot; a second account added with useradd cannot unlock until root runs passwd --enroll, then unlocks into its own session, and userdel revokes its slot and wipes its old bytes from the image (use --config disk-encryption-test after `make live`)."""
+    import mmap
     password, new = "ferrion-one-pass", "ferrion-one-changed"
+    admin_reset, recovered = "ferrion-admin-reset", "ferrion-one-recovered"
+    second_user, second_pass = "second", "ferrion-second-pass"
     scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-onepw-"))
     live, target, extra = scratch / "live.iso", scratch / "target.img", scratch / "extra.img"
     disk = [f"DISK={target}", f"EXTRA_DISK={extra}"]
     notes = []
+
+    def run_prompts(vm, cmd, prompts, done_re, marker, transcript_name, timeout=120):
+        since = vm.mark()
+        vm.type(cmd + "\n")
+        for prompt, answer in prompts:
+            if not vm.wait_serial(prompt, 30, since):
+                (vm.out / transcript_name).write_text(vm.text(since))
+                return None, f"{cmd} did not ask {prompt!r}; see {vm.out / transcript_name}"
+            vm.type(answer + "\n")
+            since = vm.mark()
+        vm.wait_serial(done_re, timeout, since)
+        time.sleep(1)
+        vm.type(f"echo {marker}-$?\n")
+        status = vm.wait_serial(rf"{marker}-(\d+)", 60, since)
+        text = vm.text(since)
+        (vm.out / transcript_name).write_text(text)
+        if not status:
+            return None, f"{cmd} produced no exit status; see {vm.out / transcript_name}"
+        return int(status.group(1)), text
+
     try:
         shutil.copyfile(ROOT / "build" / args.arch / args.config / "redox-live.iso", live)
         for path, size in ((target, 2 << 30), (extra, 64 << 20)):
@@ -3694,6 +3717,7 @@ def test_one_password(args, out):
         if not recovery:
             return False, f"the installer did not finish with one password; see {out / 'install'}"
 
+        user_uid = None
         vm = boot_copy(args, out / "password", disk)
         try:
             if not vm.wait_serial(r"user[\s\S]{0,400}Password \(1/\d+\)", args.timeout):
@@ -3711,6 +3735,7 @@ def test_one_password(args, out):
                     or frame.kind() == "login"):
                 return False, (f"no session of user after the unlock (launcher euid {owner}, screen {frame.kind()}, "
                                f"env {env.strip()!r}); see {vm.out}")
+            user_uid = int(uid.group(1))
             notes.append("bootloader password reached user's desktop")
             _, context = run_status(vm, "grep launcher /scheme/sys/context")
             for pid in re.findall(r"(?m)^\s*(\d+)\s+\d+\s.*launcher\s*$", context):
@@ -3729,21 +3754,17 @@ def test_one_password(args, out):
                 return False, f"a second login as user did not ask for the password; see {vm.out}"
             vm.type(password + "\n")
             time.sleep(3)
-            since = vm.mark()
-            vm.type("passwd\n")
-            for prompt, answer in ((r"current password: ", password), (r"new password: ", new),
-                                   (r"confirm password: ", new)):
-                if not vm.wait_serial(prompt, 30, since):
-                    return False, f"passwd did not ask {prompt.strip()}; see {vm.out}"
-                vm.type(answer + "\n")
-                since = vm.mark()
-            vm.wait_serial(r"user:\S*\$ ", 120, since)
-            time.sleep(1)
-            vm.type("echo passwd-status-$?\n")
-            status = vm.wait_serial(r"passwd-status-(\d+)", 60, since)
-            (vm.out / "passwd.txt").write_text(vm.text(since))
-            if not status or status.group(1) != "0":
-                return False, f"passwd as user failed; see {vm.out / 'passwd.txt'}"
+            code, err = run_prompts(
+                vm,
+                "passwd",
+                ((r"current password: ", password), (r"new password: ", new),
+                 (r"confirm password: ", new)),
+                r"user:\S*\$ ",
+                "passwd-status",
+                "passwd.txt",
+            )
+            if code != 0:
+                return False, f"passwd as user failed ({code}): {err}"
             notes.append("second login asked; passwd changed the password")
         finally:
             vm.close()
@@ -3770,11 +3791,164 @@ def test_one_password(args, out):
                 return False, "no bootloader prompt after passwd"
             if not unlock(vm, new, 2, 60):
                 return False, f"the old password was not refused at the bootloader; see {vm.out}"
-            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout) is None:
+            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout) != user_uid:
                 return False, f"the new password did not log user in; see {vm.out}"
             notes.append("after passwd the old password is refused and the new one opens and logs in")
+
+            code, err = run_prompts(
+                vm,
+                "passwd user",
+                ((r"new password: ", admin_reset), (r"confirm password: ", admin_reset)),
+                r"root:.*# ",
+                "admin-reset-status",
+                "admin-reset.txt",
+            )
+            if code != 0:
+                return False, f"root passwd user failed ({code}): {err}"
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no serial login after admin reset; see {vm.out}"
+            time.sleep(3)
+            since = vm.mark()
+            vm.type("user\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"login as user after admin reset did not ask for password; see {vm.out}"
+            vm.type(admin_reset + "\n")
+            time.sleep(3)
+            code, err = run_prompts(
+                vm,
+                "passwd",
+                ((r"current password: ", admin_reset), (r"new password: ", recovered),
+                 (r"confirm password: ", recovered), (r"previous disk password: ", new)),
+                r"user:\S*\$ ",
+                "passwd-recover-status",
+                "passwd-recover.txt",
+            )
+            if code != 0:
+                return False, f"passwd with previous disk password failed ({code}): {err}"
         finally:
             vm.close()
+
+        vm = boot_copy(args, out / "admin-reset", disk)
+        try:
+            if not unlock(vm, new, 1, args.timeout):
+                return False, "no bootloader prompt after admin-reset recovery"
+            if not unlock(vm, recovered, 2, 60):
+                return False, f"the pre-reset disk password was not refused; see {vm.out}"
+            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout) != user_uid:
+                return False, f"the recovered password did not open and log user in; see {vm.out}"
+            notes.append("after admin reset, passwd with previous disk password rewraps the slot and logs user in")
+
+            status, output = run_status(vm, f"useradd -m -s /usr/bin/ion {second_user}")
+            if status != 0:
+                return False, f"useradd {second_user} failed ({status}): {output!r}"
+            code, err = run_prompts(
+                vm,
+                f"passwd {second_user}",
+                ((r"new password: ", second_pass), (r"confirm password: ", second_pass)),
+                r"root:.*# ",
+                "second-passwd-status",
+                "second-passwd.txt",
+            )
+            if code != 0:
+                return False, f"root passwd {second_user} failed ({code}): {err}"
+            status, _ = run_status(vm, f"grep ' {second_user}$' /etc/unlock-slots")
+            if status == 0:
+                return False, f"{second_user} was enrolled automatically before passwd --enroll"
+        finally:
+            vm.close()
+
+        second_slot = None
+        vm = boot_copy(args, out / "second-unenrolled", disk)
+        try:
+            if not unlock(vm, second_pass, 1, args.timeout):
+                return False, "no bootloader prompt for unenrolled second account check"
+            if not unlock(vm, recovered, 2, 60):
+                return False, f"unenrolled {second_user}'s password was not refused at the bootloader; see {vm.out}"
+            if not root_shell(vm, args.timeout * 2):
+                return False, f"no root shell after second-unenrolled check; see {vm.out}"
+            notes.append("unenrolled second account refused at bootloader")
+
+            status, _ = run_status(vm, "passwd --enroll root")
+            if status == 0:
+                return False, "passwd --enroll root succeeded unexpectedly"
+            code, err = run_prompts(
+                vm,
+                f"passwd --enroll {second_user}",
+                ((rf"password for {second_user}: ", second_pass),
+                 (r"disk password or recovery key: ", recovered)),
+                r"root:.*# ",
+                "enroll-status",
+                "enroll.txt",
+            )
+            if code != 0:
+                return False, f"passwd --enroll {second_user} failed ({code}): {err}"
+            _, slots_text = run_status(vm, "cat /etc/unlock-slots")
+            match = re.search(rf"(?m)^(\d+) {second_user}$", slots_text)
+            if not match:
+                return False, f"{second_user} not recorded in /etc/unlock-slots: {slots_text!r}"
+            second_slot = int(match.group(1))
+        finally:
+            vm.close()
+
+        second_slot_bytes = raw_key_slots(target)[second_slot]
+        if second_slot_bytes[:16] == bytes(16):
+            return False, f"enrolled slot {second_slot} for {second_user} is empty on disk"
+
+        vm = boot_copy(args, out / "second-enrolled", disk)
+        try:
+            if not unlock(vm, second_pass, 1, args.timeout):
+                return False, f"no bootloader prompt for enrolled {second_user}"
+            if not root_shell(vm, args.timeout * 2):
+                return False, f"enrolled {second_user} password did not unlock the disk; see {vm.out}"
+            owner = wait_session(vm, args.timeout)
+            _, env = run_status(vm, "grep REDOXFS_UNLOCK /scheme/sys/env")
+            _, uid = run_status(vm, f"grep '^{second_user};' /etc/passwd")
+            uid = re.search(rf"{second_user};(\d+);", uid)
+            if (f"REDOXFS_UNLOCK_SLOT={second_slot}" not in env
+                    or "REDOXFS_UNLOCK_KIND=passphrase" not in env
+                    or not uid or owner != int(uid.group(1))):
+                return False, (f"enrolled {second_user} did not launch its session (launcher euid {owner}, "
+                               f"expected {uid.group(1) if uid else None}, env {env.strip()!r}); see {vm.out}")
+            notes.append(f"passwd --enroll unlocked and launched {second_user}'s session")
+
+            code, err = run_prompts(
+                vm,
+                f"userdel {second_user}",
+                ((r"disk password or recovery key: ", recovered),),
+                r"root:.*# ",
+                "userdel-status",
+                "userdel.txt",
+            )
+            if code != 0:
+                return False, f"userdel {second_user} failed ({code}): {err}"
+            status_pw, _ = run_status(vm, f"grep '^{second_user};' /etc/passwd")
+            status_sl, _ = run_status(vm, f"grep ' {second_user}$' /etc/unlock-slots")
+            if status_pw == 0 or status_sl == 0:
+                return False, f"userdel left {second_user} in passwd ({status_pw}) or unlock-slots ({status_sl})"
+        finally:
+            vm.close()
+
+        if raw_key_slots(target)[second_slot] != bytes(48):
+            return False, f"slot {second_slot} was not cleared in the newest header after userdel"
+        with target.open("rb") as disk_file:
+            with mmap.mmap(disk_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                if mm.find(second_slot_bytes) != -1:
+                    return False, f"removed slot {second_slot}'s old bytes are still in the image"
+
+        vm = boot_copy(args, out / "second-removed", disk)
+        try:
+            if not unlock(vm, second_pass, 1, args.timeout):
+                return False, "no bootloader prompt after userdel"
+            if not unlock(vm, recovered, 2, 60):
+                return False, f"removed {second_user}'s password was not refused at the bootloader; see {vm.out}"
+            if not root_shell(vm, args.timeout * 2):
+                return False, f"no root shell after userdel reboot; see {vm.out}"
+            notes.append("userdel revoked the slot and old slot bytes are absent from the image")
+        finally:
+            vm.close()
+
         return True, "; ".join(notes)
     finally:
         shutil.rmtree(scratch)

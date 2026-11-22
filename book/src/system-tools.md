@@ -48,17 +48,21 @@ Available programs:
 
 - `id` - Displays user identity.
 - `login` - Allows users to login into the system
-- `passwd` - Allows users to modify their passwords.
+- `passwd` - Allows users to modify their passwords, and (as `root` with `--enroll LOGIN`) enrolls an account to unlock an encrypted disk at startup.
 - `su` - Allows users to substitute identity.
 - `sudo` - Enables users to execute a command as another user.
 - `useradd` - Adds a user
 - `usermod` - Modifies user information
-- `userdel` - Deletes a user
+- `userdel` - Deletes a user, revoking its disk-unlock slot first if the account was enrolled.
 - `groupadd` - Adds a user group
 - `groupmod` - Modifies group information
 - `groupdel` - Removes a user group
 
 `whoami` is a link to `id`. `getty`, which `init` uses to open a terminal line and start `login`, is part of the `base` package.
+
+On an encrypted installation set up with one password, `passwd` changes the account's login password and rewraps its disk-unlock key slot in `/etc/unlock-slots` in one operation. If an administrator reset the account's login password with `passwd LOGIN`, the disk slot keeps the previous password until the owner runs `passwd`, which prompts for `previous disk password: ` (or the recovery key) and rewraps the slot before saving the new password.
+
+Accounts added after installation with `useradd` do not unlock the disk automatically. An administrator enrolls a non-root account with a non-empty password by running `passwd --enroll LOGIN`, which verifies the account's password and an existing disk password or recovery key, adds a new RedoxFS key slot, and records it in `/etc/unlock-slots`. Removing an enrolled account with `userdel LOGIN` asks for a disk password or recovery key, removes the account's key slot (rolling the header ring), and keeps the account if slot removal fails. The bootloader's startup name list (`EFI/BOOT/UNLOCK.TXT` on the EFI partition) is written at installation and is not rewritten when accounts are enrolled or removed later; that file is display-only and does not affect which slot unlocks the disk or which account logs in.
 
 ### extrautils
 
