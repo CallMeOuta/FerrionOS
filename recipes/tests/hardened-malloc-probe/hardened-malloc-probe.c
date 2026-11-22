@@ -3,7 +3,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -30,6 +33,19 @@ enum {
     MAX_TIMED_EXEC_MS = 120000,
     MAX_PATH_BYTES = 512,
     MAX_ESCAPED_BYTES = 768,
+    MUTEX_STRESS_THREADS = 4,
+    MUTEX_STRESS_ITERS = 200000,
+    MUTEX_ATTR_ITERS = 20000,
+    COND_HANDOFF_ROUNDS = 400,
+    MUTEX_BENCH_ITERS = 100000,
+    FUTEX_BENCH_ITERS = 10000,
+    MICRO_MPROTECT_PAIRS = 1000,
+    MICRO_HOT_PAGES = 64,
+    MICRO_PF_PAGES = 1024,
+    MICRO_OP_ITERS = 1000,
+    MICRO_STATVFS_ITERS = 100,
+    FUTEX_WAIT_POLL_LIMIT = 5000,
+    STALE_WAKE_POLL_MS = 1000,
 };
 
 struct mem_frames {
@@ -506,9 +522,633 @@ static int run_timed_exec(int timeout_ms, char **cmd) {
     return 0;
 }
 
+#if defined(__x86_64__) && defined(__redox__)
+extern uintptr_t redox_cur_thrfd_v0(void);
+extern uintptr_t redox_dup_v1(uintptr_t fd, const char *buf, uintptr_t len);
+extern uintptr_t redox_write_v1(uintptr_t fd, const void *buf, uintptr_t len);
+extern uintptr_t redox_close_v1(uintptr_t fd);
+
+__attribute__((used)) volatile uint64_t fc_futex_wake_count;
+__attribute__((used)) volatile uint64_t fc_total_syscalls;
+extern char hm_fc_start[], hm_fc_entry[], hm_fc_end[];
+
+__asm__(
+    ".intel_syntax noprefix\n"
+    ".text\n"
+    ".p2align 4\n"
+    ".globl hm_fc_start\n"
+    ".globl hm_fc_entry\n"
+    ".globl hm_fc_end\n"
+    "hm_fc_start:\n"
+    "hm_fc_entry:\n"
+    "    lea rsp, [rsp - 128]\n"
+    "    push rcx\n"
+    "    push r11\n"
+    "    inc qword ptr [rip + fc_total_syscalls]\n"
+    "    cmp rax, 240\n"
+    "    jne 1f\n"
+    "    cmp rsi, 1\n"
+    "    jne 1f\n"
+    "    inc qword ptr [rip + fc_futex_wake_count]\n"
+    "1:\n"
+    "    syscall\n"
+    "    popfq\n"
+    "    pop rcx\n"
+    "    lea rsp, [rsp + 128]\n"
+    "    jmp rcx\n"
+    "hm_fc_end:\n"
+    ".att_syntax prefix\n"
+);
+
+static inline long raw_sys_futex(uint32_t *addr, long op, long val, const struct timespec *ts) {
+    long ret;
+    register long r10 __asm__("r10") = (long)(uintptr_t)ts;
+    register long r8 __asm__("r8") = 0;
+    __asm__ volatile(
+        "syscall"
+        : "=a"(ret)
+        : "a"(240L), "D"(addr), "S"(op), "d"(val), "r"(r10), "r"(r8)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+static long fc_open_and_enable(void) {
+    fc_futex_wake_count = 0;
+    fc_total_syscalls = 0;
+    uintptr_t fd = redox_dup_v1(redox_cur_thrfd_v0(), "foreign-call", 12);
+    if (fd > (uintptr_t)-4096) {
+        return -1;
+    }
+    uintptr_t words[3] = {(uintptr_t)hm_fc_entry, (uintptr_t)hm_fc_start, (uintptr_t)hm_fc_end};
+    uintptr_t w = redox_write_v1(fd, words, sizeof(words));
+    if (w > (uintptr_t)-4096) {
+        (void)redox_close_v1(fd);
+        return -1;
+    }
+    return (long)fd;
+}
+
+static void fc_disable_and_close(long fd) {
+    if (fd >= 0) {
+        uintptr_t zero[3] = {0, 0, 0};
+        (void)redox_write_v1((uintptr_t)fd, zero, sizeof(zero));
+        (void)redox_close_v1((uintptr_t)fd);
+    }
+}
+#endif
+
+struct counter_ctx {
+    pthread_mutex_t *mu;
+    uint64_t *counter;
+    int iters;
+    int recursive_depth;
+    int use_trylock_yield;
+};
+
+static void *counter_worker(void *arg) {
+    struct counter_ctx *ctx = (struct counter_ctx *)arg;
+    for (int i = 0; i < ctx->iters; i++) {
+        if (ctx->use_trylock_yield && (i & 15) == 0) {
+            int trc = pthread_mutex_trylock(ctx->mu);
+            if (trc == EBUSY) {
+                assert(pthread_mutex_lock(ctx->mu) == 0);
+            } else {
+                assert(trc == 0);
+            }
+            (*ctx->counter)++;
+            assert(pthread_mutex_unlock(ctx->mu) == 0);
+            if ((i & 4095) == 0) {
+                sched_yield();
+            }
+            continue;
+        }
+        for (int d = 0; d < ctx->recursive_depth; d++) {
+            assert(pthread_mutex_lock(ctx->mu) == 0);
+        }
+        (*ctx->counter)++;
+        for (int d = 0; d < ctx->recursive_depth; d++) {
+            assert(pthread_mutex_unlock(ctx->mu) == 0);
+        }
+    }
+    return NULL;
+}
+
+struct cond_ctx {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int turn;
+    int round;
+};
+
+struct cond_arg {
+    struct cond_ctx *ctx;
+    int id;
+};
+
+static void *cond_worker(void *arg) {
+    struct cond_arg *a = (struct cond_arg *)arg;
+    struct cond_ctx *c = a->ctx;
+    for (int r = 0; r < COND_HANDOFF_ROUNDS; r++) {
+        assert(pthread_mutex_lock(&c->mu) == 0);
+        while (c->turn != a->id) {
+            assert(pthread_cond_wait(&c->cv, &c->mu) == 0);
+        }
+        c->turn = (c->turn + 1) % MUTEX_STRESS_THREADS;
+        c->round++;
+        assert(pthread_cond_broadcast(&c->cv) == 0);
+        assert(pthread_mutex_unlock(&c->mu) == 0);
+    }
+    return NULL;
+}
+
+struct timed_ctx {
+    pthread_mutex_t mu;
+    atomic_int holder_ready;
+    atomic_int waiter_done;
+    int timed_rc;
+};
+
+static void *timed_waiter_fn(void *arg) {
+    struct timed_ctx *tc = (struct timed_ctx *)arg;
+    struct timespec ts;
+    assert(clock_gettime(CLOCK_REALTIME, &ts) == 0);
+    ts.tv_nsec += 30000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+    tc->timed_rc = pthread_mutex_timedlock(&tc->mu, &ts);
+    if (tc->timed_rc == 0) {
+        pthread_mutex_unlock(&tc->mu);
+    }
+    return NULL;
+}
+
+static void *peer_waiter_fn(void *arg) {
+    struct timed_ctx *tc = (struct timed_ctx *)arg;
+    assert(pthread_mutex_lock(&tc->mu) == 0);
+    atomic_store(&tc->waiter_done, 1);
+    assert(pthread_mutex_unlock(&tc->mu) == 0);
+    return NULL;
+}
+
+struct stale_timed_ctx {
+    pthread_mutex_t mu;
+    atomic_int waiter_entered;
+    atomic_int waiter_done;
+    int timed_rc;
+};
+
+static void *stale_peer_waiter_fn(void *arg) {
+    struct stale_timed_ctx *sc = (struct stale_timed_ctx *)arg;
+    atomic_store(&sc->waiter_entered, 1);
+    assert(pthread_mutex_lock(&sc->mu) == 0);
+    atomic_store(&sc->waiter_done, 1);
+    assert(pthread_mutex_unlock(&sc->mu) == 0);
+    return NULL;
+}
+
+static void *stale_timed_waiter_fn(void *arg) {
+    struct stale_timed_ctx *sc = (struct stale_timed_ctx *)arg;
+    struct timespec ts;
+    assert(clock_gettime(CLOCK_REALTIME, &ts) == 0);
+    ts.tv_nsec += 30000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+    sc->timed_rc = pthread_mutex_timedlock(&sc->mu, &ts);
+    if (sc->timed_rc == 0) {
+        pthread_mutex_unlock(&sc->mu);
+    }
+    return NULL;
+}
+
+#if defined(__x86_64__) && defined(__redox__)
+struct futex_handoff_ctx {
+    _Atomic uint32_t *word;
+    atomic_int entered;
+    atomic_int woke;
+};
+
+static void *futex_waiter_untouched_fn(void *arg) {
+    struct futex_handoff_ctx *fc = (struct futex_handoff_ctx *)arg;
+    atomic_store(&fc->entered, 1);
+    (void)raw_sys_futex((uint32_t *)fc->word, 0, 0, NULL);
+    for (int i = 0; i < 64; i++) {
+        if (atomic_load(fc->word) != 0) {
+            break;
+        }
+        (void)raw_sys_futex((uint32_t *)fc->word, 0, 0, NULL);
+    }
+    atomic_store(&fc->woke, 1);
+    return NULL;
+}
+
+static void *futex_waiter_fn(void *arg) {
+    struct futex_handoff_ctx *fc = (struct futex_handoff_ctx *)arg;
+    atomic_store(&fc->entered, 1);
+    for (int i = 0; i < 64; i++) {
+        uint32_t cur = atomic_load(fc->word);
+        if (cur != 0) {
+            break;
+        }
+        (void)raw_sys_futex((uint32_t *)fc->word, 0, 0, NULL);
+    }
+    atomic_store(&fc->woke, 1);
+    return NULL;
+}
+#endif
+
+static int run_mutex_stress_inner(void) {
+    pthread_mutex_t normal_mu = PTHREAD_MUTEX_INITIALIZER;
+    uint64_t normal_count = 0;
+    struct counter_ctx nctx = {&normal_mu, &normal_count, MUTEX_STRESS_ITERS, 1, 1};
+    pthread_t threads[MUTEX_STRESS_THREADS];
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        assert(pthread_create(&threads[i], NULL, counter_worker, &nctx) == 0);
+    }
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        assert(pthread_join(threads[i], NULL) == 0);
+    }
+    uint64_t expected_normal = (uint64_t)MUTEX_STRESS_THREADS * (uint64_t)MUTEX_STRESS_ITERS;
+    uint64_t expected_attr = (uint64_t)MUTEX_STRESS_THREADS * (uint64_t)MUTEX_ATTR_ITERS;
+    int normal_ok = (normal_count == expected_normal);
+
+    pthread_mutexattr_t rattr;
+    pthread_mutex_t rec_mu;
+    assert(pthread_mutexattr_init(&rattr) == 0);
+    assert(pthread_mutexattr_settype(&rattr, PTHREAD_MUTEX_RECURSIVE) == 0);
+    assert(pthread_mutex_init(&rec_mu, &rattr) == 0);
+    uint64_t rec_count = 0;
+    struct counter_ctx rctx = {&rec_mu, &rec_count, MUTEX_ATTR_ITERS, 2, 0};
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        assert(pthread_create(&threads[i], NULL, counter_worker, &rctx) == 0);
+    }
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        assert(pthread_join(threads[i], NULL) == 0);
+    }
+    int rec_ok = (rec_count == expected_attr);
+    pthread_mutex_destroy(&rec_mu);
+    pthread_mutexattr_destroy(&rattr);
+
+    pthread_mutexattr_t eattr;
+    pthread_mutex_t err_mu;
+    assert(pthread_mutexattr_init(&eattr) == 0);
+    assert(pthread_mutexattr_settype(&eattr, PTHREAD_MUTEX_ERRORCHECK) == 0);
+    assert(pthread_mutex_init(&err_mu, &eattr) == 0);
+    assert(pthread_mutex_lock(&err_mu) == 0);
+    int relock_rc = pthread_mutex_lock(&err_mu);
+    assert(pthread_mutex_unlock(&err_mu) == 0);
+    int unowned_rc = pthread_mutex_unlock(&err_mu);
+    uint64_t err_count = 0;
+    struct counter_ctx ectx = {&err_mu, &err_count, MUTEX_ATTR_ITERS, 1, 0};
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        assert(pthread_create(&threads[i], NULL, counter_worker, &ectx) == 0);
+    }
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        assert(pthread_join(threads[i], NULL) == 0);
+    }
+    int errck_ok = (relock_rc != 0 && unowned_rc == EPERM && err_count == expected_attr);
+    pthread_mutex_destroy(&err_mu);
+    pthread_mutexattr_destroy(&eattr);
+
+    struct cond_ctx cctx;
+    assert(pthread_mutex_init(&cctx.mu, NULL) == 0);
+    assert(pthread_cond_init(&cctx.cv, NULL) == 0);
+    cctx.turn = 0;
+    cctx.round = 0;
+    struct cond_arg cargs[MUTEX_STRESS_THREADS];
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        cargs[i].ctx = &cctx;
+        cargs[i].id = i;
+        assert(pthread_create(&threads[i], NULL, cond_worker, &cargs[i]) == 0);
+    }
+    for (int i = 0; i < MUTEX_STRESS_THREADS; i++) {
+        assert(pthread_join(threads[i], NULL) == 0);
+    }
+    int cond_ok = (cctx.round == MUTEX_STRESS_THREADS * COND_HANDOFF_ROUNDS);
+    pthread_cond_destroy(&cctx.cv);
+    pthread_mutex_destroy(&cctx.mu);
+
+    struct timed_ctx tctx;
+    assert(pthread_mutex_init(&tctx.mu, NULL) == 0);
+    atomic_init(&tctx.holder_ready, 0);
+    atomic_init(&tctx.waiter_done, 0);
+    tctx.timed_rc = -1;
+    assert(pthread_mutex_lock(&tctx.mu) == 0);
+    pthread_t t_timed, t_peer;
+    assert(pthread_create(&t_timed, NULL, timed_waiter_fn, &tctx) == 0);
+    assert(pthread_create(&t_peer, NULL, peer_waiter_fn, &tctx) == 0);
+    struct timespec hold_ts = {0, 120000000L};
+    nanosleep(&hold_ts, NULL);
+    assert(pthread_join(t_timed, NULL) == 0);
+    assert(pthread_mutex_unlock(&tctx.mu) == 0);
+    assert(pthread_join(t_peer, NULL) == 0);
+    int timed_ok = (tctx.timed_rc == ETIMEDOUT && atomic_load(&tctx.waiter_done) == 1);
+    pthread_mutex_destroy(&tctx.mu);
+
+    struct stale_timed_ctx sctx;
+    assert(pthread_mutex_init(&sctx.mu, NULL) == 0);
+    atomic_init(&sctx.waiter_entered, 0);
+    atomic_init(&sctx.waiter_done, 0);
+    sctx.timed_rc = -1;
+    assert(pthread_mutex_lock(&sctx.mu) == 0);
+    pthread_t t_sw, t_st;
+    assert(pthread_create(&t_sw, NULL, stale_peer_waiter_fn, &sctx) == 0);
+    for (int i = 0; i < FUTEX_WAIT_POLL_LIMIT && atomic_load(&sctx.waiter_entered) == 0; i++) {
+        struct timespec st = {0, 1000000L};
+        nanosleep(&st, NULL);
+    }
+    struct timespec sw_settle = {0, 20000000L};
+    nanosleep(&sw_settle, NULL);
+    assert(pthread_create(&t_st, NULL, stale_timed_waiter_fn, &sctx) == 0);
+    assert(pthread_join(t_st, NULL) == 0);
+    struct timespec sw_requeue = {0, 50000000L};
+    nanosleep(&sw_requeue, NULL);
+    assert(pthread_mutex_unlock(&sctx.mu) == 0);
+    for (int i = 0; i < STALE_WAKE_POLL_MS && atomic_load(&sctx.waiter_done) == 0; i++) {
+        struct timespec st = {0, 1000000L};
+        nanosleep(&st, NULL);
+    }
+    int stale_timed_ok = (sctx.timed_rc == ETIMEDOUT && atomic_load(&sctx.waiter_done) == 1);
+    if (stale_timed_ok) {
+        assert(pthread_join(t_sw, NULL) == 0);
+        pthread_mutex_destroy(&sctx.mu);
+    }
+
+    int futex_key_ok = 1;
+#if defined(__x86_64__) && defined(__redox__)
+    void *fpage = mmap(NULL, PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(fpage != MAP_FAILED);
+    _Atomic uint32_t *fword = (_Atomic uint32_t *)fpage;
+    struct futex_handoff_ctx fh = {fword, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0)};
+    pthread_t t_fw;
+    assert(pthread_create(&t_fw, NULL, futex_waiter_fn, &fh) == 0);
+    for (int i = 0; i < FUTEX_WAIT_POLL_LIMIT && atomic_load(&fh.entered) == 0; i++) {
+        struct timespec st = {0, 1000000L};
+        nanosleep(&st, NULL);
+    }
+    struct timespec settle = {0, 20000000L};
+    nanosleep(&settle, NULL);
+    atomic_store(fword, 1);
+    long woken = raw_sys_futex((uint32_t *)fword, 1, 1, NULL);
+    assert(pthread_join(t_fw, NULL) == 0);
+
+    void *untouched = mmap(NULL, 64ULL * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(untouched != MAP_FAILED);
+    _Atomic uint32_t *uword = (_Atomic uint32_t *)((char *)untouched + 32ULL * PAGE_BYTES);
+    long untouched_empty_rc = raw_sys_futex((uint32_t *)((char *)untouched + 48ULL * PAGE_BYTES), 1, 1, NULL);
+    struct futex_handoff_ctx ufh = {uword, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0)};
+    pthread_t t_ufw;
+    assert(pthread_create(&t_ufw, NULL, futex_waiter_untouched_fn, &ufh) == 0);
+    for (int i = 0; i < FUTEX_WAIT_POLL_LIMIT && atomic_load(&ufh.entered) == 0; i++) {
+        struct timespec st = {0, 1000000L};
+        nanosleep(&st, NULL);
+    }
+    nanosleep(&settle, NULL);
+    atomic_store(uword, 1);
+    long uwoken = raw_sys_futex((uint32_t *)uword, 1, 1, NULL);
+    assert(pthread_join(t_ufw, NULL) == 0);
+
+    void *none_page = mmap(NULL, PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(none_page != MAP_FAILED);
+    long none_rc = raw_sys_futex((uint32_t *)none_page, 1, 1, NULL);
+    void *mprot_none = mmap(NULL, PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(mprot_none != MAP_FAILED);
+    *(volatile uint32_t *)mprot_none = 7;
+    assert(mprotect(mprot_none, PAGE_BYTES, PROT_NONE) == 0);
+    long mprot_none_rc = raw_sys_futex((uint32_t *)mprot_none, 1, 1, NULL);
+    long kern_rc = raw_sys_futex((uint32_t *)(uintptr_t)0xffffffff80000000ULL, 1, 1, NULL);
+    munmap(mprot_none, PAGE_BYTES);
+    munmap(none_page, PAGE_BYTES);
+    munmap(untouched, 64ULL * PAGE_BYTES);
+    munmap(fpage, PAGE_BYTES);
+    futex_key_ok = (woken >= 0 && atomic_load(&fh.woke) == 1 && uwoken >= 0 && atomic_load(&ufh.woke) == 1 && untouched_empty_rc == 0 && none_rc == -EFAULT && mprot_none_rc == -EFAULT && kern_rc == -EFAULT);
+#endif
+
+    int all_ok = normal_ok && rec_ok && errck_ok && cond_ok && timed_ok && stale_timed_ok && futex_key_ok;
+    printf("mutex-stress normal=%d rec=%d errck=%d cond=%d timed=%d stale_timed=%d futex_key=%d ok=%d\n",
+           normal_ok, rec_ok, errck_ok, cond_ok, timed_ok, stale_timed_ok, futex_key_ok, all_ok);
+    fflush(stdout);
+    return all_ok ? 0 : 1;
+}
+
+static int run_mutex_stress(void) {
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        _exit(run_mutex_stress_inner());
+    }
+    bool timed_out = false;
+    int st = wait_child_status(pid, TEST_TIMEOUT_MS, &timed_out);
+    if (timed_out) {
+        printf("mutex-stress timed_out=1 ok=0\n");
+        fflush(stdout);
+        return 1;
+    }
+    return st == 0 ? 0 : 1;
+}
+
+static int run_mutex_bench(void) {
+    pthread_mutex_t m_static = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_t m_init;
+    assert(pthread_mutex_init(&m_init, NULL) == 0);
+
+    uint64_t t0 = now_us();
+    for (int i = 0; i < MUTEX_BENCH_ITERS; i++) {
+        pthread_mutex_lock(&m_static);
+        pthread_mutex_unlock(&m_static);
+    }
+    uint64_t t1 = now_us();
+    uint64_t static_ns = ((t1 - t0) * 1000ULL) / MUTEX_BENCH_ITERS;
+
+    t0 = now_us();
+    for (int i = 0; i < MUTEX_BENCH_ITERS; i++) {
+        pthread_mutex_lock(&m_init);
+        pthread_mutex_unlock(&m_init);
+    }
+    t1 = now_us();
+    uint64_t init_ns = ((t1 - t0) * 1000ULL) / MUTEX_BENCH_ITERS;
+
+    int fc_enabled = 0;
+    uint64_t wake_calls = 0;
+    uint64_t total_sc = 0;
+    uint64_t futex_wake_ns = 0;
+#if defined(__x86_64__) && defined(__redox__)
+    uint32_t ctrl_word = 0;
+    long fcfd = fc_open_and_enable();
+    if (fcfd >= 0) {
+        fc_enabled = 1;
+        assert(raw_sys_futex(&ctrl_word, 1, 1, NULL) >= 0);
+        for (int i = 0; i < 10000; i++) {
+            pthread_mutex_lock(&m_static);
+            pthread_mutex_unlock(&m_static);
+        }
+        fc_disable_and_close(fcfd);
+        wake_calls = fc_futex_wake_count;
+        total_sc = fc_total_syscalls;
+    }
+    uint32_t fw = 0;
+    t0 = now_us();
+    for (int i = 0; i < FUTEX_BENCH_ITERS; i++) {
+        assert(raw_sys_futex(&fw, 1, 1, NULL) >= 0);
+    }
+    t1 = now_us();
+    futex_wake_ns = ((t1 - t0) * 1000ULL) / FUTEX_BENCH_ITERS;
+#endif
+
+    pthread_mutex_destroy(&m_init);
+    printf("mutex-bench fc_enabled=%d static_ns=%llu init_ns=%llu wake_calls_10k=%llu total_sc_10k=%llu futex_wake_ns=%llu\n",
+           fc_enabled,
+           (unsigned long long)static_ns,
+           (unsigned long long)init_ns,
+           (unsigned long long)wake_calls,
+           (unsigned long long)total_sc,
+           (unsigned long long)futex_wake_ns);
+    fflush(stdout);
+    return 0;
+}
+
+static int run_micro(void) {
+    pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    uint64_t t0 = now_us();
+    for (int i = 0; i < MUTEX_BENCH_ITERS; i++) {
+        pthread_mutex_lock(&m);
+        pthread_mutex_unlock(&m);
+    }
+    uint64_t t1 = now_us();
+    printf("micro mutex_lock_unlock ns=%llu\n",
+           (unsigned long long)(((t1 - t0) * 1000ULL) / MUTEX_BENCH_ITERS));
+
+#if defined(__x86_64__) && defined(__redox__)
+    uint32_t fw = 0;
+    t0 = now_us();
+    for (int i = 0; i < FUTEX_BENCH_ITERS; i++) {
+        assert(raw_sys_futex(&fw, 1, 1, NULL) >= 0);
+    }
+    t1 = now_us();
+    printf("micro futex_wake_empty ns=%llu\n",
+           (unsigned long long)(((t1 - t0) * 1000ULL) / FUTEX_BENCH_ITERS));
+#endif
+
+    void *hot = mmap(NULL, (size_t)MICRO_HOT_PAGES * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(hot != MAP_FAILED);
+    memset(hot, 0x33, (size_t)MICRO_HOT_PAGES * PAGE_BYTES);
+    volatile unsigned char *vhot = (volatile unsigned char *)hot;
+    volatile uint64_t sink = 0;
+
+    static const size_t PAGES_LIST[3] = {1, 8, 32};
+    void *r1 = mmap(NULL, 64ULL * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(r1 != MAP_FAILED);
+    memset(r1, 1, 64ULL * PAGE_BYTES);
+    for (int pi = 0; pi < 3; pi++) {
+        size_t np = PAGES_LIST[pi];
+        size_t sz = np * PAGE_BYTES;
+        t0 = now_us();
+        for (int i = 0; i < MICRO_MPROTECT_PAIRS; i++) {
+            assert(mprotect(r1, sz, PROT_NONE) == 0);
+            assert(mprotect(r1, sz, PROT_READ | PROT_WRITE) == 0);
+        }
+        t1 = now_us();
+        printf("micro mprotect_%zup_alone ns=%llu\n",
+               np, (unsigned long long)(((t1 - t0) * 1000ULL) / (2ULL * MICRO_MPROTECT_PAIRS)));
+
+        t0 = now_us();
+        for (int i = 0; i < MICRO_MPROTECT_PAIRS; i++) {
+            assert(mprotect(r1, sz, PROT_NONE) == 0);
+            uint64_t acc = 0;
+            for (int hp = 0; hp < MICRO_HOT_PAGES; hp++) {
+                acc += vhot[(size_t)hp * PAGE_BYTES];
+            }
+            assert(mprotect(r1, sz, PROT_READ | PROT_WRITE) == 0);
+            for (int hp = 0; hp < MICRO_HOT_PAGES; hp++) {
+                acc += vhot[(size_t)hp * PAGE_BYTES];
+            }
+            sink += acc;
+        }
+        t1 = now_us();
+        printf("micro mprotect_%zup_64hot ns=%llu\n",
+               np, (unsigned long long)(((t1 - t0) * 1000ULL) / (2ULL * MICRO_MPROTECT_PAIRS)));
+    }
+    munmap(hot, (size_t)MICRO_HOT_PAGES * PAGE_BYTES);
+    munmap(r1, 64ULL * PAGE_BYTES);
+
+    size_t pf_sz = (size_t)MICRO_PF_PAGES * PAGE_BYTES;
+    volatile unsigned char *pf = mmap(NULL, pf_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(pf != MAP_FAILED);
+    t0 = now_us();
+    for (size_t off = 0; off < pf_sz; off += PAGE_BYTES) {
+        pf[off] = 1;
+    }
+    t1 = now_us();
+    printf("micro fresh_page_fault ns=%llu\n",
+           (unsigned long long)(((t1 - t0) * 1000ULL) / MICRO_PF_PAGES));
+    munmap((void *)pf, pf_sz);
+
+    t0 = now_us();
+    for (int i = 0; i < MICRO_OP_ITERS; i++) {
+        void *p = mmap(NULL, 4ULL * PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        assert(p != MAP_FAILED);
+        assert(munmap(p, 4ULL * PAGE_BYTES) == 0);
+    }
+    t1 = now_us();
+    printf("micro mmap_munmap_4p_none ns=%llu\n",
+           (unsigned long long)(((t1 - t0) * 1000ULL) / MICRO_OP_ITERS));
+
+    t0 = now_us();
+    for (int i = 0; i < MICRO_OP_ITERS; i++) {
+        volatile unsigned char *p = mmap(NULL, 4ULL * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        assert(p != MAP_FAILED);
+        for (size_t k = 0; k < 4; k++) {
+            p[k * PAGE_BYTES] = (unsigned char)i;
+        }
+        assert(munmap((void *)p, 4ULL * PAGE_BYTES) == 0);
+    }
+    t1 = now_us();
+    printf("micro mmap_touch_munmap_4p_rw ns=%llu\n",
+           (unsigned long long)(((t1 - t0) * 1000ULL) / MICRO_OP_ITERS));
+
+    int nullfd = open("/dev/null", O_WRONLY);
+    if (nullfd >= 0) {
+        char b = 'x';
+        t0 = now_us();
+        for (int i = 0; i < MICRO_OP_ITERS; i++) {
+            assert(write(nullfd, &b, 1) == 1);
+        }
+        t1 = now_us();
+        printf("micro write_1b_devnull ns=%llu\n",
+               (unsigned long long)(((t1 - t0) * 1000ULL) / MICRO_OP_ITERS));
+        close(nullfd);
+    }
+
+    unsigned char rnd[40];
+    t0 = now_us();
+    for (int i = 0; i < MICRO_OP_ITERS; i++) {
+        assert(getrandom(rnd, sizeof(rnd), 0) == (ssize_t)sizeof(rnd));
+    }
+    t1 = now_us();
+    printf("micro getrandom_40b ns=%llu\n",
+           (unsigned long long)(((t1 - t0) * 1000ULL) / MICRO_OP_ITERS));
+
+    struct statvfs st;
+    t0 = now_us();
+    for (int i = 0; i < MICRO_STATVFS_ITERS; i++) {
+        (void)statvfs("/scheme/memory", &st);
+    }
+    t1 = now_us();
+    printf("micro statvfs_memory ns=%llu\n",
+           (unsigned long long)(((t1 - t0) * 1000ULL) / MICRO_STATVFS_ITERS));
+
+    (void)sink;
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: hardened-malloc-probe <sparse|prot-none|syscalls|run-suite DIR|timed-exec MS CMD...>\n");
+        fprintf(stderr, "usage: hardened-malloc-probe <sparse|prot-none|syscalls|mutex-stress|mutex-bench|micro|run-suite DIR|timed-exec MS CMD...>\n");
         return 2;
     }
     if (strcmp(argv[1], "sparse") == 0) {
@@ -519,6 +1159,15 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "syscalls") == 0) {
         return run_syscalls();
+    }
+    if (strcmp(argv[1], "mutex-stress") == 0) {
+        return run_mutex_stress();
+    }
+    if (strcmp(argv[1], "mutex-bench") == 0) {
+        return run_mutex_bench();
+    }
+    if (strcmp(argv[1], "micro") == 0) {
+        return run_micro();
     }
     if (strcmp(argv[1], "run-suite") == 0 && argc == 3) {
         return run_suite(argv[2]);

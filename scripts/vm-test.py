@@ -6444,6 +6444,104 @@ def test_hardened_malloc(vm, args):
     )
 
 
+def test_hardened_malloc_hotpath(vm, args):
+    """Checks pthread_mutex concurrency, private futex wake key matching, zero uncontended futex_wake syscalls, and uncontended mutex latency threshold (<= 150 ns/pair)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("test -x /usr/bin/hardened-malloc-probe && echo HMH_READY || echo HMH_MISSING\n")
+    ready = vm.wait_serial(r"\r?\n(HMH_READY|HMH_MISSING)\r?\n", 20, since)
+    if not ready or ready.group(1) != "HMH_READY":
+        return False, f"hardened-malloc-probe missing on image; see {vm.out / 'serial.log'}"
+    sections = []
+    problems = []
+    metrics = {"loadavg_start": list(os.getloadavg()), "mutex_bench": [], "bench_default": [], "bench_light": []}
+    st_stress, out_stress = guest_run(vm, "hmhstress", "hardened-malloc-probe mutex-stress", 60)
+    sections.append(f"=== mutex-stress (exit {st_stress}) ===\n{out_stress}\n")
+    if st_stress != 0 or "ok=1" not in out_stress:
+        problems.append(f"mutex-stress failed (exit {st_stress})")
+    fc_enabled_list = []
+    static_ns_list = []
+    init_ns_list = []
+    wake_calls_list = []
+    futex_wake_ns_list = []
+    for run_idx in range(1, 6):
+        st_b, out_b = guest_run(vm, f"hmhmb{run_idx}", "hardened-malloc-probe mutex-bench", 60)
+        sections.append(f"=== mutex-bench {run_idx} (exit {st_b}) ===\n{out_b}\n")
+        m = re.search(
+            r"mutex-bench fc_enabled=(\d+) static_ns=(\d+) init_ns=(\d+) wake_calls_10k=(\d+) total_sc_10k=(\d+) futex_wake_ns=(\d+)",
+            out_b,
+        )
+        if st_b != 0 or not m:
+            problems.append(f"mutex-bench run {run_idx} missing output")
+            continue
+        row = {
+            "fc_enabled": int(m.group(1)),
+            "static_ns": int(m.group(2)),
+            "init_ns": int(m.group(3)),
+            "wake_calls_10k": int(m.group(4)),
+            "total_sc_10k": int(m.group(5)),
+            "futex_wake_ns": int(m.group(6)),
+        }
+        metrics["mutex_bench"].append(row)
+        fc_enabled_list.append(row["fc_enabled"])
+        static_ns_list.append(row["static_ns"])
+        init_ns_list.append(row["init_ns"])
+        wake_calls_list.append(row["wake_calls_10k"])
+        futex_wake_ns_list.append(row["futex_wake_ns"])
+    for key, cmd in (
+        ("bench_default", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/small hardened-malloc-bench-hm hm-default 2>/dev/null"),
+        ("bench_light", "LD_LIBRARY_PATH=/usr/lib/hardened-malloc/light-small hardened-malloc-bench-hm hm-light 2>/dev/null"),
+    ):
+        for run_idx in range(1, 6):
+            st_r, out_r = guest_run(vm, f"hmh{key[-3:]}{run_idx}", cmd, 180)
+            sections.append(f"=== {key} {run_idx} (exit {st_r}) ===\n{out_r}\n")
+            bm = re.search(r"bench label=\S+ small_ms=(\d+) med_ms=(\d+) large_ms=(\d+) realloc_ms=(\d+)", out_r)
+            if st_r != 0 or not bm:
+                problems.append(f"{key} run {run_idx} failed")
+                continue
+            metrics[key].append({
+                "small_ms": int(bm.group(1)),
+                "med_ms": int(bm.group(2)),
+                "large_ms": int(bm.group(3)),
+                "realloc_ms": int(bm.group(4)),
+            })
+    metrics["loadavg_end"] = list(os.getloadavg())
+    (vm.out / "hardened-malloc-hotpath.txt").write_text("".join(sections))
+    if static_ns_list:
+        med_static = sorted(static_ns_list)[len(static_ns_list) // 2]
+        med_init = sorted(init_ns_list)[len(init_ns_list) // 2]
+        min_wakes = min(wake_calls_list)
+        max_wakes = max(wake_calls_list)
+        med_fw = sorted(futex_wake_ns_list)[len(futex_wake_ns_list) // 2]
+        all_fc_enabled = all(v == 1 for v in fc_enabled_list)
+        metrics["fc_enabled_all"] = all_fc_enabled
+        metrics["median_static_ns"] = med_static
+        metrics["median_init_ns"] = med_init
+        metrics["min_wake_calls_10k"] = min_wakes
+        metrics["max_wake_calls_10k"] = max_wakes
+        metrics["median_futex_wake_ns"] = med_fw
+        if not all_fc_enabled:
+            problems.append(f"foreign-call syscall counter not enabled ({fc_enabled_list})")
+        if min_wakes != 1 or max_wakes != 1:
+            problems.append(f"counted futex_wake calls {min_wakes}..{max_wakes} != 1 (1 control + 0 unlock)")
+        if med_static > 150 or med_init > 150:
+            problems.append(f"mutex latency static={med_static}ns init={med_init}ns > 150ns")
+    else:
+        med_static = med_init = med_fw = -1
+        max_wakes = -1
+    (vm.out / "hardened-malloc-hotpath.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out / 'hardened-malloc-hotpath.txt'}"
+    return True, (
+        f"mutex-stress ok, uncontended static={med_static}ns init={med_init}ns (<=150ns), "
+        f"fc_enabled=1 wake_calls_10k={max_wakes} (1 control + 0 unlock), futex_wake={med_fw}ns; "
+        f"see {vm.out / 'hardened-malloc-hotpath.txt'}"
+    )
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -6499,6 +6597,7 @@ TESTS["agent-scope"] = test_agent_scope
 TESTS["agent-clone"] = test_agent_clone
 TESTS["agent-scope-overhead"] = test_agent_scope_overhead
 TESTS["hardened-malloc"] = test_hardened_malloc
+TESTS["hardened-malloc-hotpath"] = test_hardened_malloc_hotpath
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
