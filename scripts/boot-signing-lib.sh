@@ -22,7 +22,7 @@ boot_mount() {
     if [ -n "${REDOXFS_KEY_FILE:-}" ]; then
         key_args=(--key-file "$REDOXFS_KEY_FILE")
     fi
-    "$redoxfs" "${key_args[@]}" "$image" "$dir" >"$dir.log" 2>&1 &
+    "$redoxfs" --flush-on-unmount "${key_args[@]}" "$image" "$dir" >"$dir.log" 2>&1 &
     for _ in $(seq 100); do
         [ -f "$dir/usr/lib/boot/kernel" ] && return 0
         sleep 0.1

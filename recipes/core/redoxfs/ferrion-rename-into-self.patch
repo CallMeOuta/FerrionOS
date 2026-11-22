@@ -1,0 +1,70 @@
+FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc after the existing recipe patches. Found by the deterministic simulation in sim/redoxfs (sim/redoxfs/run.sh replay FILE runs a replay).
+
+Renaming a directory into itself or into one of its descendants was not refused: it either failed with ENOTEMPTY or detached the subtree into a cycle no path reaches. rename_node and rename_node_no_replace now return EINVAL, as POSIX requires.
+
+Replay (seed 1): mkdir /g3; rename /g3 /g3/h returns ENOTEMPTY instead of EINVAL; with a deeper target the rename succeeds and leaks the subtree. Without this patch 120 of 120 simulated seeds fail.
+diff --git a/src/transaction.rs b/src/transaction.rs
+index f99d76f..3cdf6fa 100644
+--- a/src/transaction.rs
++++ b/src/transaction.rs
+@@ -1,5 +1,5 @@
+ use alloc::{
+-    collections::{BTreeMap, VecDeque},
++    collections::{BTreeMap, BTreeSet, VecDeque},
+     vec::Vec,
+ };
+ use core::{
+@@ -1473,6 +1473,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
+         new_name: &str,
+     ) -> Result<()> {
+         let orig = self.find_node(orig_parent_ptr, orig_name)?;
++        self.check_move(&orig, orig_parent_ptr, new_parent_ptr)?;
+ 
+         // TODO: only allow ENOENT as an error?
+         if let Ok(new) = self.find_node(new_parent_ptr, new_name) {
+@@ -1512,6 +1513,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
+         new_name: &str,
+     ) -> Result<()> {
+         let orig = self.find_node(orig_parent_ptr, orig_name)?;
++        self.check_move(&orig, orig_parent_ptr, new_parent_ptr)?;
+ 
+         // The target shouldn't exist.
+         if self.find_node(new_parent_ptr, new_name).is_ok() {
+@@ -1533,6 +1535,37 @@ impl<'a, D: Disk> Transaction<'a, D> {
+         Ok(())
+     }
+ 
++    fn check_move(
++        &mut self,
++        orig: &TreeData<Node>,
++        orig_parent_ptr: TreePtr<Node>,
++        new_parent_ptr: TreePtr<Node>,
++    ) -> Result<()> {
++        if !orig.data().is_dir() || new_parent_ptr.id() == orig_parent_ptr.id() {
++            return Ok(());
++        }
++        let mut pending = Vec::from([orig.ptr()]);
++        let mut visited = BTreeSet::new();
++        let mut children = Vec::new();
++        while let Some(dir_ptr) = pending.pop() {
++            if dir_ptr.id() == new_parent_ptr.id() {
++                return Err(Error::new(EINVAL));
++            }
++            if !visited.insert(dir_ptr.id()) {
++                continue;
++            }
++            children.clear();
++            self.child_nodes(dir_ptr, &mut children)?;
++            for child in children.iter() {
++                let child_ptr = child.node_ptr();
++                if self.read_tree(child_ptr)?.data().is_dir() {
++                    pending.push(child_ptr);
++                }
++            }
++        }
++        Ok(())
++    }
++
+     fn check_name(&mut self, parent_ptr: &TreePtr<Node>, name: &str) -> Result<()> {
+         if name.contains(':') {
+             return Err(Error::new(EINVAL));

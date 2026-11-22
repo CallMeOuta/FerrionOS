@@ -1,0 +1,13 @@
+1 3000 rename of a directory into itself (ferrion-rename-into-self.patch)
+2 3000 operations returned with writes still in a volatile cache (ferrion-write-barrier.patch)
+3 3000 deleted files leaked their last record (ferrion-truncate-tail.patch)
+17 3000 an open unlinked file kept one link (ferrion-unlinked-links.patch)
+40 3000 a zero-length write grew the file (ferrion-empty-write.patch)
+325 3000 truncation left stale records and bytes (ferrion-truncate-tail.patch)
+557 3000 stale bytes after the end of a file (ferrion-truncate-tail.patch)
+18 4000 harness: a close interrupted by a read error
+38 5000 harness: a close interrupted by a read error
+57 1000 harness: a close interrupted by a read error
+11 10000 harness: an open deleted file released before a power loss in a remount
+428 10000 harness: an open deleted file released before a power loss in a remount
+837 10000 harness: an open deleted file released before a power loss in a remount

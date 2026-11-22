@@ -1,0 +1,20 @@
+[package]
+name = "redoxfs-sim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Deterministic simulation test of RedoxFS for FerrionOS"
+
+[dependencies]
+getrandom = "0.4"
+lz4_flex = { version = "0.11", default-features = false, features = ["checked-decode"] }
+redox_syscall = "0.9.5"
+redoxfs = { path = "../../recipes/core/redoxfs/source", default-features = false, features = ["std"] }
+
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+codegen-units = 4
+
+[workspace]

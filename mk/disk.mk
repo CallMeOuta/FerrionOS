@@ -65,7 +65,7 @@ else
 	truncate -s "$$FILESYSTEM_SIZE"m $@.partial
 	$(REDOXFS_MKFS) $(REDOXFS_MKFS_FLAGS) $@.partial
 	mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) $@.partial $(MOUNT_DIR)
+	$(REDOXFS) --flush-on-unmount $@.partial $(MOUNT_DIR)
 	sleep 1
 	pgrep redoxfs
 	umask 022 && $(INSTALLER) $(INSTALLER_OPTS) -c $(FILESYSTEM_CONFIG) $(MOUNT_DIR)
@@ -80,7 +80,7 @@ ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
 	@mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) $(BUILD)/harddrive.img $(MOUNT_DIR)
+	$(REDOXFS) --flush-on-unmount $(BUILD)/harddrive.img $(MOUNT_DIR)
 	@sleep 2
 	@echo "\033[1;36;49mharddrive.img mounted ($$(pgrep redoxfs))\033[0m"
 endif
@@ -90,7 +90,7 @@ ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
 	@mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) $(BUILD)/extra.img $(MOUNT_DIR)
+	$(REDOXFS) --flush-on-unmount $(BUILD)/extra.img $(MOUNT_DIR)
 	@sleep 2
 	@echo "\033[1;36;49mextra.img mounted ($$(pgrep redoxfs))\033[0m"
 endif
@@ -100,7 +100,7 @@ ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
 else
 	@mkdir -p $(MOUNT_DIR)
-	$(REDOXFS) $(BUILD)/redox-live.iso $(MOUNT_DIR)
+	$(REDOXFS) --flush-on-unmount $(BUILD)/redox-live.iso $(MOUNT_DIR)
 	@sleep 2
 	@echo "\033[1;36;49mredox-live.iso mounted ($$(pgrep redoxfs))\033[0m"
 endif

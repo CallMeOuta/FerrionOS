@@ -1,0 +1,19 @@
+FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc after the existing recipe patches. Found by the deterministic simulation in sim/redoxfs (sim/redoxfs/run.sh replay FILE runs a replay).
+
+A zero-length write at an offset past the end of a file grew the file and changed its modification time; POSIX says such a write changes nothing.
+
+Replay (seed 40): create /h; write /h 655362 0 leaves size 655362 instead of 0. Without this patch 120 of 120 simulated seeds fail.
+diff --git a/src/transaction.rs b/src/transaction.rs
+index c360c7f..459ebc3 100644
+--- a/src/transaction.rs
++++ b/src/transaction.rs
+@@ -2071,6 +2071,9 @@ impl<'a, D: Disk> Transaction<'a, D> {
+         mtime_nsec: u32,
+     ) -> Result<usize> {
+         let mut node = self.read_tree(node_ptr)?;
++        if buf.is_empty() {
++            return Ok(0);
++        }
+ 
+         if self.write_node_inner(&mut node, &mut offset, buf)? {
+             let node_mtime = node.data().mtime();
