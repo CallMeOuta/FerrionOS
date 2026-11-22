@@ -446,10 +446,40 @@ static void timerfd_alarm_quota(void) {
     pass("timerfd-alarm-quota");
 }
 
+static void timerfd_refresh_poll(void) {
+    int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    CHECK(fd >= 0);
+    int alias = dup(fd);
+    CHECK(alias >= 0);
+    for (int iter = 0; iter < 40; iter++) {
+        struct itimerspec value = timer_value(0, 1000000L, 0);
+        CHECK(timerfd_settime(fd, 0, &value, NULL) == 0);
+        int ep = watch(fd, EPOLLIN);
+        struct itimerspec cur;
+        int expired = 0;
+        for (int spin = 0; spin < 200000; spin++) {
+            CHECK(timerfd_gettime(alias, &cur) == 0);
+            if (cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0) {
+                expired = 1;
+                break;
+            }
+        }
+        CHECK(expired == 1);
+        struct epoll_event event = {0};
+        CHECK(epoll_wait(ep, &event, 1, 200) == 1);
+        CHECK((event.events & EPOLLIN) != 0);
+        CHECK(read_count(fd) == 1);
+        CHECK(close(ep) == 0);
+    }
+    CHECK(close(alias) == 0);
+    CHECK(close(fd) == 0);
+    pass("timerfd-refresh-poll");
+}
+
 int main(int argc, char **argv) {
     CHECK(setvbuf(stdout, NULL, _IONBF, 0) == 0);
     CHECK(signal(SIGALRM, timed_out) != SIG_ERR);
-    alarm(30);
+    alarm(45);
     if (argc == 6 && strcmp(argv[1], "--exec-child") == 0) {
         exec_child(argv + 2);
         return 0;
@@ -466,6 +496,7 @@ int main(int argc, char **argv) {
     timerfd_shared();
     descriptor_flags(argv[0]);
     timerfd_alarm_quota();
+    timerfd_refresh_poll();
     alarm(0);
     puts("fd-primitives-probe: PASS");
     return 0;

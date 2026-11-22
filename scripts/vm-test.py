@@ -1088,13 +1088,13 @@ def test_fd_primitives(vm, args):
     since = vm.mark()
     # The shell, not the probe, reports exit; the typed command cannot match it.
     vm.type("bash -c 'fd-primitives-probe; echo fd-primitives-exit-$?'\n")
-    found = vm.wait_serial(r"(?s)\n(.*?)\nfd-primitives-exit-(\d+)\s", 30, since)
+    found = vm.wait_serial(r"(?s)\n(.*?)\nfd-primitives-exit-(\d+)\s", 60, since)
     output = found.group(1) if found else vm.text(since)
     status = int(found.group(2)) if found else None
     log = vm.out / "fd-primitives.txt"
     log.write_text(f"exit {status}\n{output}\n")
     if status is None:
-        return False, f"descriptor probe did not exit within 30s; see {log}"
+        return False, f"descriptor probe did not exit within 60s; see {log}"
     if status != 0 or "fd-primitives-probe: FAIL" in output:
         return False, f"descriptor probe failed (exit {status}); see {log}"
     expected = (

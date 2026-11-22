@@ -40,9 +40,9 @@ struct Timer {
 }
 
 impl Timer {
-    fn expire_at(&mut self, deadline: u128, now: u128) -> Option<u128> {
+    fn next_expiry(&self, deadline: u128, now: u128) -> (u64, Option<u128>) {
         if now < deadline {
-            return Some(deadline);
+            return (0, Some(deadline));
         }
         let (count, next) = if self.interval == 0 {
             (1u128, None)
@@ -51,9 +51,12 @@ impl Timer {
             let next = deadline.checked_add(count.saturating_mul(self.interval));
             (count, next)
         };
-        self.count = self
-            .count
-            .saturating_add(count.min(COUNTER_MAX as u128) as u64);
+        (count.min(COUNTER_MAX as u128) as u64, next)
+    }
+
+    fn expire_at(&mut self, deadline: u128, now: u128) -> Option<u128> {
+        let (added, next) = self.next_expiry(deadline, now);
+        self.count = self.count.saturating_add(added);
         next
     }
 
@@ -260,11 +263,23 @@ impl<'a> Objects<'a> {
         if now < armed_deadline {
             return Ok(());
         }
-        let next = match &mut self.objects.get_mut(&id).unwrap().value {
-            Value::Timer(timer) => timer.expire_at(armed_deadline, now),
+        let (added, next) = match &self.objects.get(&id).unwrap().value {
+            Value::Timer(timer) => timer.next_expiry(armed_deadline, now),
             Value::Counter { .. } => return Ok(()),
         };
-        self.rearm(id, next)
+        self.rearm(id, next)?;
+        let became_readable = match &mut self.objects.get_mut(&id).unwrap().value {
+            Value::Timer(timer) => {
+                let prev = timer.count;
+                timer.count = timer.count.saturating_add(added);
+                prev == 0 && timer.count != 0
+            }
+            Value::Counter { .. } => false,
+        };
+        if became_readable {
+            self.notify(id, EVENT_READ)?;
+        }
+        Ok(())
     }
 
     fn wake(&mut self, token: usize) -> Result<()> {
@@ -293,8 +308,12 @@ impl<'a> Objects<'a> {
             (timer.clock, deadline)
         };
         self.assert_alarm_invariants(Some(uid));
-        let Ok(now) = self.now(clock) else {
-            return Ok(());
+        let now = match self.now(clock) {
+            Ok(now) => now,
+            Err(error) => {
+                eprintln!("fdobjd: clock read failed on wake for timer {id}: {error}");
+                return Ok(());
+            }
         };
         let (next, readable) = {
             let Value::Timer(timer) = &mut self.objects.get_mut(&id).unwrap().value else {
