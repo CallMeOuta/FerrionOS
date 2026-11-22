@@ -1,0 +1,960 @@
+diff --git a/rmm/src/page/mapper.rs b/rmm/src/page/mapper.rs
+index 99eb592f..3f51f29d 100644
+--- a/rmm/src/page/mapper.rs
++++ b/rmm/src/page/mapper.rs
+@@ -1,10 +1,66 @@
+-use core::{marker::PhantomData, num::NonZeroU8};
++use core::{marker::PhantomData, num::NonZeroU8, ops::ControlFlow};
+ 
+ use crate::{
+     Arch, FrameAllocator, PageEntry, PageFlags, PageFlush, PageTable, PhysicalAddress, TableKind,
+     VirtualAddress,
+ };
+ 
++const MAX_PAGE_LEVELS: usize = 5;
++
++struct WalkFrame<A> {
++    table: PageTable<A>,
++    next_idx: usize,
++    end_idx: usize,
++    reclaim_allowed: bool,
++}
++
++fn validate_range<A: Arch>(start: VirtualAddress, end: VirtualAddress) -> Option<(usize, usize)> {
++    assert!(A::PAGE_LEVELS >= 1 && A::PAGE_LEVELS <= MAX_PAGE_LEVELS);
++    let start_u = start.data();
++    let end_u = end.data();
++    assert_eq!(start_u & A::PAGE_OFFSET_MASK, 0);
++    assert_eq!(end_u & A::PAGE_OFFSET_MASK, 0);
++    assert!(start_u <= end_u);
++    if start_u == end_u {
++        return None;
++    }
++    let last_page = end_u - A::PAGE_SIZE;
++    assert_eq!(start_u & A::PAGE_ADDRESS_MASK, start_u);
++    assert_eq!(last_page & A::PAGE_ADDRESS_MASK, last_page);
++    Some((start_u, last_page))
++}
++
++fn level_bounds<A: Arch>(table: &PageTable<A>, start_u: usize, last_page: usize) -> (usize, usize) {
++    let shift = table.level() * A::PAGE_ENTRY_SHIFT + A::PAGE_SHIFT;
++    let table_base = table.base().data();
++    let table_span_minus_page = A::PAGE_ENTRIES
++        .wrapping_shl(shift as u32)
++        .wrapping_sub(A::PAGE_SIZE);
++    let table_last_page = table_base.wrapping_add(table_span_minus_page);
++    let sub_start = if start_u > table_base {
++        start_u
++    } else {
++        table_base
++    };
++    let sub_last = if last_page < table_last_page {
++        last_page
++    } else {
++        table_last_page
++    };
++    assert!(sub_start <= sub_last);
++    let first_idx = (sub_start - table_base) >> shift;
++    let end_idx = (sub_last - table_base) >> shift;
++    assert!(first_idx <= end_idx && end_idx < A::PAGE_ENTRIES);
++    (first_idx, end_idx)
++}
++
++fn is_large_entry<A: Arch>(level: usize, entry: PageEntry<A>) -> bool {
++    let Some(level_nz) = NonZeroU8::new(level as u8) else {
++        return false;
++    };
++    A::entry_flag_large(level_nz).is_some_and(|flag| (entry.data() & flag) != 0)
++}
++
+ pub struct PageMapper<A, F> {
+     table_kind: TableKind,
+     table_addr: PhysicalAddress,
+@@ -124,6 +180,321 @@ impl<A: Arch, F> PageMapper<A, F> {
+     ) -> Option<PageFlush<A>> {
+         unsafe { self.remap_with(virt, |_| flags).map(|(_, _, flush)| flush) }
+     }
++
++    pub fn count_mapped_pages(&self, start: VirtualAddress, end: VirtualAddress) -> usize {
++        let Some((start_u, last_page)) = validate_range::<A>(start, end) else {
++            return 0;
++        };
++        let root = self.table();
++        let (first_idx, end_idx) = level_bounds::<A>(&root, start_u, last_page);
++        let mut stack: [Option<WalkFrame<A>>; MAX_PAGE_LEVELS] = [None, None, None, None, None];
++        stack[0] = Some(WalkFrame {
++            table: root,
++            next_idx: first_idx,
++            end_idx,
++            reclaim_allowed: false,
++        });
++        let mut depth: usize = 1;
++        let mut mapped_pages: usize = 0;
++
++        while depth > 0 {
++            let Some(top) = stack[depth - 1].as_mut() else {
++                unreachable!();
++            };
++            if top.next_idx > top.end_idx {
++                stack[depth - 1] = None;
++                depth -= 1;
++                continue;
++            }
++            let idx = top.next_idx;
++            top.next_idx += 1;
++            let Some(entry) = (unsafe { top.table.entry(idx) }) else {
++                continue;
++            };
++            if !entry.present() {
++                continue;
++            }
++            let level = top.table.level();
++            if level == 0 {
++                mapped_pages += 1;
++            } else if is_large_entry(level, entry) {
++                let shift = level * A::PAGE_ENTRY_SHIFT + A::PAGE_SHIFT;
++                let entry_start = top.table.base().data() + (idx << shift);
++                let entry_last = entry_start + ((1usize << shift) - A::PAGE_SIZE);
++                let lo = if start_u > entry_start {
++                    start_u
++                } else {
++                    entry_start
++                };
++                let hi = if last_page < entry_last {
++                    last_page
++                } else {
++                    entry_last
++                };
++                mapped_pages += ((hi - lo) >> A::PAGE_SHIFT) + 1;
++            } else {
++                let Some(child) = (unsafe { top.table.next(idx) }) else {
++                    continue;
++                };
++                let (c_first, c_end) = level_bounds::<A>(&child, start_u, last_page);
++                assert!(depth < A::PAGE_LEVELS);
++                stack[depth] = Some(WalkFrame {
++                    table: child,
++                    next_idx: c_first,
++                    end_idx: c_end,
++                    reclaim_allowed: false,
++                });
++                depth += 1;
++            }
++        }
++
++        mapped_pages
++    }
++
++    pub unsafe fn try_remap_range_with_full<E>(
++        &mut self,
++        start: VirtualAddress,
++        end: VirtualAddress,
++        mut remap: impl FnMut(PhysicalAddress, PageFlags<A>) -> Option<(PhysicalAddress, PageFlags<A>)>,
++        mut on_remapped: impl FnMut(
++            VirtualAddress,
++            PhysicalAddress,
++            PageFlags<A>,
++        ) -> Result<ControlFlow<()>, E>,
++    ) -> Result<(), E> {
++        let Some((start_u, last_page)) = validate_range::<A>(start, end) else {
++            return Ok(());
++        };
++        let root = self.table();
++        let (first_idx, end_idx) = level_bounds::<A>(&root, start_u, last_page);
++        let mut stack: [Option<WalkFrame<A>>; MAX_PAGE_LEVELS] = [None, None, None, None, None];
++        stack[0] = Some(WalkFrame {
++            table: root,
++            next_idx: first_idx,
++            end_idx,
++            reclaim_allowed: false,
++        });
++        let mut depth: usize = 1;
++
++        while depth > 0 {
++            let Some(top) = stack[depth - 1].as_mut() else {
++                unreachable!();
++            };
++            if top.next_idx > top.end_idx {
++                stack[depth - 1] = None;
++                depth -= 1;
++                continue;
++            }
++            let idx = top.next_idx;
++            top.next_idx += 1;
++            let Some(entry) = (unsafe { top.table.entry(idx) }) else {
++                continue;
++            };
++            if !entry.present() {
++                continue;
++            }
++            let level = top.table.level();
++            if level == 0 {
++                let Ok(old_phys) = entry.address() else {
++                    continue;
++                };
++                let old_flags = entry.flags();
++                let Some((new_phys, new_flags)) = remap(old_phys, old_flags) else {
++                    continue;
++                };
++                let new_entry = PageEntry::new(new_phys.data(), new_flags.data());
++                unsafe {
++                    top.table.set_entry(idx, new_entry);
++                }
++                let virt = top.table.entry_base(idx).expect("leaf index in bounds");
++                if let ControlFlow::Break(()) = on_remapped(virt, old_phys, old_flags)? {
++                    return Ok(());
++                }
++            } else {
++                assert!(
++                    !is_large_entry(level, entry),
++                    "huge page encountered in user range remap"
++                );
++                let Some(child) = (unsafe { top.table.next(idx) }) else {
++                    continue;
++                };
++                let (c_first, c_end) = level_bounds::<A>(&child, start_u, last_page);
++                assert!(depth < A::PAGE_LEVELS);
++                stack[depth] = Some(WalkFrame {
++                    table: child,
++                    next_idx: c_first,
++                    end_idx: c_end,
++                    reclaim_allowed: false,
++                });
++                depth += 1;
++            }
++        }
++
++        Ok(())
++    }
++
++    pub unsafe fn remap_range_with_full(
++        &mut self,
++        start: VirtualAddress,
++        end: VirtualAddress,
++        remap: impl FnMut(PhysicalAddress, PageFlags<A>) -> Option<(PhysicalAddress, PageFlags<A>)>,
++        mut on_remapped: impl FnMut(VirtualAddress, PhysicalAddress, PageFlags<A>),
++    ) {
++        let _ = unsafe {
++            self.try_remap_range_with_full::<core::convert::Infallible>(
++                start,
++                end,
++                remap,
++                |virt, phys, old_flags| {
++                    on_remapped(virt, phys, old_flags);
++                    Ok(ControlFlow::Continue(()))
++                },
++            )
++        };
++    }
++
++    unsafe fn unmap_range_inner<FTable>(
++        &mut self,
++        start: VirtualAddress,
++        end: VirtualAddress,
++        max_leaves: usize,
++        mut on_leaf: impl FnMut(VirtualAddress, PhysicalAddress, u8, PageFlags<A>),
++        mut free_table: Option<FTable>,
++    ) -> VirtualAddress
++    where
++        FTable: FnMut(PhysicalAddress),
++    {
++        assert!(max_leaves >= 1);
++        let Some((start_u, last_page)) = validate_range::<A>(start, end) else {
++            return end;
++        };
++        let root = self.table();
++        let (first_idx, end_idx) = level_bounds::<A>(&root, start_u, last_page);
++        let mut stack: [Option<WalkFrame<A>>; MAX_PAGE_LEVELS] = [None, None, None, None, None];
++        stack[0] = Some(WalkFrame {
++            table: root,
++            next_idx: first_idx,
++            end_idx,
++            reclaim_allowed: false,
++        });
++        let mut depth: usize = 1;
++        let mut unmapped_count: usize = 0;
++
++        while depth > 0 {
++            let Some(top) = stack[depth - 1].as_mut() else {
++                unreachable!();
++            };
++            if top.next_idx > top.end_idx {
++                let finished = stack[depth - 1].take().expect("active walk frame");
++                depth -= 1;
++                if depth > 0
++                    && finished.reclaim_allowed
++                    && let Some(ref mut free_fn) = free_table
++                {
++                    let is_empty = !(0..A::PAGE_ENTRIES).any(|j| {
++                        unsafe { finished.table.entry(j) }.is_some_and(|e| e.present())
++                    });
++                    if is_empty {
++                        let parent = stack[depth - 1].as_mut().expect("parent walk frame");
++                        let parent_idx = parent.next_idx - 1;
++                        unsafe {
++                            parent.table.set_entry(parent_idx, PageEntry::new(0, 0));
++                        }
++                        free_fn(finished.table.phys());
++                    }
++                }
++                continue;
++            }
++            let idx = top.next_idx;
++            top.next_idx += 1;
++            let Some(entry) = (unsafe { top.table.entry(idx) }) else {
++                continue;
++            };
++            if !entry.present() {
++                continue;
++            }
++            let level = top.table.level();
++            if level == 0 {
++                let Ok(phys) = entry.address() else {
++                    continue;
++                };
++                let virt = top.table.entry_base(idx).expect("leaf index in bounds");
++                if unmapped_count == max_leaves {
++                    return virt;
++                }
++                let flags = entry.flags();
++                unsafe {
++                    top.table.set_entry(idx, PageEntry::new(0, 0));
++                }
++                unmapped_count += 1;
++                on_leaf(virt, phys, 0, flags);
++            } else {
++                assert!(
++                    !is_large_entry(level, entry),
++                    "huge page encountered in user range unmap"
++                );
++                let child_reclaim = if depth == 1 {
++                    A::KERNEL_SEPARATE_TABLE || idx < A::PAGE_ENTRIES / 2
++                } else {
++                    top.reclaim_allowed
++                };
++                let Some(child) = (unsafe { top.table.next(idx) }) else {
++                    continue;
++                };
++                let (c_first, c_end) = level_bounds::<A>(&child, start_u, last_page);
++                assert!(depth < A::PAGE_LEVELS);
++                stack[depth] = Some(WalkFrame {
++                    table: child,
++                    next_idx: c_first,
++                    end_idx: c_end,
++                    reclaim_allowed: child_reclaim,
++                });
++                depth += 1;
++            }
++        }
++
++        end
++    }
++
++    pub unsafe fn unmap_range<FTable>(
++        &mut self,
++        start: VirtualAddress,
++        end: VirtualAddress,
++        on_leaf: impl FnMut(VirtualAddress, PhysicalAddress, u8, PageFlags<A>),
++        free_table: Option<FTable>,
++    ) where
++        FTable: FnMut(PhysicalAddress),
++    {
++        let next = unsafe { self.unmap_range_inner(start, end, usize::MAX, on_leaf, free_table) };
++        assert_eq!(next, end);
++    }
++
++    pub unsafe fn unmap_range_batch<FTable>(
++        &mut self,
++        start: VirtualAddress,
++        end: VirtualAddress,
++        batch: &mut [(VirtualAddress, PhysicalAddress, u8, PageFlags<A>)],
++        free_table: Option<FTable>,
++    ) -> (usize, VirtualAddress)
++    where
++        FTable: FnMut(PhysicalAddress),
++    {
++        assert!(!batch.is_empty());
++        let mut count: usize = 0;
++        let next = unsafe {
++            self.unmap_range_inner(
++                start,
++                end,
++                batch.len(),
++                |virt, phys, lvl, flags| {
++                    batch[count] = (virt, phys, lvl, flags);
++                    count += 1;
++                },
++                free_table,
++            )
++        };
++        (count, next)
++    }
+ }
+ 
+ impl<A: Arch, F: FrameAllocator> PageMapper<A, F> {
+diff --git a/src/context/memory.rs b/src/context/memory.rs
+index 05a11c24..c5a1db2f 100644
+--- a/src/context/memory.rs
++++ b/src/context/memory.rs
+@@ -1403,28 +1403,26 @@ impl Grant {
+     ) -> Result<Grant, Enomem> {
+         const MAX_EAGER_PAGES: usize = 16;
+ 
+-        let (the_frame, the_frame_info) = the_zeroed_frame();
++        if flags.has_user() {
++            let (the_frame, the_frame_info) = the_zeroed_frame();
+ 
+-        // TODO: Use flush_all after a certain number of pages, otherwise no
+-
+-        for page in span.pages().take(MAX_EAGER_PAGES) {
+-            // Good thing with lazy page fault handlers, is that if we fail due to ENOMEM here, we
+-            // can continue and let the process face the OOM killer later.
+-            unsafe {
+-                the_frame_info
+-                    .add_ref(RefKind::Cow)
+-                    .expect("the static zeroed frame cannot be shared!");
+-
+-                let Some(result) = mapper.map_phys(
+-                    page.start_address(),
+-                    the_frame.base(),
+-                    flags.write(false),
+-                    0,
+-                ) else {
+-                    break;
+-                };
+-                result.ignore();
+-                flusher.queue(the_frame, None, TlbShootdownActions::NEW_MAPPING);
++            for page in span.pages().take(MAX_EAGER_PAGES) {
++                unsafe {
++                    the_frame_info
++                        .add_ref(RefKind::Cow)
++                        .expect("the static zeroed frame cannot be shared!");
++
++                    let Some(result) = mapper.map_phys(
++                        page.start_address(),
++                        the_frame.base(),
++                        flags.write(false),
++                        0,
++                    ) else {
++                        break;
++                    };
++                    result.ignore();
++                    flusher.queue(the_frame, None, TlbShootdownActions::NEW_MAPPING);
++                }
+             }
+         }
+ 
+@@ -1781,40 +1779,85 @@ impl Grant {
+         dst_flusher: &mut impl GenericFlusher,
+         mode: CopyMappingsMode,
+     ) -> Result<Grant, Enomem> {
+-        let (allows_writable, rk) = match mode {
+-            CopyMappingsMode::Owned { .. } => (false, RefKind::Cow),
+-            CopyMappingsMode::Borrowed => (true, RefKind::Shared),
+-        };
+-
+-        // TODO: Page table iterator
+-        for page_idx in 0..page_count {
+-            let src_page = src_base.next_by(page_idx);
+-            let dst_page = dst_base.next_by(page_idx).start_address();
++        match mode {
++            CopyMappingsMode::Owned { .. } => {
++                let start = src_base.start_address();
++                let end = src_base.next_by(page_count).start_address();
++                unsafe {
++                    src_mapper.try_remap_range_with_full(
++                        start,
++                        end,
++                        |same_phys, old_flags| Some((same_phys, old_flags.write(false))),
++                        |src_virt, phys, _old_flags| {
++                            let frame = Frame::containing(phys);
++                            src_flusher.queue(frame, None, TlbShootdownActions::REVOKE_WRITE);
++
++                            let src_page_info = get_page_info(frame)
++                                .expect("allocated page was not present in the global page array");
++                            let src_frame = match src_page_info.add_ref(RefKind::Cow) {
++                                Ok(()) => frame,
++                                Err(AddRefError::CowToShared) => {
++                                    unreachable!("CowToShared cannot occur in Owned copy_mappings")
++                                }
++                                Err(AddRefError::SharedToCow) => {
++                                    if src_page_info.add_ref(RefKind::Shared)
++                                        == Err(AddRefError::RcOverflow)
++                                    {
++                                        return Err(Enomem);
++                                    }
++                                    let CowResult {
++                                        new_frame,
++                                        old_frame,
++                                    } = cow(frame, src_page_info, RefKind::Cow)
++                                        .map_err(|_| Enomem)?;
++                                    if let Some(old_frame) = old_frame {
++                                        src_flusher.queue(
++                                            old_frame,
++                                            None,
++                                            TlbShootdownActions::FREE,
++                                        );
++                                    }
++                                    new_frame
++                                }
++                                Err(AddRefError::RcOverflow) => return Err(Enomem),
++                            };
+ 
+-            let src_frame = match rk {
+-                RefKind::Cow => {
+-                    let Some((_, phys, flush)) = (unsafe {
+-                        src_mapper.remap_with(src_page.start_address(), |flags| flags.write(false))
+-                    }) else {
+-                        // Page is not mapped, let the page fault handler take care of that (initializing
+-                        // it to zero).
+-                        //
+-                        // TODO: If eager, allocate zeroed page if writable, or use *the* zeroed page (also
+-                        // for read-only)?
+-                        continue;
+-                    };
+-                    unsafe {
+-                        flush.ignore();
+-                    }
+-                    let frame = Frame::containing(phys);
+-                    src_flusher.queue(frame, None, TlbShootdownActions::REVOKE_WRITE);
+-                    frame
++                            let page_idx =
++                                Page::containing_address(src_virt).offset_from(src_base);
++                            let dst_page = dst_base.next_by(page_idx).start_address();
++                            let Some(map_result) = (unsafe {
++                                dst_mapper.map_phys(
++                                    dst_page,
++                                    src_frame.base(),
++                                    flags.write(false),
++                                    0,
++                                )
++                            }) else {
++                                return Ok(core::ops::ControlFlow::Break(()));
++                            };
++                            unsafe {
++                                map_result.ignore();
++                            }
++                            dst_flusher.queue(
++                                src_frame,
++                                None,
++                                TlbShootdownActions::NEW_MAPPING,
++                            );
++                            Ok(core::ops::ControlFlow::Continue(()))
++                        },
++                    )?;
+                 }
+-                RefKind::Shared => {
+-                    if let Some((phys, _)) = src_mapper.translate(src_page.start_address()) {
++            }
++            CopyMappingsMode::Borrowed => {
++                for page_idx in 0..page_count {
++                    let src_page = src_base.next_by(page_idx);
++                    let dst_page = dst_base.next_by(page_idx).start_address();
++
++                    let src_frame = if let Some((phys, _)) =
++                        src_mapper.translate(src_page.start_address())
++                    {
+                         Frame::containing(phys)
+                     } else {
+-                        // TODO: Omit the unnecessary subsequent add_ref call.
+                         let must_be_zero = true;
+                         let new_frame =
+                             init_frame(RefCount::One, must_be_zero).expect("TODO: handle OOM");
+@@ -1827,89 +1870,63 @@ impl Grant {
+                             src_flush.ignore();
+                         }
+                         src_flusher.queue(new_frame, None, TlbShootdownActions::NEW_MAPPING);
+-
+                         new_frame
+-                    }
+-                }
+-            };
+-
+-            let src_frame = {
+-                let src_page_info = get_page_info(src_frame)
+-                    .expect("allocated page was not present in the global page array");
+-
+-                match src_page_info.add_ref(rk) {
+-                    Ok(()) => src_frame,
+-                    Err(AddRefError::CowToShared) => {
+-                        let CowResult {
+-                            new_frame,
+-                            old_frame,
+-                        } = cow(src_frame, src_page_info, rk).map_err(|_| Enomem)?;
+-                        if let Some(old_frame) = old_frame {
+-                            src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+-                        }
++                    };
+ 
+-                        // TODO: Flusher
+-                        unsafe {
+-                            if let Some((_flags, phys, flush)) = src_mapper
+-                                .remap_with_full(src_page.start_address(), |_, f| {
+-                                    Some((new_frame.base(), f))
+-                                })
+-                            {
+-                                // TODO: flush.ignore() is correct, but seems to be amplifying a
+-                                // userspace race condition
+-                                //
+-                                //flush.ignore();
+-                                flush.flush();
+-
+-                                // FIXME: Is MOVE correct?
+-                                src_flusher.queue(
+-                                    Frame::containing(phys),
+-                                    None,
+-                                    TlbShootdownActions::MOVE,
+-                                );
++                    let src_frame = {
++                        let src_page_info = get_page_info(src_frame)
++                            .expect("allocated page was not present in the global page array");
++
++                        match src_page_info.add_ref(RefKind::Shared) {
++                            Ok(()) => src_frame,
++                            Err(AddRefError::CowToShared) => {
++                                let CowResult {
++                                    new_frame,
++                                    old_frame,
++                                } = cow(src_frame, src_page_info, RefKind::Shared)
++                                    .map_err(|_| Enomem)?;
++                                if let Some(old_frame) = old_frame {
++                                    src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
++                                }
++                                unsafe {
++                                    if let Some((_flags, phys, flush)) = src_mapper
++                                        .remap_with_full(src_page.start_address(), |_, f| {
++                                            Some((new_frame.base(), f))
++                                        })
++                                    {
++                                        flush.flush();
++                                        src_flusher.queue(
++                                            Frame::containing(phys),
++                                            None,
++                                            TlbShootdownActions::MOVE,
++                                        );
++                                    }
++                                }
++                                new_frame
+                             }
++                            Err(AddRefError::SharedToCow) => {
++                                unreachable!("SharedToCow cannot occur in Borrowed copy_mappings")
++                            }
++                            Err(AddRefError::RcOverflow) => return Err(Enomem),
+                         }
++                    };
+ 
+-                        new_frame
+-                    }
+-                    // Cannot be shared and CoW simultaneously.
+-                    Err(AddRefError::SharedToCow) => {
+-                        // The call to cow() later implicitly removes one ref, so add it here
+-                        // first, even if Shared.
+-                        if src_page_info.add_ref(RefKind::Shared) == Err(AddRefError::RcOverflow) {
+-                            return Err(Enomem);
+-                        }
+-
+-                        // TODO: Copy in place, or use a zeroed page?
+-                        let CowResult {
+-                            new_frame,
+-                            old_frame,
+-                        } = cow(src_frame, src_page_info, rk).map_err(|_| Enomem)?;
+-                        if let Some(old_frame) = old_frame {
+-                            src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+-                        }
+-                        new_frame
++                    let Some(map_result) = (unsafe {
++                        dst_mapper.map_phys(
++                            dst_page,
++                            src_frame.base(),
++                            flags.write(flags.has_write()),
++                            0,
++                        )
++                    }) else {
++                        break;
++                    };
++                    unsafe {
++                        map_result.ignore();
+                     }
+-                    Err(AddRefError::RcOverflow) => return Err(Enomem),
++                    dst_flusher.queue(src_frame, None, TlbShootdownActions::NEW_MAPPING);
+                 }
+-            };
+-
+-            let Some(map_result) = (unsafe {
+-                dst_mapper.map_phys(
+-                    dst_page,
+-                    src_frame.base(),
+-                    flags.write(flags.has_write() && allows_writable),
+-                    // TODO: huge pages?
+-                    0,
+-                )
+-            }) else {
+-                break;
+-            };
+-            unsafe {
+-                map_result.ignore();
+             }
+-
+-            dst_flusher.queue(src_frame, None, TlbShootdownActions::NEW_MAPPING);
+         }
+ 
+         Ok(Grant {
+@@ -1941,40 +1958,57 @@ impl Grant {
+         dst_flusher: &mut impl GenericFlusher,
+     ) -> Result<Grant> {
+         assert!(!self.info.is_pinned());
+-
+-        for src_page in self.span().pages() {
+-            let dst_page = dst_base.next_by(src_page.offset_from(self.base));
+-
+-            // TODO: Validate flags?
+-            let Some((phys, lvl, _flags, flush)) =
+-                (unsafe { src_mapper.unmap_phys(src_page.start_address()) })
+-            else {
+-                continue;
+-            };
+-            unsafe {
+-                flush.ignore();
+-            }
+-            // TODO: huge pages
+-            debug_assert_eq!(lvl, 0, "no userspace pages have huge mappings");
+-
+-            src_flusher.queue(Frame::containing(phys), None, TlbShootdownActions::MOVE);
+-
+-            let dst_mapper = dst_mapper.as_deref_mut().unwrap_or(&mut *src_mapper);
+-
+-            // TODO: Preallocate to handle OOM?
+-            let flush = unsafe {
+-                dst_mapper
+-                    .map_phys(dst_page.start_address(), phys, flags, 0)
+-                    .expect("TODO: OOM")
++        let src_span = self.span();
++        let dst_span = PageSpan::new(dst_base, self.info.page_count);
++        if dst_mapper.is_none() {
++            assert!(!src_span.intersects(dst_span));
++        }
++
++        const TRANSFER_BATCH_PAGES: usize = 64;
++        let mut batch = [(
++            VirtualAddress::new(0),
++            rmm::PhysicalAddress::new(0),
++            0u8,
++            PageFlags::new(),
++        ); TRANSFER_BATCH_PAGES];
++        let mut cur = self.base.start_address();
++        let end = self.base.next_by(self.info.page_count).start_address();
++
++        while cur < end {
++            let (count, next_cur) = unsafe {
++                src_mapper.unmap_range_batch(
++                    cur,
++                    end,
++                    &mut batch,
++                    Some(|table_phys| unsafe {
++                        TheFrameAllocator(NumaMemoryPolicy::NodeLocalLeniant).free_one(table_phys);
++                    }),
++                )
+             };
+-            unsafe {
+-                flush.ignore();
++            assert!(count <= batch.len());
++            assert!(next_cur > cur);
++            cur = next_cur;
++
++            for &(src_virt, phys, lvl, _flags) in &batch[..count] {
++                assert_eq!(lvl, 0, "no userspace pages have huge mappings");
++                src_flusher.queue(Frame::containing(phys), None, TlbShootdownActions::MOVE);
++                let src_page = Page::containing_address(src_virt);
++                let dst_page = dst_base.next_by(src_page.offset_from(self.base));
++                let dst_mapper_ref = dst_mapper.as_deref_mut().unwrap_or(&mut *src_mapper);
++                let flush = unsafe {
++                    dst_mapper_ref
++                        .map_phys(dst_page.start_address(), phys, flags, 0)
++                        .expect("TODO: OOM")
++                };
++                unsafe {
++                    flush.ignore();
++                }
++                dst_flusher.queue(
++                    Frame::containing(phys),
++                    None,
++                    TlbShootdownActions::NEW_MAPPING,
++                );
+             }
+-            dst_flusher.queue(
+-                Frame::containing(phys),
+-                None,
+-                TlbShootdownActions::NEW_MAPPING,
+-            );
+         }
+ 
+         self.base = dst_base;
+@@ -1990,29 +2024,27 @@ impl Grant {
+     ) {
+         assert!(self.info.mapped);
+ 
+-        for page in self.span().pages() {
+-            unsafe {
+-                // Lazy mappings don't require remapping, as info.flags will be updated.
+-                let Some((old_flags, phys, flush)) =
+-                    mapper.remap_with_full(page.start_address(), |same_phys, old_flags| {
+-                        if !old_flags.has_write() && new_flags.has_write() {
+-                            // Page flags will be updated in [`correct_inner`].
+-                            Some((same_phys, new_flags.write(false)))
+-                        } else {
+-                            Some((same_phys, new_flags))
+-                        }
+-                    })
+-                else {
+-                    continue;
+-                };
+-                flush.ignore();
+-                //info!("Remapped page {:?} (frame {:?})", page, Frame::containing(mapper.translate(page.start_address()).unwrap().0));
+-                flusher.queue(
+-                    Frame::containing(phys),
+-                    None,
+-                    TlbShootdownActions::change_of_flags(old_flags, new_flags),
+-                );
+-            }
++        let start = self.base.start_address();
++        let end = self.base.next_by(self.info.page_count).start_address();
++        unsafe {
++            mapper.remap_range_with_full(
++                start,
++                end,
++                |same_phys, old_flags| {
++                    if !old_flags.has_write() && new_flags.has_write() {
++                        Some((same_phys, new_flags.write(false)))
++                    } else {
++                        Some((same_phys, new_flags))
++                    }
++                },
++                |_virt, phys, old_flags| {
++                    flusher.queue(
++                        Frame::containing(phys),
++                        None,
++                        TlbShootdownActions::change_of_flags(old_flags, new_flags),
++                    );
++                },
++            );
+         }
+ 
+         self.info.flags = new_flags;
+@@ -2094,22 +2126,20 @@ impl Grant {
+                 TlbShootdownActions::FREE,
+             );
+         } else {
+-            for page in self.span().pages() {
+-                // Lazy mappings do not need to be unmapped.
+-                let Some((phys, lvl, _, flush)) =
+-                    (unsafe { mapper.unmap_phys(page.start_address()) })
+-                else {
+-                    continue;
+-                };
+-
+-                // TODO: huge pages
+-                debug_assert_eq!(lvl, 0);
+-
+-                unsafe {
+-                    flush.ignore();
+-                }
+-
+-                flusher.queue(Frame::containing(phys), None, TlbShootdownActions::FREE);
++            let start = self.base.start_address();
++            let end = self.base.next_by(self.info.page_count).start_address();
++            unsafe {
++                mapper.unmap_range(
++                    start,
++                    end,
++                    |_virt, phys, lvl, _flags| {
++                        assert_eq!(lvl, 0);
++                        flusher.queue(Frame::containing(phys), None, TlbShootdownActions::FREE);
++                    },
++                    Some(|table_phys| unsafe {
++                        TheFrameAllocator(NumaMemoryPolicy::NodeLocalLeniant).free_one(table_phys);
++                    }),
++                );
+             }
+         }
+ 
+diff --git a/src/scheme/sys/context.rs b/src/scheme/sys/context.rs
+index bf9d58d2..8ad76667 100644
+--- a/src/scheme/sys/context.rs
++++ b/src/scheme/sys/context.rs
+@@ -53,16 +53,27 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
+                     // TODO: All user programs must have some grant in order for executable memory to even
+                     // exist, but is this a good indicator of whether it is user or kernel?
+                     let is_kernel = addr_space_guard.grants.is_empty();
+-                    for (_base, info) in addr_space_guard.grants.iter() {
+-                        // wrap as method?
++                    for (base, info) in addr_space_guard.grants.iter() {
+                         match info.provider {
+                             context::memory::Provider::Allocated { .. } => {
+-                                private_memory += info.page_count() * crate::memory::PAGE_SIZE
++                                let start = base.start_address();
++                                let end = base.next_by(info.page_count()).start_address();
++                                private_memory += addr_space_guard
++                                    .table
++                                    .utable
++                                    .count_mapped_pages(start, end)
++                                    * crate::memory::PAGE_SIZE;
+                             }
+-                            // Excluded because it is not allocable by user, whether
+-                            // this region is counted toward usable memory remain unknown
+                             context::memory::Provider::PhysBorrowed { .. } => {}
+-                            _ => shared_memory += info.page_count() * crate::memory::PAGE_SIZE,
++                            _ => {
++                                let start = base.start_address();
++                                let end = base.next_by(info.page_count()).start_address();
++                                shared_memory += addr_space_guard
++                                    .table
++                                    .utable
++                                    .count_mapped_pages(start, end)
++                                    * crate::memory::PAGE_SIZE;
++                            }
+                         }
+                     }
+                     Some((private_memory, shared_memory, is_kernel))
+diff --git a/src/scheme/sys/memstat.rs b/src/scheme/sys/memstat.rs
+index fd8dbcd8..d56e8a15 100644
+--- a/src/scheme/sys/memstat.rs
++++ b/src/scheme/sys/memstat.rs
+@@ -9,7 +9,7 @@ use crate::{
+         self,
+         memory::{AddrSpace, Grant, GrantFileRef, PageSpan, Provider},
+     },
+-    memory::{Page, PAGE_SIZE},
++    memory::PAGE_SIZE,
+     scheme::SchemeId,
+     sync::CleanLockToken,
+     syscall::{
+@@ -59,22 +59,13 @@ fn inner_maps(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec
+                     let base_addr = base.start_address().data();
+                     let virt_size = grant_info.page_count() * PAGE_SIZE;
+ 
+-                    let mut rss_size = 0;
+-
+-                    // TODO: cheaper way to get RSS size
+-                    for page in Page::range_inclusive(
+-                        base,
+-                        base.next_by(grant_info.page_count().saturating_sub(1)),
+-                    ) {
+-                        if addr_space_guard
+-                            .table
+-                            .utable
+-                            .translate(page.start_address())
+-                            .is_some()
+-                        {
+-                            rss_size += PAGE_SIZE;
+-                        }
+-                    }
++                    let start = base.start_address();
++                    let end = base.next_by(grant_info.page_count()).start_address();
++                    let rss_size = addr_space_guard
++                        .table
++                        .utable
++                        .count_mapped_pages(start, end)
++                        * PAGE_SIZE;
+ 
+                     let (provider_type, opt_file_ref) = match &grant_info.provider {
+                         Provider::Allocated { cow_file_ref, .. } => {
