@@ -1,0 +1,290 @@
+FerrionOS change to relibc (MIT license, kept), made against upstream commit 74b5e7e315043a21b599f271d5692727aa54f64d with the patches before it in the recipe's list applied (meant for upstream: yes):
+- Parse DT_BIND_NOW, DF_BIND_NOW (DT_FLAGS), and DF_1_NOW (DT_FLAGS_1) in src/ld_so/dso.rs and enforce immediate PLT binding per object in DSO::relocate; skip writing lazy trampoline slots into GOT when jmprel/pltrelsz is empty or binding is immediate.
+- Enforce PT_GNU_RELRO with PROT_READ (rounding both start and end down to page boundaries with checked arithmetic) after relocation and PT_LOAD protection in DSO::relocate, including for ld.so (libc.so) itself.
+- In static_init (src/ld_so/mod.rs), scan all program headers instead of returning early after PT_TLS, compute load_base from PT_PHDR when present, and protect the static binary's PT_GNU_RELRO range with PROT_READ.
+- Link libc.so with -Wl,-z,relro -Wl,-z,now in Makefile.
+
+diff --git a/Makefile b/Makefile
+index 4534cf82..f52c2d72 100644
+--- a/Makefile
++++ b/Makefile
+@@ -145,6 +145,8 @@ $(BUILD)/$(PROFILE)/libc.so: $(BUILD)/$(PROFILE)/ld_so.o $(BUILD)/$(PROFILE)/lib
+ 		-Wl,--gc-sections \
+ 		-Wl,--dynamic-list=dynlst.txt \
+ 		-Wl,-z,pack-relative-relocs \
++		-Wl,-z,relro \
++		-Wl,-z,now \
+ 		-Wl,--sort-common \
+ 		-Wl,--whole-archive $^ -Wl,--no-whole-archive \
+ 		-Wl,-soname,libc.so.6 \
+diff --git a/src/ld_so/dso.rs b/src/ld_so/dso.rs
+index bf52f039..56c5efc2 100644
+--- a/src/ld_so/dso.rs
++++ b/src/ld_so/dso.rs
+@@ -158,6 +158,7 @@ pub(super) struct Dynamic<'data> {
+     symbols: &'data [Sym],
+     explicit_addend: bool,
+     pltrelsz: usize,
++    bind_now: bool,
+ }
+ 
+ impl<'data> Dynamic<'data> {
+@@ -963,6 +964,7 @@ impl DSO {
+         let mut hash_table = None;
+         let mut explicit_addend = None;
+         let mut pltrelsz = None;
++        let mut bind_now = false;
+         let mut debug = None;
+         let mut symtab_ptr = None;
+         let (mut rel_ptr, mut rel_len) = (None, None);
+@@ -1105,6 +1107,18 @@ impl DSO {
+                     assert_eq!(val_usize, size_of::<Sym>());
+                 }
+ 
++                elf::DT_BIND_NOW => bind_now = true,
++                elf::DT_FLAGS => {
++                    if (val as u32) & elf::DF_BIND_NOW != 0 {
++                        bind_now = true;
++                    }
++                }
++                elf::DT_FLAGS_1 => {
++                    if (val as u32) & elf::DF_1_NOW != 0 {
++                        bind_now = true;
++                    }
++                }
++
+                 _ => {}
+             }
+         }
+@@ -1205,6 +1219,7 @@ impl DSO {
+                 relr,
+                 explicit_addend: explicit_addend.unwrap_or_default(),
+                 pltrelsz: pltrelsz.unwrap_or_default(),
++                bind_now,
+             },
+             debug,
+         ))
+@@ -1390,11 +1405,16 @@ impl DSO {
+ 
+         let jmprel = self.dynamic.jmprel;
+         let pltrelsz = self.dynamic.pltrelsz;
++        if jmprel == 0 || pltrelsz == 0 {
++            return Ok(());
++        }
+ 
+-        unsafe {
+-            got.add(1).write(core::ptr::addr_of!(*self) as usize);
+-            got.add(2)
+-                .write(__plt_resolve_trampoline as *const () as usize);
++        if resolve == Resolve::Lazy {
++            unsafe {
++                got.add(1).write(core::ptr::addr_of!(*self) as usize);
++                got.add(2)
++                    .write(__plt_resolve_trampoline as *const () as usize);
++            }
+         }
+ 
+         let relsz = if self.dynamic.explicit_addend {
+@@ -1471,6 +1491,23 @@ impl DSO {
+         Ok(())
+     }
+ 
++    fn protect_relro(&self, phdrs: &[ProgramHeader]) {
++        const MAX_RELRO_PHDRS: usize = 256;
++        assert!(
++            phdrs.len() <= MAX_RELRO_PHDRS,
++            "[ld.so]: program header count exceeds bound"
++        );
++        let base = if self.pie { self.base as usize } else { 0 };
++        for ph in phdrs
++            .iter()
++            .filter(|ph| ph.p_type(NativeEndian) == elf::PT_GNU_RELRO)
++        {
++            let p_vaddr = usize::try_from(ph.p_vaddr(NativeEndian)).expect("always within bounds");
++            let p_memsz = usize::try_from(ph.p_memsz(NativeEndian)).expect("always within bounds");
++            protect_relro_range(base, p_vaddr, p_memsz);
++        }
++    }
++
+     pub fn relocate(&self, ph: Option<&[ProgramHeader]>, resolve: Resolve) -> object::Result<()> {
+         let global_scope = GLOBAL_SCOPE.read();
+ 
+@@ -1487,12 +1524,22 @@ impl DSO {
+             self.static_relocate(&global_scope, reloc)?;
+         }
+ 
++        let effective_resolve = if self.dynamic.bind_now {
++            Resolve::Now
++        } else {
++            resolve
++        };
++
+         // ld.so is itself PIE and uses lazy PLT relocations internally,
+         // so its own PLT entries must be adjusted by the load base before
+         // use.
+-        self.lazy_relocate(&global_scope, resolve)?;
++        self.lazy_relocate(&global_scope, effective_resolve)?;
+ 
+         if self.is_me {
++            if !self.phdrs.is_null() && self.phnum > 0 {
++                let my_phdrs = unsafe { slice::from_raw_parts(self.phdrs, self.phnum) };
++                self.protect_relro(my_phdrs);
++            }
+             return Ok(());
+         }
+ 
+@@ -1537,10 +1584,37 @@ impl DSO {
+             }
+         }
+ 
++        self.protect_relro(ph);
++
+         Ok(())
+     }
+ }
+ 
++pub(super) fn protect_relro_range(base: usize, p_vaddr: usize, p_memsz: usize) {
++    if p_memsz == 0 {
++        return;
++    }
++    let page_size = Sys::getpagesize();
++    assert!(
++        page_size != 0 && page_size.is_power_of_two(),
++        "[ld.so]: invalid page size"
++    );
++    let relro_start = base
++        .checked_add(p_vaddr)
++        .expect("[ld.so]: PT_GNU_RELRO start overflow");
++    let relro_end = relro_start
++        .checked_add(p_memsz)
++        .expect("[ld.so]: PT_GNU_RELRO end overflow");
++    let start = relro_start & !(page_size - 1);
++    let end = relro_end & !(page_size - 1);
++    if end > start {
++        unsafe {
++            Sys::mprotect(start as *mut c_void, end - start, sys_mman::PROT_READ)
++                .expect("[ld.so]: mprotect PT_GNU_RELRO failed");
++        }
++    }
++}
++
+ impl Drop for DSO {
+     fn drop(&mut self) {
+         if self.is_me {
+diff --git a/src/ld_so/mod.rs b/src/ld_so/mod.rs
+index 1db74ea8..921495f2 100644
+--- a/src/ld_so/mod.rs
++++ b/src/ld_so/mod.rs
+@@ -42,13 +42,15 @@ fn static_init(
+ ) {
+     const SIZEOF_PHDR64: usize = mem::size_of::<ProgramHeader64<Endianness>>();
+     const SIZEOF_PHDR32: usize = mem::size_of::<ProgramHeader32<Endianness>>();
++    const MAX_STATIC_AUXV_ENTRIES: usize = 1024;
++    const MAX_STATIC_PHDRS: usize = 256;
+ 
+     let mut phdr_opt = None;
+     let mut phent_opt = None;
+     let mut phnum_opt = None;
+ 
+     let mut auxv = sp.auxv();
+-    loop {
++    for _ in 0..MAX_STATIC_AUXV_ENTRIES {
+         let (kind, value) = unsafe { *auxv };
+         if kind == AT_NULL {
+             break;
+@@ -67,6 +69,11 @@ fn static_init(
+     let phdr = phdr_opt.expect("failed to find AT_PHDR");
+     let phent = phent_opt.expect("failed to find AT_PHENT");
+     let phnum = phnum_opt.expect("failed to find AT_PHNUM");
++    assert!(phnum <= MAX_STATIC_PHDRS, "AT_PHNUM exceeds bound");
++
++    let mut pt_phdr_vaddr = None;
++    let mut tls_phdr = None;
++    let mut relro_phdr = None;
+ 
+     for i in 0..phnum {
+         let ph_addr = phdr + phent * i;
+@@ -96,37 +103,57 @@ fn static_init(
+             _ => panic!("unknown AT_PHENT size {}", phent),
+         };
+ 
++        match p_type {
++            elf::PT_PHDR if pt_phdr_vaddr.is_none() => {
++                pt_phdr_vaddr = Some(p_vaddr);
++            }
++            elf::PT_TLS if tls_phdr.is_none() => {
++                tls_phdr = Some((p_align, p_filesz, p_memsz, p_vaddr));
++            }
++            elf::PT_GNU_RELRO if relro_phdr.is_none() => {
++                relro_phdr = Some((p_vaddr, p_memsz));
++            }
++            _ => (),
++        }
++    }
++
++    let load_base = pt_phdr_vaddr.map_or(0, |vaddr| {
++        phdr.checked_sub(vaddr)
++            .expect("PT_PHDR vaddr exceeds AT_PHDR")
++    });
++
++    if let Some((p_align, p_filesz, p_memsz, p_vaddr)) = tls_phdr {
+         let page_size = Sys::getpagesize();
+-        let voff = p_vaddr % page_size;
+-        // let vaddr = ph.p_vaddr as usize - voff;
++        let tls_addr = load_base
++            .checked_add(p_vaddr)
++            .expect("PT_TLS vaddr overflow");
++        let voff = tls_addr % page_size;
+         let vsize = (p_memsz + voff).div_ceil(page_size) * page_size;
++        let valign = if p_align > 0 {
++            p_memsz.div_ceil(p_align) * p_align
++        } else {
++            p_memsz
++        };
+ 
+-        if p_type == elf::PT_TLS {
+-            let valign = if p_align > 0 {
+-                p_memsz.div_ceil(p_align) * p_align
+-            } else {
+-                p_memsz
+-            };
+-
+-            unsafe {
+-                STATIC_TCB_MASTER.ptr = p_vaddr as *const u8;
+-                STATIC_TCB_MASTER.image_size = p_filesz;
+-                STATIC_TCB_MASTER.offset = valign;
+-
+-                let tcb = Tcb::new(vsize).expect("failed to allocate TCB");
+-                tcb.masters_ptr = ptr::addr_of_mut!(STATIC_TCB_MASTER);
+-                tcb.masters_len = mem::size_of::<Master>();
+-                tcb.copy_masters().expect("failed to copy TLS master data");
+-                tcb.activate(
+-                    #[cfg(target_os = "redox")]
+-                    Some(thr_fd),
+-                );
+-            }
+-
+-            //TODO: Warning on multiple TLS sections?
+-            return;
++        unsafe {
++            STATIC_TCB_MASTER.ptr = tls_addr as *const u8;
++            STATIC_TCB_MASTER.image_size = p_filesz;
++            STATIC_TCB_MASTER.offset = valign;
++
++            let tcb = Tcb::new(vsize).expect("failed to allocate TCB");
++            tcb.masters_ptr = ptr::addr_of_mut!(STATIC_TCB_MASTER);
++            tcb.masters_len = mem::size_of::<Master>();
++            tcb.copy_masters().expect("failed to copy TLS master data");
++            tcb.activate(
++                #[cfg(target_os = "redox")]
++                Some(thr_fd),
++            );
+         }
+     }
++
++    if let Some((p_vaddr, p_memsz)) = relro_phdr {
++        dso::protect_relro_range(load_base, p_vaddr, p_memsz);
++    }
+ }
+ 
+ #[cfg(any(target_os = "linux", target_os = "redox"))]
