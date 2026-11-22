@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use crate::{
     errno::*,
     mem::user_ok,
-    thread::{Frame, MaskState, Thread},
+    thread::{AltStack, Frame, MaskState, Thread},
 };
 
 #[derive(Clone, Copy, Default)]
@@ -224,20 +224,41 @@ pub fn rt_sigprocmask(thread: &Thread, how: u64, set: u64, oset: u64, size: u64)
     0
 }
 
+const SS_ONSTACK: i32 = 1;
+const SS_DISABLE: i32 = 2;
+const SS_AUTODISARM: i32 = 1 << 31;
+const MINSIGSTKSZ: u64 = 2048;
+
+fn encode_altstack(stack: AltStack, on: bool) -> (u64, i32, u64) {
+    match stack {
+        AltStack::Disabled => (0, SS_DISABLE, 0),
+        AltStack::Enabled { sp, size } => (sp, if on { SS_ONSTACK } else { 0 }, size),
+    }
+}
+
+fn decode_altstack(sp: u64, flags: i32, size: u64, strict: bool) -> Result<AltStack, i64> {
+    if strict && flags & !(SS_DISABLE | SS_AUTODISARM) != 0 {
+        return Err(EINVAL);
+    }
+    if flags & SS_DISABLE != 0 {
+        Ok(AltStack::Disabled)
+    } else if strict && size < MINSIGSTKSZ {
+        Err(ENOMEM)
+    } else {
+        Ok(AltStack::Enabled { sp, size })
+    }
+}
+
 fn on_altstack(thread: &Thread, sp: u64) -> bool {
-    let (base, flags, size) = *thread.altstack.lock().unwrap();
-    flags & 2 == 0 && sp > base && sp <= base + size
+    thread.altstack.lock().unwrap().contains(sp)
 }
 
 pub fn sigaltstack(thread: &Thread, frame: &Frame, ss: u64, oss: u64) -> i64 {
-    const SS_ONSTACK: i32 = 1;
-    const SS_DISABLE: i32 = 2;
-    const MINSIGSTKSZ: u64 = 2048;
     if (ss != 0 && !user_ok(ss, 24)) || (oss != 0 && !user_ok(oss, 24)) {
         return -EFAULT;
     }
-    let on = on_altstack(thread, frame.rsp);
     let old = *thread.altstack.lock().unwrap();
+    let on = old.contains(frame.rsp);
     if ss != 0 {
         if on {
             return -EPERM;
@@ -249,24 +270,19 @@ pub fn sigaltstack(thread: &Thread, frame: &Frame, ss: u64, oss: u64) -> i64 {
                 *((ss + 16) as *const u64),
             )
         };
-        if flags & !(SS_DISABLE | (1 << 31)) != 0 {
-            return -EINVAL;
-        }
-        let new = if flags & SS_DISABLE != 0 {
-            (0, SS_DISABLE, 0)
-        } else if size < MINSIGSTKSZ {
-            return -ENOMEM;
-        } else {
-            (sp, 0, size)
+        let new = match decode_altstack(sp, flags, size, true) {
+            Ok(stack) => stack,
+            Err(e) => return -e,
         };
         *thread.altstack.lock().unwrap() = new;
     }
     if oss != 0 {
+        let (sp, flags, size) = encode_altstack(old, on);
         unsafe {
-            *(oss as *mut u64) = old.0;
-            *((oss + 8) as *mut i32) = if on { SS_ONSTACK } else { old.1 };
+            *(oss as *mut u64) = sp;
+            *((oss + 8) as *mut i32) = flags;
             *((oss + 12) as *mut i32) = 0;
-            *((oss + 16) as *mut u64) = old.2;
+            *((oss + 16) as *mut u64) = size;
         }
     }
     0
@@ -582,12 +598,13 @@ fn push_frame(
 ) -> Result<(), ()> {
     let old_mask = end_temporary(thread).unwrap_or_else(|| thread.mask.load(Ordering::Relaxed));
     let xsize = crate::cpu::xsave_size() as u64;
-    let (alt_sp, alt_flags, alt_size) = *thread.altstack.lock().unwrap();
-    let on = on_altstack(thread, frame.rsp);
-    let mut sp = if action.flags & SA_ONSTACK != 0 && alt_flags & 2 == 0 && !on {
-        alt_sp + alt_size
-    } else {
-        frame.rsp - 128 // the red zone
+    let alt = *thread.altstack.lock().unwrap();
+    let on = alt.contains(frame.rsp);
+    let mut sp = match alt {
+        AltStack::Enabled { sp: alt_sp, size: alt_size } if action.flags & SA_ONSTACK != 0 && !on => {
+            alt_sp + alt_size
+        }
+        _ => frame.rsp - 128,
     };
     sp -= xsize + 4;
     sp &= !63;
@@ -617,15 +634,10 @@ fn push_frame(
         u.write(UC_FP_XSTATE | UC_SIGCONTEXT_SS);
         u.add(1).write(0);
         // uc_stack
-        u.add(2).write(alt_sp);
-        (u.add(3) as *mut i32).write(if alt_flags & 2 != 0 {
-            2
-        } else if on {
-            1
-        } else {
-            0
-        });
-        u.add(4).write(alt_size);
+        let (enc_sp, enc_flags, enc_size) = encode_altstack(alt, on);
+        u.add(2).write(enc_sp);
+        (u.add(3) as *mut i32).write(enc_flags);
+        u.add(4).write(enc_size);
         // uc_mcontext: r8..r15 rdi rsi rbp rbx rdx rax rcx rsp rip eflags csgsfs err trapno
         // oldmask cr2 fpstate reserved[8]
         let f = *frame;
@@ -715,11 +727,9 @@ pub fn sigreturn(thread: &Thread, frame: &mut Frame) -> Result<(), ()> {
             u.add(4).read(),
         );
         if !on_altstack(thread, frame.rsp) {
-            *thread.altstack.lock().unwrap() = if flags & 2 != 0 {
-                (0, 2, 0)
-            } else {
-                (sp, 0, size)
-            };
+            if let Ok(restored) = decode_altstack(sp, flags, size, false) {
+                *thread.altstack.lock().unwrap() = restored;
+            }
         }
     }
     Ok(())

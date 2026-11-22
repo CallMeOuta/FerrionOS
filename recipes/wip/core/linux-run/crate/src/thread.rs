@@ -67,6 +67,21 @@ pub enum MaskState {
     Temporary { saved: u64 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AltStack {
+    Disabled,
+    Enabled { sp: u64, size: u64 },
+}
+
+impl AltStack {
+    pub fn contains(self, sp: u64) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Enabled { sp: base, size } => sp > base && sp <= base.saturating_add(size),
+        }
+    }
+}
+
 /// Runtime state of one Linux thread. THREADS holds one reference and the thread's data page
 /// another (taken with `Arc::into_raw`), which `exit_thread` gives back.
 pub struct Thread {
@@ -78,8 +93,7 @@ pub struct Thread {
     pub mask: AtomicU64,
     /// Signals sent to this thread with tgkill or tkill.
     pub pending: AtomicU64,
-    /// sigaltstack: (sp, flags, size).
-    pub altstack: Mutex<(u64, i32, u64)>,
+    pub altstack: Mutex<AltStack>,
     pub clear_tid: AtomicU64,
     pub robust_list: AtomicU64,
     pub mask_state: Mutex<MaskState>,
@@ -170,7 +184,7 @@ pub fn new_thread(tid: i32, mask: u64) -> &'static Thread {
         area,
         mask: AtomicU64::new(mask),
         pending: AtomicU64::new(0),
-        altstack: Mutex::new((0, 2 /* SS_DISABLE */, 0)),
+        altstack: Mutex::new(AltStack::Disabled),
         clear_tid: AtomicU64::new(0),
         robust_list: AtomicU64::new(0),
         mask_state: Mutex::new(MaskState::Normal),

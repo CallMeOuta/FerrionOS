@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -21,6 +22,90 @@
 #define FAST_SPIN_ITERS 16384
 #define MAX_TIMEOUTS 5
 #define NUDGE_LIMIT 20
+#define ALT_STACK_SIZE 65536
+
+static unsigned char alt_stack_mem[ALT_STACK_SIZE];
+static atomic_int alt_sp_in_range;
+static atomic_int alt_onstack_ok;
+static atomic_int alt_size_ok;
+
+static void on_alt_usr1(int sig) {
+    (void)sig;
+    volatile unsigned char local = 1;
+    uintptr_t p = (uintptr_t)&local;
+    uintptr_t lo = (uintptr_t)alt_stack_mem;
+    uintptr_t hi = lo + ALT_STACK_SIZE;
+    if (p >= lo && p < hi) {
+        atomic_store(&alt_sp_in_range, 1);
+    }
+    stack_t cur;
+    memset(&cur, 0, sizeof cur);
+    if (sigaltstack(NULL, &cur) == 0) {
+        if ((cur.ss_flags & SS_ONSTACK) != 0 && (cur.ss_flags & SS_DISABLE) == 0) {
+            atomic_store(&alt_onstack_ok, 1);
+        }
+        if (cur.ss_sp == alt_stack_mem && cur.ss_size == ALT_STACK_SIZE) {
+            atomic_store(&alt_size_ok, 1);
+        }
+    }
+}
+
+static int run_sigaltstack_checks(void) {
+    sigset_t empty;
+    sigemptyset(&empty);
+    pthread_sigmask(SIG_SETMASK, &empty, NULL);
+
+    stack_t cur, next;
+    memset(&cur, 0, sizeof cur);
+    if (sigaltstack(NULL, &cur) != 0) {
+        return 7;
+    }
+    int init_disabled = (cur.ss_flags == SS_DISABLE);
+
+    memset(&next, 0, sizeof next);
+    next.ss_sp = alt_stack_mem;
+    next.ss_size = ALT_STACK_SIZE;
+    next.ss_flags = 0;
+    if (sigaltstack(&next, &cur) != 0) {
+        return 7;
+    }
+    int prev_disabled = (cur.ss_flags == SS_DISABLE);
+
+    memset(&cur, 0, sizeof cur);
+    if (sigaltstack(NULL, &cur) != 0) {
+        return 7;
+    }
+    int enabled_ok = (cur.ss_flags == 0 && cur.ss_sp == alt_stack_mem && cur.ss_size == ALT_STACK_SIZE);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_alt_usr1;
+    sa.sa_flags = SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
+        return 7;
+    }
+    raise(SIGUSR1);
+
+    memset(&next, 0, sizeof next);
+    next.ss_flags = SS_DISABLE;
+    if (sigaltstack(&next, &cur) != 0) {
+        return 7;
+    }
+    int prev_enabled = (cur.ss_flags == 0 && cur.ss_sp == alt_stack_mem && cur.ss_size == ALT_STACK_SIZE);
+
+    memset(&cur, 0, sizeof cur);
+    if (sigaltstack(NULL, &cur) != 0) {
+        return 7;
+    }
+    int disabled_again = (cur.ss_flags == SS_DISABLE && cur.ss_sp == NULL && cur.ss_size == 0);
+
+    printf("sigaltstack %d %d %d %d %d %d %d %d\n",
+           init_disabled, prev_disabled, enabled_ok,
+           atomic_load(&alt_sp_in_range), atomic_load(&alt_onstack_ok), atomic_load(&alt_size_ok),
+           prev_enabled, disabled_again);
+    return 0;
+}
 
 static atomic_int usr1_count;
 static atomic_llong last_usr1_ms;
@@ -464,5 +549,5 @@ int main(void) {
     if (pause_missed > 0) {
         printf("pause missed %d\n", pause_missed);
     }
-    return 0;
+    return run_sigaltstack_checks();
 }
