@@ -30,11 +30,11 @@ tests remain, with the config snapshots adapted to the production fields.
  src/layout/floating.rs          |  70 ++++++++++++++++++---
  src/layout/floating/stacking.rs | 108 +++++++++++++++++++++++++++++++-
  src/layout/free.rs              |  26 +++++++-
- src/layout/mod.rs               |  27 +++++++-
+ src/layout/mod.rs               |  32 +++++++++-
  src/layout/tile.rs              |  20 +++++-
  src/layout/workspace.rs         |  31 ++++++++-
  src/layout/workspace/free.rs    | 107 ++++++++++++++++++++++++++++++-
- 10 files changed, 496 insertions(+), 24 deletions(-)
+ 10 files changed, 499 insertions(+), 26 deletions(-)
 
 diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
 index acfb3290..10cafcf0 100644
@@ -561,7 +561,7 @@ index d223d814..707ec7df 100644
      pub fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
          if let Some(ws) = self.active_workspace_mut() {
 diff --git a/src/layout/mod.rs b/src/layout/mod.rs
-index edbef60c..41926353 100644
+index edbef60c..cb4c3722 100644
 --- a/src/layout/mod.rs
 +++ b/src/layout/mod.rs
 @@ -1,4 +1,5 @@
@@ -571,7 +571,24 @@ index edbef60c..41926353 100644
  //! Window layout logic.
  //!
  //! Niri implements scrollable tiling with dynamic workspaces. The scrollable tiling is mostly
-@@ -2894,6 +2895,10 @@ impl<W: LayoutElement> Layout<W> {
+@@ -42,7 +43,7 @@ use niri_config::utils::MergeWith as _;
+ use niri_config::{
+     Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
+ };
+-use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
++use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout, WindowTile};
+ use scrolling::{Column, ColumnWidth};
+ use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+ use smithay::backend::renderer::element::utils::RescaleRenderElement;
+@@ -459,6 +460,7 @@ struct InteractiveMoveData<W: LayoutElement> {
+     /// config overrides for the workspace where the move originated from. As soon as the window
+     /// moves over some different workspace though, this override will reset.
+     pub(self) workspace_config: Option<(WorkspaceId, niri_config::LayoutPart)>,
++    pub(self) drop: Option<(WorkspaceId, WindowTile)>,
+ }
+ 
+ #[derive(Debug)]
+@@ -2894,17 +2896,22 @@ impl<W: LayoutElement> Layout<W> {
          for mon in self.monitors_mut() {
              mon.insert_hint = None;
          }
@@ -582,21 +599,58 @@ index edbef60c..41926353 100644
  
          if !matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_))) {
              return;
-@@ -2923,6 +2928,13 @@ impl<W: LayoutElement> Layout<W> {
+         }
+-        let Some(InteractiveMoveState::Moving(move_)) = self.interactive_move.take() else {
++        let Some(InteractiveMoveState::Moving(mut move_)) = self.interactive_move.take() else {
+             unreachable!()
+         };
+         if output.is_some_and(|out| &move_.output != out) {
+             self.interactive_move = Some(InteractiveMoveState::Moving(move_));
+             return;
+         }
++        move_.drop = None;
+ 
+         let _span = tracy_client::span!("Layout::update_insert_hint::update");
+ 
+@@ -2923,6 +2930,12 @@ impl<W: LayoutElement> Layout<W> {
                          ws.scrolling_insert_position(pos_within_workspace)
                      };
  
-+                    // ferrion-wm 2026-11-21 (F7): at a side edge of a free workspace, a floating
-+                    // window is offered that half.
 +                    if move_.is_floating {
 +                        let tile = ws.free_drop_tile(pos_within_workspace);
 +                        ws.free_offer_drop_tile(tile);
++                        move_.drop = tile.map(|target| (ws_id, target));
 +                    }
 +
                      let border_width = move_.tile.effective_border_width().unwrap_or(0.);
                      let corner_radius = move_
                          .tile
-@@ -4339,6 +4351,7 @@ impl<W: LayoutElement> Layout<W> {
+@@ -4091,6 +4104,7 @@ impl<W: LayoutElement> Layout<W> {
+                     pointer_ratio_within_window,
+                     output_config,
+                     workspace_config,
++                    drop: None,
+                 };
+ 
+                 if let Some((tile_pos, zoom)) = tile_pos {
+@@ -4157,6 +4171,8 @@ impl<W: LayoutElement> Layout<W> {
+             }
+         }
+ 
++        self.update_insert_hint(None);
++
+         true
+     }
+ 
+@@ -4274,6 +4290,7 @@ impl<W: LayoutElement> Layout<W> {
+ 
+                         (mon, insert_ws, position, offset, zoom)
+                     } else {
++                        move_.drop = None;
+                         let mon = &mut monitors[*active_monitor_idx];
+                         let zoom = mon.overview_zoom();
+                         // No point in trying to use the pointer position on the wrong output.
+@@ -4339,6 +4356,7 @@ impl<W: LayoutElement> Layout<W> {
                      InsertPosition::Floating => {
                          let mut tile = move_.tile;
                          tile.floating_pos = None;
@@ -604,20 +658,16 @@ index edbef60c..41926353 100644
  
                          match insert_ws {
                              InsertWorkspace::Existing(_) => {
-@@ -4380,6 +4393,18 @@ impl<W: LayoutElement> Layout<W> {
+@@ -4380,6 +4398,14 @@ impl<W: LayoutElement> Layout<W> {
                              true,
                              None,
                          );
 +
-+                        // ferrion-wm 2026-11-21 (F7): dropped at a side edge of a free workspace,
-+                        // the window tiles to that half.
-+                        if let (InsertWorkspace::Existing(_), Some(offset)) = (insert_ws, offset) {
-+                            let pos = (move_.pointer_pos_within_output - offset).downscale(zoom);
++                        if let Some((drop_ws_id, target)) = move_.drop {
++                            assert_eq!(drop_ws_id, ws_id);
 +                            if let Some(ws) = mon.workspaces.iter_mut().find(|ws| ws.id() == ws_id)
 +                            {
-+                                if let Some(target) = ws.free_drop_tile(pos) {
-+                                    ws.tile_window(Some(&win_id), target);
-+                                }
++                                ws.tile_window(Some(&win_id), target);
 +                            }
 +                        }
                      }
