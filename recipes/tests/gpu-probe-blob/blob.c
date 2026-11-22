@@ -90,6 +90,7 @@ struct drm_virtgpu_context_init {
 #define DRM_IOCTL_VIRTGPU_GETPARAM DRM_IOWR(0x43, struct drm_virtgpu_getparam)
 #define DRM_IOCTL_VIRTGPU_WAIT DRM_IOWR(0x48, struct drm_virtgpu_3d_wait)
 #define VIRTGPU_EXECBUF_RING_IDX 0x04
+#define QUEUE_ORDER_SUBMITS 200
 #define VIRTGPU_WAIT_NOWAIT 0x01
 #define DRM_IOCTL_VIRTGPU_RESOURCE_INFO DRM_IOWR(0x45, struct drm_virtgpu_resource_info)
 #define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB DRM_IOWR(0x4a, struct drm_virtgpu_resource_create_blob)
@@ -507,6 +508,31 @@ int gpu_probe_blob(int argc, char **argv)
                     pass("munmap-after-close", "released closed mapping");
             }
         }
+    }
+
+    int queued = 0;
+    for (int i = 0; i < QUEUE_ORDER_SUBMITS; i++) {
+        struct drm_virtgpu_execbuffer burst = {.flags = VIRTGPU_EXECBUF_RING_IDX, .ring_idx = 0, .fence_fd = -1};
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &burst) != 0)
+            break;
+        queued++;
+    }
+    struct drm_virtgpu_resource_create_blob ordered = {
+        .blob_mem = VIRTGPU_BLOB_MEM_HOST3D,
+        .blob_flags = VIRTGPU_BLOB_FLAG_USE_MAPPABLE,
+        .size = 4096,
+        .blob_id = 0,
+    };
+    snprintf(detail, sizeof detail, "%d of %d submissions accepted", queued, QUEUE_ORDER_SUBMITS);
+    if (queued == QUEUE_ORDER_SUBMITS)
+        pass("queue-order-burst", detail);
+    else
+        fail("queue-order-burst", detail);
+    if (expect_ok("queue-order-blob", ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, &ordered)) == 0) {
+        printf(TAG ": queue-order submits=%d res=%u\n", queued, ordered.res_handle);
+        pass("queue-order-blob", "blob created after the burst");
+        struct drm_gem_close close_ordered = {.handle = ordered.bo_handle};
+        ioctl(fd, DRM_IOCTL_GEM_CLOSE, &close_ordered);
     }
 
     struct drm_virtgpu_resource_create_blob leftover = {

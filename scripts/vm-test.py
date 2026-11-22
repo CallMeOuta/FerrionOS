@@ -4614,6 +4614,7 @@ GPU_CONTEXT_TRACE = ("virtio_gpu_features", "virtio_gpu_cmd_ctx_create", "virtio
 GPU_BLOB_TRACE = (
     "virtio_gpu_features",
     "virtio_gpu_cmd_ctx_create",
+    "virtio_gpu_cmd_ctx_submit",
     "virtio_gpu_cmd_ctx_destroy",
     "virtio_gpu_cmd_res_create_blob",
     "virtio_gpu_cmd_res_map_blob",
@@ -4790,6 +4791,19 @@ def test_gpu_blob(vm, args):
         and m.group(2).strip() == ctx_name
     ]
     create_lines = [line for line in trace if re.search(r"\bvirtio_gpu_cmd_res_create_blob\b", line)]
+    order = re.search(rf"(?m)^{tag}: queue-order submits=(\d+) res=(\d+)", output)
+    if not order:
+        reasons.append("the probe printed no queue-order result")
+    else:
+        burst, order_res = int(order.group(1)), int(order.group(2))
+        create_at = next((i for i, line in enumerate(trace) if re.search(
+            rf"\bvirtio_gpu_cmd_res_create_blob\b.*\bres {order_res:#x}\b", line)), None)
+        if create_at is None:
+            reasons.append(f"QEMU's trace has no virtio_gpu_cmd_res_create_blob for res {order_res:#x}")
+        else:
+            before = sum(1 for line in trace[:create_at] if re.search(r"\bvirtio_gpu_cmd_ctx_submit\b", line))
+            if before < burst:
+                reasons.append(f"only {before} of the {burst} submissions reached the host before blob {order_res:#x}")
     map_lines = [line for line in trace if re.search(r"\bvirtio_gpu_cmd_res_map_blob\b", line)]
     unref_lines = [line for line in trace if re.search(r"\bvirtio_gpu_cmd_res_unref\b", line)]
     first_map = re.search(
