@@ -4566,6 +4566,50 @@ def test_mesa_cpu(vm, args):
     return True, "Mesa CPU versions and both exact frames checked"
 
 
+GL_EXACT_VENUS_TRACE = ("virtio_gpu_cmd_submit_3d",)
+
+
+def test_gl_exact(vm, args):
+    """OpenGL ES 2 exact triangle through Zink over lavapipe (default) or Venus (--venus, unproven until sync)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root shell"
+    env = ["MESA_LOADER_DRIVER_OVERRIDE=zink"]
+    if args.venus:
+        icd = args.venus_icd or f"/usr/share/vulkan/icd.d/virtio_icd.{args.arch}.json"
+        env.insert(0, f"VK_DRIVER_FILES={icd}")
+    else:
+        env.insert(0, "LIBGL_ALWAYS_SOFTWARE=1")
+    cmd = f"{' '.join(env)} gpu-probe gl-exact"
+    since = vm.mark()
+    vm.type(f"bash -c '{cmd}; echo GL-EXACT-EXIT-$?'\n")
+    finished = vm.wait_serial(r"GL-EXACT-EXIT-(\d+)", args.timeout, since)
+    output = vm.text(since)
+    (vm.out / "gl-exact.txt").write_text(output)
+    if not finished or finished.group(1) != "0":
+        return False, "gl-exact probe failed; see gl-exact.txt"
+    match = re.search(r'GPU_GL_EXACT version="([^"]*)" renderer="([^"]*)"', output)
+    if not match:
+        return False, "missing GPU_GL_EXACT line; see gl-exact.txt"
+    renderer = match.group(2)
+    if "zink" not in renderer.lower():
+        return False, f"renderer is not Zink ({renderer!r}); see gl-exact.txt"
+    if args.venus:
+        low = renderer.lower()
+        if "venus" not in low or "llvmpipe" in low:
+            return False, f"renderer does not name Zink on Venus ({renderer!r}); see gl-exact.txt"
+        submits = [line for line in vm.trace() if "virtio_gpu_cmd_submit_3d" in line]
+        (vm.out / "gl-exact-trace.txt").write_text("\n".join(submits) + ("\n" if submits else ""))
+        if not submits:
+            return False, "QEMU trace has no virtio_gpu_cmd_submit_3d lines; see gl-exact-trace.txt"
+    expected = "GPU_PIXELS api=gl-exact triangle=17540 mismatches=0 hash=47972063c7a47bfb"
+    if expected not in output:
+        return False, "missing exact gl-exact pixels; see gl-exact.txt"
+    if "GPU_GL_EXACT_OK" not in output:
+        return False, "missing GPU_GL_EXACT_OK; see gl-exact.txt"
+    backend = "Venus" if args.venus else "lavapipe"
+    return True, f"Zink ({backend}) exact GLES2 frame checked: {renderer}"
+
+
 GPU_CONTEXT_TRACE = ("virtio_gpu_features", "virtio_gpu_cmd_ctx_create", "virtio_gpu_cmd_ctx_destroy")
 GPU_BLOB_TRACE = (
     "virtio_gpu_features",
@@ -5038,6 +5082,7 @@ TESTS["linux-python"] = test_linux_python
 TESTS["linux-net"] = test_linux_net
 TESTS["dso-atexit"] = test_dso_atexit
 TESTS["mesa-cpu"] = test_mesa_cpu
+TESTS["gl-exact"] = test_gl_exact
 TESTS["gtk-window"] = test_gtk_window
 TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 TESTS["firefox-start"] = test_firefox_start
@@ -5087,6 +5132,10 @@ def main():
                              "checker's verdict; exit 0 only when the signal is exact in one piece")
     parser.add_argument("--signal", choices=("rig", "seq"), default="rig",
                         help="--check-wav: the rig's counter signal (plans/audio.md) or audio-baseline's seq bytes")
+    parser.add_argument("--venus", action="store_true",
+                        help="gl-exact: select Venus's Vulkan ICD via VK_DRIVER_FILES and expect Zink on Venus")
+    parser.add_argument("--venus-icd", default="",
+                        help="gl-exact --venus: override VK_DRIVER_FILES path")
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(2)
@@ -5138,6 +5187,10 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *VK_EXACT_TRACE]})
+            elif name == "gl-exact" and args.venus:
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=venus",)
+                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GL_EXACT_VENUS_TRACE]})
             try:
                 qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
                 host = host_versions(qemu)
