@@ -59,6 +59,7 @@ pub struct DiskRing {
     disk_size: u64,
     #[allow(unused, reason = "closed on drop")]
     ring_fd: Fd,
+    disk_fd: Fd,
     pipe: Pipe,
 }
 
@@ -101,7 +102,6 @@ impl DiskRing {
             CallFlags::empty(),
             &[RingCallVerb::SetFileTable as u64],
         )?;
-        drop(disk_fd);
 
         // mmap the shared DMA/shm pool
         let shm_ptr = unsafe {
@@ -155,6 +155,7 @@ impl DiskRing {
             sq,
             cq,
             ring_fd,
+            disk_fd,
             shm_base: shm_ptr,
             allocator,
             next_id: 0,
@@ -294,6 +295,11 @@ impl Disk for DiskRing {
 
     fn size(&mut self) -> Result<u64> {
         Ok(self.disk_size)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.disk_fd.fsync()?;
+        Ok(())
     }
 }
 
