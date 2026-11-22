@@ -1,8 +1,9 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 use redox_scheme::scheme::{SchemeState, SchemeSync};
 use redox_scheme::{CallerCtx, OpenResult, RequestKind, Response, SignalBehavior, Socket};
@@ -141,7 +142,7 @@ struct Node {
     session: u32,
     vpath: String,
     state: NodeState,
-    lock_inode: Option<usize>,
+    lock_inode: Cell<Option<usize>>,
     listing: Option<Vec<(String, DirentKind, u64)>>,
     grant: Option<usize>,
     flags: usize,
@@ -418,7 +419,7 @@ fn skeleton(
     if accmode_writes(flags) || flags & O_TRUNC != 0 {
         return Err(err(EISDIR));
     }
-    if matches!(mode, LinkMode::OpenLinkItself | LinkMode::CreateLink) {
+    if flags & O_SYMLINK != 0 && !mode.follows() {
         return Err(err(EINVAL));
     }
     let listing = scope
@@ -426,24 +427,18 @@ fn skeleton(
         .into_iter()
         .map(|name| (name, DirentKind::Directory, 0))
         .collect();
-    let (state, lock_inode) = match sys_open(vpath, O_STAT | O_DIRECTORY).ok() {
-        Some(fd) => {
-            let ino = stat_inode(&fd)?;
-            (
-                NodeState::Open {
-                    fd,
-                    place: NodePlace::Lower,
-                },
-                Some(ino),
-            )
-        }
-        None => (NodeState::Detached, None),
+    let state = match sys_open(vpath, O_STAT | O_DIRECTORY).ok() {
+        Some(fd) => NodeState::Open {
+            fd,
+            place: NodePlace::Lower,
+        },
+        None => NodeState::Detached,
     };
     Ok(Opened::Node(Node {
         session,
         vpath: vpath.to_owned(),
         state,
-        lock_inode,
+        lock_inode: Cell::new(None),
         listing: Some(listing),
         grant: None,
         flags,
@@ -687,7 +682,7 @@ impl Proxy {
         loop {
             let vpath = match walked {
                 Walked::External(target) => {
-                    if mode == LinkMode::OpenLinkItself {
+                    if flags & O_SYMLINK != 0 && flags & O_CREAT == 0 {
                         let id = self.insert(Handle::External {
                             session,
                             path: target,
@@ -766,7 +761,7 @@ impl Proxy {
                     );
                     if matches!(opened, Ok(Opened::Node(_)))
                         && !read_only
-                        && mode == LinkMode::CreateLink
+                        && flags & O_SYMLINK != 0
                         && accmode_writes(flags)
                         && let Some(s) = self.sessions.get_mut(&session)
                     {
@@ -804,21 +799,15 @@ impl Proxy {
                 O_NOFOLLOW
             };
         let make_node = |fd: OwnedFd| -> Result<Node> {
-            let lock_inode = match origin_inode {
-                Some(ino) => ino,
-                None => stat_inode(&fd)?,
-            };
-            let node = Node {
+            Ok(Node {
                 session,
                 vpath: vpath.to_owned(),
                 state: NodeState::Open { fd, place },
-                lock_inode: Some(lock_inode),
+                lock_inode: Cell::new(origin_inode),
                 listing: None,
                 grant: Some(grant),
                 flags,
-            };
-            assert!(node.lock_inode.is_some());
-            Ok(node)
+            })
         };
         for _ in 0..MAX_CREATE_TRIES {
             match sys_open(real, base) {
@@ -889,9 +878,12 @@ impl Proxy {
             return Err(err(EIO));
         }
         for dir in chain.into_iter().rev() {
-            let mode = fs::symlink_metadata(join(&lower, dir))
+            let lower_meta = fs::symlink_metadata(join(&lower, dir)).ok();
+            let mode = lower_meta
+                .as_ref()
                 .map(|m| m.permissions().mode() & 0o7777)
                 .unwrap_or(0o755);
+            let lower_ino = lower_meta.as_ref().map(|m| m.ino() as usize);
             let target = join(&layer, dir);
             match fs::create_dir(&target) {
                 Ok(()) => {}
@@ -904,6 +896,9 @@ impl Proxy {
             }
             let _ = fs::set_permissions(&target, fs::Permissions::from_mode(mode));
             ov.created(dir, true).map_err(err)?;
+            if let Some(ino) = lower_ino {
+                ov.set_origin_inode(dir, ino);
+            }
             assert_eq!(ov.has_upper(dir), exists(&target));
             ov.check_invariants();
         }
@@ -920,6 +915,10 @@ impl Proxy {
             (lower, layer)
         };
         self.copy_up_dirs(session, grant, rel_parent(rel))?;
+        {
+            let (ov, _, _) = self.clone_grant_mut(session, grant)?;
+            ov.can_add_upper(rel).map_err(err)?;
+        }
         let staged = self.stage_path(&layer);
         let (from, to) = (join(&lower, rel), join(&layer, rel));
         let io = |e: std::io::Error| err(e.raw_os_error().unwrap_or(EIO));
@@ -944,16 +943,12 @@ impl Proxy {
             remove_path(&staged);
             return Err(e);
         }
-        let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
-        let mut next_ov = ov.clone();
-        if let Err(e) = next_ov.copy_up_done(rel).map_err(err).and_then(|()| {
-            next_ov.set_origin_inode(rel, lower_ino);
-            save_overlay(&layer, &next_ov)
-        }) {
+        let (ov, _, _) = self.clone_grant_mut(session, grant)?;
+        if let Err(e) = ov.copy_up_done(rel).map_err(err) {
             remove_path(&to);
             return Err(e);
         }
-        *ov = next_ov;
+        ov.set_origin_inode(rel, lower_ino);
         assert_eq!(ov.has_upper(rel), exists(&to));
         ov.check_invariants();
         Ok(())
@@ -1055,16 +1050,20 @@ impl Proxy {
                     false,
                 )?;
                 let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
-                let mut next_ov = ov.clone();
-                if let Err(e) = next_ov
-                    .created(rel, flags & O_DIRECTORY != 0)
-                    .map_err(err)
-                    .and_then(|()| save_overlay(&layer, &next_ov))
+                let undo = match ov.created_undo(rel, flags & O_DIRECTORY != 0).map_err(err) {
+                    Ok(undo) => undo,
+                    Err(e) => {
+                        remove_path(&target);
+                        return Err(e);
+                    }
+                };
+                if undo.persisted_changed()
+                    && let Err(e) = save_overlay(&layer, ov)
                 {
+                    ov.undo_created(rel, undo);
                     remove_path(&target);
                     return Err(e);
                 }
-                *ov = next_ov;
                 assert_eq!(ov.has_upper(rel), exists(&target));
                 ov.check_invariants();
                 Ok(opened)
@@ -1160,7 +1159,7 @@ impl Proxy {
                 node.vpath.clone(),
                 node.place(),
                 node.flags,
-                node.lock_inode,
+                node.lock_inode.get(),
             )
         };
         match &self.live(session)?.1[grant] {
@@ -1169,7 +1168,8 @@ impl Proxy {
             GrantState::Clone { .. } if place == Some(NodePlace::Upper) => return self.node_fd(id),
             GrantState::Clone { .. } => {}
         }
-        let (located_session, located_grant, rel, _, located_upper) = self.located_node(id)?;
+        let (located_session, located_grant, rel, _, located_upper, lower_ino) =
+            self.located_node(id)?;
         if located_session != session || located_grant != grant || located_upper {
             return Err(err(ESTALE));
         }
@@ -1182,12 +1182,13 @@ impl Proxy {
         )?;
         let raw = fd.as_raw_fd() as usize;
         if let Some(Handle::Node(node)) = self.handles.get_mut(&id) {
+            let pinned = before_inode.unwrap_or(lower_ino);
+            node.lock_inode.set(Some(pinned));
             node.state = NodeState::Open {
                 fd,
                 place: NodePlace::Upper,
             };
-            assert_eq!(node.lock_inode, before_inode);
-            assert!(node.lock_inode.is_some());
+            assert_eq!(node.lock_inode.get(), Some(pinned));
         }
         Ok(raw)
     }
@@ -1228,7 +1229,7 @@ impl Proxy {
         Ok((grant, rel, access))
     }
 
-    fn located_node(&mut self, id: usize) -> Result<(u32, usize, String, String, bool)> {
+    fn located_node(&mut self, id: usize) -> Result<(u32, usize, String, String, bool, usize)> {
         let (session, vpath, fd) = {
             let node = self.node(id)?;
             (
@@ -1261,7 +1262,7 @@ impl Proxy {
         {
             return Err(err(ESTALE));
         }
-        Ok((session, grant, rel, real, upper))
+        Ok((session, grant, rel, real, upper, held.st_ino as usize))
     }
 
     fn unlink(&mut self, dirfd: usize, path: &str, flags: usize) -> Result<()> {
@@ -1303,9 +1304,12 @@ impl Proxy {
         }
         let (ov, lower, layer) = self.clone_grant_mut(session, grant)?;
         let lower_had = !ov.lower_hidden(&rel) && exists(&join(&lower, &rel));
-        let mut next_ov = ov.clone();
-        next_ov.removed(&rel, lower_had).map_err(err)?;
-        save_overlay(&layer, &next_ov)?;
+        let undo = ov.removed_undo(&rel, lower_had).map_err(err)?;
+        let persisted = undo.persisted_changed();
+        if persisted && let Err(e) = save_overlay(&layer, ov) {
+            ov.undo_removed(undo);
+            return Err(e);
+        }
         if upper {
             let c = cpath(&real)?;
             if let Err(e) = check(unsafe {
@@ -1315,11 +1319,13 @@ impl Proxy {
                     libc::unlink(c.as_ptr())
                 }
             }) {
-                let _ = save_overlay(&layer, ov);
+                ov.undo_removed(undo);
+                if persisted {
+                    let _ = save_overlay(&layer, ov);
+                }
                 return Err(e);
             }
         }
-        *ov = next_ov;
         assert_eq!(ov.has_upper(&rel), exists(&join(&layer, &rel)));
         ov.check_invariants();
         Ok(())
@@ -1427,9 +1433,8 @@ impl Proxy {
         let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
         let (from, to) = (join(&layer, &old_rel), join(&layer, &new_rel));
         let (a, b) = (cpath(&from)?, cpath(&to)?);
-        let mut next_ov = ov.clone();
-        next_ov
-            .rename(
+        let undo = ov
+            .rename_undo(
                 &old_rel,
                 &new_rel,
                 src_kind == Kind::Dir,
@@ -1437,12 +1442,17 @@ impl Proxy {
                 plan.opaque_new,
             )
             .map_err(err)?;
-        check(unsafe { libc::rename(a.as_ptr(), b.as_ptr()) })?;
-        if let Err(e) = save_overlay(&layer, &next_ov) {
-            let _ = unsafe { libc::rename(b.as_ptr(), a.as_ptr()) };
+        if let Err(e) = check(unsafe { libc::rename(a.as_ptr(), b.as_ptr()) }) {
+            ov.undo_rename(undo);
             return Err(e);
         }
-        *ov = next_ov;
+        if undo.persisted_changed()
+            && let Err(e) = save_overlay(&layer, ov)
+        {
+            let _ = unsafe { libc::rename(b.as_ptr(), a.as_ptr()) };
+            ov.undo_rename(undo);
+            return Err(e);
+        }
         if plan.opaque_new {
             assert_eq!(lkind(&to)?, Kind::Dir);
         }
@@ -1463,7 +1473,7 @@ impl Proxy {
 
     fn link(&mut self, id: usize, dirfd: usize, path: &str) -> Result<()> {
         let vpath = self.node(id)?.vpath.clone();
-        let (session, located_grant, located_rel, _, _) = self.located_node(id)?;
+        let (session, located_grant, located_rel, _, _, _) = self.located_node(id)?;
         let (new_session, new) = self.target(dirfd, path)?;
         if session != new_session {
             return Err(err(EXDEV));
@@ -1508,16 +1518,24 @@ impl Proxy {
         }
         if access == Access::Clone {
             let (ov, _, layer) = self.clone_grant_mut(session, grant)?;
-            let mut next_ov = ov.clone();
-            if let Err(e) = next_ov
-                .created(&new_rel, false)
-                .map_err(err)
-                .and_then(|()| save_overlay(&layer, &next_ov))
+            let src_origin = ov.origin_inode(&old_rel);
+            let undo = match ov.created_undo(&new_rel, false).map_err(err) {
+                Ok(undo) => undo,
+                Err(e) => {
+                    remove_path(&to);
+                    return Err(e);
+                }
+            };
+            if undo.persisted_changed()
+                && let Err(e) = save_overlay(&layer, ov)
             {
+                ov.undo_created(&new_rel, undo);
                 remove_path(&to);
                 return Err(e);
             }
-            *ov = next_ov;
+            if let Some(ino) = src_origin {
+                ov.set_origin_inode(&new_rel, ino);
+            }
             assert_eq!(ov.has_upper(&new_rel), exists(&to));
             ov.check_invariants();
         }
@@ -1639,7 +1657,7 @@ impl Proxy {
 
     pub fn inode_of(&self, id: usize) -> Option<usize> {
         match self.handles.get(&id) {
-            Some(Handle::Node(node)) => node.lock_inode,
+            Some(Handle::Node(node)) => node.lock_inode.get(),
             _ => None,
         }
     }
@@ -2072,7 +2090,18 @@ impl SchemeSync for Proxy {
     }
 
     fn inode(&self, id: usize) -> Result<usize> {
-        self.inode_of(id).ok_or(err(EBADF))
+        match self.handles.get(&id) {
+            Some(Handle::Node(node)) => {
+                if let Some(ino) = node.lock_inode.get() {
+                    return Ok(ino);
+                }
+                let fd = node.fd().ok_or(err(EBADF))?;
+                let ino = stat_inode(fd)?;
+                node.lock_inode.set(Some(ino));
+                Ok(ino)
+            }
+            _ => Err(err(EBADF)),
+        }
     }
 }
 

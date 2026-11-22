@@ -44,8 +44,102 @@ pub fn rel_parent(rel: &str) -> &str {
     }
 }
 
-fn under(path: &str, base: &str) -> bool {
-    path.len() > base.len() && path.starts_with(base) && path.as_bytes()[base.len()] == b'/'
+fn subtree_set(set: &BTreeSet<String>, rel: &str, include_self: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if include_self && set.contains(rel) {
+        out.push(rel.to_owned());
+    }
+    let below = format!("{rel}/");
+    for p in set.range(below.clone()..) {
+        if !p.starts_with(&below) {
+            break;
+        }
+        out.push(p.clone());
+    }
+    out
+}
+
+fn subtree_map(
+    map: &BTreeMap<String, usize>,
+    rel: &str,
+    include_self: bool,
+) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    if include_self && let Some(&v) = map.get(rel) {
+        out.push((rel.to_owned(), v));
+    }
+    let below = format!("{rel}/");
+    for (p, &v) in map.range(below.clone()..) {
+        if !p.starts_with(&below) {
+            break;
+        }
+        out.push((p.clone(), v));
+    }
+    out
+}
+
+fn remove_subtree_set(set: &mut BTreeSet<String>, rel: &str, include_self: bool) -> Vec<String> {
+    let items = subtree_set(set, rel, include_self);
+    for p in &items {
+        set.remove(p);
+    }
+    items
+}
+
+fn remove_subtree_map(
+    map: &mut BTreeMap<String, usize>,
+    rel: &str,
+    include_self: bool,
+) -> Vec<(String, usize)> {
+    let items = subtree_map(map, rel, include_self);
+    for (p, _) in &items {
+        map.remove(p);
+    }
+    items
+}
+
+pub struct CreatedUndo {
+    was_upper: bool,
+    removed_whiteout: bool,
+    added_opaque: bool,
+}
+
+impl CreatedUndo {
+    pub fn persisted_changed(&self) -> bool {
+        self.removed_whiteout || self.added_opaque
+    }
+}
+
+pub struct RemovedUndo {
+    rel: String,
+    removed_upper: Vec<String>,
+    removed_whiteouts: Vec<String>,
+    removed_opaque: Vec<String>,
+    removed_origins: Vec<(String, usize)>,
+    added_whiteout: bool,
+}
+
+impl RemovedUndo {
+    pub fn persisted_changed(&self) -> bool {
+        self.added_whiteout || !self.removed_whiteouts.is_empty() || !self.removed_opaque.is_empty()
+    }
+}
+
+pub struct RenameUndo {
+    from: String,
+    to: String,
+    noop: bool,
+    saved_upper: Vec<String>,
+    saved_whiteouts: Vec<String>,
+    saved_opaque: Vec<String>,
+    saved_origins: Vec<(String, usize)>,
+    persisted_changed: bool,
+}
+
+impl RenameUndo {
+    pub fn persisted_changed(&self) -> bool {
+        self.persisted_changed
+    }
 }
 
 impl Overlay {
@@ -65,12 +159,12 @@ impl Overlay {
     }
 
     pub fn check_invariants(&self) {
-        assert!(self.whiteouts.is_disjoint(&self.upper));
-        assert!(self.opaque.is_subset(&self.upper));
-        assert!(self.opaque.is_disjoint(&self.whiteouts));
-        assert!(self.origin_inodes.keys().all(|k| self.upper.contains(k)));
         assert!(self.upper.len() <= MAX_ENTRIES);
         assert!(self.whiteouts.len() <= MAX_ENTRIES);
+        debug_assert!(self.whiteouts.is_disjoint(&self.upper));
+        debug_assert!(self.opaque.is_subset(&self.upper));
+        debug_assert!(self.opaque.is_disjoint(&self.whiteouts));
+        debug_assert!(self.origin_inodes.keys().all(|k| self.upper.contains(k)));
     }
 
     pub fn set_origin_inode(&mut self, rel: &str, inode: usize) {
@@ -123,71 +217,225 @@ impl Overlay {
         !self.lower_hidden(dir) && !self.opaque.contains(dir)
     }
 
-    pub fn created(&mut self, rel: &str, dir: bool) -> Result<(), i32> {
+    pub fn created_undo(&mut self, rel: &str, dir: bool) -> Result<CreatedUndo, i32> {
         self.can_add_upper(rel)?;
-        self.upper.insert(rel.to_owned());
-        if self.whiteouts.remove(rel) && dir {
-            self.opaque.insert(rel.to_owned());
+        let was_upper = !self.upper.insert(rel.to_owned());
+        let removed_whiteout = self.whiteouts.remove(rel);
+        let added_opaque = if removed_whiteout && dir {
+            self.opaque.insert(rel.to_owned())
+        } else {
+            false
+        };
+        assert!(self.upper.contains(rel));
+        assert!(!self.whiteouts.contains(rel));
+        self.check_invariants();
+        Ok(CreatedUndo {
+            was_upper,
+            removed_whiteout,
+            added_opaque,
+        })
+    }
+
+    pub fn undo_created(&mut self, rel: &str, undo: CreatedUndo) {
+        if undo.added_opaque {
+            self.opaque.remove(rel);
+        }
+        if undo.removed_whiteout {
+            self.whiteouts.insert(rel.to_owned());
+        }
+        if !undo.was_upper {
+            self.upper.remove(rel);
+            self.origin_inodes.remove(rel);
         }
         self.check_invariants();
-        Ok(())
+    }
+
+    pub fn created(&mut self, rel: &str, dir: bool) -> Result<(), i32> {
+        self.created_undo(rel, dir).map(|_| ())
+    }
+
+    pub fn removed_undo(&mut self, rel: &str, lower_had: bool) -> Result<RemovedUndo, i32> {
+        let removed_whiteouts = subtree_set(&self.whiteouts, rel, false);
+        if lower_had
+            && !self.whiteouts.contains(rel)
+            && self.whiteouts.len() - removed_whiteouts.len() >= MAX_ENTRIES
+        {
+            return Err(crate::scope::EIO);
+        }
+        for p in &removed_whiteouts {
+            self.whiteouts.remove(p);
+        }
+        let removed_upper = remove_subtree_set(&mut self.upper, rel, true);
+        let removed_opaque = remove_subtree_set(&mut self.opaque, rel, true);
+        let removed_origins = remove_subtree_map(&mut self.origin_inodes, rel, true);
+        let added_whiteout = if lower_had {
+            self.whiteouts.insert(rel.to_owned())
+        } else {
+            false
+        };
+        assert!(!self.upper.contains(rel));
+        assert!(!self.opaque.contains(rel));
+        self.check_invariants();
+        Ok(RemovedUndo {
+            rel: rel.to_owned(),
+            removed_upper,
+            removed_whiteouts,
+            removed_opaque,
+            removed_origins,
+            added_whiteout,
+        })
+    }
+
+    pub fn undo_removed(&mut self, undo: RemovedUndo) {
+        if undo.added_whiteout {
+            self.whiteouts.remove(&undo.rel);
+        }
+        for p in undo.removed_upper {
+            self.upper.insert(p);
+        }
+        for p in undo.removed_whiteouts {
+            self.whiteouts.insert(p);
+        }
+        for p in undo.removed_opaque {
+            self.opaque.insert(p);
+        }
+        for (p, ino) in undo.removed_origins {
+            self.origin_inodes.insert(p, ino);
+        }
+        self.check_invariants();
     }
 
     pub fn removed(&mut self, rel: &str, lower_had: bool) -> Result<(), i32> {
-        self.upper.remove(rel);
-        let below = format!("{rel}/");
-        self.upper.retain(|p| !p.starts_with(&below));
-        self.whiteouts.retain(|p| !p.starts_with(&below));
-        self.opaque.retain(|p| p != rel && !p.starts_with(&below));
-        self.origin_inodes
-            .retain(|p, _| p != rel && !p.starts_with(&below));
-        if lower_had {
-            if !self.whiteouts.contains(rel) && self.whiteouts.len() >= MAX_ENTRIES {
-                return Err(crate::scope::EIO);
-            }
-            self.whiteouts.insert(rel.to_owned());
-        }
-        self.check_invariants();
-        Ok(())
+        self.removed_undo(rel, lower_had).map(|_| ())
     }
 
     pub fn moved(&mut self, from: &str, to: &str) {
-        let moved: Vec<String> = self
-            .upper
-            .iter()
-            .filter(|p| p.as_str() == from || under(p, from))
-            .cloned()
-            .collect();
+        let moved = remove_subtree_set(&mut self.upper, from, true);
         for p in moved {
-            self.upper.remove(&p);
             let dst = format!("{to}{}", &p[from.len()..]);
             self.whiteouts.remove(&dst);
             self.upper.insert(dst);
         }
-        let moved_opaque: Vec<String> = self
-            .opaque
-            .iter()
-            .filter(|p| p.as_str() == from || under(p, from))
-            .cloned()
-            .collect();
-        self.opaque.retain(|p| p.as_str() != to && !under(p, to));
+        let moved_opaque = remove_subtree_set(&mut self.opaque, from, true);
+        let _ = remove_subtree_set(&mut self.opaque, to, true);
         for p in moved_opaque {
-            self.opaque.remove(&p);
             let dst = format!("{to}{}", &p[from.len()..]);
             self.opaque.insert(dst);
         }
-        let moved_origins: Vec<(String, usize)> = self
-            .origin_inodes
-            .iter()
-            .filter(|(p, _)| p.as_str() == from || under(p, from))
-            .map(|(p, ino)| (p.clone(), *ino))
-            .collect();
-        self.origin_inodes
-            .retain(|p, _| p.as_str() != to && !under(p, to));
+        let moved_origins = remove_subtree_map(&mut self.origin_inodes, from, true);
+        let _ = remove_subtree_map(&mut self.origin_inodes, to, true);
         for (p, ino) in moved_origins {
-            self.origin_inodes.remove(&p);
             let dst = format!("{to}{}", &p[from.len()..]);
             self.origin_inodes.insert(dst, ino);
+        }
+        self.check_invariants();
+    }
+
+    fn pair_slice_set(set: &BTreeSet<String>, a: &str, b: &str) -> Vec<String> {
+        let mut out = subtree_set(set, a, true);
+        out.extend(subtree_set(set, b, true));
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn pair_slice_map(map: &BTreeMap<String, usize>, a: &str, b: &str) -> Vec<(String, usize)> {
+        let mut out = subtree_map(map, a, true);
+        out.extend(subtree_map(map, b, true));
+        out.sort_by(|x, y| x.0.cmp(&y.0));
+        out.dedup_by(|x, y| x.0 == y.0);
+        out
+    }
+
+    pub fn rename_undo(
+        &mut self,
+        from: &str,
+        to: &str,
+        is_dir: bool,
+        whiteout_old: bool,
+        opaque_new: bool,
+    ) -> Result<RenameUndo, i32> {
+        if opaque_new {
+            assert!(is_dir);
+        }
+        if from == to {
+            self.check_invariants();
+            return Ok(RenameUndo {
+                from: from.to_owned(),
+                to: to.to_owned(),
+                noop: true,
+                saved_upper: Vec::new(),
+                saved_whiteouts: Vec::new(),
+                saved_opaque: Vec::new(),
+                saved_origins: Vec::new(),
+                persisted_changed: false,
+            });
+        }
+        let saved_upper = Self::pair_slice_set(&self.upper, from, to);
+        let saved_whiteouts = Self::pair_slice_set(&self.whiteouts, from, to);
+        let saved_opaque = Self::pair_slice_set(&self.opaque, from, to);
+        let saved_origins = Self::pair_slice_map(&self.origin_inodes, from, to);
+        let to_was_whited_out = self.whiteouts.contains(to);
+        self.moved(from, to);
+        let res = self.removed(from, whiteout_old).and_then(|()| {
+            self.created(to, is_dir)?;
+            if opaque_new || (is_dir && to_was_whited_out) {
+                self.mark_opaque(to);
+            }
+            Ok(())
+        });
+        if let Err(e) = res {
+            self.undo_rename(RenameUndo {
+                from: from.to_owned(),
+                to: to.to_owned(),
+                noop: false,
+                saved_upper,
+                saved_whiteouts,
+                saved_opaque,
+                saved_origins,
+                persisted_changed: false,
+            });
+            return Err(e);
+        }
+        let new_whiteouts = Self::pair_slice_set(&self.whiteouts, from, to);
+        let new_opaque = Self::pair_slice_set(&self.opaque, from, to);
+        let persisted_changed = new_whiteouts != saved_whiteouts || new_opaque != saved_opaque;
+        self.check_invariants();
+        Ok(RenameUndo {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            noop: false,
+            saved_upper,
+            saved_whiteouts,
+            saved_opaque,
+            saved_origins,
+            persisted_changed,
+        })
+    }
+
+    pub fn undo_rename(&mut self, undo: RenameUndo) {
+        if undo.noop {
+            return;
+        }
+        let _ = remove_subtree_set(&mut self.upper, &undo.from, true);
+        let _ = remove_subtree_set(&mut self.upper, &undo.to, true);
+        let _ = remove_subtree_set(&mut self.whiteouts, &undo.from, true);
+        let _ = remove_subtree_set(&mut self.whiteouts, &undo.to, true);
+        let _ = remove_subtree_set(&mut self.opaque, &undo.from, true);
+        let _ = remove_subtree_set(&mut self.opaque, &undo.to, true);
+        let _ = remove_subtree_map(&mut self.origin_inodes, &undo.from, true);
+        let _ = remove_subtree_map(&mut self.origin_inodes, &undo.to, true);
+        for p in undo.saved_upper {
+            self.upper.insert(p);
+        }
+        for p in undo.saved_whiteouts {
+            self.whiteouts.insert(p);
+        }
+        for p in undo.saved_opaque {
+            self.opaque.insert(p);
+        }
+        for (p, ino) in undo.saved_origins {
+            self.origin_inodes.insert(p, ino);
         }
         self.check_invariants();
     }
@@ -200,21 +448,8 @@ impl Overlay {
         whiteout_old: bool,
         opaque_new: bool,
     ) -> Result<(), i32> {
-        if opaque_new {
-            assert!(is_dir);
-        }
-        if from == to {
-            self.check_invariants();
-            return Ok(());
-        }
-        self.moved(from, to);
-        self.removed(from, whiteout_old)?;
-        self.created(to, is_dir)?;
-        if opaque_new {
-            self.mark_opaque(to);
-        }
-        self.check_invariants();
-        Ok(())
+        self.rename_undo(from, to, is_dir, whiteout_old, opaque_new)
+            .map(|_| ())
     }
 
     pub fn encode(&self) -> Vec<u8> {

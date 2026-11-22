@@ -1103,7 +1103,7 @@ def test_fd_primitives(vm, args):
         "timerfd-monotonic-relative-absolute-readiness",
         "timerfd-realtime-relative-absolute-readiness",
         "timerfd-gettime-interval-disarm-rearm", "timerfd-dup-fork-blocking",
-        "descriptor-flags-exec", "timerfd-alarm-quota",
+        "descriptor-flags-exec", "timerfd-alarm-quota", "timerfd-refresh-poll",
     )
     lines = output.splitlines()
     missing = [name for name in expected if f"fd-primitives-probe: pass {name}" not in lines]
@@ -6678,6 +6678,10 @@ def test_agent_scope(vm, args):
     _, output = run("sclinks2", "ls -l /home/user/scope /home/user/scope/d")
     if output.count(" -> ") < 5:
         problems.append("the session's symlinks did not stay in the folder")
+    run("sclnkrt0", "rm -f /home/user/scope/rtlink /home/user/scope/extlink && ln -s /home/user/outside/secret.txt /home/user/scope/rtlink && ln -s /scheme/null /home/user/scope/extlink")
+    status, output = run("sclnkrt1", "ferrion-run --files /home/user/scope ferrion-run-probe retarget-link /home/user/scope/rtlink /home/user/scope/extlink")
+    if status != 0 or "RETARGET_OK EXT=/scheme/null" not in output or "leads outside /home/user/scope: /home/user/scope/rtlink ->" not in output:
+        problems.append(f"retargeted symlink was not reported (exit {status}, {output.strip()[-160:]})")
     status, output = run("schome2", "ferrion-run --files /home/user cat /home/user/outside/secret.txt")
     if SCOPE_MARKER not in output:
         problems.append(f"a session given the whole home could not read a file in it (exit {status})")
@@ -6827,6 +6831,15 @@ def test_agent_clone(vm, args):
     rn_clone_line = re.search(r"RENAME (?:OK|ERR \d+)", rn_clone)
     if not rn_direct_line or not rn_clone_line or rn_direct_line.group(0) != rn_clone_line.group(0) or "RN_INTACT" not in rn_dir:
         problems.append(f"rename file onto lower dir: direct={rn_direct_line.group(0) if rn_direct_line else None} clone={rn_clone_line.group(0) if rn_clone_line else None} intact={'RN_INTACT' in rn_dir}")
+
+    run("clop0", "rm -rf /home/user/cl-op && mkdir -p /home/user/cl-op/d && echo lower > /home/user/cl-op/d/x")
+    status, op_out = run("clop1", "ferrion-run --clone /home/user/cl-op bash -c \"rm /home/user/cl-op/d/x && rmdir /home/user/cl-op/d && mkdir /home/user/cl-op/e && mv /home/user/cl-op/e /home/user/cl-op/d && printf OP_COUNT= && ls -A /home/user/cl-op/d | wc -l\"")
+    op_sess = re.search(r"session (\d+-\d+) keeps", op_out)
+    if op_sess:
+        run("clop2", f"ferrion-run apply {op_sess.group(1)}")
+    _, op_after = run("clop3", "test -d /home/user/cl-op/d && test ! -e /home/user/cl-op/d/x && echo OP_CLEAN")
+    if status != 0 or "OP_COUNT=0" not in op_out or "OP_CLEAN" not in op_after:
+        problems.append(f"rename dir onto whited-out dir lost opaque (exit={status}, op_out={op_out.strip()[-120:]}, clean={'OP_CLEAN' in op_after})")
 
     run("cllk0", "rm -rf /home/user/cl-lk && mkdir -p /home/user/cl-lk && echo one > /home/user/cl-lk/f")
     status, lk_out = run("cllk1", "ferrion-run --clone /home/user/cl-lk ferrion-run-probe lock-fchmod /home/user/cl-lk/f")

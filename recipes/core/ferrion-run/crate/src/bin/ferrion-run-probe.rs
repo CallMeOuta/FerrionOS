@@ -73,6 +73,8 @@ mod probe {
             ["lock-hold", path, secs] => lock_hold(path, secs.parse().unwrap_or(0)),
             ["lock-try", path] => lock_try(path),
             ["lock-fchmod", path] => lock_fchmod(path),
+            ["retarget-link", path, target] => retarget_link(path, target),
+            ["create-many", dir, count] => create_many(dir, count.parse().unwrap_or(0)),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
@@ -224,6 +226,55 @@ mod probe {
             return 1;
         }
         println!("LOCK_FCHMOD OK");
+        0
+    }
+
+    fn retarget_link(path: &str, ext_link: &str) -> i32 {
+        use syscall::flag::{O_NOFOLLOW, O_STAT, O_SYMLINK, O_WRONLY};
+        let rw_flags = (O_SYMLINK | O_NOFOLLOW | O_STAT | O_WRONLY) as i32;
+        let fd = match call::open(path, rw_flags, 0) {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: open {path}: {e}");
+                return 1;
+            }
+        };
+        let _ = call::close(fd);
+        let ext_flags = (O_SYMLINK | O_WRONLY) as i32;
+        let efd = match call::open(ext_link, ext_flags, 0) {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: open external {ext_link}: {e}");
+                return 1;
+            }
+        };
+        let mut buf = [0u8; 256];
+        let path_res = call::fpath(efd, &mut buf);
+        let _ = call::close(efd);
+        match path_res {
+            Ok(n) => {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                println!("RETARGET_OK EXT={text}");
+                0
+            }
+            Err(e) => {
+                eprintln!("ferrion-run-probe: fpath {ext_link}: {e}");
+                1
+            }
+        }
+    }
+
+    fn create_many(dir: &str, count: usize) -> i32 {
+        let start = std::time::Instant::now();
+        for i in 0..count {
+            let path = format!("{dir}/f{i}");
+            if let Err(e) = std::fs::File::create(&path) {
+                eprintln!("ferrion-run-probe: create {path}: {e}");
+                return 1;
+            }
+        }
+        let elapsed_ms = start.elapsed().as_millis();
+        println!("CREATED {count} IN {elapsed_ms}ms");
         0
     }
 
