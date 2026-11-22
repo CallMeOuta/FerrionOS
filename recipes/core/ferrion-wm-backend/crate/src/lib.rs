@@ -65,6 +65,11 @@ impl Backend {
     pub fn open() -> std::io::Result<Self> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "inputd/DRM backend requires FerrionOS"))
     }
+    pub fn open_with_wakeup(_wakeup: impl Fn() + Send + Sync + 'static) -> std::io::Result<Self> {
+        Self::open()
+    }
+    pub fn cursor_size(&self) -> std::io::Result<(u32, u32)> { match *self {} }
+    pub fn set_cursor(&mut self, _pixels: Option<&[u8]>, _size: (u32, u32), _hotspot: (i32, i32)) -> std::io::Result<()> { match *self {} }
     pub fn vt(&self) -> usize { match *self {} }
     pub fn dimensions(&self) -> (u32, u32) { match *self {} }
     pub fn stride(&self) -> u32 { match *self {} }

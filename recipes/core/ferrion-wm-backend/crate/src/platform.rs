@@ -33,6 +33,7 @@ struct Shared {
     changed: Condvar,
     stopped: AtomicBool,
     failure: Mutex<Option<io::Error>>,
+    wakeup: Box<dyn Fn() + Send + Sync>,
 }
 
 struct Display {
@@ -52,6 +53,12 @@ struct Cursor {
 
 impl Backend {
     pub fn open() -> io::Result<Self> {
+        Self::open_with_wakeup(|| {})
+    }
+
+    /// Wake the consumer after publishing an event or a terminal reader error.
+    /// The callback must not block; a calloop ping is one suitable implementation.
+    pub fn open_with_wakeup(wakeup: impl Fn() + Send + Sync + 'static) -> io::Result<Self> {
         let epoch = Instant::now();
         let input = Arc::new(ConsumerHandle::new_vt()?);
         let vt = consumer_vt(&input)?;
@@ -62,6 +69,7 @@ impl Backend {
             changed: Condvar::new(),
             stopped: AtomicBool::new(false),
             failure: Mutex::new(None),
+            wakeup: Box::new(wakeup),
         });
         // Bounded storage: never block the reader behind rendering. Overflow is
         // a visible terminal error rather than dropping a key release silently.
@@ -71,6 +79,7 @@ impl Backend {
         let reader = thread::Builder::new().name("ferrion-wm-input".into()).spawn(move || {
             if let Err(error) = read_input(thread_input, &thread_shared, sender, stop_reader, epoch) {
                 *thread_shared.failure.lock().unwrap() = Some(error);
+                (thread_shared.wakeup)();
             }
         })?;
         let backend = Self {
@@ -120,6 +129,46 @@ impl Backend {
                 Err(io::Error::new(io::ErrorKind::BrokenPipe, "input reader stopped"))
             }
         }
+    }
+
+    /// Hardware plane capacity in pixels. Cursor images are never scaled silently.
+    pub fn cursor_size(&self) -> io::Result<(u32, u32)> {
+        let cursor = self.shared.cursor.lock().unwrap();
+        let cursor = cursor.as_ref().ok_or_else(|| io::Error::other("display change pending"))?;
+        Ok((cursor.buffer.size().0, cursor.buffer.size().1))
+    }
+
+    /// Install tightly packed premultiplied ARGB8888 pixels, or hide the plane.
+    /// This shares the cursor lock with motion, so a shape change cannot race an
+    /// input move. The frame renderer and its presentation never take this lock.
+    pub fn set_cursor(&mut self, pixels: Option<&[u8]>, size: (u32, u32), hotspot: (i32, i32)) -> io::Result<()> {
+        self.check_failure()?;
+        let mut cursor = self.shared.cursor.lock().unwrap();
+        let cursor = cursor.as_mut().ok_or_else(|| io::Error::other("display change pending"))?;
+        let Some(pixels) = pixels else {
+            #[allow(deprecated)]
+            return cursor.drm.set_cursor2(cursor.crtc, None::<&DumbBuffer>, (0, 0));
+        };
+        let (width, height) = size;
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        if width == 0 || height == 0 || width > cursor.buffer.size().0
+            || height > cursor.buffer.size().1 || bytes != pixels.len() as u64
+            || hotspot.0 < 0 || hotspot.1 < 0
+            || hotspot.0 as u32 >= width || hotspot.1 as u32 >= height
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "cursor image does not fit its plane"));
+        }
+        let pitch = cursor.buffer.pitch() as usize;
+        {
+            let mut mapping = cursor.drm.map_dumb_buffer(&mut cursor.buffer)?;
+            mapping.fill(0);
+            let row_bytes = width as usize * 4;
+            for (row, source) in pixels.chunks_exact(row_bytes).enumerate() {
+                mapping[row * pitch..row * pitch + row_bytes].copy_from_slice(source);
+            }
+        }
+        #[allow(deprecated)]
+        cursor.drm.set_cursor2(cursor.crtc, Some(&cursor.buffer), hotspot)
     }
 
     /// Called only after DisplayChanged, with all renderer images released.
@@ -305,7 +354,7 @@ fn read_input(input: Arc<ConsumerHandle>, shared: &Shared, sender: mpsc::SyncSen
             }
             if changed {
                 *shared.cursor.lock().unwrap() = None;
-                send(&sender, BackendEvent::DisplayChanged)?;
+                send(&sender, shared, BackendEvent::DisplayChanged)?;
                 continue;
             }
         }
@@ -324,7 +373,7 @@ fn read_input(input: Arc<ConsumerHandle>, shared: &Shared, sender: mpsc::SyncSen
             match event {
                 ConsumerHandleEvent::Handoff => {
                     *shared.cursor.lock().unwrap() = None;
-                    send(&sender, BackendEvent::DisplayChanged)?;
+                    send(&sender, shared, BackendEvent::DisplayChanged)?;
                     break;
                 }
                 ConsumerHandleEvent::Events(&[]) => break,
@@ -337,9 +386,9 @@ fn read_input(input: Arc<ConsumerHandle>, shared: &Shared, sender: mpsc::SyncSen
                                 #[allow(deprecated)]
                                 cursor.drm.move_cursor(cursor.crtc, (motion.x, motion.y))?;
                                 let timing = CursorTiming { read_us, completed_us: elapsed_us(epoch), x: motion.x, y: motion.y };
-                                send(&sender, BackendEvent::CursorTiming(timing))?;
+                                send(&sender, shared, BackendEvent::CursorTiming(timing))?;
                             }
-                            send(&sender, BackendEvent::Input(event))?;
+                            send(&sender, shared, BackendEvent::Input(event))?;
                         }
                     }
                 }
@@ -348,11 +397,13 @@ fn read_input(input: Arc<ConsumerHandle>, shared: &Shared, sender: mpsc::SyncSen
     }
 }
 
-fn send(sender: &mpsc::SyncSender<BackendEvent>, event: BackendEvent) -> io::Result<()> {
+fn send(sender: &mpsc::SyncSender<BackendEvent>, shared: &Shared, event: BackendEvent) -> io::Result<()> {
     sender.try_send(event).map_err(|error| match error {
         mpsc::TrySendError::Full(_) => io::Error::other("input queue overflow; compositor is not draining events"),
         mpsc::TrySendError::Disconnected(_) => io::Error::new(io::ErrorKind::BrokenPipe, "compositor event receiver closed"),
-    })
+    })?;
+    (shared.wakeup)();
+    Ok(())
 }
 
 fn elapsed_us(epoch: Instant) -> u64 {
