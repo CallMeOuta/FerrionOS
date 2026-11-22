@@ -3,8 +3,19 @@ use std::process::exit;
 
 use redox_scheme::scheme::{SchemeState, SchemeSync};
 use redox_scheme::{CallerCtx, OpenResult, RequestKind, SignalBehavior, Socket};
-use syscall::error::{Error, Result, EACCES};
+use syscall::error::{Error, Result, EACCES, EIO};
 use syscall::schemev2::NewFdFlags;
+
+enum ServeEnd {
+    Closed,
+    Failed(Error),
+}
+
+enum Outcome {
+    Exited(i32),
+    Signaled(i32),
+    ServerFailed,
+}
 
 const PAGE: usize = 4096;
 const FILL: u8 = 0xA5;
@@ -46,19 +57,26 @@ impl SchemeSync for ShortScheme {
     }
 }
 
-fn serve(socket: Socket) -> ! {
+fn serve(socket: Socket) -> ServeEnd {
     let mut scheme = ShortScheme;
     let mut state = SchemeState::new();
     loop {
         let request = match socket.next_request(SignalBehavior::Restart) {
             Ok(Some(request)) => request,
-            _ => exit(0),
+            Ok(None) => return ServeEnd::Closed,
+            Err(err) => return ServeEnd::Failed(err),
         };
-        if let RequestKind::Call(call) = request.kind() {
-            let response = call.handle_sync(&mut scheme, &mut state);
-            if socket.write_response(response, SignalBehavior::Restart).is_err() {
-                exit(0);
+        match request.kind() {
+            RequestKind::Call(call) => {
+                let response = call.handle_sync(&mut scheme, &mut state);
+                if let Err(err) = socket.write_response(response, SignalBehavior::Restart) {
+                    return ServeEnd::Failed(err);
+                }
             }
+            RequestKind::OnClose { id } if id == ROOT_ID => {
+                return ServeEnd::Closed;
+            }
+            _ => {}
         }
     }
 }
@@ -95,13 +113,41 @@ fn main() {
         drop(socket);
         reader(cap);
     }
-    std::thread::spawn(move || serve(socket));
+    unsafe { libc::close(cap as i32) };
+    let server = std::thread::spawn(move || serve(socket));
     let mut status = 0;
-    if unsafe { libc::waitpid(child, &mut status, 0) } != child || !libc::WIFEXITED(status) {
-        println!("scheme-short-read-probe: FAIL the reader did not exit normally ({status:#x})");
-        exit(2);
+    let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+    let reader_outcome = if waited != child {
+        Outcome::Signaled(-1)
+    } else if libc::WIFEXITED(status) {
+        Outcome::Exited(libc::WEXITSTATUS(status))
+    } else if libc::WIFSIGNALED(status) {
+        Outcome::Signaled(libc::WTERMSIG(status))
+    } else {
+        Outcome::Signaled(-1)
+    };
+    let serve_end = match server.join() {
+        Ok(end) => end,
+        Err(_) => ServeEnd::Failed(Error::new(EIO)),
+    };
+    let outcome = match (reader_outcome, &serve_end) {
+        (Outcome::Exited(0), ServeEnd::Failed(_)) => Outcome::ServerFailed,
+        (r, _) => r,
+    };
+    match outcome {
+        Outcome::Exited(0) => exit(0),
+        Outcome::Exited(code) => exit(code),
+        Outcome::Signaled(sig) => {
+            println!("scheme-short-read-probe: FAIL the reader did not exit normally (signal {sig}, status {status:#x})");
+            exit(2);
+        }
+        Outcome::ServerFailed => {
+            if let ServeEnd::Failed(err) = serve_end {
+                println!("scheme-short-read-probe: FAIL server exited with error: {err}");
+            }
+            exit(2);
+        }
     }
-    exit(libc::WEXITSTATUS(status));
 }
 
 fn reader(cap: usize) -> ! {
