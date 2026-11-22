@@ -3,7 +3,11 @@ use std::{
     fs::File,
     io::{self, Write},
     os::fd::AsRawFd,
+    os::unix::fs::FileExt,
 };
+
+const CYCLES: usize = 96;
+const MAX_READS: usize = 4096;
 
 struct Mapping {
     address: *mut u8,
@@ -60,7 +64,7 @@ fn pattern(seed: usize, index: usize) -> u8 {
 }
 fn exercise(unlink_first: bool, mapped_write: bool, hold_previous: bool) -> io::Result<()> {
     let mut previous: Option<(Mapping, File, usize)> = None;
-    for iteration in 0..96 {
+    for iteration in 0..CYCLES {
         let len = [409, 620, 209][iteration % 3] * 730 * 4;
         let (mut file, path) = tempfile::NamedTempFile::new()?.into_parts();
         let path = if unlink_first {
@@ -95,18 +99,109 @@ fn exercise(unlink_first: bool, mapped_write: bool, hold_previous: bool) -> io::
     }
     Ok(())
 }
+fn read_through_descriptor(file: &File, len: usize, seed: usize, when: &str) -> io::Result<()> {
+    let mut bytes = vec![0xa5u8; len + 4096];
+    let mut total = 0;
+    for _ in 0..MAX_READS {
+        let count = file.read_at(&mut bytes[total..], total as u64)?;
+        if count == 0 {
+            break;
+        }
+        total += count;
+        if total == bytes.len() {
+            break;
+        }
+    }
+    if total != len {
+        return Err(io::Error::other(format!(
+            "{when}: seed={seed} read returned {total} of {len} bytes"
+        )));
+    }
+    if let Some(index) = (0..len).find(|&index| bytes[index] != pattern(seed, index)) {
+        return Err(io::Error::other(format!(
+            "{when}: seed={seed} byte={index} read={:02x} expected={:02x}",
+            bytes[index],
+            pattern(seed, index)
+        )));
+    }
+    let size = file.metadata()?.len();
+    if size != len as u64 {
+        return Err(io::Error::other(format!(
+            "{when}: seed={seed} size={size} expected={len}"
+        )));
+    }
+    Ok(())
+}
+fn read_back(unlink_first: bool, unmap_first: bool) -> io::Result<()> {
+    for iteration in 0..CYCLES {
+        let len = [409, 620, 209][iteration % 3] * 730 * 4;
+        let (file, path) = tempfile::NamedTempFile::new()?.into_parts();
+        let path = if unlink_first {
+            path.close()?;
+            None
+        } else {
+            Some(path)
+        };
+        file.set_len(len as u64)?;
+        let mut writer = Mapping::new(&file, len, true)?;
+        writer.write_pattern(iteration);
+        if unmap_first {
+            drop(writer);
+            read_through_descriptor(&file, len, iteration, "after munmap")?;
+        } else {
+            read_through_descriptor(&file, len, iteration, "while mapped")?;
+            drop(writer);
+            read_through_descriptor(&file, len, iteration, "after munmap")?;
+        }
+        drop(file);
+        if let Some(path) = path {
+            path.close()?;
+        }
+    }
+    Ok(())
+}
+fn read_back_cases() -> usize {
+    let mut failures = 0;
+    for unlink_first in [false, true] {
+        for unmap_first in [false, true] {
+            let case = format!("read-back unlink_first={unlink_first} unmap_first={unmap_first}");
+            match read_back(unlink_first, unmap_first) {
+                Ok(()) => println!("shm-reuse-probe: PASS {case} ({CYCLES} cycles)"),
+                Err(error) => {
+                    println!("shm-reuse-probe: FAIL {case}: {error}");
+                    failures += 1;
+                }
+            }
+        }
+    }
+    failures
+}
 fn main() -> std::process::ExitCode {
     println!(
         "shm-reuse-probe: directory={}",
         std::env::temp_dir().display()
     );
+    match std::env::args().nth(1).as_deref() {
+        None => {}
+        Some("read-back") => {
+            return if read_back_cases() == 0 {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::FAILURE
+            };
+        }
+        Some(_) => {
+            eprintln!("usage: shm-reuse-probe [read-back]");
+            return std::process::ExitCode::from(2);
+        }
+    }
     let mut failures = 0;
     for unlink_first in [false, true] {
         for mapped_write in [false, true] {
             for hold_previous in [false, true] {
                 let case = format!("unlink_first={unlink_first} mapped_write={mapped_write} retain_mapping={hold_previous}");
                 match exercise(unlink_first, mapped_write, hold_previous) {
-                    Ok(()) => println!("shm-reuse-probe: PASS {case} (96 cycles)"),
+                    Ok(()) => println!("shm-reuse-probe: PASS {case} ({CYCLES} cycles)"),
                     Err(error) => {
                         println!("shm-reuse-probe: FAIL {case}: {error}");
                         failures += 1;

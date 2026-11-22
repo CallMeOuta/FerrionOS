@@ -1951,6 +1951,16 @@ def run_desktop_columns_timing(args, out):
     return run_gated(args, out, run_desktop_columns, Blocked)
 
 
+def test_shm_read_back(vm, args):
+    """Reads through a descriptor what a shared mapping wrote, while mapped and after munmap; size must stay."""
+    if not root_shell(vm, args.timeout):
+        return False, "serial root shell unavailable"
+    status, output = run_status(vm, "shm-reuse-probe read-back", max(args.timeout, 120))
+    (vm.out / "probe.txt").write_text(output)
+    passed = len(re.findall(r"shm-reuse-probe: PASS read-back ", output))
+    return status == 0 and passed == 4, f"{passed}/4 read-back cases pass; exit {status}; see {vm.out / 'probe.txt'}"
+
+
 def test_desktop_regions(vm, args):
     """Compares the desktop's region probes with flat/first-run.svg within two RGB steps."""
     from desktop_fixtures import compare_probes, load_regions
@@ -7719,6 +7729,7 @@ TESTS["scheme-short-read"] = test_scheme_short_read
 TESTS["event-poll"] = test_event_poll
 TESTS["desktop-regions"] = test_desktop_regions
 TESTS["shm-reuse"] = test_shm_reuse
+TESTS["shm-read-back"] = test_shm_read_back
 TESTS["resolver"] = test_resolver
 TESTS["cli-tools"] = test_cli_tools
 TESTS["dlopen-ctor"] = test_dlopen_ctor
