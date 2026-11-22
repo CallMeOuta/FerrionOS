@@ -270,28 +270,14 @@ pub fn build(
         &dep_pkgars
     };
     let have_toolchain = !name.is_host() && !dep_host_pkgars.is_empty();
-    let (sysroot_cached, toolchain_cached) = (
-        build_deps_dir(
-            logger,
-            &sysroot_dir,
-            deps_sysroot,
-            false,
-            cook_config.clean_target,
-        )?,
-        if have_toolchain {
-            build_deps_dir(
-                logger,
-                &toolchain_dir,
-                &dep_host_pkgars,
-                false,
-                cook_config.clean_target,
-            )?
-        } else {
-            true
-        },
-    );
+    let sysroot_tags_ok = deps_tags_current(logger, &sysroot_dir, deps_sysroot)?;
+    let toolchain_tags_ok = if have_toolchain {
+        deps_tags_current(logger, &toolchain_dir, &dep_host_pkgars)?
+    } else {
+        true
+    };
 
-    if !sysroot_cached || !toolchain_cached || {
+    if !sysroot_tags_ok || !toolchain_tags_ok || {
         build_is_source_newer(
             logger,
             recipe_dir,
@@ -306,13 +292,9 @@ pub fn build(
         for stage_dir in &stage_dirs {
             remove_stage_dir(stage_dir)?;
         }
-        if cook_config.clean_target {
-            if sysroot_cached {
-                build_deps_dir(logger, &sysroot_dir, deps_sysroot, true, true)?;
-            }
-            if toolchain_cached && have_toolchain {
-                build_deps_dir(logger, &toolchain_dir, &dep_host_pkgars, true, true)?;
-            }
+        build_deps_dir(logger, &sysroot_dir, deps_sysroot)?;
+        if have_toolchain {
+            build_deps_dir(logger, &toolchain_dir, &dep_host_pkgars)?;
         }
     } else {
         log_to_pty!(logger, "DEBUG: using cached build");
@@ -496,6 +478,10 @@ pub fn build(
             command
         };
 
+        assert_deps_populated(&sysroot_dir, deps_sysroot)?;
+        if have_toolchain {
+            assert_deps_populated(&toolchain_dir, &dep_host_pkgars)?;
+        }
         let full_script = format!(
             "{}\n{}\n{}\n{}",
             BUILD_PRESCRIPT, SHARED_PRESCRIPT, script, BUILD_POSTSCRIPT
@@ -617,67 +603,145 @@ pub fn get_sub_target_dir(target_dir: &Path, sub_path: &str) -> PathBuf {
     target_dir.join(sub_path)
 }
 
+const DEPS_POPULATED_MARKER: &str = ".populated";
+
+enum DepsDir {
+    Absent,
+    Populated { tags: BTreeSet<String> },
+    Emptied { tags: BTreeSet<String> },
+}
+
+fn inspect_deps_dir(deps_dir: &Path) -> Result<DepsDir> {
+    let tags_dir = deps_dir.join(".tags");
+    if !tags_dir.is_dir() {
+        return Ok(DepsDir::Absent);
+    }
+    let mut tags = BTreeSet::new();
+    for entry in
+        std::fs::read_dir(&tags_dir).map_err(wrap_io_err!(&tags_dir, "Reading tags dir"))?
+    {
+        let entry = entry.map_err(wrap_io_err!(&tags_dir, "Reading tags entry"))?;
+        if let Some(name) = entry.file_name().to_str() {
+            tags.insert(name.to_owned());
+        }
+    }
+    if deps_dir.join(DEPS_POPULATED_MARKER).is_file() {
+        Ok(DepsDir::Populated { tags })
+    } else {
+        Ok(DepsDir::Emptied { tags })
+    }
+}
+
+fn expected_dep_tags(dep_pkgars: &BTreeSet<(PackageName, PathBuf)>) -> BTreeSet<String> {
+    dep_pkgars
+        .iter()
+        .map(|(name, _)| name.without_prefix().to_owned())
+        .collect()
+}
+
+fn assert_deps_populated(
+    deps_dir: &Path,
+    dep_pkgars: &BTreeSet<(PackageName, PathBuf)>,
+) -> Result<()> {
+    let state = inspect_deps_dir(deps_dir)?;
+    let DepsDir::Populated { tags } = state else {
+        panic!(
+            "deps dir {} is not Populated before build",
+            deps_dir.display()
+        );
+    };
+    assert_eq!(tags, expected_dep_tags(dep_pkgars));
+    Ok(())
+}
+
+fn open_deps_pkey(dep_pkgars: &BTreeSet<(PackageName, PathBuf)>) -> Result<[u8; 32]> {
+    let pkey_path = "build/id_ed25519.pub.toml";
+    match PublicKeyFile::open(pkey_path) {
+        Ok(k) => Ok(k.pkey),
+        Err(e) => {
+            if !dep_pkgars.is_empty() {
+                Err(Error::from(e))
+            } else {
+                Ok(Default::default())
+            }
+        }
+    }
+}
+
+fn deps_hashes_match(
+    logger: &PtyOut,
+    deps_dir: &Path,
+    tags: &BTreeSet<String>,
+    dep_pkgars: &BTreeSet<(PackageName, PathBuf)>,
+    pkey_file: &[u8; 32],
+) -> Result<bool> {
+    let expected = expected_dep_tags(dep_pkgars);
+    if *tags != expected {
+        return Ok(false);
+    }
+    let tags_dir = deps_dir.join(".tags");
+    let mut cached = true;
+    for (name, pkgar_path) in dep_pkgars {
+        let tag_file = tags_dir.join(name.without_prefix());
+        let Ok(tag_hash) = blake3::Hash::from_hex(fs::read_to_string(&tag_file)?) else {
+            log_to_pty!(
+                logger,
+                "DEBUG: updating {:?}: {:?} is absent",
+                deps_dir.file_name().unwrap().display(),
+                name.as_str(),
+            );
+            cached = false;
+            continue;
+        };
+        let pkgar_hash = PackageFile::new(pkgar_path, pkey_file)?.header().blake3;
+        if *tag_hash.as_bytes() != pkgar_hash {
+            log_to_pty!(
+                logger,
+                "DEBUG: updating {:?}: {:?} is updated",
+                deps_dir.file_name().unwrap().display(),
+                name.as_str(),
+            );
+            cached = false;
+        }
+    }
+    Ok(cached)
+}
+
+fn deps_tags_current(
+    logger: &PtyOut,
+    deps_dir: &Path,
+    dep_pkgars: &BTreeSet<(PackageName, PathBuf)>,
+) -> Result<bool> {
+    let pkey_file = open_deps_pkey(dep_pkgars)?;
+    match inspect_deps_dir(deps_dir)? {
+        DepsDir::Absent => Ok(false),
+        DepsDir::Populated { tags } | DepsDir::Emptied { tags } => {
+            deps_hashes_match(logger, deps_dir, &tags, dep_pkgars, &pkey_file)
+        }
+    }
+}
+
 fn build_deps_dir(
     logger: &PtyOut,
     deps_dir: &PathBuf,
     dep_pkgars: &BTreeSet<(PackageName, PathBuf)>,
-    check_init_tag: bool,
-    write_init_tag: bool,
 ) -> Result<bool> {
-    let pkey_path = "build/id_ed25519.pub.toml";
-    let pkey_file = match PublicKeyFile::open(pkey_path) {
-        Ok(k) => k.pkey,
-        Err(e) => {
-            if !dep_pkgars.is_empty() {
-                return Err(Error::from(e));
-            } else {
-                Default::default()
+    let pkey_file = open_deps_pkey(dep_pkgars)?;
+    match inspect_deps_dir(deps_dir)? {
+        DepsDir::Populated { tags } => {
+            if deps_hashes_match(logger, deps_dir, &tags, dep_pkgars, &pkey_file)? {
+                return Ok(true);
+            }
+            fs::remove_all(deps_dir)?;
+        }
+        DepsDir::Emptied { .. } => {
+            fs::remove_all(deps_dir)?;
+        }
+        DepsDir::Absent => {
+            if deps_dir.exists() {
+                fs::remove_all(deps_dir)?;
             }
         }
-    };
-    let tags_dir = deps_dir.join(".tags");
-    if tags_dir.is_dir() {
-        let mut cached = fs::check_files_present(
-            &tags_dir,
-            &dep_pkgars
-                .iter()
-                .map(|(name, _)| name.without_prefix())
-                .collect(),
-        )?;
-        if cached {
-            for (name, pkgar_path) in dep_pkgars {
-                let tag_file = tags_dir.join(name.without_prefix());
-                let Ok(tag_hash) = blake3::Hash::from_hex(fs::read_to_string(&tag_file)?) else {
-                    log_to_pty!(
-                        logger,
-                        "DEBUG: updating {:?}: {:?} is absent",
-                        deps_dir.file_name().unwrap().display(),
-                        name.as_str(),
-                    );
-                    cached = false;
-                    continue;
-                };
-                let pkgar_hash = PackageFile::new(pkgar_path, &pkey_file)?.header().blake3;
-                if *tag_hash.as_bytes() != pkgar_hash {
-                    log_to_pty!(
-                        logger,
-                        "DEBUG: updating {:?}: {:?} is updated",
-                        deps_dir.file_name().unwrap().display(),
-                        name.as_str(),
-                    );
-                    cached = false;
-                }
-            }
-        }
-        if cached
-            && (!check_init_tag || {
-                let init_tag_file = deps_dir.join(".tags-init");
-                std::fs::exists(&init_tag_file).unwrap_or(false)
-            })
-        {
-            return Ok(true);
-        }
-        fs::remove_all(deps_dir)?;
     }
 
     let deps_dir_tmp = deps_dir.with_added_extension("tmp");
@@ -701,10 +765,8 @@ fn build_deps_dir(
         std::fs::write(&tag_file, hash.as_bytes()).map_err(wrap_io_err!("Writing tag"))?;
     }
 
-    if write_init_tag {
-        let init_tag_file = deps_dir_tmp.join(".tags-init");
-        std::fs::write(init_tag_file, "").map_err(wrap_io_err!("Writing init tag"))?;
-    }
+    let populated_marker = deps_dir_tmp.join(DEPS_POPULATED_MARKER);
+    std::fs::write(&populated_marker, "").map_err(wrap_io_err!("Writing populated marker"))?;
 
     fs::rename(&deps_dir_tmp, deps_dir)?;
 
@@ -712,12 +774,21 @@ fn build_deps_dir(
 }
 
 fn clean_deps_dir(deps_dir: &PathBuf) -> Result<bool> {
-    let tags_dir = deps_dir.join(".tags");
-    let tags_dir_tmp = deps_dir.with_added_extension("tags");
-    fs::rename(&tags_dir, &tags_dir_tmp)?;
-    fs::remove_all(deps_dir)?;
-    fs::create_dir(deps_dir)?;
-    fs::rename(&tags_dir_tmp, &tags_dir)?;
+    let marker = deps_dir.join(DEPS_POPULATED_MARKER);
+    if marker.is_file() {
+        fs::remove_all(&marker)?;
+    }
+    if deps_dir.is_dir() {
+        for entry in
+            std::fs::read_dir(deps_dir).map_err(wrap_io_err!(deps_dir, "Reading deps dir"))?
+        {
+            let entry = entry.map_err(wrap_io_err!(deps_dir, "Reading deps entry"))?;
+            if entry.file_name() == ".tags" {
+                continue;
+            }
+            fs::remove_all(&entry.path())?;
+        }
+    }
     Ok(false)
 }
 
