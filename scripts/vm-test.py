@@ -3933,6 +3933,15 @@ def test_disk_keys(args, out):
 
 def test_disk_install(args, out):
     """DE6: the live image's text installer installs to a second disk with one passphrase; that disk starts with the passphrase and with the recovery key the installer printed; its filesystem.toml holds no passphrase and its raw bytes no file name (use --config disk-encryption-test after `make live`)."""
+    import tomllib
+
+    def read_guest_toml(vm, path):
+        status, out_text = run_status(vm, f"echo TOML-BEGIN; cat {path}; echo TOML-END")
+        if status != 0:
+            return None, out_text
+        match = re.search(r"(?ms)^TOML-BEGIN\n(.*)\nTOML-END$", out_text)
+        return (match.group(1) if match else None), out_text
+
     passphrase, installed = config_passphrase(args), "ferrion-installed-disk"
     scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-install-"))
     live, target, extra = scratch / "live.iso", scratch / "target.img", scratch / "extra.img"
@@ -3946,11 +3955,14 @@ def test_disk_install(args, out):
         try:
             if not unlock(vm, passphrase, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
                 return False, f"the live image did not reach a root shell; see {vm.out}"
+            live_toml, live_raw = read_guest_toml(vm, "/filesystem.toml")
+            if live_toml is None:
+                return False, f"could not read live /filesystem.toml: {live_raw[-200:]!r}; see {vm.out}"
             since = vm.mark()
             vm.type("redox_installer_tui\n")
             # lived logs "removing handle: ..." on the same console as the installer closes its
             # handles; that line can land between a drive's number and its path.
-            choice = vm.wait_serial(r"(\d+): (?:removing handle[^\n]*\n)?\S+: 2\.00 GB", args.timeout, since)
+            choice = vm.wait_serial(r"(\d+): (?:removing handle[^\n]*\n)?\S+(?:removing handle[^\n]*\n)?: 2\.00 GB", args.timeout, since)
             if not choice or not vm.wait_serial(r"Select a drive", 10, since):
                 return False, f"the installer did not offer the 2 GB disk; see {vm.out}"
             vm.type(choice.group(1) + "\n")
@@ -3982,9 +3994,21 @@ def test_disk_install(args, out):
                 if not unlock(vm, secret, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
                     return False, f"the installed disk did not start with its {name}; see {vm.out}"
                 if name == "passphrase":
-                    status, output = run_status(vm, f"grep -c -e encrypt_disk -e {installed} -e {passphrase} /filesystem.toml")
+                    status, output = run_status(vm, f"grep -c -e encrypt_disk -e unlock_account -e {installed} -e {passphrase} /filesystem.toml")
                     if status != 1:
-                        return False, f"the installed filesystem.toml holds a passphrase ({status}): {output!r}"
+                        return False, f"the installed filesystem.toml holds encryption fields or a passphrase ({status}): {output!r}"
+                    inst_toml, inst_raw = read_guest_toml(vm, "/filesystem.toml")
+                    if inst_toml is None:
+                        return False, f"could not read installed /filesystem.toml: {inst_raw[-200:]!r}; see {vm.out}"
+                    expected_cfg = tomllib.loads(live_toml)
+                    expected_cfg.get("general", {}).pop("encrypt_disk", None)
+                    expected_cfg.get("general", {}).pop("unlock_account", None)
+                    if "user" in expected_cfg.get("users", {}):
+                        expected_cfg["users"]["user"].pop("password", None)
+                    if tomllib.loads(inst_toml) != expected_cfg:
+                        (vm.out / "live-filesystem.toml").write_text(live_toml)
+                        (vm.out / "installed-filesystem.toml").write_text(inst_toml)
+                        return False, f"installed filesystem.toml differed beyond stripped encryption fields; see {vm.out}"
                 notes.append(f"starts with its {name}")
             finally:
                 vm.close()
@@ -4000,6 +4024,100 @@ def test_disk_install(args, out):
         names = [name for name in (b"filesystem.toml", b"os-release", b"redoxfs-key") if name in raw]
         if names:
             return False, f"file names readable in the raw disk: {names}"
+
+        unenc = scratch / "unenc.img"
+        unenc.write_bytes(b"")
+        os.truncate(unenc, 2 << 30)
+        gen_line = next(
+            (i + 1 for i, line in enumerate(live_toml.splitlines()) if line.strip() == "[general]"),
+            None,
+        )
+        if gen_line is None:
+            return False, "live /filesystem.toml has no [general] header for unencrypted install check"
+        vm = boot_copy(args, out / "unenc-install", [f"DISK={live}", f"EXTRA_DISK={unenc}"])
+        try:
+            if not unlock(vm, passphrase, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"live image did not reach root shell for unencrypted install; see {vm.out}"
+            for cmd in (
+                f"head -n {gen_line} /filesystem.toml > /tmp/fs.toml",
+                "echo 'unlock_account = \"user\"' >> /tmp/fs.toml",
+                f"tail -n +{gen_line + 1} /filesystem.toml >> /tmp/fs.toml",
+                "cp /tmp/fs.toml /filesystem.toml",
+                "rm -f /tmp/fs.toml",
+            ):
+                rc, out_cmd = run_status(vm, cmd)
+                if rc != 0:
+                    return False, f"failed to stage stale unlock_account ({cmd}, rc={rc}): {out_cmd!r}"
+            since = vm.mark()
+            vm.type("redox_installer_tui\n")
+            choice = vm.wait_serial(r"(\d+): (?:removing handle[^\n]*\n)?\S+(?:removing handle[^\n]*\n)?: 2\.00 GB", args.timeout, since)
+            if not choice or not vm.wait_serial(r"Select a drive", 10, since):
+                return False, f"installer did not offer 2 GB disk for unencrypted install; see {vm.out}"
+            vm.type(choice.group(1) + "\n")
+            if not vm.wait_serial(r"Encrypt this disk\? \[Y/n\]", 30, since):
+                return False, f"installer did not ask about encryption for unencrypted install; see {vm.out}"
+            since = vm.mark()
+            vm.type("n\n")
+            if not vm.wait_serial(r"installed successfully|failed to install: .*", 900, since):
+                return False, f"unencrypted install timed out; see {vm.out}"
+            if "failed to install" in vm.text(since):
+                return False, f"unencrypted install failed; see {vm.out}"
+            if not vm.wait_serial(r"root:.*# ", 120, since):
+                return False, f"unencrypted install did not return to root shell; see {vm.out}"
+        finally:
+            vm.close()
+
+        if b"UNLOCK  TXT" not in target.read_bytes()[2048 * 512:4096 * 512]:
+            return False, "encrypted install did not write UNLOCK.TXT into the EFI partition"
+        efi_bytes = unenc.read_bytes()[2048 * 512:4096 * 512]
+        if b"UNLOCK  TXT" in efi_bytes:
+            return False, "unencrypted install wrote UNLOCK.TXT into the EFI partition"
+
+        vm = boot_copy(args, out / "unenc-boot", [f"DISK={unenc}", f"EXTRA_DISK={extra}"])
+        try:
+            if not root_shell(vm, args.timeout * 2):
+                return False, f"unencrypted installed disk did not reach root shell; see {vm.out}"
+            status_sl, _ = run_status(vm, "ls -l /etc/unlock-slots")
+            if status_sl == 0:
+                return False, f"unencrypted install created /etc/unlock-slots; see {vm.out}"
+            unenc_toml, unenc_raw = read_guest_toml(vm, "/filesystem.toml")
+            if unenc_toml is None:
+                return False, f"could not read unencrypted /filesystem.toml: {unenc_raw[-200:]!r}; see {vm.out}"
+            unenc_gen = tomllib.loads(unenc_toml).get("general", {})
+            if "encrypt_disk" in unenc_gen or "unlock_account" in unenc_gen:
+                return False, f"unencrypted filesystem.toml kept encryption fields: {unenc_gen!r}"
+            notes.append("unencrypted install cleared stale unlock_account with no UNLOCK.TXT or /etc/unlock-slots")
+        finally:
+            vm.close()
+
+        small = scratch / "small.img"
+        small.write_bytes(b"")
+        os.truncate(small, 48 << 20)
+        vm = boot_copy(args, out / "small-fail", [f"DISK={live}", f"EXTRA_DISK={small}"])
+        try:
+            if not unlock(vm, passphrase, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"live image did not reach root shell for small-disk failure check; see {vm.out}"
+            since = vm.mark()
+            vm.type("redox_installer_tui; echo small-install-rc-$?\n")
+            choice = vm.wait_serial(r"(\d+): (?:removing handle[^\n]*\n)?\S+(?:removing handle[^\n]*\n)?: 48\.0 MB", args.timeout, since)
+            if not choice or not vm.wait_serial(r"Select a drive", 10, since):
+                return False, f"installer did not offer 48 MB disk; see {vm.out}"
+            vm.type(choice.group(1) + "\n")
+            if not vm.wait_serial(r"Encrypt this disk\? \[Y/n\]", 30, since):
+                return False, f"installer did not ask about encryption on 48 MB disk; see {vm.out}"
+            since = vm.mark()
+            vm.type("n\n")
+            done = vm.wait_serial(r"small-install-rc-(\d+)", 300, since)
+            transcript = vm.text(since)
+            (vm.out / "small-fail.txt").write_text(transcript)
+            if not done or int(done.group(1)) == 0:
+                return False, f"48 MB install did not fail cleanly (match={done}); see {vm.out / 'small-fail.txt'}"
+            if not re.search(r"failed to install:.*(?:failed to write|failed to create|No space left|ENOSPC)", transcript, re.S):
+                return False, f"48 MB install error did not preserve the copy failure; see {vm.out / 'small-fail.txt'}"
+            notes.append("mid-copy failure unmounted cleanly and preserved the copy error")
+        finally:
+            vm.close()
+
         return True, "; ".join(notes) + "; two slots in use; no file name in the raw disk"
     finally:
         shutil.rmtree(scratch)
@@ -4249,7 +4367,88 @@ def test_one_password(args, out):
                 return False, f"unenrolled {second_user}'s password was not refused at the bootloader; see {vm.out}"
             if not root_shell(vm, args.timeout * 2):
                 return False, f"no root shell after second-unenrolled check; see {vm.out}"
+            if wait_session(vm, args.timeout) != user_uid:
+                return False, f"user session did not start before claim-integrity check; see {vm.out}"
             notes.append("unenrolled second account refused at bootloader")
+
+            _, pre_claim = run_status(vm, "ls -ld /var/run/unlock-session /var/run/unlock-session/claimed")
+            (vm.out / "claim-check.txt").write_text(f"pre:\n{pre_claim}\n")
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no serial login for second claim check; see {vm.out}"
+            time.sleep(2)
+            since = vm.mark()
+            vm.type(f"{second_user}\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"no password prompt for {second_user}; see {vm.out}"
+            vm.type(second_pass + "\n")
+            if not vm.wait_serial(rf"{second_user}:.*\$ ", 20, since):
+                return False, f"no shell for {second_user}; see {vm.out}"
+            for cmd in (
+                "cp /etc/hostname /var/run/unlock-session/claimed",
+                "rm -f /var/run/unlock-session/claimed",
+                "mv /var/run/unlock-session/claimed /tmp/claim-moved-1",
+            ):
+                run_status(vm, cmd, timeout=30)
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no serial login after {second_user} exit; see {vm.out}"
+            time.sleep(2)
+            since = vm.mark()
+            vm.type("user\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                (vm.out / "claim-check.txt").write_text(f"pre:\n{pre_claim}\nafter-second:\n{vm.text(since)}\n")
+                return False, f"user logged in without password after {second_user} touched claim marker; see {vm.out}"
+            vm.type(recovered + "\n")
+            if not vm.wait_serial(r"user:\S*\$ ", 20, since):
+                return False, f"no user shell after password prompt in claim check; see {vm.out}"
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no serial login after user exit in claim check; see {vm.out}"
+            time.sleep(2)
+            since = vm.mark()
+            vm.type("root\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"no root password prompt after claim check; see {vm.out}"
+            vm.type("password\n")
+            if not vm.wait_serial(r"root:.*# ", 20, since):
+                return False, f"no root shell after claim check; see {vm.out}"
+            _, post_claim = run_status(vm, "ls -ld /var/run/unlock-session /var/run/unlock-session/claimed")
+            (vm.out / "claim-check.txt").write_text(f"pre:\n{pre_claim}\npost:\n{post_claim}\n")
+            if "drwx------" not in post_claim or "/var/run/unlock-session/claimed" not in post_claim:
+                return False, f"claim marker not in root-only 0700 /var/run/unlock-session: {post_claim!r}"
+            run_status(vm, "rm -rf /var/run/unlock-session")
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no serial login for fail-closed claim check; see {vm.out}"
+            time.sleep(2)
+            since = vm.mark()
+            vm.type("user\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"login did not fail closed when /var/run/unlock-session was missing; see {vm.out}"
+            vm.type(recovered + "\n")
+            if not vm.wait_serial(r"user:\S*\$ ", 20, since):
+                return False, f"no user shell after fail-closed check; see {vm.out}"
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no serial login after fail-closed user exit; see {vm.out}"
+            time.sleep(2)
+            since = vm.mark()
+            vm.type("root\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"no root password prompt after fail-closed check; see {vm.out}"
+            vm.type("password\n")
+            if not vm.wait_serial(r"root:.*# ", 20, since):
+                return False, f"no root shell after fail-closed claim check; see {vm.out}"
+            status_dir, _ = run_status(vm, "ls -ld /var/run/unlock-session")
+            if status_dir == 0:
+                return False, "login recreated missing /var/run/unlock-session instead of failing closed"
+            notes.append("claim marker protected from second account and fails closed when directory is missing")
 
             status, _ = run_status(vm, "passwd --enroll root")
             if status == 0:
@@ -4293,6 +4492,35 @@ def test_one_password(args, out):
                 return False, (f"enrolled {second_user} did not launch its session (launcher euid {owner}, "
                                f"expected {uid.group(1) if uid else None}, env {env.strip()!r}); see {vm.out}")
             notes.append(f"passwd --enroll unlocked and launched {second_user}'s session")
+
+            _, ctx_out = run_status(vm, "cat /scheme/sys/context")
+            pids = [int(m) for m in re.findall(r"(?m)^\s*(\d+)\s+\d+\s", ctx_out)]
+            max_pid = max(pids) if pids else 0
+            block_paths = [f"/etc/.unlock-slots.tmp.{pid}" for pid in range(max_pid + 1, max_pid + 51)]
+            for start in range(0, len(block_paths), 5):
+                run_status(vm, "mkdir " + " ".join(block_paths[start:start + 5]))
+            code_blk, err_blk = run_prompts(
+                vm,
+                f"userdel {second_user}",
+                ((r"disk password or recovery key: ", recovered),),
+                r"root:.*# ",
+                "userdel-blk-status",
+                "userdel-blk.txt",
+            )
+            for start in range(0, len(block_paths), 5):
+                run_status(vm, "rmdir " + " ".join(block_paths[start:start + 5]))
+            if code_blk == 0:
+                return False, f"userdel {second_user} succeeded while unlock-slots write was blocked: {err_blk}"
+            status_pw_blk, _ = run_status(vm, f"grep '^{second_user};' /etc/passwd")
+            status_sl_blk, _ = run_status(vm, f"grep '^{second_slot} {second_user}$' /etc/unlock-slots")
+            run_status(vm, f"printf %s {recovered} > /tmp/rec.key")
+            status_list_blk, list_blk = run_status(vm, "redoxfs-key list --key-file /tmp/rec.key /")
+            run_status(vm, "rm -f /tmp/rec.key")
+            if (status_pw_blk != 0 or status_sl_blk != 0 or status_list_blk != 0
+                    or not re.search(rf"(?m)^slot {second_slot}: in use\b", list_blk)):
+                return False, (f"failed userdel left state inconsistent: passwd={status_pw_blk}, "
+                               f"unlock-slots={status_sl_blk}, list_rc={status_list_blk}, list={list_blk!r}")
+            notes.append("failed userdel kept account, unlock-slots record and disk slot intact")
 
             code, err = run_prompts(
                 vm,
@@ -4502,10 +4730,37 @@ def test_resolver(vm, args):
 
 
 def test_cli_tools(vm, args):
-    """Issue 12: desktop text filters and tar's gzip/directory options work."""
+    """Issue 12 + sm-core-patches 07: desktop text filters and tar options match host GNU tar."""
     if not root_shell(vm, args.timeout):
         return False, "no root shell on the serial console"
-    script = r'''set -euo pipefail
+    cases = (
+        ("t_match", "tar -tzf diff.tar.gz alpha"),
+        ("t_miss", "tar -tzf diff.tar.gz missing"),
+        ("t_dir", "tar -tzf diff.tar.gz -C input"),
+        ("c_strip", "tar -czf stripped.tar.gz --strip-components=1 -C input sub/beta && tar -tzf stripped.tar.gz"),
+        ("x_match", "tar -xzf diff.tar.gz -C ext1 alpha && ls -A ext1"),
+        ("x_miss", "tar -xzf diff.tar.gz -C ext2 missing"),
+    )
+    host_expected = {}
+    with tempfile.TemporaryDirectory(prefix="ferrion-tar-ref-") as ref_dir:
+        ref = Path(ref_dir)
+        (ref / "input" / "sub").mkdir(parents=True)
+        (ref / "ext1").mkdir()
+        (ref / "ext2").mkdir()
+        (ref / "input" / "alpha").write_text("alpha\n")
+        (ref / "input" / "sub" / "beta").write_text("beta\n")
+        subprocess.run(["tar", "-czf", "diff.tar.gz", "-C", "input", "alpha", "sub/beta"], cwd=ref, check=True)
+        for name, cmd in cases:
+            proc = subprocess.run(["bash", "-c", cmd], cwd=ref, capture_output=True, text=True)
+            host_expected[name] = (proc.returncode, proc.stdout)
+    guest_cases = "\n".join(
+        f'({cmd}) > "$work/diff/out" 2>/dev/null; rc=$?\n'
+        f'b64=$(base64 "$work/diff/out" | tr -d "\\r\\n")\n'
+        f'printf "TARCASE {name} %d %s\\n" "$rc" "$b64"'
+        for name, cmd in cases
+    )
+    script = (
+        r'''set -euo pipefail
 work=$(mktemp -d /tmp/ferrion-cli-tools.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 test "$(printf 'before\n' | sed 's/before/after/')" = after
@@ -4520,16 +4775,41 @@ tar -xzf bundle.tar.gz -C output
 test "$(cat output/message)" = "archive payload"
 test -d output/empty
 echo cli-tar-ok
+mkdir -p "$work/diff/input/sub" "$work/diff/ext1" "$work/diff/ext2"
+printf 'alpha\n' > "$work/diff/input/alpha"
+printf 'beta\n' > "$work/diff/input/sub/beta"
+cd "$work/diff"
+tar -czf diff.tar.gz -C input alpha sub/beta
+set +e
 '''
+        + guest_cases
+        + "\nset -e\necho cli-tar-diff-done\n"
+    )
     encoded = base64.b64encode(script.encode()).decode()
+    run_status(vm, "rm -f /tmp/cli-tools.b64", timeout=30)
+    for start in range(0, len(encoded), 160):
+        chunk = encoded[start:start + 160]
+        rc, _ = run_status(vm, f"printf %s {chunk} >> /tmp/cli-tools.b64", timeout=30)
+        if rc != 0:
+            return False, f"cli-tools script upload failed at offset {start} (rc={rc})"
     status, output = run_status(
-        vm, f"bash -c 'printf %s {encoded} | base64 -d | bash'", timeout=60)
+        vm, "bash -c 'base64 -d /tmp/cli-tools.b64 | bash; rc=$?; rm -f /tmp/cli-tools.b64; exit $rc'", timeout=60)
     (vm.out / "cli-tools.txt").write_text(output)
-    expected = ("cli-sed-ok", "cli-awk-ok", "cli-tar-ok")
+    expected = ("cli-sed-ok", "cli-awk-ok", "cli-tar-ok", "cli-tar-diff-done")
     missing = [marker for marker in expected if not re.search(rf"(?m)^{marker}$", output)]
     if status != 0 or missing:
         return False, f"cli-tools exit {status}; missing {missing}; see {vm.out / 'cli-tools.txt'}"
-    return True, "sed substitution, awk arithmetic and tar -czf/-xzf -C passed"
+    observed = {}
+    for match in re.finditer(r"(?m)^TARCASE (\S+) (\d+) ([A-Za-z0-9+/=]*)$", output):
+        name, rc_str, b64 = match.groups()
+        observed[name] = (int(rc_str), base64.b64decode(b64).decode("utf-8", errors="replace"))
+    diffs = []
+    for name, _ in cases:
+        if observed.get(name) != host_expected[name]:
+            diffs.append(f"{name}: guest={observed.get(name)!r} host={host_expected[name]!r}")
+    if diffs:
+        return False, "tar diff mismatch: " + "; ".join(diffs) + f"; see {vm.out / 'cli-tools.txt'}"
+    return True, "sed, awk, tar -czf/-xzf -C and 6-case GNU tar differential matrix passed"
 
 
 # The net-hardening test's network: QEMU's user network (restricted, so nothing leaves
