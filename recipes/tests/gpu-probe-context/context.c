@@ -525,8 +525,8 @@ int gpu_probe_context(int argc, char **argv)
     check_gem_close(first, "first");
     check_gem_close(second, "second");
 
-    struct drm_virtgpu_execbuffer exec = {0};
-    expect_errno("submit-not-yet", ioctl(second, DRM_IOCTL_VIRTGPU_EXECBUFFER, &exec), EINVAL);
+    struct drm_virtgpu_execbuffer exec = {.flags = 0x100};
+    expect_errno("submit-bad-flags", ioctl(second, DRM_IOCTL_VIRTGPU_EXECBUFFER, &exec), EINVAL);
 
     printf(TAG ": closing second\n");
     close(second);
