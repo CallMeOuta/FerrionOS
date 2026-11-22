@@ -46,6 +46,7 @@ pub mod casting;
 pub mod cxa;
 pub mod db;
 pub mod error;
+pub mod fortify;
 pub mod fs;
 pub mod header;
 pub mod io;

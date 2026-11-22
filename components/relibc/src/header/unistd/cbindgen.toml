@@ -16,7 +16,7 @@
 # fcntl.h brings in sys/stat.h bringing in off_t, gid_t and uid_t
 # fcntl.h brings in pid_t
 # bits/useconds-t.h brings in features.h (for deprecated annotations)
-sys_includes = ["stddef.h", "stdint.h", "fcntl.h"]
+sys_includes = ["stddef.h", "stdint.h", "fcntl.h", "features.h"]
 include_guard = "_RELIBC_UNISTD_H"
 after_includes = """
 #include <bits/ssize-t.h>    // for ssize_t from sys/types.h
@@ -37,6 +37,9 @@ after_includes = """
 #define _POSIX_TIMERS 202405L
 #define _XOPEN_SHM 1
 #define _XOPEN_VERSION 700L
+"""
+trailer = """
+#include <bits/fortify-unistd.h>
 """
 language = "C"
 style = "Tag"

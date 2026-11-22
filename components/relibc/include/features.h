@@ -109,4 +109,29 @@
     #define __deprecatedNote(x)
 #endif
 
+#if defined(_FORTIFY_SOURCE) && _FORTIFY_SOURCE > 0 && defined(__OPTIMIZE__) && __OPTIMIZE__ > 0 && !defined(__NO_FORTIFY)
+    #if _FORTIFY_SOURCE >= 3 && ((defined(__has_builtin) && __has_builtin(__builtin_dynamic_object_size)) || (defined(__GNUC__) && __GNUC__ >= 12))
+        #define __USE_FORTIFY_LEVEL 3
+        #define __ferrion_bos(ptr) __builtin_dynamic_object_size((ptr), 1)
+        #define __ferrion_bos0(ptr) __builtin_dynamic_object_size((ptr), 0)
+    #elif _FORTIFY_SOURCE >= 2
+        #define __USE_FORTIFY_LEVEL 2
+        #define __ferrion_bos(ptr) __builtin_object_size((ptr), 1)
+        #define __ferrion_bos0(ptr) __builtin_object_size((ptr), 0)
+    #else
+        #define __USE_FORTIFY_LEVEL 1
+        #define __ferrion_bos(ptr) __builtin_object_size((ptr), 0)
+        #define __ferrion_bos0(ptr) __builtin_object_size((ptr), 0)
+    #endif
+    #if defined(__GNUC__) && !defined(__clang__)
+        #define __ferrion_fortify_inline extern __inline__ __attribute__((__always_inline__, __gnu_inline__, __artificial__))
+    #elif defined(__clang__)
+        #define __ferrion_fortify_inline static __inline__ __attribute__((__always_inline__))
+    #else
+        #define __ferrion_fortify_inline static __inline__
+    #endif
+#else
+    #define __USE_FORTIFY_LEVEL 0
+#endif
+
 #endif

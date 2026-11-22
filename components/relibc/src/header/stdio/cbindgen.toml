@@ -36,6 +36,8 @@ typedef struct FILE FILE;
 #define stdout stdout
 #define stderr stderr
 
+#include <bits/fortify-stdio.h>
+
 #endif // _RELIBC_BITS_STDIO_H
 """
 language = "C"
