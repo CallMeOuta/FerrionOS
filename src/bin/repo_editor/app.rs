@@ -1,9 +1,9 @@
 use crate::*;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum RightPanelTab {
     MainActions,
-    Terminal(usize),
+    Terminal(JobId),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -264,11 +264,20 @@ impl App {
         self.right_tab_active = RightPanelTab::MainActions;
     }
 
+    pub fn resolve_right_tab(&mut self) -> RightPanelTab {
+        if let RightPanelTab::Terminal(id) = self.right_tab_active
+            && !self.exec.jobs.contains_key(&id)
+        {
+            self.right_tab_active = RightPanelTab::MainActions;
+        }
+        self.right_tab_active
+    }
+
     pub fn current_job_id(&self) -> Option<JobId> {
-        let RightPanelTab::Terminal(i) = self.right_tab_active else {
+        let RightPanelTab::Terminal(id) = self.right_tab_active else {
             return None;
         };
-        self.exec.active_job_order.get(i).map(|s| *s)
+        self.exec.jobs.contains_key(&id).then_some(id)
     }
 
     pub fn current_job(&self) -> Option<&PackageJob> {

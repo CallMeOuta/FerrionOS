@@ -16,6 +16,12 @@ pub enum StatusUpdate {
     JobFinished(JobId, i32),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    Running { pid: u32 },
+    Exited(i32),
+}
+
 pub struct PackageJob {
     pub id: JobId,
     pub command: String,
@@ -24,8 +30,7 @@ pub struct PackageJob {
     pub buffer: Vec<u8>,
     pub scroll: usize,
     pub auto_scroll: bool,
-    pub exit_code: Option<i32>,
-    pub pid: Option<u32>,
+    pub state: JobState,
     pub pty_writer: Box<dyn Write + Send>,
 }
 
@@ -56,10 +61,10 @@ impl FmtDisplay for PackageJob {
                 self.targets.len() - 1
             )?,
         }
-        match self.exit_code {
-            Some(0) => f.write_str(" ✅")?,
-            Some(_) => f.write_str(" ❌")?,
-            None => {}
+        match self.state {
+            JobState::Exited(0) => f.write_str(" ✅")?,
+            JobState::Exited(_) => f.write_str(" ❌")?,
+            JobState::Running { .. } => {}
         }
         Ok(())
     }
@@ -84,17 +89,17 @@ impl ExecutionManager {
         command: &str,
         targets: Vec<PackageName>,
         status_tx: mpsc::Sender<StatusUpdate>,
-    ) {
+    ) -> Option<JobId> {
         if targets.is_empty() {
-            return;
+            return None;
         }
 
-        if self.active_job_order.len() > 0 {
+        if !self.active_job_order.is_empty() {
             for id in self.active_job_order.clone() {
                 if self
                     .jobs
                     .get(&id)
-                    .is_some_and(|s| s.exit_code.is_some_and(|s| s == 0))
+                    .is_some_and(|s| s.state == JobState::Exited(0))
                 {
                     self.close_job(&id);
                 }
@@ -105,19 +110,6 @@ impl ExecutionManager {
         self.next_job_id += 1;
         let (pty_reader, log_reader, pty_writer, (mut slave_pty, mut pipe_writer)) =
             setup_pty_with_stdin();
-
-        let mut job = PackageJob {
-            id: job_id,
-            command: command.to_string(),
-            targets: targets.clone(),
-            logs: Vec::new(),
-            buffer: Vec::new(),
-            scroll: 0,
-            auto_scroll: true,
-            exit_code: None,
-            pid: None,
-            pty_writer,
-        };
 
         spawn_log_reader(pty_reader, job_id, status_tx.clone());
         spawn_log_reader(log_reader, job_id, status_tx.clone());
@@ -136,7 +128,17 @@ impl ExecutionManager {
 
         let pipe = (&mut slave_pty, &mut pipe_writer);
         let mut handle = spawn_to_pipe(&mut cmd, &Some(pipe)).unwrap();
-        job.pid = Some(handle.id());
+        let job = PackageJob {
+            id: job_id,
+            command: command.to_string(),
+            targets,
+            logs: Vec::new(),
+            buffer: Vec::new(),
+            scroll: 0,
+            auto_scroll: true,
+            state: JobState::Running { pid: handle.id() },
+            pty_writer,
+        };
         self.jobs.insert(job_id, job);
 
         let _ = write!(pipe_writer, "{:?}\n", cmd);
@@ -146,6 +148,7 @@ impl ExecutionManager {
                 .send(StatusUpdate::JobFinished(job_id, code))
                 .unwrap();
         });
+        Some(job_id)
     }
 
     pub fn handle_status_update(&mut self, update: StatusUpdate) {
@@ -161,8 +164,7 @@ impl ExecutionManager {
             }
             StatusUpdate::JobFinished(job_id, code) => {
                 if let Some(job) = self.jobs.get_mut(&job_id) {
-                    job.pid.take();
-                    job.exit_code = Some(code);
+                    job.state = JobState::Exited(code);
                 }
             }
         }

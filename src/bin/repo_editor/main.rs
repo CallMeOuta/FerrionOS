@@ -72,7 +72,7 @@ fn main() -> Result<()> {
                 .split(main_chunks[1]);
             render_right_tabs(&mut app, f, &right_chunks);
 
-            match app.right_tab_active {
+            match app.resolve_right_tab() {
                 RightPanelTab::MainActions => {
                     let right_style =
                         app.box_style(" Main Actions ", "[Ctrl+C] Exit", Focus::MainPanel);
@@ -148,7 +148,7 @@ fn render_left_recipes(
             );
         f.render_widget(tabs, split[0]);
         let tabs = Tabs::new(vec![labels[2], labels[3]])
-            .select(app.filter_source.index() - 2)
+            .select(app.filter_source.index().checked_sub(2))
             .style(Style::default().fg(Color::Gray))
             .highlight_style(
                 Style::default()
@@ -210,9 +210,14 @@ fn render_right_tabs(
         };
         right_tab_titles.push(format!("{}{}", fstr, job));
     }
-    let selected_tab_idx = match &app.right_tab_active {
+    let selected_tab_idx = match app.resolve_right_tab() {
         RightPanelTab::MainActions => 0,
-        RightPanelTab::Terminal(i) => *i + 1,
+        RightPanelTab::Terminal(id) => app
+            .exec
+            .active_job_order
+            .iter()
+            .position(|&job_id| job_id == id)
+            .map_or(0, |pos| pos + 1),
     };
     app.right_tabs_area = right_chunks[0];
     let top_right_tabs = Tabs::new(right_tab_titles.clone())
@@ -293,10 +298,9 @@ fn render_right_terminal(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     };
 
     let title = format!(" Job #{}: repo {}", job.id, job);
-    let hint = if job.exit_code.is_some() {
-        "[X] Close [Ctrl+C] Exit"
-    } else {
-        "[Ctrl+C] Stop"
+    let hint = match job.state {
+        JobState::Exited(_) => "[X] Close [Ctrl+C] Exit",
+        JobState::Running { .. } => "[Ctrl+C] Stop",
     };
 
     let auto_scroll = job.auto_scroll;
@@ -341,16 +345,19 @@ fn handle_input<B: ratatui::backend::Backend>(
     match event {
         Event::Key(Key::Ctrl('c')) => {
             if let Some(job) = app.current_job()
-                && job.pid.is_some()
+                && let JobState::Running { pid } = job.state
             {
-                kill_everything(job.pid);
+                kill_everything(Some(pid));
             } else {
                 return ControlFlow::Break(());
             }
         }
 
         Event::Key(Key::F(n)) => {
-            if let Some(fi) = FilterSource::try_from_index((n - 2) as _) {
+            if let Some(fi) = n
+                .checked_sub(2)
+                .and_then(|idx| FilterSource::try_from_index(idx as usize))
+            {
                 if app.filter_source != fi {
                     app.filter_source = fi;
                     app.update_filter();
@@ -359,8 +366,10 @@ fn handle_input<B: ratatui::backend::Backend>(
             } else if n == 6 {
                 app.right_tab_active = RightPanelTab::MainActions;
                 app.focus = Focus::MainPanel;
-            } else if n != 0 {
-                app.right_tab_active = RightPanelTab::Terminal((n - 7) as _);
+            } else if let Some(idx) = n.checked_sub(7)
+                && let Some(&job_id) = app.exec.active_job_order.get(idx as usize)
+            {
+                app.right_tab_active = RightPanelTab::Terminal(job_id);
                 app.focus = Focus::MainPanel;
             }
         }
@@ -415,10 +424,9 @@ fn handle_input<B: ratatui::backend::Backend>(
                         matched_action,
                         targets.is_empty(),
                         app.current_job_id().is_none(),
-                    ) {
-                        app.exec.spawn_job(cmd, targets, status_tx.clone());
-                        app.right_tab_active =
-                            RightPanelTab::Terminal(app.exec.active_job_order.len() - 1);
+                    ) && let Some(job_id) = app.exec.spawn_job(cmd, targets, status_tx.clone())
+                    {
+                        app.right_tab_active = RightPanelTab::Terminal(job_id);
                     }
                 }
                 key => {
@@ -518,8 +526,8 @@ fn handle_input<B: ratatui::backend::Backend>(
                         {
                             if i == 0 {
                                 app.right_tab_active = RightPanelTab::MainActions;
-                            } else {
-                                app.right_tab_active = RightPanelTab::Terminal(i - 1);
+                            } else if let Some(&job_id) = app.exec.active_job_order.get(i - 1) {
+                                app.right_tab_active = RightPanelTab::Terminal(job_id);
                             }
                         }
                     } else if left_chunks[2].contains(mp) {
@@ -565,10 +573,10 @@ fn handle_input<B: ratatui::backend::Backend>(
                         if let Some(cmd) = clicked_command
                             && !targets.is_empty()
                             && app.current_job_id().is_none()
+                            && let Some(job_id) =
+                                app.exec.spawn_job(cmd, targets, status_tx.clone())
                         {
-                            app.exec.spawn_job(cmd, targets, status_tx.clone());
-                            app.right_tab_active =
-                                RightPanelTab::Terminal(app.exec.active_job_order.len() - 1);
+                            app.right_tab_active = RightPanelTab::Terminal(job_id);
                         }
                     }
                 }
