@@ -1,23 +1,8 @@
 FerrionOS change to the upstream bootloader (MIT license, kept), made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8 after the existing recipe patches.
 
-Embed the recipe-patched RedoxFS, not the registry copy, so filesystem fixes also reach read-only boot transactions. Match its syscall error type.
+Embed the recipe-patched RedoxFS, not the registry copy, mark the unlocked boot filesystem read_only before any transaction, assert read_only on load_to_memory and verify::Manifest::load, and match its syscall error type.
 
---- a/Cargo.toml
-+++ b/Cargo.toml
-@@ -19,11 +19,11 @@
- ed25519-compact = { version = "2.6.1", default-features = false, features = ["opt_size"] }
- linked_list_allocator = "0.10.5"
- log = "0.4.17"
--redox_syscall = "0.5"
-+redox_syscall = "0.9.5"
- spin = "0.9.5"
- 
- [dependencies.redoxfs]
--version = "0.8"
-+path = "../../redoxfs/source"
- default-features = false
- features = ["log"]
- 
+diff -ruN '--exclude=.git' a/Cargo.lock b/Cargo.lock
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -24,12 +24,6 @@
@@ -38,10 +23,9 @@ Embed the recipe-patched RedoxFS, not the registry copy, so filesystem fixes als
  [[package]]
  name = "bitflags"
 -version = "2.9.4"
--source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
 +version = "2.13.2"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
 +checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
  
  [[package]]
@@ -84,14 +68,12 @@ Embed the recipe-patched RedoxFS, not the registry copy, so filesystem fixes als
  [[package]]
  name = "lock_api"
 -version = "0.4.13"
--source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "96936507f153605bddfcda068dd804796c84324ed2510809e5b2a624c81da765"
--dependencies = [
-- "autocfg",
 +version = "0.4.14"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "96936507f153605bddfcda068dd804796c84324ed2510809e5b2a624c81da765"
 +checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
-+dependencies = [
+ dependencies = [
+- "autocfg",
   "scopeguard",
  ]
  
@@ -160,10 +142,9 @@ Embed the recipe-patched RedoxFS, not the registry copy, so filesystem fixes als
 +[[package]]
  name = "redox-path"
 -version = "0.3.1"
--source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "436d45c2b6a5b159d43da708e62b25be3a4a3d5550d654b72216ade4c4bfd717"
 +version = "0.4.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "436d45c2b6a5b159d43da708e62b25be3a4a3d5550d654b72216ade4c4bfd717"
 +checksum = "083c57139a99303d842a4cfe1f0fd6483d77d81eda1442be84bcb1a0f737ed96"
 +
 +[[package]]
@@ -307,19 +288,19 @@ Embed the recipe-patched RedoxFS, not the registry copy, so filesystem fixes als
  name = "uuid"
  version = "1.18.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -344,6 +467,12 @@
- version = "0.9.5"
- source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -346,6 +469,12 @@
  checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-+
-+[[package]]
+ 
+ [[package]]
 +name = "windows-link"
 +version = "0.2.1"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
- 
- [[package]]
++
++[[package]]
  name = "x86"
+ version = "0.52.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
 @@ -365,3 +494,23 @@
   "byteorder",
   "cipher",
@@ -344,3 +325,71 @@ Embed the recipe-patched RedoxFS, not the registry copy, so filesystem fixes als
 + "quote",
 + "syn",
 +]
+diff -ruN '--exclude=.git' a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -19,11 +19,11 @@
+ ed25519-compact = { version = "2.6.1", default-features = false, features = ["opt_size"] }
+ linked_list_allocator = "0.10.5"
+ log = "0.4.17"
+-redox_syscall = "0.5"
++redox_syscall = "0.9.5"
+ spin = "0.9.5"
+ 
+ [dependencies.redoxfs]
+-version = "0.8"
++path = "../../redoxfs/source"
+ default-features = false
+ features = ["log"]
+ 
+diff -ruN '--exclude=.git' a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -469,6 +469,7 @@
+     path: &str,
+     filetype: Filetype,
+ ) -> &'static mut [u8] {
++    assert!(fs.read_only);
+     fs.tx(|tx| {
+         let mut node = None;
+         for component in path.split('/') {
+diff -ruN '--exclude=.git' a/src/os/bios/mod.rs b/src/os/bios/mod.rs
+--- a/src/os/bios/mod.rs
++++ b/src/os/bios/mod.rs
+@@ -129,7 +129,9 @@
+ 
+         //TODO: get block from partition table
+         let block = 2 * crate::MIBI as u64 / redoxfs::BLOCK_SIZE;
+-        redoxfs::FileSystem::open(disk, password_opt, Some(block), false)
++        let mut fs = redoxfs::FileSystem::open(disk, password_opt, Some(block), false)?;
++        fs.read_only = true;
++        Ok(fs)
+     }
+ 
+     fn hwdesc(&self) -> OsHwDesc {
+diff -ruN '--exclude=.git' a/src/os/uefi/mod.rs b/src/os/uefi/mod.rs
+--- a/src/os/uefi/mod.rs
++++ b/src/os/uefi/mod.rs
+@@ -234,7 +234,10 @@
+             let block = device.partition_offset / redoxfs::BLOCK_SIZE;
+ 
+             match redoxfs::FileSystem::open(device.disk, password_opt, Some(block), false) {
+-                Ok(ok) => return Ok(ok),
++                Ok(mut ok) => {
++                    ok.read_only = true;
++                    return Ok(ok);
++                }
+                 Err(err) => match err.errno {
+                     // Ignore header not found error
+                     syscall::ENOENT => (),
+diff -ruN '--exclude=.git' a/src/verify.rs b/src/verify.rs
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -93,6 +93,7 @@
+     /// With verification on, loads the manifest and its signature and checks the signature
+     /// before reading anything else in the manifest; refuses to go on when either fails.
+     pub fn load<O: Os>(os: &O, fs: &mut redoxfs::FileSystem<O::D>) -> Option<Manifest> {
++        assert!(fs.read_only);
+         let key = key();
+         // Measured with or without a key: all zero records that this boot verifies nothing.
+         crate::measure::boot_key(&key);
