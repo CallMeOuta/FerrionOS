@@ -29,21 +29,39 @@ impl Tpm {
         tpm2::parse_pcr_read(&response, &BOOT_PCRS).map_err(|e| format!("TPM2_PCR_Read: {e}"))
     }
 
-    fn quote(&self, nonce: &[u8]) -> Result<tpm2::Quote, String> {
+    fn flush_key(&self, key: u32) -> Result<(), String> {
+        self.transact(&tpm2::flush_context(key))
+            .and_then(|r| tpm2::parse_empty(&r).map_err(|e| format!("TPM2_FlushContext: {e}")))
+    }
+
+    fn with_transient_key<T>(&self, f: impl FnOnce(u32) -> Result<T, String>) -> Result<T, String> {
         let response = self.transact(&tpm2::create_attestation_key())?;
-        let key = tpm2::parse_create_primary(&response)
-            .map_err(|e| format!("TPM2_CreatePrimary: {e}"))?;
-        let quote = self
-            .transact(&tpm2::quote(key, nonce, &BOOT_PCRS))
-            .and_then(|r| {
-                tpm2::parse_quote(&r, &BOOT_PCRS).map_err(|e| format!("TPM2_Quote: {e}"))
-            });
-        let flushed = self
-            .transact(&tpm2::flush_context(key))
-            .and_then(|r| tpm2::parse_empty(&r).map_err(|e| format!("TPM2_FlushContext: {e}")));
-        let quote = quote?;
+        let key = match tpm2::parse_create_primary(&response) {
+            Ok(key) => key,
+            Err(err) => {
+                if tpm2::response_code(&response) == Some(tpm2::RC_SUCCESS)
+                    && let Some(bytes) = response.get(tpm2::HEADER_LEN..tpm2::HEADER_LEN + 4)
+                {
+                    let leaked = u32::from_be_bytes(bytes.try_into().unwrap());
+                    let _ = self.flush_key(leaked);
+                }
+                return Err(format!("TPM2_CreatePrimary: {err}"));
+            }
+        };
+        let result = f(key);
+        let flushed = self.flush_key(key);
+        let value = result?;
         flushed?;
-        Ok(quote)
+        Ok(value)
+    }
+
+    fn quote(&self, nonce: &[u8]) -> Result<tpm2::Quote, String> {
+        self.with_transient_key(|key| {
+            self.transact(&tpm2::quote(key, nonce, &BOOT_PCRS))
+                .and_then(|r| {
+                    tpm2::parse_quote(&r, &BOOT_PCRS).map_err(|e| format!("TPM2_Quote: {e}"))
+                })
+        })
     }
 }
 

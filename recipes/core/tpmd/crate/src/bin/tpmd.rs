@@ -10,7 +10,7 @@ use libredox::flag::{MAP_SHARED, O_CLOEXEC, O_RDWR, PROT_READ, PROT_WRITE};
 use redox_scheme::scheme::SchemeSync;
 use redox_scheme::{CallerCtx, Socket};
 use syscall::data::Stat;
-use syscall::error::{EBADF, EINVAL, EIO, EPERM, Error, Result};
+use syscall::error::{EBADF, EBUSY, EINVAL, EIO, EPERM, Error, Result};
 use syscall::flag::MODE_CHR;
 use tpmd::{TPM_FD_ENV, service, tpm2};
 
@@ -181,6 +181,11 @@ impl Crb {
         Ok(())
     }
 
+    fn go_idle(&self) {
+        self.write(CTRL_REQ, CTRL_REQ_GO_IDLE);
+        self.wait(CTRL_REQ, CTRL_REQ_GO_IDLE, 0, STATE_TIMEOUT);
+    }
+
     fn transact(&self, command: &[u8], timeout: Duration) -> Result<Vec<u8>, String> {
         if command.len() > self.cmd_size {
             return Err(format!("command of {} bytes does not fit", command.len()));
@@ -189,6 +194,7 @@ impl Crb {
             return Err("TPM is in a fatal error state".into());
         }
         self.write(CTRL_REQ, CTRL_REQ_CMD_READY);
+        let _idle_guard = IdleGuard(self);
         if !self.wait(CTRL_REQ, CTRL_REQ_CMD_READY, 0, STATE_TIMEOUT) {
             return Err("TPM did not become ready".into());
         }
@@ -209,8 +215,6 @@ impl Crb {
             return Err(format!("response size {len} is out of range"));
         }
         let response = (0..len).map(read_byte).collect();
-        self.write(CTRL_REQ, CTRL_REQ_GO_IDLE);
-        self.wait(CTRL_REQ, CTRL_REQ_GO_IDLE, 0, STATE_TIMEOUT);
         Ok(response)
     }
 
@@ -235,9 +239,22 @@ impl Crb {
     }
 }
 
+struct IdleGuard<'a>(&'a Crb);
+
+impl Drop for IdleGuard<'_> {
+    fn drop(&mut self) {
+        self.0.go_idle();
+    }
+}
+
+enum Channel {
+    Idle,
+    Pending(Vec<u8>),
+}
+
 struct TpmScheme {
     crb: Crb,
-    response: Option<Vec<u8>>,
+    channel: Channel,
 }
 
 impl SchemeSync for TpmScheme {
@@ -252,6 +269,10 @@ impl SchemeSync for TpmScheme {
         if id != HANDLE {
             return Err(Error::new(EBADF));
         }
+        if !matches!(self.channel, Channel::Idle) {
+            return Err(Error::new(EBUSY));
+        }
+        assert!(matches!(self.channel, Channel::Idle));
         if tpm2::declared_size(buf) != Some(buf.len()) || buf.len() < tpm2::HEADER_LEN {
             return Err(Error::new(EINVAL));
         }
@@ -264,7 +285,7 @@ impl SchemeSync for TpmScheme {
             eprintln!("tpmd: {e}");
             Error::new(EIO)
         })?;
-        self.response = Some(response);
+        self.channel = Channel::Pending(response);
         Ok(buf.len())
     }
 
@@ -279,11 +300,11 @@ impl SchemeSync for TpmScheme {
         if id != HANDLE {
             return Err(Error::new(EBADF));
         }
-        let Some(response) = self.response.take() else {
-            return Ok(0);
+        let Channel::Pending(response) = std::mem::replace(&mut self.channel, Channel::Idle) else {
+            return Err(Error::new(EINVAL));
         };
         if buf.len() < response.len() {
-            self.response = Some(response);
+            self.channel = Channel::Pending(response);
             return Err(Error::new(EINVAL));
         }
         buf[..response.len()].copy_from_slice(&response);
@@ -376,7 +397,7 @@ fn main() {
 
     let mut scheme = TpmScheme {
         crb,
-        response: None,
+        channel: Channel::Idle,
     };
     if let Err(e) = service::serve(&socket, &mut scheme) {
         eprintln!("tpmd: {e}");
