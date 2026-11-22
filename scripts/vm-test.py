@@ -488,6 +488,9 @@ class Swtpm:
         shutil.rmtree(self.dir)
 
 
+PROCESS_TREE_LIMIT = 64
+
+
 class VM:
     """One QEMU run started by `make qemu`: serial on stdio, monitor on a socket."""
 
@@ -673,7 +676,23 @@ class VM:
         os.killpg(self.proc.pid, signal.SIGKILL)
         self.proc.wait(timeout=20)
 
+    def qemu_priority(self):
+        """Returns the nice value and I/O class the host gave QEMU, or None when no QEMU process is found."""
+        pending, visited = [str(self.proc.pid)], 0
+        while pending and visited < PROCESS_TREE_LIMIT:
+            pid = pending.pop()
+            visited += 1
+            try:
+                if Path(f"/proc/{pid}/comm").read_text().startswith("qemu-system"):
+                    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                    return {"nice": int(fields[16]), "io": command_output(["ionice", "-p", pid])}
+                pending.extend(Path(f"/proc/{pid}/task/{pid}/children").read_text().split())
+            except OSError:
+                continue
+        return None
+
     def close(self):
+        self.priority = self.qemu_priority()
         if self.proc.poll() is None:
             try:
                 if hasattr(self, "monitor"):
@@ -5539,6 +5558,8 @@ def main():
                     captures = sorted(vm.capture_sources)
                     last_capture = vm.last_capture_source
                     trace_lines = len(vm.trace())
+            host["load_average"] = [round(load, 2) for load in os.getloadavg()]
+            host["qemu_priority"] = vm.priority if vm is not None else None
             failures += verdict == "FAIL"
             blocked += verdict == "BLOCKED"
             result = {"test": name, "run": run, "verdict": verdict, "note": note, "host": host,
