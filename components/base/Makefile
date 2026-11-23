@@ -15,10 +15,10 @@ BUILD_FLAGS +=  --target-dir $(BUILD_DIR)
 INITFS_BINS = ipcd init logd ramfs randd udsd zerod \
 	acpid fbbootlogd hwd inputd lived \
 	pcid pcid-spawner rtcd vesad
-INITFS_DRIVERS_BINS = nvmed virtio-blkd virtio-gpud
+INITFS_DRIVERS_BINS = nvmed virtio-blkd
 BASE_BINS = fbcond getty inputd pcid pcid-spawner redoxerd audiod dhcpd ptyd netstack nbdd
 DRIVERS_BINS = e1000d ihdad ihdgd ixgbed rtl8139d rtl8168d \
-	usbctl usbhidd usbhubd usbscsid virtio-netd xhcid
+	usbctl usbhidd usbhubd usbscsid virtio-gpud virtio-netd xhcid
 SELFTEST_DIRS := $(patsubst selftests/%/Cargo.toml,%,$(wildcard selftests/*/Cargo.toml))
 TEST_BINS := $(addsuffix -selftest,$(SELFTEST_DIRS))
 
