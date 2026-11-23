@@ -581,10 +581,11 @@ class VM:
     """One QEMU run started by `make qemu`: serial on stdio, monitor on a socket."""
 
     def __init__(self, args, out, tpm=False, qemu_flags="", make=(), snapshot=True):
-        image = ROOT / "build" / args.arch / args.config / "harddrive.img"
+        live = "live=yes" in (*args.make, *make)
+        image = ROOT / "build" / args.arch / args.config / ("redox-live.iso" if live else "harddrive.img")
         if not image.exists():
             sys.exit(f"vm-test: {image.relative_to(ROOT)} is missing; build it first: "
-                     f"make image ARCH={args.arch} CONFIG_NAME={args.config}")
+                     f"make {'live' if live else 'image'} ARCH={args.arch} CONFIG_NAME={args.config}")
         # `make qemu` unmounts a mounted image before booting it; someone else's
         # `make mount` must never be pulled out from under them.
         mount_dir = image.parent / "filesystem"
@@ -9264,12 +9265,29 @@ def test_dma_outside_grant(vm, args):
                   f"fault at B {b_address.group(1)}, status domain {status.group(1)} pages {status.group(2)} faults 1")
 
 
+def test_hw_live(args, out):
+    """Boot the storage-free USB images with real keyboard input and an untouched writable NVMe."""
+    import hw_live
+    text_out = out / "text"
+    text_out.mkdir(exist_ok=True)
+    ok, note = hw_live.test(args, text_out, ROOT, VM)
+    if not ok:
+        return ok, note
+    config = "my_hw_live" if args.config == "desktop" else args.config
+    desktop_args = argparse.Namespace(**{**vars(args), "config": config + "_desktop"})
+    desktop_out = out / "desktop"
+    desktop_out.mkdir(exist_ok=True)
+    ok, desktop_note = hw_live.test(desktop_args, desktop_out, ROOT, VM)
+    return ok, f"text: {note}; desktop: {desktop_note}"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
          "dev-parity": test_dev_parity, "firefox-headless": test_firefox_headless, "rand-seed": test_rand_seed,
          "firefox-cjk": test_firefox_cjk,
          "ferrion-run": test_ferrion_run}
+TESTS["hw-live"] = test_hw_live
 TESTS["ferrion-cli"] = test_ferrion_cli
 TESTS["update-today"] = test_update_today
 TESTS["update-index"] = test_update_index
@@ -9353,6 +9371,7 @@ def test_media_decode(vm, args):
 TESTS["media-decode"] = test_media_decode
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
+OWN_IMAGE["hw-live"] = test_hw_live
 OWN_IMAGE["one-password"] = test_one_password
 OWN_IMAGE["key-slot-roll"] = test_key_slot_roll
 OWN_IMAGE["wayland-client"] = run_wayland_client
@@ -9577,9 +9596,12 @@ def main():
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GL_EXACT_VENUS_TRACE]})
             try:
                 qemu, gpu, vk_driver_files, render_node = qemu_settings(args, make)
-                host = host_versions(qemu)
-                host["vk_driver_files"] = vk_driver_files or None
-                host["render_node"] = (render_node or boot_render_node()) if gpu in ("venus", "virtio-gl") else None
+                if name == "hw-live":
+                    host = {"system": sys.platform, "qemu": command_output([*qemu, "--version"])}
+                else:
+                    host = host_versions(qemu)
+                    host["vk_driver_files"] = vk_driver_files or None
+                    host["render_node"] = (render_node or boot_render_node()) if gpu in ("venus", "virtio-gl") else None
                 require_3d_host(qemu, gpu, args.arch)
                 if name in OWN_IMAGE:
                     ok, note = OWN_IMAGE[name](args, out)

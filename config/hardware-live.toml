@@ -1,0 +1,42 @@
+include = ["base.toml"]
+
+[general]
+filesystem_size = 256
+
+[packages]
+base = "ignore"
+hardware-live-base = "source"
+installer = "ignore"
+ferrion-audiod = "ignore"
+ca-certificates = {}
+coreutils = {}
+extrautils = "source"
+ion = {}
+pkgutils = {}
+kibi = {}
+uutils-grep = {}
+uutils-procps = {}
+
+[[files]]
+path = "/hw-live"
+data = "FERRION_HW_LIVE=1\nSTORAGE=off\nQUIET=0\n"
+
+[[files]]
+path = "/usr/lib/init.d/30_console_switch"
+data = """
+requires_weak 30_console.target
+inputd -A 2
+"""
+
+[[files]]
+path = "/usr/lib/init.d/20_audiod.service"
+data = """
+[unit]
+description = "First-boot audio multiplexer"
+requires_weak = ["00_base.target"]
+
+[service]
+cmd = "audiod"
+type = { scheme = "audio" }
+priority = -20
+"""

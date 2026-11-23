@@ -1,0 +1,36 @@
+[package]
+description = "Storage-free first-boot components for FerrionOS"
+
+[source]
+same_as = "../base"
+
+[build]
+template = "custom"
+dependencies = ["redoxfs"]
+dev-dependencies = ["relibc"]
+script = """
+if [ "${TARGET%%-*}" != x86_64 ]; then
+    echo "First-boot live images require x86_64" >&2
+    exit 1
+fi
+make -C "${COOKBOOK_SOURCE}" install-base \
+    SRC_DIR="${COOKBOOK_SOURCE}" SYSROOT="${COOKBOOK_SYSROOT}" \
+    LINKER="${GNU_TARGET}-ld" CARGO="${COOKBOOK_CARGO}" \
+    BUILD_DIR="${COOKBOOK_BUILD}" DESTDIR="${COOKBOOK_STAGE}" \
+    INITFS_DRIVERS_BINS="" \
+    BASE_BINS="fbcond getty inputd pcid pcid-spawner redoxerd audiod dhcpd ptyd netstack" \
+    DRIVERS_BINS="usbctl usbhidd usbhubd xhcid"
+: > "${COOKBOOK_BUILD}/initfs/lib/pcid.d/initfs.toml"
+MAX_DRIVER_CONFIGS=128
+driver_configs=0
+for config in "${COOKBOOK_STAGE}/usr/lib/pcid.d/"*.toml; do
+    driver_configs=$((driver_configs + 1))
+    [ "$driver_configs" -le "$MAX_DRIVER_CONFIGS" ] || exit 1
+    if [ "$(basename "$config")" != xhcid.toml ]; then
+        rm "$config"
+    fi
+done
+env -u CARGO -u RUSTFLAGS cargo run --manifest-path "${COOKBOOK_SOURCE}/initfs/tools/Cargo.toml" --bin redox-initfs-ar -- \
+    "${COOKBOOK_BUILD}/initfs" "${COOKBOOK_BUILD}/${TARGET}/release/bootstrap" \
+    -o "${COOKBOOK_STAGE}/usr/lib/boot/initfs"
+"""

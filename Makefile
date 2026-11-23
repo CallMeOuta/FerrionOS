@@ -25,6 +25,23 @@ rebuild:
 	rm -rf $(BUILD)/repo.tag $(BUILD)/harddrive.img $(BUILD)/redox-live.iso
 	$(MAKE) all
 
+.PHONY: hw-live-faults
+
+# Build the two forbidden-feature kernels that hw-live must refuse; never boot these artifacts.
+hw-live-faults:
+ifeq ($(PODMAN_BUILD),1)
+	$(PODMAN_RUN) make hw-live-faults
+else
+	@test "$(ARCH)" = x86_64
+	@for feature in system76_ec_debug lpss_debug; do \
+		env PATH="$(PREFIX_PATH):$$PATH" CARGO_NET_OFFLINE=true \
+			CARGO_TARGET_DIR="$(ROOT)/build/hw-live-faults/$$feature/target" \
+			$(MAKE) -C recipes/core/kernel/source \
+			BUILD="$(ROOT)/build/hw-live-faults/$$feature" \
+			KERNEL_CARGO_FEATURES="$$feature" ARCH="$(ARCH)" || exit $$?; \
+	done
+endif
+
 NOT_ON_PODMAN?=0
 
 clean:

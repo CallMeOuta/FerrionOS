@@ -4,6 +4,18 @@ What can be checked in this repository, cheapest first: what each check proves a
 
 Agent-written changes require a VM check, a differential comparison with an independent reference, or a deterministic simulation with injected faults, red before the fix and green after it ([ADR 0025](adr/0025-tests-without-unit-tests.md)). Upstream tests stay; agents do not add unit tests.
 
+## First-boot USB rehearsal
+
+`config/hardware-live.toml` and `config/hardware-live-desktop.toml` contain no accounts or installer. Each private `config/my_<name>.toml` includes one and supplies its own root password; the desktop companion is named `my_<name>_desktop.toml` and also supplies a password-protected account with uid 1000 for the graphical login. Never include `dev-accounts.toml`. Build both live images with `CI=1 COOKBOOK_LOGS=true make live CONFIG_NAME=<private-name> VERIFIED_BOOT=0`, and build the refusal fixtures once with `CI=1 COOKBOOK_LOGS=true make hw-live-faults`. The latter compiles real kernels with the two forbidden debug features; these kernels are never booted.
+
+`python3 scripts/vm-test.py hw-live --config <private-name> --timeout 180` checks the image contents and runs the text image with one CPU and 24 CPUs using only the PS/2 keyboard, then with 24 CPUs and only a USB keyboard. It also checks the companion desktop reaches its graphical login. Every boot uses OVMF, an emulated USB stick, a 2560 by 1600 framebuffer, and a writable NVMe disk without QEMU snapshots; its complete digest must remain unchanged. The text checks type the private account credentials through the selected keyboard and require a command's output on the debug console. The default private config name is `my_hw_live`.
+
+`scripts/hw-live-check.py --help` documents the host gate. It inspects the mounted image and its actual initfs archive, requires the image kernel to match its Cargo build output, rejects enabled `system76_ec_debug` or `lpss_debug`, and scans the supplied component trees for firmware-variable writes. The VM check supplies the kernel, bootloader, base, installer and update-tool trees. It also plants a variable-write call, a storage driver binary and a storage PCI config; all must be rejected. The image-content rule is an allowlist, not merely the absence of one NVMe driver.
+
+The fixed `/hw-live` policy lives inside the image, rather than in an editable settings file beside it. The live bootloader ignores it when a verified-boot key is installed; otherwise it keeps diagnostic output visible and measures the policy with the boot environment. `hardware-live-base` shares base's source and patch list and installs neither storage drivers nor their PCI entries. Changing the policy requires rebuilding and rehearsing the image; this is not a general disk-write fence.
+
+`python3 scripts/hw-stick.py create-image --bootloader <bootloader-live.efi> --image <redox-live.iso> --output <new-stick.img>` stages the same FAT layout the VM uses. For the maintainer's B1 sitting only, `prepare` accepts a removable USB whole disk and requires its canonical path again as `--confirm-erase`; it refuses mounted disks, active holders and system disks. No agent runs `prepare` on a physical device. After initial preparation, the FAT filesystem contains `EFI/BOOT/BOOTX64.EFI` and `redox-live.iso`, so subsequent image updates can be file copies. FerrionOS remains VM-only until the maintainer records a real-hardware result.
+
 ## The ladder
 
 | Rung | Command | Proves | Needs |

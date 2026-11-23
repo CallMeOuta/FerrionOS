@@ -1,0 +1,21 @@
+include = ["hardware-live.toml"]
+
+[general]
+filesystem_size = 512
+
+[packages]
+orbdata = "source"
+orbital = {}
+orbterm = {}
+orbutils = "source"
+
+[[files]]
+path = "/usr/lib/init.d/20_orbital"
+data = """
+requires_weak 20_audiod.service 30_console.target
+nowait VT=3 orbital orblogin launcher
+"""
+
+[[files]]
+path = "/usr/lib/init.d/30_console_switch"
+data = ""
