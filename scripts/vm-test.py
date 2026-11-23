@@ -342,12 +342,16 @@ def require_3d_host(qemu, gpu, arch):
         raise Blocked("QEMU or the host kernel lacks KVM's honor-guest-pat, which Venus needs on an Intel host")
 
 
+MAX_RESIZES_PER_FRAME = 16
+
+
 class RFB:
     """Read raw RGB frames from QEMU's private, unauthenticated Unix VNC socket."""
 
     def __init__(self, sock):
         self.sock = sock
         self.deadline = None
+        self.outstanding = 0
         if self.read(12) != b"RFB 003.008\n":
             raise RuntimeError("QEMU VNC must support RFB 3.8")
         self.sock.sendall(b"RFB 003.008\n")
@@ -388,6 +392,7 @@ class RFB:
         """A whole frame. The server may send it in several updates, so every pixel must arrive in this call."""
         previous = self.sock.gettimeout()
         self.deadline = time.monotonic() + timeout
+        resizes = 0
         try:
             while True:
                 width, height = self.width, self.height
@@ -396,12 +401,33 @@ class RFB:
                 missing = bytearray(b"\x01") * (width * height)
                 left = width * height
                 resized = False
-                while left and not resized:
-                    self.sock.sendall(struct.pack("!BBHHHH", 3, 0, 0, 0, width, height))
+                while (left or self.outstanding > 0) and not resized:
+                    if self.outstanding == 0:
+                        self.sock.sendall(struct.pack("!BBHHHH", 3, 0, 0, 0, width, height))
+                        self.outstanding += 1
                     resized, covered = self._update(width, height, missing)
                     left -= covered
-                if not resized:
-                    return Frame(width, height, bytes(self.rgb))
+                if resized:
+                    resizes += 1
+                    if resizes > MAX_RESIZES_PER_FRAME:
+                        raise RuntimeError(f"VNC resized more than {MAX_RESIZES_PER_FRAME} times in one frame")
+                    continue
+                assert self.outstanding == 0
+                self.sock.settimeout(0)
+                try:
+                    pending = self.sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    pending = b""
+                if pending:
+                    self.sock.settimeout(previous)
+                    resized, _ = self._update(width, height, missing)
+                    if resized:
+                        resizes += 1
+                        if resizes > MAX_RESIZES_PER_FRAME:
+                            raise RuntimeError(f"VNC resized more than {MAX_RESIZES_PER_FRAME} times in one frame")
+                        continue
+                    raise RuntimeError("unexpected VNC update after complete frame")
+                return Frame(width, height, bytes(self.rgb))
         finally:
             self.deadline = None
             self.sock.settimeout(previous)
@@ -421,6 +447,7 @@ class RFB:
             break
         self.read(1)
         resized = False
+        saw_pixels = False
         covered = 0
         for _ in range(struct.unpack("!H", self.read(2))[0]):
             x, y, w, h, encoding = struct.unpack("!HHHHi", self.read(12))
@@ -430,6 +457,7 @@ class RFB:
                 continue
             if encoding != 0:
                 raise RuntimeError(f"unexpected VNC encoding {encoding}")
+            saw_pixels = True
             raw = self.read(w * h * 4)
             if resized:
                 continue
@@ -442,6 +470,10 @@ class RFB:
                 self.rgb[start * 3:(start + w) * 3] = pixels[row * w * 3:(row + 1) * w * 3]
                 covered += missing[start:start + w].count(1)
                 missing[start:start + w] = bytes(w)
+        if not (resized and not saw_pixels):
+            if self.outstanding <= 0:
+                raise RuntimeError("unexpected VNC reply with no outstanding request")
+            self.outstanding -= 1
         return resized, covered
 
 
