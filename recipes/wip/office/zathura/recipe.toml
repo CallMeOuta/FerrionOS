@@ -1,8 +1,0 @@
-[source]
-tar = "https://pwmt.org/projects/zathura/download/zathura-0.5.14.tar.xz"
-[build]
-template = "meson"
-dependencies = [
-    "girara",
-    "gtk3",
-]

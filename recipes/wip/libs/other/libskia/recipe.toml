@@ -1,6 +1,0 @@
-[source]
-git = "https://skia.googlesource.com/skia"
-rev = "canvaskit/0.41.0"
-shallow_clone = true
-[build]
-template = "custom"

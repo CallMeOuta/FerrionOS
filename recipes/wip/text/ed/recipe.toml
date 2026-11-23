@@ -1,4 +1,0 @@
-[source]
-tar = "https://ftp.gnu.org/gnu/ed/ed-1.22.5.tar.lz"
-[build]
-template = "configure"

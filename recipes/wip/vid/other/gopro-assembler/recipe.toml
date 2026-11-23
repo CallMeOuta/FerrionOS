@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/alichtman/gopro-chaptered-video-assembler"
-[build]
-template = "cargo"

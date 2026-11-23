@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/pwnwriter/haylxon"
-[build]
-template = "cargo"

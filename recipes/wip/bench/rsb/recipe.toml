@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/gamelife1314/rsb"
-shallow_clone = true
-[build]
-template = "cargo"
-dependencies = ["openssl3"]

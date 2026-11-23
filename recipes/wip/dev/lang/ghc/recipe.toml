@@ -1,4 +1,0 @@
-[source]
-tar = "https://downloads.haskell.org/~ghc/9.14.1/ghc-9.14.1-src.tar.xz"
-[build]
-template = "custom"

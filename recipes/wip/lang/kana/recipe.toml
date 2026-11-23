@@ -1,5 +1,0 @@
-[source]
-git = "https://gitlab.gnome.org/fkinoshita/kana"
-shallow_clone = true
-[build]
-template = "meson"

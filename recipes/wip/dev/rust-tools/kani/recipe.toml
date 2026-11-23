@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/model-checking/kani"
-shallow_clone = true
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/veeso/tuifeed"
-[build]
-template = "cargo"

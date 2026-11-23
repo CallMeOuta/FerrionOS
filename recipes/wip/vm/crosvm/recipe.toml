@@ -1,6 +1,0 @@
-[source]
-git = "https://chromium.googlesource.com/crosvm/crosvm"
-shallow_clone = true
-[build]
-template = "cargo"
-cargoflags = "--no-default-features"

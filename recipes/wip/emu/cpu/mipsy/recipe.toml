@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/insou22/mipsy"
-shallow_clone = true
-[build]
-template = "cargo"
-cargopackages = ["mipsy"]

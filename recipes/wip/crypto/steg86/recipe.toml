@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/woodruffw/steg86"
-[build]
-template = "cargo"

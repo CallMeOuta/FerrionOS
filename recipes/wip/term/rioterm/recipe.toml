@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/raphamorim/rio"
-[build]
-template = "cargo"
-dependencies = [
-    "freetype2",
-    "fontconfig",
-    "libxkbcommon",
-]

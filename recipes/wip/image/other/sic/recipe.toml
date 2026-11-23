@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/foresterre/sic"
-[build]
-template = "cargo"

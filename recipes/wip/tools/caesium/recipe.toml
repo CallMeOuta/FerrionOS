@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Lymphatus/caesium-clt"
-[build]
-template = "cargo"

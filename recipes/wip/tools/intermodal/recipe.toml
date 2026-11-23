@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/casey/intermodal"
-[build]
-template = "custom"
-script = """
-cookbook_cargo
-mv "${COOKBOOK_STAGE}/usr/bin/imdl" "${COOKBOOK_STAGE}/usr/bin/intermodal"
-"""

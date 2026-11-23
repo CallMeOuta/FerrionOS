@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Seebass22/terminal-toys"
-[build]
-template = "cargo"

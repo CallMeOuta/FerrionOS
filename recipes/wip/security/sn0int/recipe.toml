@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/kpcyrd/sn0int"
-shallow_clone = true
-[build]
-template = "cargo"
-dependencies = [
-    "libsodium",
-    "sqlite3",
-]

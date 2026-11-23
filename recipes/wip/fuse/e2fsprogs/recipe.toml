@@ -1,4 +1,0 @@
-[source]
-tar = "http://prdownloads.sourceforge.net/e2fsprogs/e2fsprogs-1.47.1.tar.gz"
-[build]
-template = "configure"

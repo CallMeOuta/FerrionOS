@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/mookid/diffr"
-[build]
-template = "cargo"

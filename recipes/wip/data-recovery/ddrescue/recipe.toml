@@ -1,4 +1,0 @@
-[source]
-tar = "https://ftp.gnu.org/gnu/ddrescue/ddrescue-1.30.tar.lz"
-[build]
-template = "configure"

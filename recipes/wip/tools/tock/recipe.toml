@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/nwtnni/tock"
-[build]
-template = "cargo"

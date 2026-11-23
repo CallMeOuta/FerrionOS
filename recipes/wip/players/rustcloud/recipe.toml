@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/cetra3/rustcloud"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

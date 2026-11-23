@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/verilator/verilator"
-rev = "v5.048"
-shallow_clone = true
-[build]
-template = "configure"

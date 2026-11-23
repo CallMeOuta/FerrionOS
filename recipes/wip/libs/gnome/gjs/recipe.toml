@@ -1,9 +1,0 @@
-[source]
-tar = "https://download.gnome.org/sources/gjs/1.88/gjs-1.88.0.tar.xz"
-[build]
-template = "meson"
-mesonflags = [
-    "-Dprofiler=disabled",
-    "-Dskip_dbus_tests=true",
-    "-Dskip_gtk_tests=true",
-]

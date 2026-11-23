@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/google/pix-image-viewer"
-[build]
-template = "cargo"

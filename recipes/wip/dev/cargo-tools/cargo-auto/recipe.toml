@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/automation-tasks-rs/cargo-auto"
-shallow_clone = true
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

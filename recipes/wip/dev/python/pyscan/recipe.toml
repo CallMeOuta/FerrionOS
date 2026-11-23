@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/aswinnnn/pyscan"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

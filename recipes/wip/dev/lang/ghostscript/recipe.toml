@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10060/ghostscript-10.06.0.tar.xz"
-[build]
-template = "configure"

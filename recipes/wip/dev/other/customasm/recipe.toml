@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/hlorenzi/customasm"
-shallow_clone = true
-[build]
-template = "cargo"

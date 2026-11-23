@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/hackclub/burrow"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages burrow
-"""

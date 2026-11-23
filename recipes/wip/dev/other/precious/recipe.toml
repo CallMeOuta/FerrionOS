@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/houseabsolute/precious"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kornelski/dssim"
-[build]
-template = "cargo"

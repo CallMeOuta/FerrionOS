@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/bytecodealliance/wasm-tools"
-[build]
-template = "cargo"

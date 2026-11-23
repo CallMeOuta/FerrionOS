@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/upx/upx/releases/download/v4.2.1/upx-4.2.1-src.tar.xz"
-[build]
-template = "custom"

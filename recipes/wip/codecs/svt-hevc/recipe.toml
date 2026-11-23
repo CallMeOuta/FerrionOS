@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/OpenVisualCloud/SVT-HEVC"
-shallow_clone = true
-[build]
-template = "cmake"

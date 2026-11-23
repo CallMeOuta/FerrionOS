@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/probe-rs/probe-rs"
-[build]
-template = "custom"
-dependencies = [
-]
-script = """
-cookbook_cargo --features cli
-"""

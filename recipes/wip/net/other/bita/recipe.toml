@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/oll3/bita"
-[build]
-template = "custom"
-script = """
-cookbook_cargo --no-default-features --features rustls-tls
-"""

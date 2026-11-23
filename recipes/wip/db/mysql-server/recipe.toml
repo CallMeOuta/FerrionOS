@@ -1,9 +1,0 @@
-[source]
-tar = "https://dev.mysql.com/downloads/file/?id=523432"
-[build]
-template = "cmake"
-dependencies = [
-    "boost",
-    "ncursesw",
-    "openssl3",
-]

@@ -1,4 +1,0 @@
-[source]
-tar = "http://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz"
-[build]
-template = "configure"

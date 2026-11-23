@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/rustwasm/twiggy"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages twiggy
-"""

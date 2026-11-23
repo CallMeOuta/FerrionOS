@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/woelper/oculante"
-[build]
-template = "cargo"
-dependencies = [
-    "gtk3",
-    "libalsa",
-]

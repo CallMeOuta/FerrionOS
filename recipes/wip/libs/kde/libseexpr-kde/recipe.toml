@@ -1,9 +1,0 @@
-[source]
-git = "https://invent.kde.org/graphics/kseexpr"
-rev = "v6.0.0.0"
-shallow_clone = true
-[build]
-template = "cmake"
-dependencies = [
-    "qt5-base",
-]

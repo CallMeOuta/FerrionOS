@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/joshka/tooters"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

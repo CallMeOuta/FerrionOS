@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/anistark/feluda"
-shallow_clone = true
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

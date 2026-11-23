@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/TheWaveWarden/odin2"
-[build]
-template = "cmake"
-dependencies = [
-    "mesa",
-    "curl",
-    "webkitgtk3",
-]

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/shashwatah/jot"
-[build]
-template = "cargo"

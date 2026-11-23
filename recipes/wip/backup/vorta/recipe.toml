@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/borgbase/vorta"
-rev = "v0.11.3"
-shallow_clone = true
-[build]
-template = "custom"

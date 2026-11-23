@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/diegopvlk/Dosage"
-rev = "v2.1.2"
-shallow_clone = true
-[build]
-template = "meson"

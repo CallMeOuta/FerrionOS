@@ -1,6 +1,0 @@
-[source]
-git = "https://invent.kde.org/sdk/libkomparediff2"
-branch = "release/25.12"
-shallow_clone = true
-[build]
-template = "cmake"

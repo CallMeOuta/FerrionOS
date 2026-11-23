@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/heyrict/exhaust"
-[build]
-template = "cargo"

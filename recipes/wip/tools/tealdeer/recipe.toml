@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/dbrgn/tealdeer"
-[build]
-template = "cargo"

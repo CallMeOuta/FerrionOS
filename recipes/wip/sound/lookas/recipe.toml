@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/rccyx/lookas"
-[build]
-template = "cargo"

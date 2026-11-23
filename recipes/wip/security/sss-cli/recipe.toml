@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/dsprenkels/sss-cli"
-[build]
-template = "cargo"

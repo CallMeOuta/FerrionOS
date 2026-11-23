@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ReagentX/Logria"
-[build]
-template = "cargo"

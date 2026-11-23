@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/mummer4/mummer/releases/download/v4.0.1/mummer-4.0.1.tar.gz"
-[build]
-template = "configure"

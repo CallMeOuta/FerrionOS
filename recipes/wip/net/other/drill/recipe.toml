@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/fcsonline/drill"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

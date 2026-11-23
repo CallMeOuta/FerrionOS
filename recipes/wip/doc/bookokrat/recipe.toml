@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/bugzmanov/bookokrat"
-[build]
-template = "cargo"

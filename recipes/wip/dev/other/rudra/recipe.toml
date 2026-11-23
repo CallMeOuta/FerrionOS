@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/sslab-gatech/Rudra"
-[build]
-template = "cargo"

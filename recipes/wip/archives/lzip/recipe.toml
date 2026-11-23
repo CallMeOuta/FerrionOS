@@ -1,4 +1,0 @@
-[source]
-tar = "https://download.savannah.gnu.org/releases/lzip/lzip-1.24.1.tar.gz"
-[build]
-template = "configure"

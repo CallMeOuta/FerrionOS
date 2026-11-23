@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/quietvoid/hdr10plus_tool"
-[build]
-template = "cargo"
-dependencies = [
-    "fontconfig",
-]

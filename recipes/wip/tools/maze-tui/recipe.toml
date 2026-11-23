@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/agl-alexglopez/maze-tui"
-[build]
-template = "custom"

@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/swc-project/swc"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages swc_cli_impl
-"""

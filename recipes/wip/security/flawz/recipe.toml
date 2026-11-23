@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/orhun/flawz"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

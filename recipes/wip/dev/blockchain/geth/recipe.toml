@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/ethereum/go-ethereum"
-branch = "release/1.16"
-shallow_clone = true
-[build]
-template = "custom"

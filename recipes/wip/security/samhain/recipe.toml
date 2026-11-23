@@ -1,4 +1,0 @@
-[source]
-tar = "https://www.la-samhna.de/samhain/samhain-current.tar.gz"
-[build]
-template = "configure"

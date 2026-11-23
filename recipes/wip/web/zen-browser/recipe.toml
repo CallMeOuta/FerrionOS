@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/zen-browser/desktop"
-branch = "stable"
-[build]
-template = "custom"

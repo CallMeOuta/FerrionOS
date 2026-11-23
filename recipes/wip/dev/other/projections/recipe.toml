@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/charmplusplus/projections"
-rev = "831b63af68f325c64dac307d9d2b5b07d9a21caa"
-[build]
-template = "custom"

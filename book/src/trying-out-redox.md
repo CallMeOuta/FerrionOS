@@ -1,8 +1,8 @@
 # Trying Out FerrionOS
 
-There are several programs, demos and other tools to try on FerrionOS. Most of these are not included in the default `desktop` image: they are in the `demo` config (`config/x86_64/demo.toml` has the full list), which FerrionOS has not built or verified yet. What this page says about the `demo` config is inherited from upstream.
+There are several programs and tools to try on FerrionOS. Some are installed in the default `desktop` image (`config/x86_64/desktop.toml`), and others can be added to a custom configuration by package name; [Including Programs in FerrionOS](./including-programs.md) describes how to add a package to an image.
 
-FerrionOS publishes no images, so build the `demo` image yourself with `CI=1 COOKBOOK_LOGS=true make all CONFIG_NAME=demo` ([Building FerrionOS](./podman-build.md)). The config does not list the `ffmpeg6` and `rustpython` packages, which the FFMPEG and RustPython sections below need; [Including Programs in FerrionOS](./including-programs.md) describes how to add a package to an image.
+FerrionOS publishes no images, so build the `desktop` image yourself with `CI=1 COOKBOOK_LOGS=true make all` ([Building FerrionOS](./podman-build.md)). To try optional packages such as `ffmpeg6`, `git`, or `rustpython`, add them to a custom configuration that includes `desktop.toml`.
 
 The system has no Wi-Fi driver, so if you need Internet access for some of the things you want to do, use an Ethernet cable or [run FerrionOS in a virtual machine](./running-vm.md). Most of the suggestions below do not require Internet access.
 
@@ -61,10 +61,6 @@ rustpython script-name.py
 ```
 
 (Upstream states that the [PyPI](https://pypi.org/) dependency manager is supported)
-
-### Periodic Table
-
-The Periodic Table `/usr/bin/periodictable` is a demonstration of the **OrbTk** user interface toolkit.
 
 ### Kibi
 

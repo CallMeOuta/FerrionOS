@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/bvaisvil/zenith"
-[build]
-template = "cargo"

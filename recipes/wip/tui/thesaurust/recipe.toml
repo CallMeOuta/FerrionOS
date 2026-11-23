@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/QuietPigeon2001/thesaurust"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

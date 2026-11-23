@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/slyeet03/spoify"
-[build]
-template = "cargo"

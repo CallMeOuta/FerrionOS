@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kolja/loriini"
-[build]
-template = "cargo"

@@ -1,5 +1,0 @@
-[source]
-tar = "https://dl.winehq.org/mono/sources/mono/mono-6.14.1.tar.xz"
-script = "GNU_CONFIG_GET config.sub"
-[build]
-template = "configure"

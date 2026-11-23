@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Cretezy/lazyjj"
-[build]
-template = "cargo"

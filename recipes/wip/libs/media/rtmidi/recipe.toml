@@ -1,4 +1,0 @@
-[source]
-tar = "http://caml.music.mcgill.ca/~gary/rtmidi/release/rtmidi-6.0.0.tar.gz"
-[build]
-template = "configure"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/krtab/agnos"
-[build]
-template = "cargo"

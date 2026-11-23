@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Nurrl/glou"
-[build]
-template = "cargo"

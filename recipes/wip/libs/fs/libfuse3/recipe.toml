@@ -1,8 +1,0 @@
-[source]
-tar = "https://github.com/libfuse/libfuse/releases/download/fuse-3.18.2/fuse-3.18.2.tar.gz"
-[build]
-template = "meson"
-mesonflags = [
-    "-Dtests=false",
-    "-Denable-io-uring=false",
-]

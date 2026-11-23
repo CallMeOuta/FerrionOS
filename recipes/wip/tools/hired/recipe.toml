@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/sidju/hired"
-[build]
-template = "cargo"

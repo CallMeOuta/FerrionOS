@@ -1,7 +1,0 @@
-[source]
-tar = "https://github.com/rizinorg/cutter/releases/download/v2.4.1/Cutter-v2.4.1-src.tar.gz"
-[build]
-template = "cmake"
-dependencies = [
-    "qt6-base",
-]

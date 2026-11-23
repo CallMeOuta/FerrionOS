@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/yazgoo/blockish-caca"
-[build]
-template = "cargo"
-dependencies = [
-    "libcaca",
-]

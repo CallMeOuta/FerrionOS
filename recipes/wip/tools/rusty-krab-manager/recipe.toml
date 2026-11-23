@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/aryakaul/rusty-krab-manager"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/envio-cli/envio"
-[build]
-template = "cargo"

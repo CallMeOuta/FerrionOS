@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/spenserblack/gengo"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages gengo
-"""

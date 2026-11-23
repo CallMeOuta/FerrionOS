@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/tapnisu/tapciify"
-[build]
-template = "cargo"

@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/SUPERCILEX/fuc"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages cpz rmz
-"""

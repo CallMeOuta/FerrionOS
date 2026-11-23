@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ZmoleCristian/gptube-cli"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/dzfrias/projectable"
-[build]
-template = "cargo"

@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/Huluti/Curtail"
-rev = "1.13.0"
-[build]
-template = "meson"
-dependencies = [
-    "gtk4",
-    "libadwaita",
-]

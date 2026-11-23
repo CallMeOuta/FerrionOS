@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/NewDawn0/tl"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

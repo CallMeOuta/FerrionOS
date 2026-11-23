@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/noahra/byteblitz"
-[build]
-template = "cargo"

@@ -1,8 +1,0 @@
-[source]
-tar = "http://dl.openfoam.org/source/11"
-[build]
-template = "custom"
-dependencies = [
-    "paraview",
-    "scotch",
-]

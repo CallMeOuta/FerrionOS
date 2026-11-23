@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/hpcg-benchmark/hpcg"
-shallow_clone = true
-[build]
-template = "custom"
-script = """
-DYNAMIC_INIT
-cookbook_cmake
-"""

@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/collabora/bmap-rs"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages bmap-rs
-"""

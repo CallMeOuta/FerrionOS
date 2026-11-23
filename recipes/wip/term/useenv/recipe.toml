@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/EliahKagan/useenv"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kongbytes/arp-scan-rs"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/brycx/checkpwn"
-[build]
-template = "cargo"

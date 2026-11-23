@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/sommerfelddev/sentrum"
-[build]
-template = "cargo"

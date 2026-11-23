@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/wwmm/easyeffects"
-rev = "v8.1.2"
-shallow_clone = true
-[build]
-template = "cmake"

@@ -1,4 +1,0 @@
-[source]
-tar = "https://dl.matroska.org/downloads/libmatroska/libmatroska-1.7.1.tar.xz"
-[build]
-template = "cmake"

@@ -1,8 +1,0 @@
-[source]
-tar = "https://www.libssh.org/files/0.12/libssh-0.12.0.tar.xz"
-[build]
-template = "cmake"
-dependencies = [
-    "zlib",
-    "openssl3",
-]

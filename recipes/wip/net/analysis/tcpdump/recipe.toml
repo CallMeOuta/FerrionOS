@@ -1,7 +1,0 @@
-[source]
-tar = "https://www.tcpdump.org/release/tcpdump-4.99.6.tar.xz"
-[build]
-template = "configure"
-dependencies = [
-    "libpcap",
-]

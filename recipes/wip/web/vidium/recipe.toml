@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/s-panferov/vidium"
-[build]
-template = "cargo"

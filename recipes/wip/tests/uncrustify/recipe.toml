@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/uncrustify/uncrustify/releases/download/uncrustify-0.82.0/uncrustify-0.82.0.tar.gz"
-[build]
-template = "cmake"

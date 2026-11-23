@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/algon-320/toyterm"
-[build]
-template = "cargo"

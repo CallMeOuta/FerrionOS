@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Emivvvvv/btc-vanity"
-[build]
-template = "cargo"

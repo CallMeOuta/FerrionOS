@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/nnethercote/counts"
-[build]
-template = "cargo"

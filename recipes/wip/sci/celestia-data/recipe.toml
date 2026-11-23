@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/CelestiaProject/CelestiaContent"
-[build]
-template = "cmake"

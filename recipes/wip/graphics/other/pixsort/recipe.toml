@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/1jz/pixsort"
-[build]
-template = "cargo"

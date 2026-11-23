@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/KhronosGroup/SPIRV-LLVM-Translator"
-rev = "v21.1.7"
-shallow_clone = true
-[build]
-template = "cmake"

@@ -1,6 +1,0 @@
-[source]
-git = "https://invent.kde.org/education/gcompris"
-rev = "V26.1"
-shallow_clone = true
-[build]
-template = "cmake"

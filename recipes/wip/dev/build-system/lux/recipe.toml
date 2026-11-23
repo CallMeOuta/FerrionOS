@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/lumen-oss/lux"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages lux-cli
-"""

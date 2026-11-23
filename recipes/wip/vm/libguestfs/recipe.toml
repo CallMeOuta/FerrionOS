@@ -1,4 +1,0 @@
-[source]
-tar = "https://download.libguestfs.org/1.58-stable/libguestfs-1.58.1.tar.gz"
-[build]
-template = "configure"

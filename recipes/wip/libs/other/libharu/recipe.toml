@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/libharu/libharu"
-rev = "v2.4.5"
-shallow_clone = true
-[build]
-template = "cmake"

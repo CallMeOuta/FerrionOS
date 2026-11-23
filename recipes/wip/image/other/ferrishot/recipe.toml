@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/nik-rev/ferrishot"
-[build]
-dependencies = [
-    "mesa",
-    "libwayland",
-]
-template = "cargo"

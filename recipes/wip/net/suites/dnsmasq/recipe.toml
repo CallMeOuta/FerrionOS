@@ -1,4 +1,0 @@
-[source]
-tar = "https://thekelleys.org.uk/dnsmasq/dnsmasq-2.92rel2.tar.xz"
-[build]
-template = "custom"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/pudnax/pilka"
-[build]
-template = "cargo"

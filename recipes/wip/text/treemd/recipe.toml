@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Epistates/treemd"
-[build]
-template = "cargo"

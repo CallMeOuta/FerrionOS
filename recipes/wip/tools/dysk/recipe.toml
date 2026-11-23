@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Canop/dysk"
-[build]
-template = "cargo"

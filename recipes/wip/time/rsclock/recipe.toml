@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/valebes/rsClock"
-[build]
-template = "cargo"

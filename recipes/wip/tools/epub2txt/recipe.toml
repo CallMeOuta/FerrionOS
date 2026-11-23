@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/quininer/epub2txt"
-[build]
-template = "cargo"

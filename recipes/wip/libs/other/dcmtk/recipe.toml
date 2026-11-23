@@ -1,7 +1,0 @@
-[source]
-tar = "https://dicom.offis.de/download/dcmtk/dcmtk370/dcmtk-3.7.0.tar.gz"
-[build]
-template = "cmake"
-cmakeflags = [
-    "-DDCMTK_WITH_DOXYGEN=OFF"
-]

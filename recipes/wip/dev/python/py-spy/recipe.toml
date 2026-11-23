@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/benfred/py-spy"
-[build]
-template = "cargo"

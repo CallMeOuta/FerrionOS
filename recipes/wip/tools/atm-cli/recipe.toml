@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/allthemusicllc/atm-cli"
-[build]
-template = "cargo"

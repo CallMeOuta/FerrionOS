@@ -1,4 +1,0 @@
-[source]
-tar = "https://download.savannah.nongnu.org/releases/tinycc/tcc-0.9.27.tar.bz2"
-[build]
-template = "configure"

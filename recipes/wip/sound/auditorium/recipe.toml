@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/nate-craft/auditorium"
-[build]
-template = "cargo"
-[package]
-dependencies = [
-    "mpv",
-    "ffmpeg6",
-]

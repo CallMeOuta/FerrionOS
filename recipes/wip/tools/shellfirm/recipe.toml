@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/kaplanelad/shellfirm"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages shellfirm
-"""

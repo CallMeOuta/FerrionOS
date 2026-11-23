@@ -121,7 +121,7 @@ Not all Linux distributions are supported by `native_bootstrap.sh`, so if you ha
 
 If you want to support your Unix-like system without Podman, you can try to install the Debian/Ubuntu package equivalents for your system from your package manager/software store, you can see them on the `ubuntu()` function of the [native_bootstrap.sh](https://github.com/CallMeOuta/FerrionOS/blob/master/native_bootstrap.sh) script.
 
-The `native_bootstrap.sh` script and `redox-base-containerfile` are inherited from upstream, where they cover the build system packages needed by the recipes of the [demo.toml](https://github.com/CallMeOuta/FerrionOS/blob/master/config/x86_64/demo.toml) filesystem configuration. FerrionOS has not verified the `demo` configuration.
+The `native_bootstrap.sh` script and `redox-base-containerfile` are inherited from upstream, where they cover the build system packages needed by the recipes of the default `desktop` filesystem configuration (`config/x86_64/desktop.toml`).
 
 (Note that some systems may have build environment problems hard and time consuming to fix, on these systems Podman will fix most headaches)
 

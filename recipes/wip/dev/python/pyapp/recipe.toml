@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ofek/pyapp"
-[build]
-template = "cargo"

@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/ninja-build/ninja"
-rev = "v1.13.1"
-shallow_clone = true
-[build]
-template = "cmake"

@@ -1,6 +1,0 @@
-[source]
-git = "https://aomedia.googlesource.com/aom"
-rev = "v3.13.2"
-shallow_clone = true
-[build]
-template = "cmake"

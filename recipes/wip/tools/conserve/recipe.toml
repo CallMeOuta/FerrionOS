@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/sourcefrog/conserve"
-[build]
-template = "cargo"

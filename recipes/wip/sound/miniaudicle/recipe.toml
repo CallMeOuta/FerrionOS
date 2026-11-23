@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/ccrma/miniAudicle"
-rev = "3ef25e881cec9ee823d9cf93346c2d6feb089007"
-[build]
-template = "custom"
-dependencies = [
-    "libsndfile",
-    "qt6-base",
-]

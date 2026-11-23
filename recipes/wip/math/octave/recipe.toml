@@ -1,4 +1,0 @@
-[source]
-tar = "https://ftp.gnu.org/gnu/octave/octave-11.1.0.tar.lz"
-[build]
-template = "configure"

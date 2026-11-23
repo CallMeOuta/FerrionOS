@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/spinframework/spin-rust-sdk"
-[build]
-template = "custom"
-script = """
-DYNAMIC_INIT
-cookbook_cargo_packages spin-sdk spin-sdk-macro
-"""

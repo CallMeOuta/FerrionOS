@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/elm/compiler"
-rev = "0.19.1"
-shallow_clone = true
-[build]
-template = "custom"

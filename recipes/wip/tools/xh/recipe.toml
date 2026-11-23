@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ducaale/xh"
-[build]
-template = "cargo"

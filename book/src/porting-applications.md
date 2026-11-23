@@ -1405,7 +1405,7 @@ Thus the best approach is to know the minimum necessary to make the application 
 
 Add missing recipe build tools in the [podman/redox-base-containerfile](https://github.com/CallMeOuta/FerrionOS/blob/master/podman/redox-base-containerfile) file (for Podman builds) or install them on your system (for Native builds).
 
-The `podman/redox-base-containerfile` file and the `native_bootstrap.sh` script are meant to cover the build tools required by the recipes on the [demo.toml](https://github.com/CallMeOuta/FerrionOS/blob/master/config/x86_64/demo.toml) filesystem configuration. This coverage is inherited from upstream and FerrionOS has not verified it.
+The `podman/redox-base-containerfile` file and the `native_bootstrap.sh` script are meant to cover the build tools required by the recipes of the default `desktop` filesystem configuration (`config/x86_64/desktop.toml`). This coverage is inherited from upstream and FerrionOS has not verified it outside the `desktop` build.
 
 ## Feature Flags
 

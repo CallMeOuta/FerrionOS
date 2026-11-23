@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ms-jpq/sad"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-tar = "https://sg.danny.cz/sg/p/sdparm-1.12.tgz"
-[build]
-template = "configure"

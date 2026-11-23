@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/taviso/loadlibrary"
-[build]
-template = "custom"
-dependencies = [
-    "readline",
-]

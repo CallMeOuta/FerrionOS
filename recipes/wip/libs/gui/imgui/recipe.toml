@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/Qix-/imgui"
-branch = "cmake"
-shallow_clone = true
-[build]
-template = "cmake"
-dependencies = ["sdl2"]

@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/nidnogg/zeitfetch"
-shallow_clone = true
-[build]
-template = "cargo"

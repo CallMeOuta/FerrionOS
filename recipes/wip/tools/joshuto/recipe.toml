@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kamiyaa/joshuto"
-[build]
-template = "cargo"

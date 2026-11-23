@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/bencherdev/bencher"
-shallow_clone = true
-[build]
-template = "custom"
-script = """
-DYNAMIC_INIT
-cookbook_cargo_packages bencher_cli
-"""

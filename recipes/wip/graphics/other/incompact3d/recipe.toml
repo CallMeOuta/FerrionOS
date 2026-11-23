@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/xcompact3d/Incompact3d"
-rev = "2546f404cf3bbf78bc745d6133173c37e46c82df"
-[build]
-template = "custom"

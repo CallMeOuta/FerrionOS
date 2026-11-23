@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/grunch/rana"
-[build]
-template = "cargo"

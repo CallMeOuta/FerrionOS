@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/imsnif/bandwhich"
-[build]
-template = "cargo"

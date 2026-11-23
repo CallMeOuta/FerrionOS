@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/korandoru/hawkeye"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages hawkeye hawkeye-fmt
-"""

@@ -1,7 +1,0 @@
-[source]
-tar = "https://github.com/OpenRadioss/OpenRadioss"
-[build]
-template = "custom"
-dependencies = [
-    "openmpi",
-]

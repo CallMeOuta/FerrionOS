@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/ahriroot/watchmen"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages watchmen watchmend
-"""

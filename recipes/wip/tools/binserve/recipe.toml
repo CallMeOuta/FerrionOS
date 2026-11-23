@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/mufeedvh/binserve"
-[build]
-template = "cargo"

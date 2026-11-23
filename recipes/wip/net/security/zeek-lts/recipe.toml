@@ -1,9 +1,0 @@
-[source]
-tar = "https://download.zeek.org/zeek-8.0.8.tar.gz"
-[build]
-template = "configure"
-dependencies = [
-    "libpcap",
-    "openssl3",
-    "zlib",
-]

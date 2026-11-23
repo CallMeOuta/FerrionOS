@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/NilsBrause/waylandpp"
-rev = "1.0.1"
-shallow_clone = true
-[build]
-template = "cmake"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/cantino/mcfly"
-[build]
-template = "cargo"

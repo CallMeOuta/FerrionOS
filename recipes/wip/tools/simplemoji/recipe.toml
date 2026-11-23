@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/SergioRibera/Simplemoji"
-[build]
-template = "cargo"

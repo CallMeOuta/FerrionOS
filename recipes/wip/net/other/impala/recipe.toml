@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/pythops/impala"
-[build]
-template = "cargo"

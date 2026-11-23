@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/sile/pixcil"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages pixcil
-"""

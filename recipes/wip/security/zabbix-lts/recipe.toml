@@ -1,4 +1,0 @@
-[source]
-tar = "https://cdn.zabbix.com/zabbix/sources/stable/7.0/zabbix-7.0.26.tar.gz"
-[build]
-template = "configure"

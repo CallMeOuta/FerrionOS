@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/typst/typst"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages typst
-"""

@@ -1,8 +1,0 @@
-[source]
-git = "https://gitlab.com/jallbrit/cbonsai"
-rev = "v1.4.2"
-[build]
-template = "custom"
-dependencies = [
-    "ncursesw",
-]

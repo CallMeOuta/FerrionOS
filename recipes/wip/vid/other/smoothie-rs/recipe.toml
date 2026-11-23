@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/couleur-tweak-tips/smoothie-rs"
-[build]
-template = "cargo"

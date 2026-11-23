@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Vinegret43/dispute"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/galeone/bacup"
-[build]
-template = "cargo"

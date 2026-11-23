@@ -1,4 +1,0 @@
-[source]
-tar = "https://ftp.gnu.org/gnu/wget/wget2-2.2.1.tar.gz"
-[build]
-template = "configure"

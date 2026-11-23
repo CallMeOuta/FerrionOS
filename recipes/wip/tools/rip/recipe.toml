@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/nivekuil/rip"
-[build]
-template = "cargo"

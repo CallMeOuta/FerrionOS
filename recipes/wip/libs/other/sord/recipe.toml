@@ -1,9 +1,0 @@
-[source]
-tar = "https://gitlab.com/drobilla/sord/-/archive/v0.16.22/sord-v0.16.22.tar.bz2"
-[build]
-template = "meson"
-mesonflags = [
-    "-Dtests=disabled",
-    "-Ddocs=disabled",
-    "-Dman=disabled",
-]

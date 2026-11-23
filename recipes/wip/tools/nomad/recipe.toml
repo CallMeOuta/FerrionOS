@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/JosephLai241/nomad"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

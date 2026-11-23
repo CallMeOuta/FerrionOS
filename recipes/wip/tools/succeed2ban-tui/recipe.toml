@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/J-Bockhofer/succeed2ban-tui"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

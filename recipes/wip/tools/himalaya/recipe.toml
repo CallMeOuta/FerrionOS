@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/soywod/himalaya"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/altsem/gitu"
-[build]
-template = "cargo"

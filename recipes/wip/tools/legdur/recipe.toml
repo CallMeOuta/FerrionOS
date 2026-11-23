@@ -1,4 +1,0 @@
-[source]
-git = "https://hg.sr.ht/~cyplo/legdur"
-[build]
-template = "cargo"

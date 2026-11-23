@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/jedisct1/yes-rs"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/saubuny/tuisic"
-[build]
-template = "cargo"

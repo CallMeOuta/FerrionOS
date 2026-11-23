@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/konradsz/igrep"
-[build]
-template = "cargo"

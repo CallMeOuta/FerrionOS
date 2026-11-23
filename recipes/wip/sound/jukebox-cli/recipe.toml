@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/FedeCarollo/jukebox-cli"
-[build]
-template = "cargo"

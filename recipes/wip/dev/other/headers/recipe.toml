@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/transmissions11/headers"
-[build]
-template = "cargo"

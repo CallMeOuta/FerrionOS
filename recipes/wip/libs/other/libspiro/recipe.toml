@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/fontforge/libspiro/releases/download/20221101/libspiro-dist-20221101.tar.gz"
-[build]
-template = "configure"

@@ -1,9 +1,0 @@
-[source]
-git = "https://git.jami.net/savoirfairelinux/jami-client-qt"
-branch = "stable/20260216.0"
-shallow_clone = true
-[build]
-template = "custom"
-script = """
-./build.py --install
-"""

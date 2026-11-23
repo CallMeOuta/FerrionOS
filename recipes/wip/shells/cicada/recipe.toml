@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/mitnk/cicada"
-rev = "710988133335582d43c74e04d0d7f95c034e2c21"
-[build]
-template = "custom"

@@ -1,4 +1,0 @@
-[source]
-tar = "http://www.liblognorm.com/files/download/liblognorm-2.1.0.tar.gz"
-[build]
-template = "configure"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/bokuweb/lcs-image-diff-rs"
-[build]
-template = "cargo"

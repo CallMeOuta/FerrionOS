@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ex0dus-0x/binsec"
-[build]
-template = "cargo"

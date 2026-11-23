@@ -1,9 +1,0 @@
-[source]
-tar = "https://archive.mozilla.org/pub/thunderbird/releases/140.7.0esr/source/thunderbird-140.7.0esr.source.tar.xz"
-[build]
-template = "custom"
-script = """
-mkdir -pv "${COOKBOOK_STAGE}"/usr/bin
-export MOZCONFIG="{COOKBOOK_RECIPE}/mozconfig"
-./mach build
-"""

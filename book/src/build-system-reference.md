@@ -63,15 +63,12 @@ The `make` targets are documented in the comments of `Makefile` and `mk/*.mk`, a
 - `config/dev-accounts.toml` - The dev accounts: `user` with an empty password, in group `sudo`, and `root` with the password `password`. They are development credentials for test machines. `config/minimal.toml` and the configurations that include `config/base.toml` directly include this file.
 - `config/minimal.toml` - The variant without server tools and Orbital.
 - `config/server.toml` - The variant with some important tools without Orbital. It cooks far fewer packages than `desktop`.
-- `config/x86_64/server-demo.toml` - `server` variant with a demonstration of a server software stack
 - `config/desktop-minimal.toml` - The minimal `desktop` variant: `minimal` with Orbital.
 - `config/desktop.toml` - The variant with some important CLI and GUI programs (this is the default configuration of the build system). It currently installs the COSMIC terminal, file manager, text editor and Orbital. Which desktop apps FerrionOS ships is not settled and may change.
 - `config/x86_64/desktop.toml` - The `desktop` configuration of x86_64: the shared one with the fish, zsh and Nushell shells added, and Nushell as the login shell of `user`.
 - `config/riscv64gc/desktop.toml` - The `desktop` configuration of RISC-V, including the shared desktop configuration.
 - `config/desktop-contain.toml` - `desktop` variant that starts the graphical login through `contain_orblogin`, a part of the `contain` sandbox tool, which aims at limiting the schemes and files that a session can reach. FerrionOS has not verified it, see [Security](./security.md).
 - `config/dev.toml` - The variant with development tools included (`config/aarch64/dev.toml` adapts it to that CPU architecture).
-- `config/$ARCH/demo.toml` - The variant with `desktop` and optional programs and demos.
-- `config/x86_64/rustconf2025.toml` - `demo` variant with two more packages, a demonstration configuration inherited from upstream
 - `config/wayland.toml` - Configuration for Wayland sessions and applications
 - `config/acid.toml` - Configuration with the `acid` test suite.
 - `config/os-test.toml` - Configuration with the `os-test` test suite
@@ -82,9 +79,7 @@ The `make` targets are documented in the comments of `Makefile` and `mk/*.mk`, a
 - `config/redoxer-gui.toml` - Configuration used to create the Redoxer GUI image
 - `config/aarch64/raspi3bp/minimal.toml` - The `minimal` configuration of the Raspberry Pi 3 Model B+ board. A board model specific configuration lies in `config/$ARCH/$BOARD` and is selected with the `BOARD` variable; this is the only one today.
 - `config/$ARCH/redoxer.toml` - CPU-specific Redoxer configuration
-- `config/x86_64/full.toml` - Configuration with all the packages of `config/x86_64/ci.toml`
 - `config/$ARCH/ci.toml` - The list of packages that `make ci-pkg` cooks (`mk/ci.mk`). Upstream's build server publishes its packages from this list; FerrionOS publishes no packages.
-- `config/$ARCH/jeremy.toml` - A test configuration inherited from upstream.
 
 ### Build System Files
 

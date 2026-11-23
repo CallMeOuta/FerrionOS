@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/ungoogled-software/ungoogled-chromium"
-rev = "149.0.7827.114-1"
-shallow_clone = true
-[build]
-template = "custom"
-script = """
-DYNAMIC_INIT
-"""

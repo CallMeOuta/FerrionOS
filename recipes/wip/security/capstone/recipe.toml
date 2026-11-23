@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/capstone-engine/capstone"
-rev = "release-5.0.9"
-shallow_clone = true
-[build]
-template = "cmake"
-cmakeflags = [
-    "-DCAPSTONE_ARCHITECTURE_DEFAULT=OFF",
-]

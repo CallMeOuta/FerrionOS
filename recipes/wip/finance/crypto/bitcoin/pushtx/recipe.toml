@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/alfred-hodler/pushtx"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages pushtx-cli
-"""

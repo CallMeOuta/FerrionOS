@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/isan-Ethen/simple-disk-benchmark-rs"
-shallow_clone = true
-[build]
-template = "cargo"

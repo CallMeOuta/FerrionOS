@@ -1,4 +1,0 @@
-[source]
-tar = "https://download.gnome.org/sources/gnome-connections/49/gnome-connections-49.0.tar.xz"
-[build]
-template = "meson"

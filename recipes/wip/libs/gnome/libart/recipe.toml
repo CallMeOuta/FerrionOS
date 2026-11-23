@@ -1,4 +1,0 @@
-[source]
-tar = "https://download.gnome.org/sources/libart_lgpl/2.3/libart_lgpl-2.3.21.tar.bz2"
-[build]
-template = "configure"

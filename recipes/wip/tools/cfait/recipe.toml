@@ -1,4 +1,0 @@
-[source]
-git = "https://codeberg.org/trougnouf/cfait"
-[build]
-template = "cargo"

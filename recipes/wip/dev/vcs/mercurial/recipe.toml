@@ -1,4 +1,0 @@
-[source]
-tar = "https://www.mercurial-scm.org/release/mercurial-6.6.2.tar.gz"
-[build]
-template = "custom"

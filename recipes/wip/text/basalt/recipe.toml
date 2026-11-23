@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/erikjuhani/basalt"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages basalt-tui
-"""

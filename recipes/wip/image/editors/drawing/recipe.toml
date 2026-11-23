@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/maoschanz/drawing"
-branch = "1.0.x-stable"
-shallow_clone = true
-[build]
-template = "meson"
-mesonflags = [
-    "-Denable-translations-and-appdata=false"
-]

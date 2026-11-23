@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ryanweideman/3d-terminal-renderer"
-[build]
-template = "cargo"

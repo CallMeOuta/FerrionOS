@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/RustScan/RustScan"
-[build]
-template = "cargo"
-dependencies = [
-    "nmap",
-]

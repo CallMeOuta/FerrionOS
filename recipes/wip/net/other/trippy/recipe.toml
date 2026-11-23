@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/fujiapple852/trippy"
-[build]
-template = "cargo"

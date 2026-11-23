@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/rustls/rustls-openssl-compat"
-shallow_clone = true
-[build]
-template = "custom"

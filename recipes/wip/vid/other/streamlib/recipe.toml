@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/streamlib/streamlib"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

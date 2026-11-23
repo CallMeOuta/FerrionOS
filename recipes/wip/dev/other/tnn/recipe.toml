@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/Tencent/TNN"
-rev = "491dfc8653e200b5e8a428069638e191662a0882"
-[build]
-template = "custom"

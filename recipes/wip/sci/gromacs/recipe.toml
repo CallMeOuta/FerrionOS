@@ -1,4 +1,0 @@
-[source]
-tar = "https://ftp.gromacs.org/gromacs/gromacs-2026.1.tar.gz"
-[build]
-template = "cmake"

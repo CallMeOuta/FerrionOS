@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/TheAwiteb/data2sound"
-[build]
-template = "cargo"

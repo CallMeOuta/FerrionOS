@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/tvlfyi/tvix"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages tvix-cli
-"""

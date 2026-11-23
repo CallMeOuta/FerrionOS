@@ -1,7 +1,0 @@
-[source]
-tar = "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.6/openmp-21.1.6.src.tar.xz"
-[build]
-template = "cmake"
-dependencies = [
-    "llvm21",
-]

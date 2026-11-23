@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/unhappychoice/gittype"
-[build]
-template = "cargo"

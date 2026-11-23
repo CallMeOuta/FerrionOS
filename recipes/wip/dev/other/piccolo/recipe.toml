@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/kyren/piccolo"
-[build]
-template = "cargo"
-cargoexamples = [
-    "interpreter"
-]

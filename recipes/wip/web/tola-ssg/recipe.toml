@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kawayww/tola-ssg"
-[build]
-template = "cargo"

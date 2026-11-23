@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/timelens/timelens"
-[build]
-template = "cargo"
-dependencies = [
-    "gstreamer",
-]

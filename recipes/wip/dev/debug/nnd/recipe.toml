@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/al13n321/nnd"
-shallow_clone = true
-[build]
-template = "cargo"
-cargoflags = ["--profile=dbgo"]

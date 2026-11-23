@@ -1,4 +1,0 @@
-[source]
-tar = "https://danlj.org/mkj/ttywatch/ttywatch-0.14.tar.bz2"
-[build]
-template = "custom"

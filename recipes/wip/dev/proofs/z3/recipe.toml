@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/Z3Prover/z3"
-rev = "z3-4.15.4"
-shallow_clone = true
-[build]
-template = "cmake"

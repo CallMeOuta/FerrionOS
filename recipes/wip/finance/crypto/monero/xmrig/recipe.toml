@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/xmrig/xmrig"
-rev = "8084ff37a5c8935c649a2e362da0fe570c79a2c2"
-[build]
-template = "cmake"
-dependencies = [
-    "openssl3",
-    "libuv",
-]

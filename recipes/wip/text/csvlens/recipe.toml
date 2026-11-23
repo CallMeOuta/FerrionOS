@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/YS-L/csvlens"
-[build]
-template = "cargo"

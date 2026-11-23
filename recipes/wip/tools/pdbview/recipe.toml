@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/landaire/pdbview"
-[build]
-template = "cargo"

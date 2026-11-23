@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/radumarias/rencfs"
-[build]
-template = "cargo"
-dependencies = [
-    "libfuse3",
-]

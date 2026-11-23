@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/bram209/leptosfmt"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages leptosfmt
-"""

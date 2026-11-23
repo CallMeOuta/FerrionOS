@@ -1,7 +1,0 @@
-[source]
-tar = "https://github.com/trapexit/mergerfs/releases/download/2.40.2/mergerfs-2.40.2.tar.gz"
-[build]
-template = "custom"
-dependencies = [
-    "libfuse3",
-]

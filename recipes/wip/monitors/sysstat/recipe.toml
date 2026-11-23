@@ -1,4 +1,0 @@
-[source]
-tar = "https://sysstat.github.io/sysstat-packages/sysstat-12.7.9.tar.xz"
-[build]
-template = "configure"

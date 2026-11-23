@@ -1,8 +1,0 @@
-[source]
-tar = "https://download.savannah.gnu.org/releases/tiger/tiger_3.2.4rc1.tar.gz"
-[build]
-template = "configure"
-[package]
-dependencies = [
-    "bash"
-]

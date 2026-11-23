@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/dtolnay/cargo-llvm-lines"
-shallow_clone = true
-[build]
-template = "cargo"

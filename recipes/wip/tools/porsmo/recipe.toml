@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ColorCookie-dev/porsmo"
-[build]
-template = "cargo"

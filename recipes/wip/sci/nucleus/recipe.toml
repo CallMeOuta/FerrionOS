@@ -1,4 +1,0 @@
-[source]
-tar = "https://codeberg.org/lo-vely/nucleus/archive/v2.tar.gz"
-[build]
-template = "meson"

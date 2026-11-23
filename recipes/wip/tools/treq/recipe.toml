@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/talis-fb/TReq"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/tgotwig/vidmerger"
-[build]
-template = "cargo"
-dependencies = [
-    "ffmpeg6",
-]

@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/coreos/cargo-vendor-filterer"
-shallow_clone = true
-[build]
-template = "cargo"

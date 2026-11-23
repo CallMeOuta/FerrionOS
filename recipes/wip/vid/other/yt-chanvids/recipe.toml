@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/daniel-araujo/yt-chanvids"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

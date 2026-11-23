@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/jtroo/kanata"
-[build]
-template = "cargo"

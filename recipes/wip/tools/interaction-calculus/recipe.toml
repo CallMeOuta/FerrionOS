@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/VictorTaelin/Interaction-Calculus"
-[build]
-template = "cargo"

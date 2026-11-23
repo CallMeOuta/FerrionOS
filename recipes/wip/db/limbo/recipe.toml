@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/tursodatabase/limbo"
-shallow_clone = true
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages limbo_cli
-"""

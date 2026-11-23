@@ -1,9 +1,0 @@
-[source]
-git = "https://gitlab.gnome.org/World/pika-backup"
-shallow_clone = true
-[build]
-template = "meson"
-dependencies = [
-    "gtk4",
-    "libadwaita",
-]

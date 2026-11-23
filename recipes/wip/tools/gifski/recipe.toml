@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ImageOptim/gifski"
-[build]
-template = "cargo"

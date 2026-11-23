@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/maxcurzi/tplay"
-[build]
-template = "cargo"
-dependencies = [
-    "ffmpeg6",
-    "libmpv",
-    "openssl3",
-]

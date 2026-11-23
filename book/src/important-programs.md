@@ -15,7 +15,6 @@ Upstream tested on the x86_64 (Intel/AMD) CPU architecture. Other CPU architectu
 | GCC 13 | Yes | Yes | Working Well | Yes |
 | Rust 1.90 | Yes | Always Crashing | Working | Yes |
 | Go 1.25 | Yes | Always Crashing | Always Crashing | No |
-| Zig 0.15 | Not Known | Not Known | Not Known | No |
 
 ## Interpreters
 
@@ -25,7 +24,6 @@ Upstream tested on the x86_64 (Intel/AMD) CPU architecture. Other CPU architectu
 | CPython 3.12 | Yes | Working Well |
 | Lua 5.4 | Yes | Working |
 | LuaJit 2.1 | Yes | Often Crashing |
-| Node.js 24 | Yes | Working |
 | PHP 8.4 | Yes | Mostly Well |
 
 ## GUI Libraries
@@ -49,12 +47,6 @@ The x86_64 desktop image currently installs the COSMIC terminal, file manager an
 | COSMIC Terminal | winit | Working Well |
 | FFplay | SDL2 | Working Well |
 | Servo | winit | Often Crashes |
-
-### Emulators
-
-| Name | GUI Backend | Status recorded upstream |
-|---|---|---|
-| RVVM | SDL1 | Working Well |
 
 ## Servers
 

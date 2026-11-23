@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/elves/elvish"
-branch = "v0.21-release"
-shallow_clone = true
-[build]
-template = "go"

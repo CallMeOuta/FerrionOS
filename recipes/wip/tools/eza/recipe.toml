@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/eza-community/eza"
-[build]
-template = "cargo"

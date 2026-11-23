@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/fathyb/carbonyl"
-[build]
-template = "cargo"
-dependencies = [
-    "nss",
-    "fontconfig",
-    "expat",
-]

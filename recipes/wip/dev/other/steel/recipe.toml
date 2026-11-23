@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/mattwparas/steel"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

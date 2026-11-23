@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/sharkdp/numbat"
-shallow_clone = true
-[build]
-template = "cargo"
-cargopackages = ["numbat-cli"]

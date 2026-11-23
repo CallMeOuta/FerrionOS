@@ -1,4 +1,0 @@
-[source]
-tar = "http://download.savannah.gnu.org/releases/liberty-eiffel/bell.tar.gz"
-[build]
-template = "custom"

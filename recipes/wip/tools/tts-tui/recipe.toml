@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/lesleyrs/tts-tui"
-[build]
-template = "cargo"
-dependencies = [
-    "speech-dispatcher",
-]

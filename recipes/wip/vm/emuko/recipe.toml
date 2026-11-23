@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/wkoszek/emuko"
-shallow_clone = true
-[build]
-template = "cargo"

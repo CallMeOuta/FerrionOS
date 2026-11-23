@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/jgardona/mhv"
-[build]
-template = "cargo"

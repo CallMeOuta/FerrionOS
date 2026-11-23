@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/ChrisVilches/horsetab"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

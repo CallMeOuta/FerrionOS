@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/orhun/gpg-tui"
-[build]
-template = "cargo"
-dependencies = [
-    "gnupg",
-    "gpgme",
-    "libgpg-error",
-]

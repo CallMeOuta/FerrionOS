@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/7sDream/fontfor"
-[build]
-template = "cargo"

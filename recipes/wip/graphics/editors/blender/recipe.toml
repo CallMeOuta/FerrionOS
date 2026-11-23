@@ -1,9 +1,0 @@
-[source]
-tar = "https://download.blender.org/source/blender-5.0.1.tar.xz"
-[build]
-template = "cmake"
-cmakeflags = [
-    "-DWITH_GHOST_SDL=ON",
-    "-DWITH_SDL=ON",
-    "-DWITH_EXPERIMENTAL_FEATURES=OFF",
-]

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/nakabonne/rhack"
-[build]
-template = "cargo"

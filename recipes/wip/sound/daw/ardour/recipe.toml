@@ -1,6 +1,0 @@
-[source]
-git = "https://git.ardour.org/ardour/ardour"
-rev = "9.0"
-shallow_clone = true
-[build]
-template = "custom"

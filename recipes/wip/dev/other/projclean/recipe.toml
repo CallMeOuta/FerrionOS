@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/sigoden/projclean"
-[build]
-template = "cargo"

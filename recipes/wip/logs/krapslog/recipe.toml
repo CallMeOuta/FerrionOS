@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/acj/krapslog-rs"
-[build]
-template = "cargo"

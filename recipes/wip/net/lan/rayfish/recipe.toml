@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/rayfish/rayfish"
-shallow_clone = true
-[build]
-template = "cargo"

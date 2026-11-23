@@ -1,6 +1,0 @@
-[source]
-git = "https://gitlab.com/AOMediaCodec/SVT-AV1"
-rev = "v4.0.1"
-shallow_clone = true
-[build]
-template = "cmake"

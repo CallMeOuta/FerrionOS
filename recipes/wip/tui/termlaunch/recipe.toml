@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/amaterasu-uwu-xd/termlaunch"
-[build]
-template = "cargo"

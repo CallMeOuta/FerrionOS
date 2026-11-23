@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/darwindarak/rallyup"
-[build]
-template = "cargo"

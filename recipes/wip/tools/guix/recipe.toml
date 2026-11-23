@@ -1,8 +1,0 @@
-[source]
-tar = "https://ftpmirror.gnu.org/gnu/guix/guix-1.4.0.tar.gz"
-[build]
-template = "configure"
-dependencies = [
-    "libgcrypt",
-    "sqlite3",
-]

@@ -218,7 +218,6 @@ rust-cairo = {}
 rust-cairo-demo = {}
 rustpython = {}
 rusty-rain = {}
-rvvm = {}
 scriptisto = {}
 sdl-gfx = {}
 sdl1 = {}

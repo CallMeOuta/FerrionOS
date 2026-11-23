@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/starship/starship"
-[build]
-template = "cargo"

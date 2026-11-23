@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/ventoy/Ventoy"
-rev = "3f65f0ef03e4aebcd14f233ca808a4f894657802"
-[build]
-template = "custom"

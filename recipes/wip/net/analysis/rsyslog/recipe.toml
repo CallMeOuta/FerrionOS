@@ -1,4 +1,0 @@
-[source]
-tar = "https://www.rsyslog.com/files/download/rsyslog/rsyslog-8.2604.0.tar.gz"
-[build]
-template = "configure"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/k9withabone/autocast"
-[build]
-template = "cargo"

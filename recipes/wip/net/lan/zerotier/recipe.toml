@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/zerotier/ZeroTierOne"
-rev = "1.16.0"
-shallow_clone = true
-[build]
-template = "custom"

@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/ahmetmutlugun/rscale2x"
-shallow_clone = true
-[build]
-template = "cargo"

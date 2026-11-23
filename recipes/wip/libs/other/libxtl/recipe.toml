@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/xtensor-stack/xtl"
-rev = "0.8.2"
-shallow_clone = true
-[build]
-template = "cmake"

@@ -1,4 +1,0 @@
-[source]
-tar = "http://www.videolan.org/pub/videolan/libdvdnav/5.0.1/libdvdnav-5.0.1.tar.bz2"
-[build]
-template = "configure"

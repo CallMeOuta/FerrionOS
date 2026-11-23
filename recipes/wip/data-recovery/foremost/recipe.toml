@@ -1,4 +1,0 @@
-[source]
-tar = "http://foremost.sourceforge.net/pkg/foremost-1.5.7.tar.gz"
-[build]
-template = "custom"

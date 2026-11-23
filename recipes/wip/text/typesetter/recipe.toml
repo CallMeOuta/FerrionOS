@@ -1,4 +1,0 @@
-[source]
-git = "https://codeberg.org/haydn/typesetter"
-[build]
-template = "meson"

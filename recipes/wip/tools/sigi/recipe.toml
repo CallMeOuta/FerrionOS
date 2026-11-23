@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/sigi-cli/sigi"
-[build]
-template = "cargo"

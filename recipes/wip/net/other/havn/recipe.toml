@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/mrjackwills/havn"
-[build]
-template = "cargo"

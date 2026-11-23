@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/oleiade/motus"
-[build]
-template = "cargo"

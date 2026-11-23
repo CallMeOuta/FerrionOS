@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/InioX/matugen"
-[build]
-template = "cargo"

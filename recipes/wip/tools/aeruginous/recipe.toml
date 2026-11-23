@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kevinmatthes/aeruginous-rs"
-[build]
-template = "cargo"

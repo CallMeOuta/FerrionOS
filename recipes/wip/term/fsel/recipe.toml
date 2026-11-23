@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Mjoyufull/fsel"
-[build]
-template = "cargo"

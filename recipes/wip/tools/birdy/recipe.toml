@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kakoc/birdy"
-[build]
-template = "cargo"

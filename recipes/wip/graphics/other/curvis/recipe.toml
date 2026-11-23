@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/fragarriss/CurVis"
-[build]
-template = "cargo"

@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/greenbone/gvm-libs"
-rev = "v23.2.2"
-shallow_clone = true
-[build]
-template = "cmake"

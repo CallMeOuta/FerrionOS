@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/Xfennec/progress"
-rev = "v0.17"
-shallow_clone = true
-[build]
-template = "custom"
-dependencies = [
-    "ncursesw",
-]

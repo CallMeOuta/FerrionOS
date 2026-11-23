@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/vanhauser-thc/thc-hydra"
-rev = "v9.7"
-shallow_clone = true
-[build]
-template = "configure"

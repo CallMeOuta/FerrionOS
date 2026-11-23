@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kl/sub-batch"
-[build]
-template = "cargo"

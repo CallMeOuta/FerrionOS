@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/d-e-s-o/notnow"
-[build]
-template = "cargo"

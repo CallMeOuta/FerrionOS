@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/SecretDeveloper/lsv"
-[build]
-template = "cargo"

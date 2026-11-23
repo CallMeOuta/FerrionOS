@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/kimwalisch/primesieve"
-rev = "v12.16"
-shallow_clone = true
-[build]
-template = "cmake"

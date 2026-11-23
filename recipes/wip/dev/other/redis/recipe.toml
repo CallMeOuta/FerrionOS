@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/redis/redis"
-rev = "7f4bae817614988c43c3024402d16edcbf3b3277"
-[build]
-template = "custom"

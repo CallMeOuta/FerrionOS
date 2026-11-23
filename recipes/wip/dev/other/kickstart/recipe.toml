@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Keats/kickstart"
-[build]
-template = "cargo"

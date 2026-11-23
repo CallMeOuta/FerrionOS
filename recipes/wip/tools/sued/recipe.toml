@@ -1,5 +1,0 @@
-[source]
-git = "https://codeberg.org/AeriaVelocity/sued"
-[build]
-template = "cargo"
-cargoflags = ["--features=repl,startup,history"]

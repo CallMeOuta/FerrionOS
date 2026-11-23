@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/BurntSushi/rust-snappy"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages szip
-"""

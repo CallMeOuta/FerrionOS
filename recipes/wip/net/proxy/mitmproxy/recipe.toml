@@ -1,8 +1,0 @@
-[source]
-tar = "https://downloads.mitmproxy.org/12.2.3/mitmproxy-12.2.3.tar.gz"
-[build]
-template = "custom"
-script = """
-mkdir -pv "${COOKBOOK_STAGE}/home/user/mitmproxy"
-cp -rv "${COOKBOOK_SOURCE}"/* "${COOKBOOK_STAGE}/home/user/mitmproxy"
-"""

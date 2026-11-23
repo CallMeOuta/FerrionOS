@@ -213,10 +213,10 @@ The `share` options share host directories with FerrionOS using VirtIO-FS, read 
 
 The default settings in `mk/config.mk` can be overridden by explicitly setting them on the `make` command line.
 
-For example, the following command builds the `demo` image variant and loads it into QEMU:
+For example, the following command builds the `server` image variant and loads it into QEMU:
 
 ```sh
-make CONFIG_NAME=demo qemu
+make CONFIG_NAME=server qemu
 ```
 
 Some environment variables can also be set for the lifetime of the current shell by setting them at the command line:
@@ -275,7 +275,7 @@ The packages to be included in the final FerrionOS image are determined by the c
 nano config/x86_64/desktop.toml
 ```
 
-The configurations at the top level of the `config` directory, such as `desktop`, `server` and `minimal`, can be built for every CPU architecture. A directory named after a CPU architecture holds the configurations that exist only for it, such as `demo`, or that replace a shared one for it, such as `config/x86_64/desktop.toml`. Feel free to browse the `config` directory for more examples.
+The configurations at the top level of the `config` directory, such as `desktop`, `server` and `minimal`, can be built for every CPU architecture. A directory named after a CPU architecture holds the configurations that exist only for it, such as `ci`, or that replace a shared one for it, such as `config/x86_64/desktop.toml`. Feel free to browse the `config` directory for more examples.
 
 For more details on the filesystem configuration, and how to add additional packages to the build image, please see the [Including Programs in FerrionOS](./including-programs.md) page.
 
@@ -297,14 +297,14 @@ The filesystem configurations for a given CPU architecture can be found in the [
 
 ### Filesystem Size
 
-The filesystem size is the total amount of storage space allocated for the filesystem that is built into the image, including all programs. It is specified in mebibytes (MiB). The `server` configuration uses 512 and the `desktop` configuration 650, and some configs (e.g., `demo`) are larger. The filesystem must be large enough to accommodate the packages included in the filesystem. For the live image (`redox-live.iso`), the filesystem must not exceed the size of your system's RAM, and must also leave room for the package's installation and system execution.
+The filesystem size is the total amount of storage space allocated for the filesystem that is built into the image, including all programs. It is specified in mebibytes (MiB). The `server` configuration uses 512 and the `desktop` configuration 650, and some configs (e.g., `dev`) are larger. The filesystem must be large enough to accommodate the packages included in the filesystem. For the live image (`redox-live.iso`), the filesystem must not exceed the size of your system's RAM, and must also leave room for the package's installation and system execution.
 
-The filesystem size is normally set from the **filesystem configuration** file, e.g. `config/x86_64/demo.toml`.
+The filesystem size is normally set from the **filesystem configuration** file, e.g. `config/desktop.toml`.
 
 ```toml
 [general]
 ...
-filesystem_size = 3000
+filesystem_size = 650
 ...
 ```
 

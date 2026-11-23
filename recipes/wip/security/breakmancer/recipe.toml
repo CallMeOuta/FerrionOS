@@ -1,4 +1,0 @@
-[source]
-git = "https://codeberg.org/timmc/breakmancer"
-[build]
-template = "cargo"

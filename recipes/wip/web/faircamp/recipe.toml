@@ -1,4 +1,0 @@
-[source]
-git = "https://codeberg.org/simonrepp/faircamp"
-[build]
-template = "cargo"

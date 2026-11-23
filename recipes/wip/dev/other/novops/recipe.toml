@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/PierreBeucher/novops"
-rev = "e0891144108a889f18448b39aebe9d5a5ac2689d"
-[build]
-template = "custom"

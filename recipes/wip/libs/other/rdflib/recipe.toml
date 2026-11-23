@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/RDFLib/rdflib/releases/download/7.0.0/rdflib-7.0.0.tar.gz"
-[build]
-template = "custom"

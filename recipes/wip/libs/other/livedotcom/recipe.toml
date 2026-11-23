@@ -1,4 +1,0 @@
-[source]
-tar = "http://www.live555.com/liveMedia/public/live555-latest.tar.gz"
-[build]
-template = "custom"

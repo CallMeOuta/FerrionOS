@@ -1,8 +1,0 @@
-[source]
-tar = "https://github.com/jarun/nnn/releases/download/v5.0/nnn-v5.0.tar.gz"
-[build]
-template = "custom"
-dependencies = [
-    "ncursesw",
-    "readline",
-]

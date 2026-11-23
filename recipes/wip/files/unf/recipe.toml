@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/io12/unf"
-[build]
-template = "cargo"

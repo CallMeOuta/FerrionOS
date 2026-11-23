@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/SCons/scons"
-rev = "4.11.0"
-shallow_clone = true
-[build]
-template = "python"

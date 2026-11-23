@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/pdeljanov/Symphonia"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages symphonia-play
-mv "${COOKBOOK_STAGE}/usr/bin/symphonia-play_symphonia-play" "${COOKBOOK_STAGE}/usr/bin/symphonia-play"
-"""

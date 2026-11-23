@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/panamax-rs/panamax"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

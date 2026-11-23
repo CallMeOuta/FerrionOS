@@ -1,4 +1,0 @@
-[source]
-tar = "http://charm.cs.illinois.edu/distrib/charm-7.0.0.tar.gz"
-[build]
-template = "custom"

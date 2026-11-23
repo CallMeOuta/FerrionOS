@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/rochacbruno/marmite"
-[build]
-template = "cargo"

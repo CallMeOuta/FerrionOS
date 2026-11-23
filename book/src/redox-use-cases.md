@@ -10,8 +10,6 @@ Graphics are drawn by the CPU: there is no hardware-accelerated 2D or 3D yet. Pr
 
 The goal for the desktop is an everyday experience modeled on macOS and Windows: one consistent desktop and ease of use. Running Windows games through Proton is a goal as well. It is planned and does not work today.
 
-The `demo` configuration adds games and other programs to try ([Trying Out FerrionOS](./trying-out-redox.md)).
-
 A further objective for the desktop is to develop FerrionOS on FerrionOS itself. [Self-hosted Development](./self-hosted.md) describes how far the inherited tools go; FerrionOS is developed on Linux today.
 
 ## Server

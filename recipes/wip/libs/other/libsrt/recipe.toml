@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/Haivision/srt"
-rev = "v1.5.4"
-shallow_clone = true
-[build]
-template = "configure"
-dependencies = [
-    "openssl3",
-]

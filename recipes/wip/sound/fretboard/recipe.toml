@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/bragefuglseth/fretboard"
-[build]
-template = "cargo"
-dependencies = [
-    "gtk4",
-    "libadwaita",
-]

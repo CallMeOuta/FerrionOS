@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ismaelgv/rnr"
-[build]
-template = "cargo"

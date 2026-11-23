@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/Tencent/ncnn"
-[build]
-template = "cmake"
-dependencies = [
-    "protobuf",
-    "libvulkan",
-    "opencv4",
-]

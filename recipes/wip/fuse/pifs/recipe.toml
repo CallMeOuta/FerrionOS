@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/philipl/pifs"
-script = "./autogen.sh"
-[build]
-template = "configure"
-dependencies = [
-    "libfuse2",
-]

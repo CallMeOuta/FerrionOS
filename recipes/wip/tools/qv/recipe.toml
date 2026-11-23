@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/timvw/qv"
-[build]
-template = "cargo"

@@ -1,9 +1,0 @@
-
-include = ["demo.toml"]
-
-[general]
-filesystem_size = 1536
-
-[packages]
-cosmic-reader = {}
-rustconf2025 = {}

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/kdheepak/taskwarrior-tui"
-[build]
-template = "cargo"

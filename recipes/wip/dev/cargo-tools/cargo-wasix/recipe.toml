@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/wasix-org/cargo-wasix"
-shallow_clone = true
-[build]
-template = "cargo"

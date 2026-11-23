@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/kristapsdz/lowdown"
-rev = "VERSION_3_1_1"
-shallow_clone = true
-[build]
-template = "custom"
-dev-dependencies = ["bmake"]
-dependencies = ["libmd"]

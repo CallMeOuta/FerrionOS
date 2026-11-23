@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/bloznelis/kbt"
-[build]
-template = "cargo"

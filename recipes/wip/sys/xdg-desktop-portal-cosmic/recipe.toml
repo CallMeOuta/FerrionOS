@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/pop-os/xdg-desktop-portal-cosmic"
-rev = "epoch-1.0.12"
-shallow_clone = true
-[build]
-template = "custom"

@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/rust-cli/termtree"
-shallow_clone = true
-[build]
-template = "cargo"
-cargoexamples = ["tree"]

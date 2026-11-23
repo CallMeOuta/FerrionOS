@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/cmus/cmus"
-rev = "v2.12.0"
-shallow_clone = true
-[build]
-template = "configure"
-dependencies = [
-    "ncursesw",
-]

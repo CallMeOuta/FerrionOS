@@ -1,7 +1,0 @@
-[source]
-git = "https://gitlab.com/floers/ordinary"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages ordinary
-"""

@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/acpica/acpica/releases/download/20260408/acpitests-unix-20260408.tar.gz"
-[build]
-template = "custom"

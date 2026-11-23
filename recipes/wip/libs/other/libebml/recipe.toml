@@ -1,4 +1,0 @@
-[source]
-tar = "https://dl.matroska.org/downloads/libebml/libebml-1.4.5.tar.xz"
-[build]
-template = "cmake"

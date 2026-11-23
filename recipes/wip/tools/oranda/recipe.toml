@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/axodotdev/oranda"
-[build]
-template = "cargo"

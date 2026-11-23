@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/Pennyw0rth/NetExec"
-rev = "v1.5.1"
-shallow_clone = true
-[build]
-template = "custom"

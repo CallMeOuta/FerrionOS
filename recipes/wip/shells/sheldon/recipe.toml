@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/rossmacarthur/sheldon"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

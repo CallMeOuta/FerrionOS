@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/tamton-aquib/veldora"
-shallow_clone = true
-[build]
-template = "cargo"

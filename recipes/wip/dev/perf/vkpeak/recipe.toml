@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/nihui/vkpeak"
-rev = "20251010"
-[build]
-template = "cmake"
-dependencies = [
-    "libvulkan",
-]

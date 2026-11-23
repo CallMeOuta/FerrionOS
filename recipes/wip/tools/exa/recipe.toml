@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ogham/exa"
-[build]
-template = "cargo"

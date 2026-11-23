@@ -1,4 +1,0 @@
-[source]
-tar = "https://cdn.openbsd.org/pub/OpenBSD/OpenBGPD/openbgpd-9.0.tar.gz"
-[build]
-template = "configure"

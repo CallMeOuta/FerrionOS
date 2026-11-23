@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Void-ux/pixelsort"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/mgunyho/tere"
-[build]
-template = "cargo"

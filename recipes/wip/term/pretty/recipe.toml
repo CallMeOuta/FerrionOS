@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/rhaskia/preTTY"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages prettyterm_gui
-"""

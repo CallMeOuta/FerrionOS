@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/animafps/teres"
-[build]
-template = "cargo"
-dependencies = [
-    "ffmpeg6",
-]

@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/TheRustyPickle/Rex"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

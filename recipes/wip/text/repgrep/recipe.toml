@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/acheronfail/repgrep"
-[build]
-template = "cargo"

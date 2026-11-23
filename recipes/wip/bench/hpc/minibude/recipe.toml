@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/UoB-HPC/miniBUDE"
-shallow_clone = true
-[build]
-template = "cmake"

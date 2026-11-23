@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/greymd/teip"
-[build]
-template = "cargo"

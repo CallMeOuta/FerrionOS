@@ -1,8 +1,0 @@
-[source]
-tar = "https://lilypond.org/download/sources/v2.26/lilypond-2.26.0.tar.gz"
-[build]
-template = "configure"
-[package]
-dependencies = [
-    "python312",
-]

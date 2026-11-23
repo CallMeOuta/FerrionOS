@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/aheart/hearth"
-[build]
-template = "cargo"

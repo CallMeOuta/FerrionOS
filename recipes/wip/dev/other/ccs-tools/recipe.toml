@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/UIUC-PPL/ccs_tools"
-shallow_clone = true
-[build]
-template = "custom"

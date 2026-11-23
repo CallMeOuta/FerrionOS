@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/brianyu28/dispatch"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

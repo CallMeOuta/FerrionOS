@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/rust-embedded/svd2rust"
-[build]
-template = "cargo"

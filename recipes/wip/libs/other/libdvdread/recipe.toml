@@ -1,4 +1,0 @@
-[source]
-tar = "http://www.videolan.org/pub/videolan/libdvdread/5.0.0/libdvdread-5.0.0.tar.bz2"
-[build]
-template = "configure"

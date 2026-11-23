@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/aantn/smag"
-[build]
-template = "cargo"

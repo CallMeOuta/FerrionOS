@@ -1,7 +1,0 @@
-[source]
-tar = "https://ecsft.cern.ch/dist/cvmfs/cvmfs-2.11.2/source.tar.gz"
-[build]
-template = "cmake"
-dependencies = [
-    "libfuse3",
-]

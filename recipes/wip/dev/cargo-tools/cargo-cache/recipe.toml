@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/matthiaskrgr/cargo-cache"
-shallow_clone = true
-[build]
-template = "cargo"

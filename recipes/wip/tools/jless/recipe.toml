@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/PaulJuliusMartinez/jless"
-[build]
-template = "cargo"

@@ -1,7 +1,0 @@
-[source]
-tar = "https://invisible-island.net/archives/lynx/tarballs/lynx2.9.2.tar.gz"
-[build]
-template = "configure"
-dependencies = [
-    "ncursesw",
-]

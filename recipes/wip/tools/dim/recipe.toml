@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/Dusk-Labs/dim"
-[build]
-template = "custom"
-dependencies = [
-    "sqlite3",
-    "openssl3",
-    "ffmpeg6",
-]

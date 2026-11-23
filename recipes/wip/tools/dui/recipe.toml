@@ -1,4 +1,0 @@
-[source]
-git = "https://gitlab.com/GregOwen/dui"
-[build]
-template = "cargo"

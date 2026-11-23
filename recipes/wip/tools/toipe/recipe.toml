@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Samyak2/toipe"
-[build]
-template = "cargo"

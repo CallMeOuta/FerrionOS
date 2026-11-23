@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/brettcannon/python-launcher"
-[build]
-template = "cargo"

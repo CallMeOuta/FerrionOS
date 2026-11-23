@@ -1,9 +1,0 @@
-[source]
-git = "https://gitlab.freedesktop.org/rncbc/qpwgraph"
-rev = "v0.9.8"
-[build]
-template = "cmake"
-cmakeflags = [
-    "-DCONFIG_ALSA_MIDI=0",
-    "-DCONFIG_SYSTEM_TRAY=0",
-]

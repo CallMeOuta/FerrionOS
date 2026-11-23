@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/jacek-kurlit/pik"
-[build]
-template = "cargo"

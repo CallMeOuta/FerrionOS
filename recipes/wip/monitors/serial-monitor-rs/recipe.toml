@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/hacknus/serial-monitor-rust"
-[build]
-template = "cargo"
-dependencies = [
-    "libxkbcommon",
-    "openssl3",
-]

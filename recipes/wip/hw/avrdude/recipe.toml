@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/avrdudes/avrdude/releases/download/v8.1/avrdude-8.1.tar.gz"
-[build]
-template = "cmake"

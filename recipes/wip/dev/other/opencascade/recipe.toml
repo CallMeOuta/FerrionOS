@@ -1,9 +1,0 @@
-[source]
-tar = "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V7_8_0.tar.gz"
-[build]
-template = "cmake"
-dependencies = [
-    "freetype2",
-    "tcl",
-    "tk",
-]

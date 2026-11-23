@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/orhun/halp"
-[build]
-template = "cargo"

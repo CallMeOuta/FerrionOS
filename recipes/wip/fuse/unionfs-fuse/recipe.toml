@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/rpodgorny/unionfs-fuse"
-rev = "v3.7"
-[build]
-template = "cmake"
-dependencies = [
-    "libfuse3",
-]

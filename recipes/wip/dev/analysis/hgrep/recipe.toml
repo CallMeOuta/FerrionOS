@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/rhysd/hgrep"
-shallow_clone = true
-[build]
-template = "cargo"

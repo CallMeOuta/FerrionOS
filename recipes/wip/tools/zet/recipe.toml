@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/yarrow/zet"
-[build]
-template = "cargo"

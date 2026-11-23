@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.0.0/mbedtls-4.0.0.tar.bz2"
-[build]
-template = "cmake"

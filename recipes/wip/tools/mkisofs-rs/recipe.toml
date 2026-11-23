@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/marysaka/mkisofs-rs"
-[build]
-template = "cargo"

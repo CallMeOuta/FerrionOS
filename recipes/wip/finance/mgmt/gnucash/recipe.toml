@@ -1,4 +1,0 @@
-[source]
-tar = "https://sourceforge.net/projects/gnucash/files/gnucash%20(stable)/5.13/gnucash-5.13.tar.bz2"
-[build]
-template = "cmake"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/akiomik/mado"
-[build]
-template = "cargo"

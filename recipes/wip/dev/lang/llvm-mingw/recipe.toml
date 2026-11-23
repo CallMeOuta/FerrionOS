@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/mstorsjo/llvm-mingw"
-rev = "20251216"
-shallow_clone = true
-[build]
-template = "custom"
-dependencies = [
-    "zlib",
-]

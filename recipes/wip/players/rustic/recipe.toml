@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/rustic-music-player/rustic"
-[build]
-template = "cargo"

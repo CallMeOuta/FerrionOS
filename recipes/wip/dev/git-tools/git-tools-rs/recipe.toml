@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/cecton/git-tools"
-shallow_clone = true
-[build]
-template = "cargo"

@@ -1,7 +1,0 @@
-[source]
-tar = "https://hashcat.net/files/hashcat-7.1.2.tar.gz"
-[build]
-template = "custom"
-dev-dependencies = [
-    "host:python312"
-]

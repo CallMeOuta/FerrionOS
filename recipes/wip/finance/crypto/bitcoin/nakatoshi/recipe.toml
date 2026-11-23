@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ndelvalle/nakatoshi"
-[build]
-template = "cargo"

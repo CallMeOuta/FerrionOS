@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/mikeleppane/envx"
-[build]
-template = "cargo"

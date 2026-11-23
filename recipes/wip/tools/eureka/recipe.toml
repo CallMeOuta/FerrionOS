@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/simeg/eureka"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

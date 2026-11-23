@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/warpwm/flowfix"
-[build]
-template = "cargo"

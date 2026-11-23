@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/BurntSushi/xsv"
-[build]
-template = "cargo"

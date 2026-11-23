@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/xaos-project/XaoS"
-rev = "release-4.3.4"
-shallow_clone = true
-[build]
-template = "cmake"

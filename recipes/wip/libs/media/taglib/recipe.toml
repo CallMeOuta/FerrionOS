@@ -1,4 +1,0 @@
-[source]
-tar = "https://taglib.org/releases/taglib-2.2.1.tar.gz"
-[build]
-template = "cmake"

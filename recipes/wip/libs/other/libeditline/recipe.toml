@@ -1,4 +1,0 @@
-[source]
-tar = "https://ftp.troglobit.com/editline/editline-1.17.1.tar.xz"
-[build]
-template = "configure"

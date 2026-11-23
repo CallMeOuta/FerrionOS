@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/netheril96/securefs"
-rev = "v2.0.0"
-[build]
-template = "custom"
-dependencies = [
-    "libfuse3",
-]

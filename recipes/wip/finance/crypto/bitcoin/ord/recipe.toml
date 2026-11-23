@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/ordinals/ord"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/wazuh/wazuh"
-rev = "v4.14.5"
-shallow_clone = true
-[build]
-template = "custom"

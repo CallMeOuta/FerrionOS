@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/jrnxf/fsrx"
-[build]
-template = "cargo"

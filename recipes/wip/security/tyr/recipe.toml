@@ -1,6 +1,0 @@
-[source]
-git = "https://gitlab.com/cyberactivity/tyr"
-shallow_clone = true
-[build]
-template = "cargo"
-cargopackages = ["baldur"]

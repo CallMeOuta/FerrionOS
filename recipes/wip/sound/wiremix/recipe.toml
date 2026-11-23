@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/tsowell/wiremix"
-[build]
-template = "cargo"
-dependencies = [
-    "pipewire",
-]

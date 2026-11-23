@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/elixir-lang/elixir"
-branch = "v1.19"
-shallow_clone = true
-[build]
-template = "custom"

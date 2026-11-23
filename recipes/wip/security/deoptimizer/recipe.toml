@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/EgeBalci/deoptimizer"
-[build]
-template = "cargo"

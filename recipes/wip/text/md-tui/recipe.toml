@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/henriklovhaug/md-tui"
-[build]
-template = "cargo"

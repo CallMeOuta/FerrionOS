@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/jamescoleuk/lk"
-[build]
-template = "cargo"

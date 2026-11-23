@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/DenSASoftware/kantig"
-[build]
-template = "cargo"

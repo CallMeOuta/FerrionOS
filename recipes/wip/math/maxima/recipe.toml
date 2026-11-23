@@ -1,4 +1,0 @@
-[source]
-tar = "https://sourceforge.net/projects/maxima/files/Maxima-source/5.49.0-source/maxima-5.49.0.tar.gz/download"
-[build]
-template = "configure"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/nuta/nsh"
-[build]
-template = "cargo"

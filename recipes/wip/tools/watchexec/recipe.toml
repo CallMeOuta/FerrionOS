@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/watchexec/watchexec"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages watchexec-cli
-"""

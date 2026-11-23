@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/dalance/pipecolor"
-[build]
-template = "cargo"

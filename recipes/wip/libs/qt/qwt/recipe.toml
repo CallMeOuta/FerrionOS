@@ -1,4 +1,0 @@
-[source]
-tar = "https://sourceforge.net/projects/qwt/files/qwt/6.3.0/qwt-6.3.0.tar.bz2/download"
-[build]
-template = "custom"

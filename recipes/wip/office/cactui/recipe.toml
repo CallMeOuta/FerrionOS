@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/vkobinski/CacTui"
-[build]
-template = "cargo"

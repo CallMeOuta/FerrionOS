@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/xrelkd/clipcat"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages clipcatd clipcatctl clipcat-menu
-"""

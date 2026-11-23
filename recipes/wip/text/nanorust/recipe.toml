@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Supakornn/nanorust"
-[build]
-template = "cargo"

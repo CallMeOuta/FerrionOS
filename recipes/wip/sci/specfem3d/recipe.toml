@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/SPECFEM/specfem3d"
-rev = "v4.1.1"
-shallow_clone = true
-[build]
-template = "configure"
-configureflags = [
-    "FC=gfortran"
-]

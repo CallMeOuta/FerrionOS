@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/RazrFalcon/cargo-bloat"
-shallow_clone = true
-[build]
-template = "cargo"

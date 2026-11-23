@@ -1,7 +1,0 @@
-[source]
-tar = "https://dl.suckless.org/surf/surf-2.1.tar.gz"
-[build]
-template = "custom"
-dependencies = [
-    "webkitgtk3",
-]

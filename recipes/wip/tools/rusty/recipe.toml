@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/zahidkhawaja/rusty"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

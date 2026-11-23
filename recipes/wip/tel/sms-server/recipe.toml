@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/morgverd/sms-server"
-[build]
-template = "cargo"

@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ztroop/dead-ringer"
-[build]
-template = "cargo"

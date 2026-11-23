@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Ragnt/AngryOxide"
-[build]
-template = "cargo"

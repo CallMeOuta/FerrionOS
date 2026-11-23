@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/yaa110/nomino"
-[build]
-template = "cargo"

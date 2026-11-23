@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/jdx/mise"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

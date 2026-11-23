@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Kither12/shezem-rs"
-[build]
-template = "cargo"

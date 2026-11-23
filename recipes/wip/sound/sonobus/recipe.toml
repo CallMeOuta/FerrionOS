@@ -1,6 +1,0 @@
-[source]
-git = "https://github.com/sonosaurus/sonobus"
-rev = "1.7.2"
-shallow_clone = true
-[build]
-template = "cmake"

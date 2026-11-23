@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/Aloxaf/silicon"
-[build]
-template = "cargo"
-dependencies = [
-    "fontconfig",
-]
