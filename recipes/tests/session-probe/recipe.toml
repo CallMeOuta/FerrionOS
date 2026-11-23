@@ -1,0 +1,10 @@
+[package]
+description = "Verifies user identity, stdio paths, environment scrubbing, home writability, and inherited descriptors inside a graphical session child"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -Werror -o "${COOKBOOK_STAGE}/usr/bin/session-probe" "${COOKBOOK_RECIPE}/session-probe.c" ${LDFLAGS}
+"""

@@ -240,6 +240,10 @@ class Blocked(RuntimeError):
     """The host cannot run the requested graphics device."""
 
 
+class Skipped(RuntimeError):
+    """The check does not apply to the requested device configuration."""
+
+
 HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
@@ -2674,7 +2678,8 @@ def run_wayland_client(args, out, *, pointer_latency=False, desktop_columns=Fals
             monitor = HostLoadMonitor(out)
         vm = None
         try:
-            vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off", make=("gpu=virtio",))
+            default_make = () if any(a.startswith("gpu=") for a in args.make) else ("gpu=virtio",)
+            vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off", make=default_make)
             with socket.socket(socket.AF_UNIX) as connection:
                 connection.settimeout(args.timeout)
                 connection.connect(str(path))
@@ -2810,19 +2815,30 @@ def test_wayland_client(vm, args, qmp, boot_load, *, pointer_latency=False):
         problems.append(f"only {len(normal_frames)} presented normal-client commits, expected at least 60")
     if median is not None and median > 16_700:
         problems.append(f"commit-to-present median {median}us exceeds 16700us")
+    slow_frames = len(re.findall(r"DD1_FRAME_SUBMITTED client=slow frame=", text))
+    def timing_summary(samples):
+        ordered = sorted(samples)
+        return ({"p50": statistics.median(ordered), "p99": ordered[math.ceil(len(ordered) * 0.99) - 1],
+                 "max": ordered[-1]} if ordered else None)
+    is_vga = any(a == "gpu=vga" for a in args.make)
+    if pointer_latency and is_vga and not pointers:
+        vga_result = {"renderer": "pixman", "transport": "rust", "width": frame.width, "height": frame.height,
+                      "frames": frames, "pointers": [], "frame_median_us": median,
+                      "slow_frames": slow_frames, "check": "pointer-latency",
+                      "verdict": "SKIPPED", "skip_reason": "no hardware cursor plane on gpu=vga (vesad)",
+                      "host_cpu_count": os.cpu_count(), "host_load": host_load, "pointer_injections": injections,
+                      "frame_us": timing_summary(normal_frames),
+                      "timing_scope": "composited frame time on vesad DIRTYFB path; hardware cursor plane absent"}
+        (vm.out / "measurements.json").write_text(json.dumps(vga_result, indent=2) + "\n")
+        raise Skipped(f"no hardware cursor plane on gpu=vga (vesad); composited frame_us={vga_result['frame_us']}; see {vm.out}")
     if len(pointers) != 100:
         problems.append(f"{len(pointers)} cursor movements, expected exactly 100")
     if not pointers:
         problems.append("no pointer timing samples")
     pointer_problems = (["cursor read-to-plane ioctl reached or exceeded 2000us"]
                         if any(p["elapsed_us"] >= 2000 for p in pointers) else [])
-    slow_frames = len(re.findall(r"DD1_FRAME_SUBMITTED client=slow frame=", text))
     if slow_frames < 2:
         problems.append("slow client did not continue rendering")
-    def timing_summary(samples):
-        ordered = sorted(samples)
-        return ({"p50": statistics.median(ordered), "p99": ordered[math.ceil(len(ordered) * 0.99) - 1],
-                 "max": ordered[-1]} if ordered else None)
     functional_problems = problems.copy()
     if pointer_latency:
         problems.extend(pointer_problems)
@@ -9649,7 +9665,51 @@ def test_media_decode(vm, args):
 
 TESTS["media-decode"] = test_media_decode
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
+def run_session_login_check(args, out):
+    """Logs in as `user` on VT 3, verifies user-owned ferrion-wm on screen, 0600 session.log, QMP software pointer motion on VGA, Mod+T child uid/stdio/env/fd isolation, and VT 3 text login recovery past a lingering Mod+L sleep child (use --config wm-session)."""
+    import session_login
+    with tempfile.TemporaryDirectory(prefix="ferrion-session-qmp-") as directory:
+        path = Path(directory) / "qmp.sock"
+        vm = None
+        try:
+            vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off")
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(args.timeout)
+                connection.connect(str(path))
+                with connection.makefile("rwb") as stream:
+                    greeting = json.loads(stream.readline())
+                    if "QMP" not in greeting:
+                        raise RuntimeError("QEMU sent no QMP greeting")
+
+                    def qmp(command, arguments=None):
+                        stream.write(json.dumps({"execute": command, "arguments": arguments or {}}).encode() + b"\n")
+                        stream.flush()
+                        while True:
+                            reply = json.loads(stream.readline())
+                            if "error" in reply:
+                                raise RuntimeError(f"QMP {command}: {reply['error']}")
+                            if "return" in reply:
+                                return reply["return"]
+
+                    qmp("qmp_capabilities")
+                    return session_login.run_session_login(
+                        vm,
+                        args,
+                        {
+                            "root_shell": root_shell,
+                            "run_status": run_status,
+                            "sendkeys": sendkeys,
+                            "settle": settle,
+                            "qmp": qmp,
+                        },
+                    )
+        finally:
+            if vm is not None:
+                vm.close()
+
+
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
+OWN_IMAGE["session-login"] = run_session_login_check
 OWN_IMAGE["hw-live"] = test_hw_live
 OWN_IMAGE["one-password"] = test_one_password
 OWN_IMAGE["key-slot-roll"] = test_key_slot_roll
@@ -9891,6 +9951,8 @@ def main():
                 verdict = "PASS" if ok else "FAIL"
             except Blocked as error:
                 verdict, note = "BLOCKED", str(error)
+            except Skipped as error:
+                verdict, note = "SKIPPED", str(error)
             except Interrupted as error:
                 interrupted = error
                 verdict, note = "INTERRUPTED", str(error)

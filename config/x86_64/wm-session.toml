@@ -1,0 +1,88 @@
+include = ["desktop.toml"]
+
+[general]
+filesystem_size = 1024
+
+[packages]
+ferrion-wm = "source"
+desktop-layout-probe = "source"
+session-probe = "source"
+xkeyboard-config = {}
+mesa = {}
+libffi = {}
+libglvnd = {}
+
+[[files]]
+path = "/usr/lib/init.d/20_orbital"
+data = ""
+
+[[files]]
+path = "/usr/lib/init.d/30_ferrion_session.service"
+data = """
+[unit]
+description = "FerrionOS graphical session login on terminal 3"
+requires_weak = [
+    "10_net.target",
+    "20_audiod.service",
+    "fbcond@3.service",
+    "00_ptyd.service",
+]
+
+[service]
+cmd = "getty"
+args = ["3"]
+envs = { FERRION_LOGIN_SESSION = "1", FERRION_LOGIN_VT = "3" }
+type = "oneshot_async"
+"""
+
+[[files]]
+path = "/etc/login-session.toml"
+mode = 0o644
+data = """
+command = "/usr/bin/ferrion-wm"
+args = ["--config", "/etc/ferrion-wm/session.kdl"]
+
+[env]
+LIBGL_ALWAYS_SOFTWARE = "1"
+RUST_LOG = "ferrion_wm=info,niri=info,smithay=warn"
+"""
+
+[[files]]
+path = "/etc/ferrion-wm/session.kdl"
+mode = 0o644
+data = """
+input {
+    keyboard { xkb { layout "us"; }; }
+}
+output "ferrion-1" { scale 1; }
+layout {
+    workspace-mode "columns"
+    gaps 12
+    center-focused-column "never"
+    focus-ring { off; }
+    border {
+        on
+        width 1
+        active-color "#7e7c7a"
+        inactive-color "#2e2d2b"
+    }
+    shadow { off; }
+    background-color "#0f0e0c"
+    struts { top 44; }
+}
+animations { off; }
+hotkey-overlay { skip-at-startup; }
+prefer-no-csd
+xwayland-satellite { off; }
+window-rule {
+    geometry-corner-radius 0
+    clip-to-geometry true
+}
+binds {
+    Mod+T { spawn "/usr/bin/session-probe"; }
+    Mod+L { spawn "/usr/bin/sleep" "60"; }
+    Mod+Shift+Space { toggle-window-floating; }
+    Mod+Q { close-window; }
+    Mod+Shift+E { quit skip-confirmation=true; }
+}
+"""
