@@ -157,6 +157,9 @@ enum After {
     },
 }
 
+const HEADER_KEY_SLOTS: usize = 64;
+type RawKeySlots = [[u8; 48]; HEADER_KEY_SLOTS];
+
 pub struct Engine {
     pub profile: Profile,
     fs: Option<FileSystem<SimDisk>>,
@@ -164,6 +167,7 @@ pub struct Engine {
     handles: [Slot; MAX_HANDLES as usize],
     armed: Armed,
     password: Option<String>,
+    verified_slots: Option<(RawKeySlots, Vec<Option<String>>)>,
     lost: Option<disk::Lost>,
     touched: Vec<NodeId>,
     fatal: Option<String>,
@@ -280,6 +284,7 @@ impl Engine {
             handles: [Slot::Free; MAX_HANDLES as usize],
             armed: Armed::default(),
             password,
+            verified_slots: None,
             touched: Vec::new(),
             fatal: None,
             durable_check,
@@ -297,6 +302,7 @@ impl Engine {
         fs.disk.guard = Some(Guard::new(fs.allocator().clone(), &fs.header));
         fs.barriers = self.profile.barriers;
         self.handles = [Slot::Free; MAX_HANDLES as usize];
+        self.verified_slots = None;
         if let DurableCheck::AfterFlush { media_current } = &mut self.durable_check {
             *media_current = match why {
                 Mounted::Fresh | Mounted::Reformatted => true,
@@ -838,6 +844,39 @@ impl Engine {
         Err(fs.disk.violations.join("; "))
     }
 
+    fn reconcile_key_slot(
+        &mut self,
+        op: &Op,
+        before_raw: &RawKeySlots,
+    ) -> std::result::Result<(), String> {
+        let (slot, requested) = match op {
+            Op::SetKeySlot { slot, password } => (*slot as usize, Some(password.clone())),
+            Op::ClearKeySlot(slot) => (*slot as usize, None),
+            _ => return Ok(()),
+        };
+        let header = self.fs.as_ref().expect("mounted file system").header;
+        let after_raw = header_slot_bytes(&header);
+        for index in 0..after_raw.len() {
+            if index != slot && after_raw[index] != before_raw[index] {
+                return Err(format!(
+                    "failed {} altered unrelated key slot {index}",
+                    op_text(op)
+                ));
+            }
+        }
+        if after_raw[slot] == before_raw[slot] {
+            return Ok(());
+        }
+        if key_slot_matches(&header, slot, requested.as_deref()).is_ok() {
+            self.model.key_slots[slot] = requested;
+            return Ok(());
+        }
+        Err(format!(
+            "failed {} left key slot {slot} in neither its old nor requested state",
+            op_text(op)
+        ))
+    }
+
     fn sync_passwords(&mut self) {
         if !self.profile.encrypted {
             return;
@@ -952,6 +991,8 @@ impl Engine {
         let writes_before = self.fs().disk.writes;
         let generation_before = self.fs().header.generation();
         let uuid_before = self.fs().header.uuid();
+        let slots_before = matches!(op, Op::SetKeySlot { .. } | Op::ClearKeySlot(_))
+            .then(|| header_slot_bytes(&self.fs().header));
         let close_target = match op {
             Op::Close(slot) => self.handle_node(*slot),
             _ => None,
@@ -1012,6 +1053,12 @@ impl Engine {
             self.apply(op, &data, created);
         } else {
             self.touched.clear();
+            if expected.is_ok() {
+                if let Some(before_raw) = slots_before {
+                    self.reconcile_key_slot(op, &before_raw)
+                        .map_err(|err| format!("{step}: {err}"))?;
+                }
+            }
         }
         self.assert_handle_invariants();
         if !outcome {
@@ -1359,10 +1406,20 @@ impl Engine {
         };
         if live_only {
             let model = &self.model;
+            let encrypted = self.profile.encrypted;
+            let verified_slots = &mut self.verified_slots;
             let fs = self.fs.as_mut().expect("mounted file system");
             let writes = fs.disk.writes;
             let snapshot = check::snapshot(fs).map_err(|err| format!("live walk failed: {err}"))?;
-            verify(fs, &snapshot, model, full, &touched)?;
+            verify(
+                fs,
+                &snapshot,
+                model,
+                full,
+                &touched,
+                encrypted,
+                verified_slots,
+            )?;
             if fs.disk.writes != writes {
                 return Err(format!(
                     "transactions that changed nothing wrote {} blocks",
@@ -1375,6 +1432,10 @@ impl Engine {
         let password = self.password.clone();
         let fs = self.fs.as_ref().expect("mounted file system");
         let live_generation = fs.header.generation();
+        let live_slots = self
+            .profile
+            .encrypted
+            .then(|| header_slot_bytes(&fs.header));
         let live_free = disk::free_ranges(fs.allocator());
         let live_layout = fs.allocator().levels().clone();
         let view = View::new(fs.disk.media(), None, BTreeMap::new());
@@ -1388,6 +1449,13 @@ impl Engine {
                 "the disk holds generation {} after the file system committed generation {live_generation}",
                 snapshot.generation
             ));
+        }
+        if let Some(expected_slots) = live_slots {
+            if header_slot_bytes(&mounted.header) != expected_slots {
+                return Err(
+                    "the durable header's key slots differ from the running header".to_string(),
+                );
+            }
         }
         let rebuilt_free = disk::free_ranges(mounted.allocator());
         if rebuilt_free != live_free {
@@ -1423,7 +1491,15 @@ impl Engine {
                 ));
             }
         }
-        verify(&mut mounted, &snapshot, &self.model, full, &touched)?;
+        verify(
+            &mut mounted,
+            &snapshot,
+            &self.model,
+            full,
+            &touched,
+            self.profile.encrypted,
+            &mut self.verified_slots,
+        )?;
         if mounted.disk.refused_writes != 0 {
             return Err(format!(
                 "a read-only mount tried {} writes",
@@ -1456,25 +1532,41 @@ impl Engine {
     }
 }
 
+fn header_slot_bytes(header: &Header) -> RawKeySlots {
+    header.key_slots.map(|slot| slot.to_bytes())
+}
+
+fn key_slot_matches(
+    header: &Header,
+    index: usize,
+    slot: Option<&str>,
+) -> std::result::Result<(), String> {
+    let stored = header.key_slots[index];
+    match slot {
+        None => {
+            if !stored.is_empty() {
+                return Err(format!("key slot {index} should be empty"));
+            }
+        }
+        Some(password) => {
+            if stored.is_empty() {
+                return Err(format!("key slot {index} should hold {password}"));
+            }
+            let mut single = *header;
+            single.key_slots = [KeySlot::default(); HEADER_KEY_SLOTS];
+            single.key_slots[index] = stored;
+            if single.unlock(password.as_bytes()).is_none() {
+                return Err(format!("{password} does not open key slot {index}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn key_slots_match(header: &Header, slots: &[Option<String>]) -> std::result::Result<(), String> {
     let stored = header.key_slots;
     for (index, slot) in slots.iter().enumerate() {
-        match slot {
-            None => {
-                if !stored[index].is_empty() {
-                    return Err(format!("key slot {index} should be empty"));
-                }
-            }
-            Some(password) => {
-                if stored[index].is_empty() {
-                    return Err(format!("key slot {index} should hold {password}"));
-                }
-                match header.unlock(password.as_bytes()) {
-                    Some((found, _)) if slots[found].as_deref() == Some(password.as_str()) => {}
-                    _ => return Err(format!("{password} does not open key slot {index}")),
-                }
-            }
-        }
+        key_slot_matches(header, index, slot.as_deref())?;
     }
     for (index, entry) in stored.iter().enumerate().skip(slots.len()) {
         if !entry.is_empty() {
@@ -1490,9 +1582,24 @@ fn verify<D: Disk>(
     model: &Model,
     full: bool,
     touched: &[NodeId],
+    encrypted: bool,
+    verified_slots: &mut Option<(RawKeySlots, Vec<Option<String>>)>,
 ) -> std::result::Result<(), String> {
     if !snapshot.problems.is_empty() {
         return Err(snapshot.problems.join("; "));
+    }
+    if encrypted {
+        let raw = header_slot_bytes(&fs.header);
+        let unchanged = !full
+            && verified_slots
+                .as_ref()
+                .is_some_and(|(cached_raw, cached_model)| {
+                    *cached_raw == raw && cached_model.as_slice() == model.key_slots.as_slice()
+                });
+        if !unchanged {
+            key_slots_match(&fs.header, &model.key_slots)?;
+            *verified_slots = Some((raw, model.key_slots.clone()));
+        }
     }
     let matching = check::compare(snapshot, model, false)?;
     if full {

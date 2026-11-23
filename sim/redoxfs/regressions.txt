@@ -12,3 +12,5 @@
 428 10000 harness: an open deleted file released before a power loss in a remount
 837 10000 harness: an open deleted file released before a power loss in a remount
 10 3000 harness: header-only keyslot ring roll crossing allocator GC
+2958 3000 harness: a key-slot roll interrupted after its first commit
+3304 3000 harness: a key-slot clear roll interrupted after its first commit
