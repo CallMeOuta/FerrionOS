@@ -1,0 +1,446 @@
+FerrionOS change to upstream userutils (MIT license, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88 after the existing recipe patches.
+
+When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session command from root-owned /etc/login-session.toml, checks claim_unlocked_session(None) before showing /etc/issue, opens /scheme/input/consumer as root, validates its display fpath prefix and VT number, activates its VT via /scheme/input/control and closes the control handle before spawning, prepares a verified 0700 /var/run/user/<uid> runtime directory and a fresh 0600 user-owned session.log created with O_EXCL after removing any existing name for stdout/stderr, applies /etc/login_schemes.toml, scrubs INIT_NOTIFY, TTY and stray non-CLOEXEC descriptors in 3..1024, spawns the session as the user with GSETTINGS_BACKEND=keyfile and FERRION_INPUT_CONSUMER_FD inherited, closes the parent's consumer handle, waits, restores the namespace, and returns to the login VT.
+
+--- a/src/bin/login.rs
++++ b/src/bin/login.rs
+@@ -2,8 +2,15 @@
+ extern crate clap;
+ 
+ use libredox::error::Result;
+-use std::fs::File;
+-use std::io::{self, Write};
++use std::collections::BTreeMap;
++use std::env;
++use std::ffi::OsStr;
++use std::fs::{self, File};
++use std::io::{self, Read, Write};
++use std::os::fd::{FromRawFd, RawFd};
++use std::os::unix::fs::MetadataExt;
++use std::os::unix::process::CommandExt;
++use std::process::Stdio;
+ use std::str;
+ 
+ use extra::option::OptionalExt;
+@@ -33,6 +40,20 @@
+ 
+ const ISSUE_FILE: &'static str = "/etc/issue";
+ const MOTD_FILE: &'static str = "/etc/motd";
++const SESSION_SWITCH_ENV: &str = "FERRION_LOGIN_SESSION";
++const LOGIN_VT_ENV: &str = "FERRION_LOGIN_VT";
++const INPUT_CONSUMER_FD_ENV: &str = "FERRION_INPUT_CONSUMER_FD";
++const INPUT_CONSUMER_FPATH_PREFIX: &str = "/scheme/display";
++const SESSION_LOG_NAME: &str = "session.log";
++const SESSION_CONFIG_FILE: &str = "/etc/login-session.toml";
++const RUNTIME_BASE_DIR: &str = "/var/run";
++const RUNTIME_USER_DIR: &str = "/var/run/user";
++const MAX_SESSION_CONFIG_BYTES: u64 = 4096;
++const MAX_SESSION_ARGS: usize = 32;
++const MAX_SESSION_ENVS: usize = 32;
++const MAX_FPATH_BYTES: usize = 4096;
++const MAX_VT: usize = 64;
++const MAX_INHERITED_FD: usize = 1024;
+ 
+ // TODO: Move to redox_users once the definition solidifies.
+ const DEFAULT_SCHEMES: [&'static str; 26] = [
+@@ -142,6 +163,345 @@
+     let _ = libredox::call::close(libredox::call::setns(before_ns_fd.into_raw()).unwrap_or_exit(1));
+ }
+ 
++#[derive(Debug, Clone, serde::Deserialize)]
++struct SessionConfig {
++    command: String,
++    #[serde(default)]
++    args: Vec<String>,
++    #[serde(default)]
++    env: BTreeMap<String, String>,
++}
++
++struct RawFdGuard(Option<usize>);
++
++impl RawFdGuard {
++    fn raw(&self) -> usize {
++        self.0.expect("raw fd already closed")
++    }
++
++    fn close_now(&mut self) {
++        if let Some(fd) = self.0.take() {
++            let _ = libredox::call::close(fd);
++        }
++    }
++}
++
++impl Drop for RawFdGuard {
++    fn drop(&mut self) {
++        self.close_now();
++    }
++}
++
++fn load_session_config() -> Option<SessionConfig> {
++    let link_meta = fs::symlink_metadata(SESSION_CONFIG_FILE).ok()?;
++    if !link_meta.is_file() || link_meta.uid() != 0 || link_meta.mode() & 0o022 != 0 {
++        return None;
++    }
++    let file = File::open(SESSION_CONFIG_FILE).ok()?;
++    let meta = file.metadata().ok()?;
++    if !meta.is_file()
++        || meta.uid() != 0
++        || meta.mode() & 0o022 != 0
++        || meta.len() > MAX_SESSION_CONFIG_BYTES
++    {
++        return None;
++    }
++    let mut text = String::new();
++    file.take(MAX_SESSION_CONFIG_BYTES)
++        .read_to_string(&mut text)
++        .ok()?;
++    let cfg: SessionConfig = toml::from_str(&text).ok()?;
++    if !cfg.command.starts_with('/')
++        || cfg.args.len() > MAX_SESSION_ARGS
++        || cfg.env.len() > MAX_SESSION_ENVS
++    {
++        return None;
++    }
++    for key in cfg.env.keys() {
++        if matches!(
++            key.as_str(),
++            SESSION_SWITCH_ENV | LOGIN_VT_ENV | INPUT_CONSUMER_FD_ENV | "XDG_RUNTIME_DIR" | "HOME"
++        ) {
++            return None;
++        }
++    }
++    Some(cfg)
++}
++
++fn parse_login_vt() -> Option<usize> {
++    let raw = env::var_os(LOGIN_VT_ENV)?;
++    let vt = raw.to_str()?.parse::<usize>().ok()?;
++    if (2..=MAX_VT).contains(&vt) {
++        Some(vt)
++    } else {
++        None
++    }
++}
++
++fn open_input_consumer() -> io::Result<(RawFdGuard, usize)> {
++    let fd = libredox::call::open(
++        "/scheme/input/consumer",
++        libredox::flag::O_RDONLY | libredox::flag::O_NONBLOCK,
++        0,
++    )
++    .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    let guard = RawFdGuard(Some(fd));
++    libredox::call::fcntl(fd, libredox::flag::F_SETFD as usize, 0)
++        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    let mut path = [0_u8; MAX_FPATH_BYTES];
++    let len = libredox::call::fpath(fd, &mut path)
++        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    let text = str::from_utf8(&path[..len])
++        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid consumer fpath"))?;
++    let rest = text
++        .strip_prefix(INPUT_CONSUMER_FPATH_PREFIX)
++        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "consumer fpath lacks display prefix"))?;
++    let (scheme_tail, vt_text) = rest
++        .split_once('/')
++        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "consumer fpath lacks VT separator"))?;
++    if (!scheme_tail.is_empty() && !scheme_tail.starts_with('.')) || vt_text.contains('/') {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "invalid consumer fpath shape",
++        ));
++    }
++    let vt = vt_text
++        .parse::<usize>()
++        .ok()
++        .filter(|vt| (2..=MAX_VT).contains(vt))
++        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid inputd VT number"))?;
++    Ok((guard, vt))
++}
++
++fn activate_vt(vt: usize) -> io::Result<()> {
++    assert!((2..=MAX_VT).contains(&vt));
++    let fd = libredox::call::open(
++        "/scheme/input/control",
++        libredox::flag::O_WRONLY | libredox::flag::O_CLOEXEC,
++        0,
++    )
++    .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    let _guard = RawFdGuard(Some(fd));
++    let mut payload = [0_u8; core::mem::size_of::<usize>() * 2];
++    let half = core::mem::size_of::<usize>();
++    payload[..half].copy_from_slice(&1_usize.to_ne_bytes());
++    payload[half..].copy_from_slice(&vt.to_ne_bytes());
++    let written = libredox::call::write(fd, &payload)
++        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    if written != payload.len() {
++        return Err(io::Error::new(
++            io::ErrorKind::WriteZero,
++            "short write to input control",
++        ));
++    }
++    Ok(())
++}
++
++fn ensure_runtime_dir(user: &User<redox_users::auth::Full>) -> io::Result<String> {
++    let base_meta = fs::symlink_metadata(RUNTIME_BASE_DIR)?;
++    if !base_meta.is_dir() || base_meta.uid() != 0 || base_meta.mode() & 0o022 != 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "unsafe runtime base directory",
++        ));
++    }
++    match fs::symlink_metadata(RUNTIME_USER_DIR) {
++        Ok(_) => {}
++        Err(err) if err.kind() == io::ErrorKind::NotFound => {
++            let fd = libredox::call::open(
++                RUNTIME_USER_DIR,
++                libredox::flag::O_CREAT | libredox::flag::O_DIRECTORY | libredox::flag::O_CLOEXEC,
++                0o755,
++            )
++            .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++            let _ = libredox::call::close(fd);
++        }
++        Err(err) => return Err(err),
++    }
++    let parent_meta = fs::symlink_metadata(RUNTIME_USER_DIR)?;
++    if !parent_meta.is_dir() || parent_meta.uid() != 0 || parent_meta.mode() & 0o022 != 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "unsafe runtime user parent directory",
++        ));
++    }
++    let dir = format!("{RUNTIME_USER_DIR}/{}", user.uid);
++    match fs::symlink_metadata(&dir) {
++        Ok(_) => {}
++        Err(err) if err.kind() == io::ErrorKind::NotFound => {
++            let fd = libredox::call::open(
++                &dir,
++                libredox::flag::O_CREAT | libredox::flag::O_DIRECTORY | libredox::flag::O_CLOEXEC,
++                0o700,
++            )
++            .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++            let chown_res = libredox::call::fchown(fd, user.uid as u32, user.gid as u32);
++            let _ = libredox::call::close(fd);
++            chown_res.map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++        }
++        Err(err) => return Err(err),
++    }
++    let meta = fs::symlink_metadata(&dir)?;
++    if !meta.is_dir()
++        || meta.uid() != user.uid as u32
++        || meta.gid() != user.gid as u32
++        || meta.mode() & 0o777 != 0o700
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "unsafe user runtime directory",
++        ));
++    }
++    Ok(dir)
++}
++
++fn open_session_log(
++    user: &User<redox_users::auth::Full>,
++    runtime_dir: &str,
++) -> io::Result<(File, File)> {
++    let path = format!("{runtime_dir}/{SESSION_LOG_NAME}");
++    match fs::remove_file(&path) {
++        Ok(()) => {}
++        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
++        Err(err) => return Err(err),
++    }
++    let fd = libredox::call::open(
++        &path,
++        libredox::flag::O_CREAT
++            | libredox::flag::O_EXCL
++            | libredox::flag::O_WRONLY
++            | libredox::flag::O_NOFOLLOW
++            | libredox::flag::O_CLOEXEC,
++        0o600,
++    )
++    .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    let log_out = unsafe { File::from_raw_fd(fd as RawFd) };
++    libredox::call::fchown(fd, user.uid as u32, user.gid as u32)
++        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    libredox::call::fchmod(fd, 0o600)
++        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
++    let meta = log_out.metadata()?;
++    if !meta.is_file()
++        || meta.uid() != user.uid as u32
++        || meta.gid() != user.gid as u32
++        || meta.mode() & 0o777 != 0o600
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "unsafe session log file",
++        ));
++    }
++    let log_err = log_out.try_clone()?;
++    Ok((log_out, log_err))
++}
++
++fn graphical_session(
++    user: &User<redox_users::auth::Full>,
++    cfg: &SessionConfig,
++    login_vt: Option<usize>,
++    stderr: &mut io::Stderr,
++) {
++    let (mut consumer, session_vt) = match open_input_consumer() {
++        Ok(pair) => pair,
++        Err(err) => {
++            let _ = writeln!(stderr, "login: failed to open input consumer: {err}");
++            return;
++        }
++    };
++    if let Err(err) = activate_vt(session_vt) {
++        let _ = writeln!(stderr, "login: failed to activate session VT: {err}");
++        return;
++    }
++    let runtime_dir = match ensure_runtime_dir(user) {
++        Ok(dir) => dir,
++        Err(err) => {
++            let _ = writeln!(stderr, "login: failed to prepare runtime directory: {err}");
++            if let Some(vt) = login_vt {
++                let _ = activate_vt(vt);
++            }
++            return;
++        }
++    };
++    let (log_out, log_err) = match open_session_log(user, &runtime_dir) {
++        Ok(pair) => pair,
++        Err(err) => {
++            let _ = writeln!(stderr, "login: failed to open session log: {err}");
++            if let Some(vt) = login_vt {
++                let _ = activate_vt(vt);
++            }
++            return;
++        }
++    };
++    let before_ns_fd = apply_login_schemes(user, &DEFAULT_SCHEMES).unwrap_or_exit(1);
++    let _ = libredox::call::fcntl(
++        before_ns_fd.raw(),
++        libredox::flag::F_SETFD as usize,
++        libredox::flag::O_CLOEXEC as usize,
++    );
++    let consumer_raw = consumer.raw();
++    let mut command = user.login_cmd(&cfg.command);
++    command
++        .args(&cfg.args)
++        .stdin(Stdio::null())
++        .stdout(Stdio::from(log_out))
++        .stderr(Stdio::from(log_err))
++        .env_remove(SESSION_SWITCH_ENV)
++        .env_remove(LOGIN_VT_ENV)
++        .env_remove("INIT_NOTIFY")
++        .env_remove("TTY")
++        .env("GSETTINGS_BACKEND", "keyfile")
++        .envs(&cfg.env)
++        .env("XDG_RUNTIME_DIR", &runtime_dir)
++        .env(INPUT_CONSUMER_FD_ENV, consumer_raw.to_string());
++    unsafe {
++        command.pre_exec(move || {
++            for fd in 3..MAX_INHERITED_FD {
++                if fd == consumer_raw {
++                    continue;
++                }
++                if let Ok(flags) = libredox::call::fcntl(fd, syscall::F_GETFD, 0) {
++                    if flags & (libredox::flag::O_CLOEXEC as usize) == 0 {
++                        let _ = libredox::call::fcntl(
++                            fd,
++                            syscall::F_SETFD,
++                            flags | (libredox::flag::O_CLOEXEC as usize),
++                        );
++                    }
++                }
++            }
++            Ok(())
++        });
++    }
++    let spawned = command.spawn();
++    consumer.close_now();
++    match spawned {
++        Ok(mut child) => {
++            let _ = child.wait();
++        }
++        Err(err) => {
++            let _ = writeln!(stderr, "login: failed to start session {}: {err}", cfg.command);
++        }
++    }
++    let _ = libredox::call::fcntl(before_ns_fd.raw(), libredox::flag::F_SETFD as usize, 0);
++    let _ = libredox::call::close(libredox::call::setns(before_ns_fd.into_raw()).unwrap_or_exit(1));
++    if let Some(vt) = login_vt {
++        let _ = activate_vt(vt);
++    }
++}
++
++fn start_session(
++    user: &User<redox_users::auth::Full>,
++    session_cfg: Option<&SessionConfig>,
++    login_vt: Option<usize>,
++    stdout: &mut io::Stdout,
++    stderr: &mut io::Stderr,
++) {
++    match session_cfg {
++        Some(cfg) => graphical_session(user, cfg, login_vt, stderr),
++        None => login_session(user, stdout, stderr),
++    }
++}
++
+ pub fn main() {
+     let mut stdout = io::stdout();
+     let mut stderr = io::stderr();
+@@ -152,6 +512,36 @@
+     )
+     .get_matches();
+ 
++    let session_enabled = env::var_os(SESSION_SWITCH_ENV).as_deref() == Some(OsStr::new("1"));
++    let login_vt = if session_enabled {
++        parse_login_vt()
++    } else {
++        None
++    };
++    unsafe {
++        env::remove_var(SESSION_SWITCH_ENV);
++        env::remove_var(LOGIN_VT_ENV);
++    }
++    let session_cfg = if session_enabled {
++        load_session_config()
++    } else {
++        None
++    };
++
++    if let Some(ref cfg) = session_cfg {
++        if let Some(account) = userutils::unlock::claim_unlocked_session(None) {
++            if let Ok(sys_users) = AllUsers::authenticator(Config::default()) {
++                if let Some(user) = sys_users.get_by_name(&account) {
++                    graphical_session(user, cfg, login_vt, &mut stderr);
++                    return;
++                }
++            }
++        }
++        if let Some(vt) = login_vt {
++            let _ = activate_vt(vt);
++        }
++    }
++
+     if let Ok(mut issue) = File::open(ISSUE_FILE) {
+         io::copy(&mut issue, &mut stdout).r#try(&mut stderr);
+         stdout.flush().r#try(&mut stderr);
+@@ -189,7 +579,7 @@
+                     if user.is_passwd_blank()
+                         || userutils::unlock::claim_unlocked_session(Some(&user.user)).is_some()
+                     {
+-                        login_session(user, &mut stdout, &mut stderr);
++                        start_session(user, session_cfg.as_ref(), login_vt, &mut stdout, &mut stderr);
+                         break;
+                     }
+ 
+@@ -202,7 +592,7 @@
+                         stdout.flush().r#try(&mut stderr);
+ 
+                         if user.verify_passwd(&password) {
+-                            login_session(user, &mut stdout, &mut stderr);
++                            start_session(user, session_cfg.as_ref(), login_vt, &mut stdout, &mut stderr);
+                             break;
+                         }
+                     }
