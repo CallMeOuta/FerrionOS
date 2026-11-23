@@ -1147,6 +1147,161 @@ def test_fork_filetable(vm, args):
     return True, "multithreaded fork+exec and posix_spawn under descriptor, mmap and malloc churn passed with zero leaks, errors or KB contexts"
 
 
+def test_exec_handles(vm, args):
+    """Checks that an exec'd or spawned program from a single-threaded or multithreaded parent, or through ferrion-run and ferrion-scoped, holds only the runtime handles exec gives it (use --config desktop)."""
+    passes = ("fork-exec-1", "posix-spawn-1", "fork-exec-multi", "posix-spawn-multi", "direct-exec-multi")
+    probe_ok, probe_note = user_probe(vm, args, "exec-handles-probe", passes, timeout=120)
+    problems = []
+    if not probe_ok:
+        problems.append(f"probe: {probe_note}")
+
+    def run_cmd(tag, line, timeout=60, sudo=False):
+        since = vm.mark()
+        vm.type(f"bash -c '{line}; echo eh-end-{tag}-$?'\n")
+        end = rf"(?s)\n(.*)eh-end-{tag}-(\d+)"
+        if sudo and vm.wait_serial(rf"\[sudo\] password|eh-end-{tag}-\d", timeout, since):
+            if not re.search(rf"eh-end-{tag}-\d", vm.text(since)):
+                vm.type("\n")
+        found = vm.wait_serial(end, timeout, since)
+        output = found.group(1) if found else vm.text(since)
+        return (int(found.group(2)) if found else None), output
+
+    launcher_log = []
+    for label, cmd in (
+        ("ferrion-run-plain", "ferrion-run --no-network /usr/bin/exec-handles-checker ferrion-run-plain 1 1"),
+        ("ferrion-run-files", "mkdir -p /tmp/exec-handles-scope && ferrion-run --no-network --files /tmp/exec-handles-scope /usr/bin/exec-handles-checker ferrion-run-files 1 1"),
+    ):
+        rc, out = run_cmd(label, cmd, timeout=60)
+        launcher_log.append(f"=== {label} rc={rc} ===\n{out}\n")
+        if rc != 0 or "extra=0" not in out:
+            problems.append(f"{label} failed (exit {rc})")
+    (vm.out / "exec-handles-launchers.txt").write_text("".join(launcher_log))
+
+    context_text = None
+    for attempt in range(3):
+        rc, out = run_cmd(
+            f"context-{attempt}",
+            "sudo sh -c \"sleep 12 && cat /scheme/sys/context > /tmp/eh-context.txt && cat /tmp/eh-context.txt\"",
+            timeout=90,
+            sudo=True,
+        )
+        if rc == 0 and re.search(r"(?m)^\s*\d+\s+", out):
+            context_text = out
+            break
+    if context_text is None:
+        problems.append("exec-handles context read failed")
+    else:
+        (vm.out / "exec-handles-context.txt").write_text(context_text)
+        lingering = [
+            line.strip()
+            for line in context_text.splitlines()
+            if "exec-handles-probe" in line
+        ]
+        if lingering:
+            problems.append(f"exec-handles-probe contexts lingered after 12s ({len(lingering)}): {lingering[:4]}")
+
+    iostat_text = None
+    for attempt in range(3):
+        rc, out = run_cmd(
+            f"iostat-{attempt}",
+            "sudo sh -c \"cat /scheme/sys/iostat > /tmp/eh-iostat.txt && cat /tmp/eh-iostat.txt\"",
+            timeout=90,
+            sudo=True,
+        )
+        if rc == 0 and re.search(r"(?m)^\d+: \S+$", out):
+            iostat_text = out
+            break
+    if iostat_text is None:
+        problems.append("ferrion-scope iostat read failed")
+    else:
+        (vm.out / "exec-handles-iostat.txt").write_text(iostat_text)
+        upper_by_proc = {}
+        upper_by_pid = {}
+        pid_names = {}
+        cur_pid = None
+        cur_entries = None
+        for raw_line in iostat_text.splitlines():
+            line = raw_line.rstrip("\r")
+            m_proc = IOSTAT_PROCESS.match(line)
+            if m_proc:
+                cur_pid = int(m_proc.group(1))
+                proc_name = m_proc.group(2).rsplit("/", 1)[-1]
+                cur_entries = []
+                upper_by_proc.setdefault(proc_name, []).append((m_proc.group(1), cur_entries))
+                pid_names.setdefault(cur_pid, set()).add(proc_name)
+                upper_by_pid.setdefault(cur_pid, {})
+                continue
+            m_fd = IOSTAT_FD.match(line)
+            if m_fd and m_fd.group(1) == "U" and cur_entries is not None:
+                entry = (m_fd.group(2), m_fd.group(3), m_fd.group(4), m_fd.group(5).strip())
+                cur_entries.append(entry)
+                desc = (int(m_fd.group(3)), int(m_fd.group(4)))
+                upper_by_pid[cur_pid].setdefault(desc, []).append((m_fd.group(2), m_fd.group(5).strip()))
+        scoped_list = upper_by_proc.get("ferrion-scoped", [])
+        proxy_list = upper_by_proc.get("ferrion-scope-proxy", [])
+        if not scoped_list or not proxy_list:
+            problems.append(f"missing iostat process (ferrion-scoped={len(scoped_list)}, ferrion-scope-proxy={len(proxy_list)})")
+        else:
+            scoped_descs = {}
+            for _, entries in scoped_list:
+                for slot, scheme_id, number, path in entries:
+                    scoped_descs[(scheme_id, number)] = (slot, path)
+            shared = []
+            for pid, entries in proxy_list:
+                for slot, scheme_id, number, path in entries:
+                    if (scheme_id, number) in scoped_descs:
+                        if path == "/scheme/initfs":
+                            continue
+                        s_slot, s_path = scoped_descs[(scheme_id, number)]
+                        shared.append(f"proxy({pid}) U{slot}==scoped U{s_slot} desc=({scheme_id},{number}) path={path or s_path}")
+            if shared:
+                problems.append(f"ferrion-scope-proxy shares non-cwd upper handles with ferrion-scoped: {shared}")
+        p1_handles = upper_by_pid.get(1, {})
+        initfs_schemes = {
+            s for (s, _), items in p1_handles.items()
+            if any(p.startswith("/scheme/initfs") for _, p in items)
+        }
+        procmgr_schemes = {
+            s for (s, _), items in p1_handles.items()
+            if any(p.startswith("/scheme/proc/") or p == "/scheme/proc" for _, p in items)
+        }
+        boot_descs = ()
+        if len(initfs_schemes) == 1 and len(procmgr_schemes) == 1:
+            candidate = ((next(iter(procmgr_schemes)), 0), (next(iter(initfs_schemes)), 1))
+            if all(desc in p1_handles for desc in candidate):
+                boot_descs = candidate
+        if not boot_descs:
+            problems.append("boot descriptions not found")
+        boot_holders_outside_init = []
+        proc_holders = {}
+        for pid, handles in sorted(upper_by_pid.items()):
+            names = ",".join(sorted(pid_names[pid]))
+            for desc, items in handles.items():
+                if desc in boot_descs and pid not in (0, 1):
+                    boot_holders_outside_init.append(f"pid {pid} ({names}) U{items[0][0]} desc={desc}")
+                if any(
+                    p.startswith("/scheme/proc/")
+                    or p.startswith("/scheme/kernel.proc/")
+                    or p in ("/scheme/proc", "/scheme/kernel.proc")
+                    for _, p in items
+                ):
+                    proc_holders.setdefault(desc, []).append((pid, names, items[0][0]))
+        if boot_holders_outside_init:
+            problems.append(
+                f"boot-wide upper handles held outside procmgr and init (PIDs 0 and 1) ({len(boot_holders_outside_init)}): {boot_holders_outside_init[:6]}"
+            )
+        shared_proc = []
+        for desc, holders in sorted(proc_holders.items()):
+            if len(holders) > 1 and not (desc in boot_descs and all(h[0] in (0, 1) for h in holders)):
+                shared_proc.append(f"desc={desc} holders={holders[:6]}")
+        if shared_proc:
+            problems.append(f"shared proc upper handles across pids ({len(shared_proc)}): {shared_proc[:6]}")
+
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, "exec'd and spawned programs (1 and 9 threads, direct exec, ferrion-run, ferrion-scope, system-wide iostat) held only auxv runtime handles"
+
+
 def test_nvme_queue(vm, args):
     """Runs nvme-queue-probe for 300 s (128 + (r % 64) 128 KiB records compressed to 4 KiB blocks), failing with /scheme/sys watcher dumps if no progress occurs for 20 s (use --config firefox)."""
     if not user_bash(vm, args.timeout):
@@ -9121,6 +9276,7 @@ TESTS["ipc-fd"] = test_ipc_fd
 TESTS["jit-signal"] = test_jit_signal
 TESTS["fdtable-race"] = test_fdtable_race
 TESTS["fork-filetable"] = test_fork_filetable
+TESTS["exec-handles"] = test_exec_handles
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["firefox-js"] = test_firefox_js

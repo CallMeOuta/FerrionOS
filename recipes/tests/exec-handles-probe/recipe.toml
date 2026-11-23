@@ -1,0 +1,11 @@
+[package]
+description = "Checks that exec'd and spawned programs hold only auxv runtime handles"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/exec-handles-checker" "${COOKBOOK_RECIPE}/exec-handles-checker.c" ${LDFLAGS}
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/exec-handles-probe" "${COOKBOOK_RECIPE}/exec-handles-probe.c" ${LDFLAGS} -lpthread
+"""
