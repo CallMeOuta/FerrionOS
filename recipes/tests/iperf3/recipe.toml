@@ -3,6 +3,8 @@ description = "Multifunctional network performance testing tool"
 
 [source]
 tar = "https://downloads.es.net/pub/iperf/iperf-3.20.tar.gz"
+blake3 = "e934c953b674bd8bfa1bb5046c388ea3edd374ce14375fd2ce6f9bb3d2ff5d55"
+patches = ["ferrion-port.patch"]
 
 [build]
 template = "configure"

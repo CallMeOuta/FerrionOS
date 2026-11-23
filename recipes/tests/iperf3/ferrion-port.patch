@@ -1,0 +1,183 @@
+--- a/src/iperf_util.c
++++ b/src/iperf_util.c
+@@ -57,23 +57,38 @@
+  */
+ int readentropy(void *out, size_t outsize)
+ {
+-    static FILE *frandom;
++    static int frandom = -1;
+     static const char rndfile[] = "/dev/urandom";
++    unsigned char *dst = (unsigned char *)out;
++    size_t got = 0;
++    size_t attempts = 0;
++    size_t max_attempts = outsize + 64;
+ 
+     if (!outsize) return 0;
+ 
+-    if (frandom == NULL) {
+-        frandom = fopen(rndfile, "rb");
+-        if (frandom == NULL) {
++    if (frandom < 0) {
++        frandom = open(rndfile, O_RDONLY);
++        if (frandom < 0) {
+             iperf_errexit(NULL, "error - failed to open %s: %s\n",
+                           rndfile, strerror(errno));
+         }
+-        setbuf(frandom, NULL);
+-    }
+-    if (fread(out, 1, outsize, frandom) != outsize) {
+-        iperf_errexit(NULL, "error - failed to read %s: %s\n",
+-                      rndfile,
+-                      feof(frandom) ? "EOF" : strerror(errno));
++    }
++    while (got < outsize && attempts < max_attempts) {
++        ssize_t n = read(frandom, dst + got, outsize - got);
++        attempts++;
++        if (n < 0) {
++            if (errno == EINTR)
++                continue;
++            iperf_errexit(NULL, "error - failed to read %s: %s\n",
++                          rndfile, strerror(errno));
++        }
++        if (n == 0) {
++            iperf_errexit(NULL, "error - failed to read %s: EOF\n", rndfile);
++        }
++        got += (size_t)n;
++    }
++    if (got != outsize) {
++        iperf_errexit(NULL, "error - failed to read %s: short read\n", rndfile);
+     }
+     return 0;
+ }
+--- a/src/units.c
++++ b/src/units.c
+@@ -52,6 +52,7 @@
+  * ------------------------------------------------------------------- */
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <assert.h>
+ #include <ctype.h>
+ #include <stdint.h>
+@@ -90,15 +91,17 @@
+     {
+ 	double    n;
+ 	char      suffix = '\0';
++	char     *end = NULL;
+ 
+ 	          assert(s != NULL);
+ 
+-	/* scan the number and any suffices */
+-	if (sscanf(s, "%lf%c", &n, &suffix) < 1) {
++	n = strtod(s, &end);
++	if (end == s || (end[0] != '\0' && end[1] != '\0')) {
+ 		i_errno = IEUNITVAL;
+ 		errarg = s;
+ 		return 0;
+ 	}
++	suffix = end[0];
+ 
+ 	/* convert according to [Tt Gg Mm Kk] */
+ 	switch    (suffix)
+@@ -137,15 +140,17 @@
+     {
+ 	double    n;
+ 	char      suffix = '\0';
++	char     *end = NULL;
+ 
+ 	          assert(s != NULL);
+ 
+-	/* scan the number and any suffices */
+-	if (sscanf(s, "%lf%c", &n, &suffix) < 1) {
++	n = strtod(s, &end);
++	if (end == s || (end[0] != '\0' && end[1] != '\0')) {
+ 		i_errno = IEUNITVAL;
+ 		errarg = s;
+ 		return 0;
+ 	}
++	suffix = end[0];
+ 
+ 	/* convert according to [Tt Gg Mm Kk] */
+ 	switch    (suffix)
+@@ -186,15 +191,17 @@
+     {
+ 	double    n;
+ 	char      suffix = '\0';
++	char     *end = NULL;
+ 
+ 	          assert(s != NULL);
+ 
+-	/* scan the number and any suffices */
+-	if (sscanf(s, "%lf%c", &n, &suffix) < 1) {
++	n = strtod(s, &end);
++	if (end == s || (end[0] != '\0' && end[1] != '\0')) {
+ 		i_errno = IEUNITVAL;
+ 		errarg = s;
+ 		return 0;
+ 	}
++	suffix = end[0];
+ 
+ 	/* convert according to [Tt Gg Mm Kk] */
+ 	switch    (suffix)
+--- a/src/iperf_client_api.c
++++ b/src/iperf_client_api.c
+@@ -761,12 +761,8 @@
+                         int rc;
+                         sp->done = 1;
+                         if (sp->thread_created == 1) {
+-                            rc = pthread_cancel(sp->thr);
+-                            if (rc != 0 && rc != ESRCH) {
+-                                i_errno = IEPTHREADCANCEL;
+-                                errno = rc;
+-                                iperf_err(test, "sender cancel in pthread_cancel - %s", iperf_strerror(i_errno));
+-                                goto cleanup_and_fail;
++                            if (sp->socket >= 0) {
++                                shutdown(sp->socket, SHUT_RDWR);
+                             }
+                             rc = pthread_join(sp->thr, NULL);
+                             if (rc != 0 && rc != ESRCH) {
+@@ -802,12 +798,8 @@
+             int rc;
+             sp->done = 1;
+             if (sp->thread_created == 1) {
+-                rc = pthread_cancel(sp->thr);
+-                if (rc != 0 && rc != ESRCH) {
+-                    i_errno = IEPTHREADCANCEL;
+-                    errno = rc;
+-                    iperf_err(test, "receiver cancel in pthread_cancel - %s", iperf_strerror(i_errno));
+-                    goto cleanup_and_fail;
++                if (sp->socket >= 0) {
++                    shutdown(sp->socket, SHUT_RDWR);
+                 }
+                 rc = pthread_join(sp->thr, NULL);
+                 if (rc != 0 && rc != ESRCH) {
+@@ -849,11 +841,8 @@
+         sp->done = 1;
+         int rc;
+         if (sp->thread_created == 1) {
+-            rc = pthread_cancel(sp->thr);
+-            if (rc != 0 && rc != ESRCH) {
+-                i_errno = IEPTHREADCANCEL;
+-                errno = rc;
+-                iperf_err(test, "cleanup_and_fail in pthread_cancel - %s", iperf_strerror(i_errno));
++            if (sp->socket >= 0) {
++                shutdown(sp->socket, SHUT_RDWR);
+             }
+             rc = pthread_join(sp->thr, NULL); 
+             if (rc != 0 && rc != ESRCH) {
+--- a/src/iperf_server_api.c
++++ b/src/iperf_server_api.c
+@@ -455,11 +455,8 @@
+         int rc;
+         sp->done = 1;
+         if (sp->thread_created == 1) {
+-            rc = pthread_cancel(sp->thr);
+-            if (rc != 0 && rc != ESRCH) {
+-                i_errno = IEPTHREADCANCEL;
+-                errno = rc;
+-                iperf_err(test, "cleanup_server in pthread_cancel - %s", iperf_strerror(i_errno));
++            if (sp->socket >= 0) {
++                shutdown(sp->socket, SHUT_RDWR);
+             }
+             rc = pthread_join(sp->thr, NULL);
+             if (rc != 0 && rc != ESRCH) {
