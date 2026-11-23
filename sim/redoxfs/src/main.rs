@@ -2,6 +2,7 @@ mod check;
 mod disk;
 mod engine;
 mod generate;
+mod keyroll;
 mod maps;
 mod model;
 mod op;
@@ -309,9 +310,55 @@ fn summary(label: &str, seeds: usize, stats: &Stats, elapsed: Duration, failures
 
 fn usage() -> ! {
     eprintln!(
-        "usage: redoxfs-sim run SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount]\n       redoxfs-sim seed SEED OPS [--flush-on-unmount]\n       redoxfs-sim replay FILE\n       redoxfs-sim maps SEEDS OPS [--first SEED] [--threads N]"
+        "usage: redoxfs-sim run SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount]\n       redoxfs-sim seed SEED OPS [--flush-on-unmount]\n       redoxfs-sim replay FILE\n       redoxfs-sim maps SEEDS OPS [--first SEED] [--threads N]\n       redoxfs-sim keyroll SEEDS OPS [--first SEED] [--threads N]"
     );
     std::process::exit(2)
+}
+
+fn run_keyroll(first: u64, seeds: u64, ops: u64, threads: usize) -> usize {
+    let started = Instant::now();
+    let next = AtomicU64::new(first);
+    let last = first + seeds;
+    let totals = std::sync::Mutex::new((0u64, 0u64, 0u64, 0u64, Vec::new()));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let seed = next.fetch_add(1, Ordering::SeqCst);
+                    if seed >= last {
+                        break;
+                    }
+                    let result = guarded(|| {
+                        keyroll::run_seed(seed, ops).map_err(|message| Failure { step: 0, message })
+                    });
+                    let mut totals = totals.lock().unwrap_or_else(|poison| poison.into_inner());
+                    match result {
+                        Ok(stats) => {
+                            totals.0 += stats.ops;
+                            totals.1 += stats.injected_errors;
+                            totals.2 += stats.retries;
+                            totals.3 += stats.exhausted;
+                        }
+                        Err(failure) => {
+                            eprintln!("FAIL keyroll seed {seed}: {}", failure.message);
+                            totals.4.push(seed);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let (ops_done, injected_errors, retries, exhausted, failed) =
+        totals.into_inner().unwrap_or_else(|poison| poison.into_inner());
+    let seconds = started.elapsed().as_secs_f64();
+    println!(
+        "keyroll: {seeds} seeds, {ops_done} rolls in {seconds:.1} s, {} failing seeds",
+        failed.len()
+    );
+    println!(
+        "  injected write errors {injected_errors}, retries {retries}, exhausted {exhausted}"
+    );
+    failed.len()
 }
 
 fn run_maps(first: u64, seeds: u64, ops: u64, threads: usize) -> usize {
@@ -491,6 +538,24 @@ fn main() {
                 index += 2;
             }
             let failed = run_maps(first, seeds, ops, threads);
+            std::process::exit(if failed == 0 { 0 } else { 1 });
+        }
+        "keyroll" => {
+            let seeds: u64 = args.get(1).and_then(|arg| arg.parse().ok()).unwrap_or_else(|| usage());
+            let ops: u64 = args.get(2).and_then(|arg| arg.parse().ok()).unwrap_or_else(|| usage());
+            let mut first = 1u64;
+            let mut threads = std::thread::available_parallelism().map_or(4, |count| count.get() / 2).max(1);
+            let mut index = 3;
+            while index < args.len() {
+                let value = args.get(index + 1).and_then(|arg| arg.parse::<u64>().ok()).unwrap_or_else(|| usage());
+                match args[index].as_str() {
+                    "--first" => first = value,
+                    "--threads" => threads = (value as usize).clamp(1, MAX_THREADS),
+                    _ => usage(),
+                }
+                index += 2;
+            }
+            let failed = run_keyroll(first, seeds, ops, threads);
             std::process::exit(if failed == 0 { 0 } else { 1 });
         }
         _ => usage(),
