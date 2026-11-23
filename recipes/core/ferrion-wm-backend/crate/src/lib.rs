@@ -16,16 +16,18 @@
 //! return. Neither is a vblank timestamp or an input-device hardware timestamp.
 
 mod input;
+#[cfg(target_os = "redox")]
+mod platform;
 mod scheduler;
 #[cfg(feature = "smithay")]
 mod smithay_input;
 #[cfg(target_os = "redox")]
-mod platform;
+mod vt;
 
 pub use input::{AxisEvent, ButtonEvent, Input, KeyEvent, MotionEvent};
-pub use scheduler::FrameScheduler;
 #[cfg(target_os = "redox")]
 pub use platform::Backend;
+pub use scheduler::FrameScheduler;
 
 /// Type-level input backend on hosts; hardware operations only exist on FerrionOS.
 #[cfg(not(target_os = "redox"))]
@@ -63,20 +65,50 @@ pub enum BackendEvent {
 #[cfg(not(target_os = "redox"))]
 impl Backend {
     pub fn open() -> std::io::Result<Self> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "inputd/DRM backend requires FerrionOS"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "inputd/DRM backend requires FerrionOS",
+        ))
     }
     pub fn open_with_wakeup(_wakeup: impl Fn() + Send + Sync + 'static) -> std::io::Result<Self> {
         Self::open()
     }
-    pub fn cursor_size(&self) -> std::io::Result<(u32, u32)> { match *self {} }
-    pub fn set_cursor(&mut self, _pixels: Option<&[u8]>, _size: (u32, u32), _hotspot: (i32, i32)) -> std::io::Result<()> { match *self {} }
-    pub fn vt(&self) -> usize { match *self {} }
-    pub fn dimensions(&self) -> (u32, u32) { match *self {} }
-    pub fn stride(&self) -> u32 { match *self {} }
-    pub fn now_us(&self) -> u64 { match *self {} }
-    pub fn refresh_period(&self) -> Option<std::time::Duration> { match *self {} }
-    pub fn framebuffer_mut(&mut self) -> &mut [u8] { match *self {} }
-    pub fn present(&mut self) -> std::io::Result<Presentation> { match *self {} }
-    pub fn try_event(&mut self) -> std::io::Result<Option<BackendEvent>> { match *self {} }
-    pub fn reconfigure(&mut self) -> std::io::Result<()> { match *self {} }
+    pub fn cursor_size(&self) -> std::io::Result<(u32, u32)> {
+        match *self {}
+    }
+    pub fn set_cursor(
+        &mut self,
+        _pixels: Option<&[u8]>,
+        _size: (u32, u32),
+        _hotspot: (i32, i32),
+    ) -> std::io::Result<()> {
+        match *self {}
+    }
+    pub fn vt(&self) -> usize {
+        match *self {}
+    }
+    pub fn dimensions(&self) -> (u32, u32) {
+        match *self {}
+    }
+    pub fn stride(&self) -> u32 {
+        match *self {}
+    }
+    pub fn now_us(&self) -> u64 {
+        match *self {}
+    }
+    pub fn refresh_period(&self) -> Option<std::time::Duration> {
+        match *self {}
+    }
+    pub fn framebuffer_mut(&mut self) -> &mut [u8] {
+        match *self {}
+    }
+    pub fn present(&mut self) -> std::io::Result<Presentation> {
+        match *self {}
+    }
+    pub fn try_event(&mut self) -> std::io::Result<Option<BackendEvent>> {
+        match *self {}
+    }
+    pub fn reconfigure(&mut self) -> std::io::Result<()> {
+        match *self {}
+    }
 }

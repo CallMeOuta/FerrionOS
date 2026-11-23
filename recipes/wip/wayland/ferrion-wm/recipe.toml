@@ -13,6 +13,7 @@ patches = [
     "F6-minimize.patch",
     "F7-tiling.patch",
     "0003-ferrion-optional-cursor.patch",
+    "0004-ferrion-scrub-input-fd.patch",
 ]
 script = """
 mkdir -p ferrion-vendor

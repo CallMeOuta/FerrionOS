@@ -13,12 +13,13 @@ use drm::control::{ClipRect, Device as _, connector, crtc, dumbbuffer::DumbBuffe
 use drm::{ClientCapability, Device as _, DriverCapability};
 use graphics_ipc::redox_uapi_exts::REDOX_DRM_CLIENT_CAP_HOTPLUG_EVENTS;
 use graphics_ipc::{CpuBackedBuffer, DrmHandle, RedoxDrmEvent};
-use inputd::{ConsumerHandle, ConsumerHandleEvent, ControlHandle};
+use inputd::ControlHandle;
 
+use crate::vt::{Consumer, ConsumerEvent};
 use crate::{BackendEvent, CursorTiming, Input, Presentation, input::InputState};
 
 pub struct Backend {
-    input: Arc<ConsumerHandle>,
+    input: Arc<Consumer>,
     display: Display,
     shared: Arc<Shared>,
     receiver: mpsc::Receiver<BackendEvent>,
@@ -77,8 +78,9 @@ impl Backend {
 
     pub fn open_with_wakeup(wakeup: impl Fn() + Send + Sync + 'static) -> io::Result<Self> {
         let epoch = Instant::now();
-        let input = Arc::new(ConsumerHandle::new_vt()?);
-        let vt = consumer_vt(&input)?;
+        let (consumer, inherited) = Consumer::open_or_inherited()?;
+        let vt = consumer.vt();
+        let input = Arc::new(consumer);
         let (display, output) = Display::open(&input)?;
         let (stop_reader, stop_writer) = stop_pipe()?;
         let shared = Arc::new(Shared {
@@ -114,7 +116,9 @@ impl Backend {
         };
         // Activate only the VT that inputd allocated to this consumer. A VT
         // environment variable cannot establish ownership and is not trusted.
-        ControlHandle::new()?.activate_vt(vt)?;
+        if !inherited {
+            ControlHandle::new()?.activate_vt(vt)?;
+        }
         Ok(backend)
     }
 
@@ -325,7 +329,7 @@ impl Drop for Backend {
 }
 
 impl Display {
-    fn open(input: &ConsumerHandle) -> io::Result<(Self, ActiveOutput)> {
+    fn open(input: &Consumer) -> io::Result<(Self, ActiveOutput)> {
         let drm = Arc::new(DrmHandle::from_file(input.open_display()?)?);
         drm.set_client_capability(ClientCapability::UniversalPlanes, true)?;
         // Virtual devices use hotspots; physical devices may legitimately omit
@@ -509,7 +513,7 @@ fn queue_display_change(shared: &Shared) -> bool {
 }
 
 fn read_input(
-    input: Arc<ConsumerHandle>,
+    input: Arc<Consumer>,
     shared: &Shared,
     sender: mpsc::SyncSender<BackendEvent>,
     stop: File,
@@ -595,15 +599,15 @@ fn read_input(
             };
             let read_us = elapsed_us(epoch);
             match event {
-                ConsumerHandleEvent::Handoff => {
+                ConsumerEvent::Handoff => {
                     if !queue_display_change(shared) {
                         return Ok(());
                     }
                     send(&sender, shared, BackendEvent::DisplayChanged)?;
                     break;
                 }
-                ConsumerHandleEvent::Events(&[]) => break,
-                ConsumerHandleEvent::Events(events) => {
+                ConsumerEvent::Events(&[]) => break,
+                ConsumerEvent::Events(events) => {
                     for wire in events {
                         let phase = shared.phase.lock().unwrap();
                         let output = match &*phase {
@@ -661,16 +665,6 @@ fn send(
 
 fn elapsed_us(epoch: Instant) -> u64 {
     epoch.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-}
-
-fn consumer_vt(input: &ConsumerHandle) -> io::Result<usize> {
-    let mut path = [0_u8; 4096];
-    let length = libredox::call::fpath(input.event_handle().as_raw_fd() as usize, &mut path)?;
-    let path = std::str::from_utf8(&path[..length]).map_err(io::Error::other)?;
-    path.rsplit('/')
-        .next()
-        .and_then(|number| number.parse().ok())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "inputd returned no VT number"))
 }
 
 fn stop_pipe() -> io::Result<(File, File)> {
