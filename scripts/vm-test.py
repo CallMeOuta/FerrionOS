@@ -240,6 +240,16 @@ class Blocked(RuntimeError):
     """The host cannot run the requested graphics device."""
 
 
+HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+class Interrupted(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+        self.signal_name = signal.Signals(signum).name
+        super().__init__(f"interrupted by {self.signal_name} ({signum})")
+
+
 def command_output(command):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=15)
@@ -637,10 +647,10 @@ class VM:
             self._cmd_seq = 0
             self.console_desynced = None
             self.reader = threading.Thread(target=self._read_serial, daemon=True)
-            self.proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.STDOUT, start_new_session=True)
             self._stack.callback(self._join_reader)
             self._stack.callback(self._close_sockets)
+            self.proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, start_new_session=True)
             self._stack.callback(self._stop_qemu)
             self.reader.start()
             self.monitor = self._connect_monitor()
@@ -838,7 +848,15 @@ class VM:
                 sock.close()
 
     def close(self):
-        self._stack.close()
+        if threading.current_thread() is not threading.main_thread():
+            self._stack.close()
+            return
+        saved = {sig: signal.signal(sig, signal.SIG_IGN) for sig in HANDLED_SIGNALS}
+        try:
+            self._stack.close()
+        finally:
+            for sig, handler in saved.items():
+                signal.signal(sig, handler)
 
 
 def firmware_status_lines(frame):
@@ -9494,12 +9512,19 @@ def main():
         except Blocked as error:
             print(f"BLOCKED lab setup: {error}", flush=True)
             sys.exit(2)
+    def on_signal(signum, _frame):
+        raise Interrupted(signum)
+
+    for sig in HANDLED_SIGNALS:
+        signal.signal(sig, on_signal)
+
     failures = blocked = 0
     for name in args.tests:
         for run in range(1, args.repeat + 1):
             out = out_root / f"{name}-{run}"
             out.mkdir(parents=True, exist_ok=True)
             vm = None
+            interrupted = None
             host = {}
             captures = []
             last_capture = None
@@ -9548,6 +9573,11 @@ def main():
                 verdict = "PASS" if ok else "FAIL"
             except Blocked as error:
                 verdict, note = "BLOCKED", str(error)
+            except Interrupted as error:
+                interrupted = error
+                verdict, note = "INTERRUPTED", str(error)
+                for sig in HANDLED_SIGNALS:
+                    signal.signal(sig, signal.SIG_IGN)
             except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
                 verdict, note = "FAIL", str(error)
             finally:
@@ -9563,6 +9593,9 @@ def main():
             result = {"test": name, "run": run, "verdict": verdict, "note": note, "host": host,
                       "make": [*args.make, *make], "capture_sources": captures, "last_capture_source": last_capture,
                       "trace_events": run_args.trace, "trace_lines": trace_lines}
+            if interrupted is not None:
+                result["signal"] = interrupted.signum
+                result["signal_name"] = interrupted.signal_name
             if name in ("desktop-columns", "desktop-columns-timing") and (out / "measurements.json").exists():
                 result["desktop_columns"] = json.loads((out / "measurements.json").read_text())
                 if (out / "host-load.json").exists():
@@ -9576,6 +9609,8 @@ def main():
                 result["timing_host_gate"] = json.loads((out / "timing-status.json").read_text())
             (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
             print(f"{verdict} {name} {run}/{args.repeat}: {note}", flush=True)
+            if interrupted is not None:
+                sys.exit(128 + interrupted.signum)
             if name == "desktop-columns-timing" and verdict == "BLOCKED":
                 break
         if name == "net-perf" and args.repeat >= 2:
