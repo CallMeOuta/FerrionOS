@@ -2852,6 +2852,7 @@ FIREFOX_WINDOW_DIR = "/tmp/firefox-window"
 FIREFOX_WINDOW_PAGES = {"first": ("1f8a4c", "First page"), "second": ("c2185b", "Second page")}
 FIREFOX_WINDOW_KEYS = {" ": "spc", "-": "minus", ".": "dot", "/": "slash", ":": "shift-semicolon", "\n": "ret"}
 FIREFOX_WINDOW_UNITS = {"KB": 1 / 1024, "MB": 1, "GB": 1024}
+FIREFOX_WINDOW_CHROME_MIN_COLORS = 8
 FIREFOX_ADDR_FOCUS_WAIT_S = 15
 FIREFOX_ADDR_FOCUS_ATTEMPTS = 2
 FIREFOX_ADDR_FOCUS_POLL_S = 0.2
@@ -2904,16 +2905,22 @@ def firefox_window_chrome(frame, page):
                 for y in range(top - 40, top) for x in range(left, right + 1)})
 
 
-def firefox_window_addr_selected(frame, page):
-    """Reports whether Firefox's address bar above `page` shows the blue selection highlight."""
+def firefox_window_addr_band(page):
+    """Computes the address-bar selection search band above a validated Firefox page."""
     left, top, right, _ = page["bounds"]
-    assert left < right and top >= 0
-    if top < FIREFOX_ADDR_BAR_TOP_OFFSET:
-        return False
+    assert left < right and top >= FIREFOX_ADDR_BAR_TOP_OFFSET
     band_top = top - FIREFOX_ADDR_BAR_TOP_OFFSET
     band_bottom = top - FIREFOX_ADDR_BAR_BOTTOM_OFFSET
     band_left = min(left + FIREFOX_ADDR_BAR_SIDE_MARGIN, right)
     band_right = max(right - FIREFOX_ADDR_BAR_SIDE_MARGIN, band_left)
+    assert band_left < band_right and band_top < band_bottom
+    return band_left, band_top, band_right, band_bottom
+
+
+def firefox_window_addr_selected(frame, band):
+    """Reports whether Firefox's address bar inside `band` shows the blue selection highlight."""
+    band_left, band_top, band_right, band_bottom = band
+    assert 0 <= band_left < band_right <= frame.width and 0 <= band_top < band_bottom <= frame.height
     count = 0
     for y in range(band_top, band_bottom):
         row = y * frame.width
@@ -2991,15 +2998,36 @@ def test_firefox_window(vm, args):
     if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
         return False, "the guest watcher did not start"
 
+    def wait_first_page(color, timeout):
+        deadline = time.monotonic() + timeout
+        first_seen = None
+        last_page = None
+        last_chrome = 0
+        frame = None
+        while time.monotonic() < deadline:
+            frame = vm.screenshot()
+            page = firefox_window_page(frame, color)
+            if page:
+                if first_seen is None:
+                    first_seen = time.monotonic() - started
+                chrome = firefox_window_chrome(frame, page)
+                last_page, last_chrome = page, chrome
+                if chrome >= FIREFOX_WINDOW_CHROME_MIN_COLORS:
+                    return frame, page, first_seen, time.monotonic() - started, chrome
+            time.sleep(0.2)
+        return frame or vm.screenshot(), last_page, first_seen, None, last_chrome
+
     first_color = FIREFOX_WINDOW_PAGES["first"][0]
     started = time.monotonic()
     status, _ = run(f"GDK_BACKEND=wayland MOZ_ENABLE_WAYLAND=1 firefox --no-remote --profile {FIREFOX_WINDOW_DIR}/profile "
                     f"file://{FIREFOX_WINDOW_DIR}/first.html > {FIREFOX_WINDOW_DIR}/firefox.log 2>&1 & true", 30)
-    frame, page = wait_page(first_color, args.timeout)
-    first_paint = time.monotonic() - started
+    frame, page, first_paint, first_chrome_s, first_chrome_colors = wait_first_page(first_color, args.timeout)
+    if first_paint is None:
+        first_paint = time.monotonic() - started
     frame.save_png(vm.out / "firefox-window-first.png")
-    results = {"session_file_s": round(session_file, 1), "first_paint_s": round(first_paint, 1), "first": page,
-               "used_before_mb": used_before}
+    results = {"session_file_s": round(session_file, 1), "first_paint_s": round(first_paint, 1),
+               "first_chrome_s": round(first_chrome_s, 1) if first_chrome_s is not None else None,
+               "first": page, "used_before_mb": used_before}
 
     def finish(ok, note):
         if not ok:
@@ -3029,36 +3057,38 @@ def test_firefox_window(vm, args):
 
     if not page:
         return finish(False, f"no Firefox page of #{first_color} after {first_paint:.0f}s; see firefox-window-first.png")
-    results["first_chrome_colors"] = firefox_window_chrome(frame, page)
-    if results["first_chrome_colors"] < 8:
+    results["first_chrome_colors"] = first_chrome_colors
+    if first_chrome_s is None or results["first_chrome_colors"] < FIREFOX_WINDOW_CHROME_MIN_COLORS:
         return finish(False, f"page painted but no Firefox toolbar above it: {results}")
-    print(f"FIREFOX first page painted after {first_paint:.1f}s: {page}", flush=True)
+    print(f"FIREFOX first page painted after {first_paint:.1f}s (chrome {first_chrome_s:.1f}s): {page}", flush=True)
 
-    def focus_address_bar(tag, current_page):
+    def focus_address_bar(tag, band):
         assert FIREFOX_ADDR_FOCUS_ATTEMPTS > 0 and FIREFOX_ADDR_FOCUS_WAIT_S > 0
         started = time.monotonic()
         frame = None
-        for _ in range(FIREFOX_ADDR_FOCUS_ATTEMPTS):
+        for attempt in range(1, FIREFOX_ADDR_FOCUS_ATTEMPTS + 1):
             vm.command("sendkey ctrl-l")
             attempt_deadline = time.monotonic() + FIREFOX_ADDR_FOCUS_WAIT_S
             while time.monotonic() < attempt_deadline:
                 frame = vm.screenshot()
-                if firefox_window_addr_selected(frame, current_page):
-                    return True, round(time.monotonic() - started, 2), None
+                if firefox_window_addr_selected(frame, band):
+                    return True, round(time.monotonic() - started, 2), attempt, None
                 time.sleep(FIREFOX_ADDR_FOCUS_POLL_S)
         elapsed = round(time.monotonic() - started, 2)
         shot = f"firefox-window-focus-{tag}-{elapsed:.1f}s.png"
         (frame or vm.screenshot()).save_png(vm.out / shot)
-        return False, elapsed, shot
+        return False, elapsed, FIREFOX_ADDR_FOCUS_ATTEMPTS, shot
 
     second_color = FIREFOX_WINDOW_PAGES["second"][0]
-    first_page = page
+    addr_band = firefox_window_addr_band(page)
     results["address_focus_s"] = {}
+    results["address_focus_attempts"] = {}
     time.sleep(5)
-    focused, focus_s, focus_shot = focus_address_bar("second", first_page)
+    focused, focus_s, focus_attempts, focus_shot = focus_address_bar("second", addr_band)
     results["address_focus_s"]["second"] = focus_s
+    results["address_focus_attempts"]["second"] = focus_attempts
     if not focused:
-        return finish(False, f"address bar did not select after Ctrl+L for second page ({focus_s}s); see {focus_shot}")
+        return finish(False, f"address bar did not select after Ctrl+L for second page ({focus_s}s, {focus_attempts} attempts); see {focus_shot}")
     typed = time.monotonic()
     keys(f"file://{FIREFOX_WINDOW_DIR}/second.html\n")
     frame, page = wait_page(second_color, args.timeout)
@@ -3067,12 +3097,13 @@ def test_firefox_window(vm, args):
     frame.save_png(vm.out / "firefox-window-second.png")
     if not page:
         return finish(False, f"typing the second page's address did not show #{second_color}; see firefox-window-second.png")
-    print(f"FIREFOX second page loaded after {results['second_load_s']}s (focus {focus_s}s): {page}", flush=True)
+    print(f"FIREFOX second page loaded after {results['second_load_s']}s (focus {focus_s}s, attempt {focus_attempts}): {page}", flush=True)
 
-    focused, focus_s, focus_shot = focus_address_bar("https", page)
+    focused, focus_s, focus_attempts, focus_shot = focus_address_bar("https", addr_band)
     results["address_focus_s"]["https"] = focus_s
+    results["address_focus_attempts"]["https"] = focus_attempts
     if not focused:
-        return finish(False, f"address bar did not select after Ctrl+L for example.com ({focus_s}s); see {focus_shot}")
+        return finish(False, f"address bar did not select after Ctrl+L for example.com ({focus_s}s, {focus_attempts} attempts); see {focus_shot}")
     typed = time.monotonic()
     keys("https://example.com/\n")
     deadline = time.monotonic() + 600
@@ -3088,8 +3119,9 @@ def test_firefox_window(vm, args):
     results["https"] = {"distinct_colors": len(set(area)), "light_share": round(light / len(area), 2)}
     if firefox_window_page(frame, second_color) or results["https"]["light_share"] < 0.5 or len(set(area)) < 3:
         return finish(False, f"https://example.com/ did not replace the second page: {results['https']}; see firefox-window-https.png")
-    return finish(True, f"first paint {first_paint:.1f}s, toolbar colors {results['first_chrome_colors']}, "
-                        f"address_focus_s {results['address_focus_s']['second']}/{results['address_focus_s']['https']}, "
+    return finish(True, f"first paint {first_paint:.1f}s (chrome {first_chrome_s:.1f}s), toolbar colors {results['first_chrome_colors']}, "
+                        f"address_focus_s {results['address_focus_s']['second']}/{results['address_focus_s']['https']} "
+                        f"(attempts {results['address_focus_attempts']['second']}/{results['address_focus_attempts']['https']}), "
                         f"second page {results['second_load_s']}s, example.com {results['https_load_s']}s; see {vm.out}")
 
 
