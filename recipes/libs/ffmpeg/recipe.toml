@@ -1,0 +1,207 @@
+[package]
+description = "Audio and video decoding libraries and tools"
+
+[source]
+tar = "https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz"
+blake3 = "c76da5cbd367114d78c9421f74de4a15649bd5cc8a3e299225dbae048d2630fc"
+patches = [
+    "redox.patch",
+    "ferrion-j1-decl.patch",
+]
+
+[build]
+template = "custom"
+dependencies = [
+    "dav1d",
+    "zlib",
+]
+compiler = "gcc"
+script = """
+DYNAMIC_INIT
+
+DECODERS=(
+    libdav1d
+    vp9
+    vp8
+    theora
+    vp3
+    mpeg1video
+    mpeg2video
+    png
+    mjpeg
+    gif
+    bmp
+    webp
+    webp_anim
+    ffv1
+    huffyuv
+    rawvideo
+    flac
+    opus
+    vorbis
+    mp2
+    mp2float
+    mp3
+    mp3float
+    mp3adu
+    mp3adufloat
+    mp3on4
+    mp3on4float
+    pcm_u8
+    pcm_s8
+    pcm_s16le
+    pcm_s16be
+    pcm_s16le_planar
+    pcm_s16be_planar
+    pcm_s24le
+    pcm_s24be
+    pcm_s24le_planar
+    pcm_s24be_planar
+    pcm_s32le
+    pcm_s32be
+    pcm_s32le_planar
+    pcm_s32be_planar
+    pcm_f32le
+    pcm_f32be
+    pcm_f64le
+    pcm_f64be
+    pcm_alaw
+    pcm_mulaw
+)
+
+ENCODERS=(
+    rawvideo
+    wrapped_avframe
+    pcm_s16le
+    pcm_f32le
+)
+
+PARSERS=(
+    av1
+    vp9
+    vp8
+    vp3
+    mpegvideo
+    mpegaudio
+    flac
+    opus
+    vorbis
+    png
+    mjpeg
+    gif
+    bmp
+    webp
+    ffv1
+)
+
+DEMUXERS=(
+    matroska
+    mov
+    ogg
+    flac
+    mp3
+    wav
+    ivf
+    mpegps
+    mpegts
+    mpegvideo
+    rawvideo
+    image2
+    image2pipe
+)
+
+MUXERS=(
+    framemd5
+    md5
+    null
+    wav
+    pcm_s16le
+    pcm_f32le
+    rawvideo
+)
+
+PROTOCOLS=(
+    file
+    pipe
+)
+
+FILTERS=(
+    format
+    aformat
+    null
+    anull
+    scale
+    aresample
+    copy
+    acopy
+    nullsrc
+    anullsrc
+    nullsink
+    anullsink
+)
+
+BSFS=(
+    vp9_superframe_split
+    av1_frame_split
+    av1_metadata
+)
+
+ARCH="${TARGET%%-*}"
+COOKBOOK_CONFIGURE_FLAGS=(
+    --enable-cross-compile
+    --target-os=redox
+    --arch="${ARCH}"
+    --cross-prefix="${GNU_TARGET}-"
+    --pkg-config=pkg-config
+    --prefix=/usr
+    --disable-everything
+    --disable-autodetect
+    --disable-doc
+    --disable-ffplay
+    --disable-sdl2
+    --disable-network
+    --disable-stripping
+    --disable-static
+    --enable-shared
+    --enable-pic
+    --enable-swscale
+    --enable-swresample
+    --enable-avfilter
+    --enable-zlib
+    --enable-libdav1d
+)
+
+for name in "${DECODERS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-decoder="${name}")
+done
+for name in "${ENCODERS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-encoder="${name}")
+done
+for name in "${PARSERS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-parser="${name}")
+done
+for name in "${DEMUXERS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-demuxer="${name}")
+done
+for name in "${MUXERS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-muxer="${name}")
+done
+for name in "${PROTOCOLS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-protocol="${name}")
+done
+for name in "${FILTERS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-filter="${name}")
+done
+for name in "${BSFS[@]}"; do
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-bsf="${name}")
+done
+
+if [[ "$REDOXER_USE_LTO" = "1" || "$REDOXER_USE_LTO" = "true" ]]; then
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-lto)
+fi
+
+cookbook_configure
+
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING.LGPLv2.1" "${COOKBOOK_STAGE}/usr/share/licenses/ffmpeg/COPYING.LGPLv2.1"
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE.md" "${COOKBOOK_STAGE}/usr/share/licenses/ffmpeg/LICENSE.md"
+"""

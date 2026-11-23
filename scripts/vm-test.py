@@ -9334,6 +9334,23 @@ TESTS["stack-smash-aborts"] = test_stack_smash_aborts
 TESTS["fortify-chk-aborts"] = test_fortify_chk_aborts
 TESTS["iommu"] = test_iommu
 TESTS["dma-outside-grant"] = test_dma_outside_grant
+
+
+def test_media_decode(vm, args):
+    """M1a: check guest ffmpeg allow-list, dav1d AOM PATENTS, video framemd5 and audio parity against host, and 4K AV1 decode fps."""
+    import media_decode
+    return media_decode.run_media_decode(
+        vm,
+        args,
+        {
+            "Blocked": Blocked,
+            "root_shell": root_shell,
+            "run_status": run_status,
+        },
+    )
+
+
+TESTS["media-decode"] = test_media_decode
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password

@@ -22,3 +22,4 @@ wget-log
 /book/book/
 # Local issue tracker (docs/agents/issue-tracker.md): kept on the maintainer's machine, never committed
 /.scratch/
+**/__pycache__/
