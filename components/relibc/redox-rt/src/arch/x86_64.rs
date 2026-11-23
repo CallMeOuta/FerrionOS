@@ -111,8 +111,8 @@ unsafe extern "sysv64" fn fork_impl(args: &ForkArgs, initial_rsp: *mut usize) ->
 
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe extern "sysv64" fn child_hook(scratchpad: &ForkScratchpad) {
-    let _ = crate::sys::close(scratchpad.cur_filetable_fd);
     crate::child_hook_common(crate::ChildHookCommonArgs {
+        cur_filetable_fd: scratchpad.cur_filetable_fd,
         new_thr_fd: FdGuard::new(scratchpad.new_thr_fd),
         new_proc_fd: if scratchpad.new_proc_fd == usize::MAX {
             None

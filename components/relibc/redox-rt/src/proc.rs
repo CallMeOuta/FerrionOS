@@ -1,13 +1,22 @@
-use core::{cell::SyncUnsafeCell, cmp, fmt::Debug, ops::Range};
+use core::{
+    cell::SyncUnsafeCell,
+    cmp,
+    fmt::Debug,
+    ops::Range,
+    ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 use crate::{
     DYNAMIC_PROC_INFO, RtTcb, StaticProcInfo,
     arch::*,
     auxv_defs::*,
     read_proc_meta,
-    sys::{fstat, open, sys_call, sys_call_wo},
+    sys::{FdTblInner, fstat, open, sys_call, sys_call_wo},
 };
 use redox_protocols::protocol::{O_CLOEXEC, ProcCall, ThreadCall};
+#[cfg(feature = "proc")]
+use redox_protocols::protocol::{ProcKillTarget, SIGKILL, WaitFlags};
 
 use alloc::{boxed::Box, vec};
 
@@ -582,11 +591,27 @@ pub fn fexec_impl(
 
         {
             let filetable_fd = thread_fd.dup_into_upper(b"filetable-binary")?;
-            let _ = filetable_fd.call_wo(
-                fds_to_close_bytes,
-                CallFlags::empty(),
-                &[syscall::FileTableVerb::Close as u64],
-            );
+            if filetable_fd
+                .call_wo(
+                    fds_to_close_bytes,
+                    CallFlags::empty(),
+                    &[syscall::FileTableVerb::Close as u64],
+                )
+                .is_err()
+            {
+                assert!(fds_to_close.len() <= FdTblInner::CONTEXT_MAX_FILES as usize);
+                for &fd in &fds_to_close {
+                    match unsafe { syscall::syscall1(syscall::SYS_CLOSE, fd) } {
+                        Ok(_) | Err(Error { errno: EBADF }) => {}
+                        Err(_) => {
+                            #[cfg(feature = "proc")]
+                            crate::sys::posix_exit(127);
+                            #[cfg(not(feature = "proc"))]
+                            core::intrinsics::abort();
+                        }
+                    }
+                }
+            }
         }
         {
             let mut guard = crate::current_filetable().inner.lock();
@@ -1046,6 +1071,149 @@ pub enum ForkArgs<'a> {
     Managed,
 }
 
+pub struct ForkAllocHooks {
+    pub lock: fn(),
+    pub unlock_parent: fn(),
+    pub unlock_child: fn(),
+}
+
+static FORK_ALLOC_HOOKS: AtomicPtr<ForkAllocHooks> = AtomicPtr::new(ptr::null_mut());
+
+pub fn set_fork_alloc_hooks(hooks: &'static ForkAllocHooks) {
+    FORK_ALLOC_HOOKS.store(hooks as *const ForkAllocHooks as *mut ForkAllocHooks, Ordering::Release);
+}
+
+pub(crate) unsafe fn unlock_fork_alloc_child() {
+    let ptr = FORK_ALLOC_HOOKS.load(Ordering::Acquire);
+    if !ptr.is_null() {
+        let hooks = unsafe { &*ptr };
+        (hooks.unlock_child)();
+    }
+}
+
+struct ForkAllocGuard {
+    hooks: *const ForkAllocHooks,
+}
+
+impl ForkAllocGuard {
+    fn lock() -> Self {
+        let ptr = FORK_ALLOC_HOOKS.load(Ordering::Acquire);
+        if !ptr.is_null() {
+            let hooks = unsafe { &*ptr };
+            (hooks.lock)();
+            Self { hooks: ptr }
+        } else {
+            Self { hooks: ptr::null() }
+        }
+    }
+}
+
+impl Drop for ForkAllocGuard {
+    fn drop(&mut self) {
+        if !self.hooks.is_null() {
+            let hooks = unsafe { &*self.hooks };
+            (hooks.unlock_parent)();
+        }
+    }
+}
+
+pub fn raw_dup_into(fd: usize, buf: &[u8], out: usize) -> Result<usize> {
+    unsafe {
+        syscall::syscall4(
+            syscall::SYS_DUP_INTO,
+            fd,
+            buf.as_ptr() as usize,
+            buf.len(),
+            out,
+        )
+    }
+}
+
+const FORK_MAX_REAP_POLLS: usize = 200;
+const FORK_REAP_SLEEP_NS: i32 = 1_000_000;
+
+pub struct ChildCleanupGuard {
+    pid: usize,
+    proc_fd: usize,
+    armed: bool,
+}
+
+impl ChildCleanupGuard {
+    pub fn disarmed() -> Self {
+        Self {
+            pid: 0,
+            proc_fd: usize::MAX,
+            armed: false,
+        }
+    }
+
+    pub fn arm(&mut self, pid: usize, proc_fd: usize) {
+        self.pid = pid;
+        self.proc_fd = proc_fd;
+        self.armed = true;
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ChildCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        #[cfg(feature = "proc")]
+        {
+            let exited = if self.proc_fd != usize::MAX {
+                sys_call_wo(
+                    self.proc_fd,
+                    &[],
+                    CallFlags::empty(),
+                    &[ProcCall::Exit as u64, (SIGKILL << 8) as u64],
+                )
+                .is_ok()
+            } else {
+                false
+            };
+            if !exited {
+                let _ = crate::sys::posix_kill(ProcKillTarget::SingleProc(self.pid), SIGKILL);
+            }
+            let mut status = 0usize;
+            let mut reaped = false;
+            for _ in 0..FORK_MAX_REAP_POLLS {
+                match crate::sys::sys_waitpid(
+                    crate::sys::WaitpidTarget::SingleProc { pid: self.pid },
+                    &mut status,
+                    WaitFlags::WNOHANG,
+                ) {
+                    Ok(p) if p == self.pid => {
+                        reaped = true;
+                        break;
+                    }
+                    Err(Error { errno: ECHILD }) => {
+                        reaped = true;
+                        break;
+                    }
+                    Err(Error { errno: EINTR }) => continue,
+                    Ok(_) => {
+                        let req = syscall::TimeSpec {
+                            tv_sec: 0,
+                            tv_nsec: FORK_REAP_SLEEP_NS,
+                        };
+                        let mut rem = syscall::TimeSpec::default();
+                        let _ = syscall::nanosleep(&req, &mut rem);
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !reaped {
+                let _ = syscall::write(2, b"[redox-rt] fork cleanup: unable to reap child\n");
+            }
+        }
+    }
+}
+
 pub fn fork_inner(initial_rsp: *mut usize, args: &ForkArgs) -> Result<usize> {
     let (cur_filetable_fd, new_filetable_fd, new_proc_fd, new_thr_fd, new_pid);
 
@@ -1063,23 +1231,89 @@ pub fn fork_inner(initial_rsp: *mut usize, args: &ForkArgs) -> Result<usize> {
         new_thr_fd = thr_fd;
         new_pid = pid;
 
-        // Copy existing files into new file table, but do not reuse the same file table (i.e. new
-        // parent FDs will not show up for the child).
-        let scratchpad = {
-            cur_filetable_fd = cur_thr_fd.dup_into_upper(b"filetable-binary")?;
-            new_filetable_fd = cur_filetable_fd.dup_into_upper(b"copy")?;
+        cur_filetable_fd = cur_thr_fd.dup_into_upper(b"filetable-binary")?;
+        let proc_fd_raw = new_proc_fd.as_ref().map_or(usize::MAX, |p| p.as_raw_fd());
 
-            // This must be done before the address space is copied.
-            let proc_fd = new_proc_fd.as_ref().map_or(usize::MAX, |p| p.as_raw_fd());
-            //let _ = syscall::write(1, alloc::format!("FDTBL{}PROC{}THR{}\n", *cur_filetable_fd, proc_fd, *new_thr_fd).as_bytes());
-
-            ForkScratchpad {
-                cur_filetable_fd: cur_filetable_fd.as_raw_fd(),
-                new_filetable_fd: new_filetable_fd.as_raw_fd(),
-                new_proc_fd: proc_fd,
-                new_thr_fd: new_thr_fd.as_raw_fd(),
-            }
+        let mut scratchpad = ForkScratchpad {
+            cur_filetable_fd: cur_filetable_fd.as_raw_fd(),
+            new_filetable_fd: usize::MAX,
+            new_proc_fd: proc_fd_raw,
+            new_thr_fd: new_thr_fd.as_raw_fd(),
         };
+
+        let (cur_addr_space_fd, new_addr_space_fd) = {
+            let _siglock = crate::signal::tmp_disable_signals();
+            let _dyn_guard = DYNAMIC_PROC_INFO.lock();
+            let fdtbl = crate::current_filetable();
+            let mut fdtbl_guard = fdtbl.inner.lock();
+            let fd_guard = fdtbl.fd.lock();
+
+            let new_filetable_slot = fdtbl_guard.reserve_upper_slot_raw(0, fd_guard.as_ref())?;
+            let cur_addr_space_slot =
+                match fdtbl_guard.reserve_upper_slot_raw(0, fd_guard.as_ref()) {
+                    Ok(slot) => slot,
+                    Err(err) => {
+                        let _ = fdtbl_guard.remove(new_filetable_slot);
+                        return Err(err);
+                    }
+                };
+            let new_addr_space_slot =
+                match fdtbl_guard.reserve_upper_slot_raw(0, fd_guard.as_ref()) {
+                    Ok(slot) => slot,
+                    Err(err) => {
+                        let _ = fdtbl_guard.remove(cur_addr_space_slot);
+                        let _ = fdtbl_guard.remove(new_filetable_slot);
+                        return Err(err);
+                    }
+                };
+
+            scratchpad.new_filetable_fd = new_filetable_slot;
+            #[cfg(target_arch = "x86")]
+            unsafe {
+                let scratchpad_ptr = initial_rsp.cast::<ForkScratchpad>();
+                scratchpad_ptr.write(scratchpad);
+            }
+
+            let _alloc_guard = ForkAllocGuard::lock();
+            let _sigact_guard = crate::signal::lock_sigactions();
+
+            if let Err(err) = raw_dup_into(cur_filetable_fd.as_raw_fd(), b"copy", new_filetable_slot)
+            {
+                let _ = fdtbl_guard.remove(new_addr_space_slot);
+                let _ = fdtbl_guard.remove(cur_addr_space_slot);
+                let _ = fdtbl_guard.remove(new_filetable_slot);
+                return Err(err);
+            }
+            if let Err(err) = raw_dup_into(cur_thr_fd.as_raw_fd(), b"addrspace", cur_addr_space_slot)
+            {
+                let _ = unsafe { syscall::syscall1(syscall::SYS_CLOSE, new_filetable_slot) };
+                let _ = fdtbl_guard.remove(new_addr_space_slot);
+                let _ = fdtbl_guard.remove(cur_addr_space_slot);
+                let _ = fdtbl_guard.remove(new_filetable_slot);
+                return Err(err);
+            }
+            if let Err(err) = raw_dup_into(cur_addr_space_slot, b"exclusive", new_addr_space_slot) {
+                let _ = unsafe { syscall::syscall1(syscall::SYS_CLOSE, cur_addr_space_slot) };
+                let _ = unsafe { syscall::syscall1(syscall::SYS_CLOSE, new_filetable_slot) };
+                let _ = fdtbl_guard.remove(new_addr_space_slot);
+                let _ = fdtbl_guard.remove(cur_addr_space_slot);
+                let _ = fdtbl_guard.remove(new_filetable_slot);
+                return Err(err);
+            }
+
+            drop(_sigact_guard);
+            drop(_alloc_guard);
+            drop(fd_guard);
+            drop(fdtbl_guard);
+            drop(_dyn_guard);
+
+            new_filetable_fd = FdGuard::new(new_filetable_slot).to_upper().unwrap();
+            (
+                FdGuard::new(cur_addr_space_slot).to_upper().unwrap(),
+                FdGuard::new(new_addr_space_slot).to_upper().unwrap(),
+            )
+        };
+
         #[cfg(any(
             target_arch = "x86_64",
             target_arch = "aarch64",
@@ -1089,18 +1323,10 @@ pub fn fork_inner(initial_rsp: *mut usize, args: &ForkArgs) -> Result<usize> {
             let scratchpad_ptr: *const ForkScratchpad = &raw const scratchpad;
             scratchpad_ptr as usize
         };
-        #[cfg(target_arch = "x86")]
-        unsafe {
-            let scratchpad_ptr = initial_rsp.cast::<ForkScratchpad>();
-            scratchpad_ptr.write(scratchpad);
-        }
 
         // CoW-duplicate address space.
         {
             let new_addr_space_sel_fd = new_thr_fd.dup_into_upper(b"current-addrspace")?;
-
-            let cur_addr_space_fd = cur_thr_fd.dup_into_upper(b"addrspace")?;
-            let new_addr_space_fd = cur_addr_space_fd.dup_into_upper(b"exclusive")?;
 
             let mut grant_desc_buf = [GrantDesc::default(); 16];
             loop {
@@ -1232,6 +1458,7 @@ pub fn fork_inner(initial_rsp: *mut usize, args: &ForkArgs) -> Result<usize> {
         syscall::CallFlags::FD,
         &[new_filetable_fd_idx as u64],
     )?;
+    let _ = new_filetable_weak_fd.take();
 
     let start_fd = new_thr_fd.dup_into_upper(b"start")?;
     start_fd.write(&[0])?;

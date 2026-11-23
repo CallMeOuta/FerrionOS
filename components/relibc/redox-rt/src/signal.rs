@@ -747,6 +747,14 @@ pub union SignalHandler {
 
 static SIGACTIONS_LOCK: Mutex<()> = Mutex::new(());
 
+pub(crate) fn lock_sigactions() -> crate::sync::MutexGuard<'static, ()> {
+    SIGACTIONS_LOCK.lock()
+}
+
+pub(crate) unsafe fn force_unlock_sigactions() {
+    unsafe { SIGACTIONS_LOCK.force_unlock() };
+}
+
 pub(crate) static PROC_CONTROL_STRUCT: SigProcControl = SigProcControl {
     pending: AtomicU64::new(0),
     actions: [const {

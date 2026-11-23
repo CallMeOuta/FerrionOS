@@ -678,12 +678,15 @@ pub fn open_into_upper<T: AsRef<str>>(path: T, flags: usize) -> Result<usize> {
     openat_into_upper(root_fd.as_raw_fd(), reference.as_ref(), flags, fcntl_flags)
 }
 pub fn dup(fd: usize, buf: &[u8]) -> Result<usize> {
+    dup_with_flags(fd, buf, 0)
+}
+pub fn dup_with_flags(fd: usize, buf: &[u8], flags: usize) -> Result<usize> {
     let _siglock = tmp_disable_signals();
 
     let out = {
         let mut fdtbl_guard = current_filetable().inner.lock();
         let fd_guard = current_filetable().fd.lock();
-        fdtbl_guard.add_posix(0, fd_guard.as_ref())?
+        fdtbl_guard.add_posix(flags, fd_guard.as_ref())?
     };
 
     let res = unsafe {
@@ -1302,6 +1305,92 @@ impl FdTblInner {
         self.active_count += 1;
 
         Ok(out_idx)
+    }
+
+    pub fn reserve_upper_slot_raw(
+        &mut self,
+        entry: usize,
+        sync_fd: Option<&FdGuardUpper>,
+    ) -> Result<usize> {
+        Ok(self.insert_upper(entry, sync_fd)? | syscall::UPPER_FDTBL_TAG)
+    }
+
+    pub fn reconcile_after_fork(
+        &mut self,
+        kernel_filetable_fd: &FdGuardUpper,
+        keep_fds: &[usize],
+    ) -> Result<()> {
+        const FAST_FD_LIMIT: usize = 4096;
+        const FAST_FD_WORDS: usize = FAST_FD_LIMIT / 64;
+
+        kernel_filetable_fd.call_wo(&[], CallFlags::empty(), &[FileTableVerb::Refresh as u64])?;
+        let _ = kernel_filetable_fd.lseek(0, syscall::SEEK_SET)?;
+
+        let mut posix_bits = [0u64; FAST_FD_WORDS];
+        let mut upper_bits = [0u64; FAST_FD_WORDS];
+        let mut high_fds: Vec<usize> = Vec::new();
+
+        let mut reader = crate::proc::FileBufReader::from_fd(kernel_filetable_fd.as_raw_fd());
+        let mut seen = 0usize;
+        for _ in 0..(Self::CONTEXT_MAX_FILES as usize) {
+            let Some(raw_fd) = reader.read_le_u64()? else {
+                break;
+            };
+            seen += 1;
+            let fd = raw_fd as usize;
+            let is_kept = keep_fds.contains(&fd);
+            let is_tracked = self.get_fd_flags(fd).is_ok();
+            if !is_kept && !is_tracked {
+                let _ = unsafe { syscall::syscall1(syscall::SYS_CLOSE, fd) };
+                continue;
+            }
+            let idx = Self::strip_tags(fd);
+            if idx < FAST_FD_LIMIT {
+                if Self::is_upper(fd) {
+                    upper_bits[idx / 64] |= 1u64 << (idx % 64);
+                } else {
+                    posix_bits[idx / 64] |= 1u64 << (idx % 64);
+                }
+            } else {
+                high_fds.push(fd);
+            }
+        }
+        if seen == Self::CONTEXT_MAX_FILES as usize && reader.read_le_u64()?.is_some() {
+            return Err(Error::new(EMFILE));
+        }
+
+        let posix_len = self.posix_fdtbl.table.len();
+        for idx in 0..posix_len {
+            if !self.posix_fdtbl.table[idx].contains(FdFlags::OCCUPIED) {
+                continue;
+            }
+            let in_kernel = if idx < FAST_FD_LIMIT {
+                (posix_bits[idx / 64] & (1u64 << (idx % 64))) != 0
+            } else {
+                high_fds.contains(&idx)
+            };
+            if !in_kernel && !keep_fds.contains(&idx) {
+                let _ = self.remove(idx);
+            }
+        }
+
+        let upper_len = self.upper_fdtbl.table.len();
+        for idx in 0..upper_len {
+            if !matches!(self.upper_fdtbl.table[idx], FdTblEntry::Occupied { .. }) {
+                continue;
+            }
+            let full_fd = idx | syscall::UPPER_FDTBL_TAG;
+            let in_kernel = if idx < FAST_FD_LIMIT {
+                (upper_bits[idx / 64] & (1u64 << (idx % 64))) != 0
+            } else {
+                high_fds.contains(&full_fd)
+            };
+            if !in_kernel && !keep_fds.contains(&full_fd) {
+                let _ = self.remove(full_fd);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn insert_at_upper(

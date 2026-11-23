@@ -486,6 +486,30 @@ impl Pal for Sys {
     }
 
     unsafe fn fork() -> Result<pid_t> {
+        fn lock_alloc() {
+            unsafe {
+                let _ = (*crate::ALLOCATOR.get()).manual_lock();
+            }
+        }
+        fn unlock_alloc_parent() {
+            unsafe {
+                (*crate::ALLOCATOR.get()).manual_unlock();
+            }
+        }
+        fn unlock_alloc_child() {
+            unsafe {
+                (*crate::ALLOCATOR.get())
+                    .lock
+                    .store(crate::sync::mutex::UNLOCKED, Ordering::Release);
+            }
+        }
+        static FORK_ALLOC_HOOKS: redox_rt::proc::ForkAllocHooks = redox_rt::proc::ForkAllocHooks {
+            lock: lock_alloc,
+            unlock_parent: unlock_alloc_parent,
+            unlock_child: unlock_alloc_child,
+        };
+        redox_rt::proc::set_fork_alloc_hooks(&FORK_ALLOC_HOOKS);
+
         // TODO: Find way to avoid lock.
         let _guard = CLONE_LOCK.write();
 
@@ -1347,12 +1371,37 @@ impl Pal for Sys {
     ) -> Result<pid_t> {
         use crate::header::spawn::Flags;
         let child = redox_rt::proc::new_child_process(&redox_rt::proc::ForkArgs::Managed)?;
+        let proc_fd = child.proc_fd.unwrap();
+        let mut child_cleanup = redox_rt::proc::ChildCleanupGuard::disarmed();
+        child_cleanup.arm(child.pid, proc_fd.as_raw_fd());
         let mut cwd = path::clone_cwd().unwrap_or_default();
         let mut cwd_fd = FdGuard::open_into_upper(cwd.as_str(), syscall::O_STAT)?;
-        let proc_fd = child.proc_fd.unwrap();
         let _curr_proc_fd = redox_rt::current_proc_fd(); // TODO use this variable?
         let cur_filetable_fd = RtTcb::current().thread_fd().dup_into_upper(b"filetable")?;
-        let file_table = cur_filetable_fd.dup_into_upper(b"copy")?;
+        let (file_table, mut cloexec_fds) = {
+            let _siglock = tmp_disable_signals();
+            let fdtbl = redox_rt::current_filetable();
+            let mut fdtbl_guard = fdtbl.inner.lock();
+            let fd_guard = fdtbl.fd.lock();
+            let file_table_slot = fdtbl_guard.reserve_upper_slot_raw(0, fd_guard.as_ref())?;
+            if let Err(err) =
+                redox_rt::proc::raw_dup_into(cur_filetable_fd.as_raw_fd(), b"copy", file_table_slot)
+            {
+                let _ = fdtbl_guard.remove(file_table_slot);
+                return Err(Errno::from(err));
+            }
+            let mut fds = alloc::vec::Vec::new();
+            for (fd, flags) in fdtbl_guard.iter() {
+                if flags & redox_protocols::protocol::O_CLOEXEC
+                    == redox_protocols::protocol::O_CLOEXEC
+                {
+                    fds.push(fd);
+                }
+            }
+            drop(fd_guard);
+            drop(fdtbl_guard);
+            (FdGuard::new(file_table_slot).to_upper().unwrap(), fds)
+        };
 
         {
             let new_file_table = child.thr_fd.dup_into_upper(b"current-filetable")?;
@@ -1401,6 +1450,14 @@ impl Pal for Sys {
                             syscall::CallFlags::FD,
                             &[u64::try_from(fd).map_err(|_| Errno(EBADFD))?],
                         )?;
+                        let target_fd = fd as usize;
+                        if flag & fcntl::O_CLOEXEC != 0 {
+                            if !cloexec_fds.contains(&target_fd) {
+                                cloexec_fds.push(target_fd);
+                            }
+                        } else {
+                            cloexec_fds.retain(|&x| x != target_fd);
+                        }
                     }
                     crate::header::spawn::Action::Close(fd) => {
                         new_file_table.call_wo(
@@ -1408,6 +1465,7 @@ impl Pal for Sys {
                             syscall::CallFlags::empty(),
                             &[syscall::flag::FileTableVerb::Close as u64],
                         )?;
+                        cloexec_fds.retain(|&x| x != fd as usize);
                     }
                     crate::header::spawn::Action::Chdir(path) => {
                         let cwd_str =
@@ -1437,6 +1495,7 @@ impl Pal for Sys {
                             syscall::CallFlags::empty(),
                             &[syscall::flag::FileTableVerb::Dup2 as u64],
                         )?;
+                        cloexec_fds.retain(|&x| x != new as usize);
                     }
                 }
             }
@@ -1468,43 +1527,57 @@ impl Pal for Sys {
         //     cwd.as_str()
         // );
 
+        {
+            let ns_fd = redox_rt::current_namespace_fd().ok();
+            let cur_ft_raw = cur_filetable_fd.as_raw_fd();
+            if !cloexec_fds.contains(&cur_ft_raw) {
+                cloexec_fds.push(cur_ft_raw);
+            }
+            let keep = [
+                child.thr_fd.as_raw_fd(),
+                proc_fd.as_raw_fd(),
+                cwd_fd.as_raw_fd(),
+                new_file_table.as_raw_fd(),
+                ns_fd.unwrap_or(usize::MAX),
+            ];
+            cloexec_fds.retain(|fd| !keep.contains(fd));
+
+            let fds_to_close_bytes: &[u8] = unsafe {
+                core::slice::from_raw_parts(
+                    cloexec_fds.as_ptr() as *const u8,
+                    cloexec_fds.len() * core::mem::size_of::<usize>(),
+                )
+            };
+
+            if new_file_table
+                .call_wo(
+                    fds_to_close_bytes,
+                    syscall::CallFlags::empty(),
+                    &[syscall::FileTableVerb::Close as u64],
+                )
+                .is_err()
+            {
+                assert!(
+                    cloexec_fds.len() <= redox_rt::sys::FdTblInner::CONTEXT_MAX_FILES as usize
+                );
+                for &fd in &cloexec_fds {
+                    match new_file_table.call_wo(
+                        &fd.to_ne_bytes(),
+                        syscall::CallFlags::empty(),
+                        &[syscall::FileTableVerb::Close as u64],
+                    ) {
+                        Ok(_) | Err(Error { errno: EBADF }) => {}
+                        Err(err) => return Err(Errno::from(err)),
+                    }
+                }
+            }
+        }
+
         new_file_table.call_wo(
             &new_file_table.as_raw_fd().to_ne_bytes(),
             syscall::CallFlags::FD | syscall::CallFlags::FD_CLONE,
             &[new_file_table.as_raw_fd() as u64],
         )?;
-
-        {
-            let fds_to_close = {
-                let guard = redox_rt::current_filetable().inner.lock();
-                let mut fds = alloc::vec::Vec::new();
-                for (fd, flags) in guard.iter() {
-                    if flags & redox_protocols::protocol::O_CLOEXEC
-                        == redox_protocols::protocol::O_CLOEXEC
-                        || fd == executable.as_raw_fd()
-                    {
-                        fds.push(fd);
-                    }
-                }
-
-                fds.push(cur_filetable_fd.as_raw_fd());
-
-                fds
-            };
-
-            let fds_to_close_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    fds_to_close.as_ptr() as *mut u8,
-                    fds_to_close.len() * core::mem::size_of::<usize>(),
-                )
-            };
-
-            let _ = new_file_table.call_wo(
-                fds_to_close_bytes,
-                syscall::CallFlags::empty(),
-                &[syscall::FileTableVerb::Close as u64],
-            );
-        }
 
         new_file_table.call_wo(
             &cwd_fd.as_raw_fd().to_ne_bytes(),
@@ -1633,6 +1706,7 @@ impl Pal for Sys {
 
         let start_fd = child.thr_fd.dup_into_upper(b"start")?;
         start_fd.write(&[0])?;
+        child_cleanup.disarm();
 
         Ok(pid_t::try_from(child.pid).unwrap())
     }

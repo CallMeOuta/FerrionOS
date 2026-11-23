@@ -98,7 +98,9 @@ pub fn execve(
             (file, stat, arg0)
         }
     };
-    let exec_fd_guard = FdGuard::new(image_file.fd as _).to_upper().unwrap();
+    let image_fd = image_file.fd as usize;
+    core::mem::forget(image_file);
+    let exec_fd_guard = FdGuard::new(image_fd).to_upper()?;
 
     // With execve now being implemented in userspace, we need to check ourselves that this
     // file is actually executable. While checking for read permission is unnecessary as the

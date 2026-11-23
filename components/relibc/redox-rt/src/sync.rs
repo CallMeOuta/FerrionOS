@@ -43,6 +43,9 @@ impl<T> Mutex<T> {
         }
         MutexGuard { lock: self }
     }
+    pub unsafe fn force_unlock(&self) {
+        self.lockword.store(Self::UNLOCKED, Ordering::Release);
+    }
 }
 pub struct MutexGuard<'l, T> {
     lock: &'l Mutex<T>,

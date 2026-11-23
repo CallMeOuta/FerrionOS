@@ -296,32 +296,69 @@ pub fn current_namespace_fd() -> syscall::Result<usize> {
         .ok_or(syscall::Error::new(syscall::ENOENT))
 }
 struct ChildHookCommonArgs {
+    cur_filetable_fd: usize,
     new_thr_fd: FdGuard,
     new_proc_fd: Option<FdGuard>,
     new_filetable_fd: FdGuardUpper,
 }
 
 unsafe fn child_hook_common(args: ChildHookCommonArgs) {
+    let fdtbl = current_filetable();
+    unsafe {
+        crate::signal::force_unlock_sigactions();
+        crate::proc::unlock_fork_alloc_child();
+        fdtbl.fd.force_unlock();
+        fdtbl.inner.force_unlock();
+        DYNAMIC_PROC_INFO.force_unlock();
+    }
+
     let new_filetable_fd = args.new_filetable_fd;
+    let new_filetable_raw = new_filetable_fd.as_raw_fd();
 
     let old_filetable_fd;
     {
-        let fdtbl = current_filetable();
         old_filetable_fd = fdtbl.take();
         fdtbl.set_fd(new_filetable_fd);
+
+        let mut keep_fds = [usize::MAX; 5];
+        let mut keep_len = 0;
+        keep_fds[keep_len] = args.new_thr_fd.as_raw_fd();
+        keep_len += 1;
+        keep_fds[keep_len] = new_filetable_raw;
+        keep_len += 1;
+        keep_fds[keep_len] = args.cur_filetable_fd;
+        keep_len += 1;
+        if let Some(ref new_proc_fd) = args.new_proc_fd {
+            keep_fds[keep_len] = new_proc_fd.as_raw_fd();
+            keep_len += 1;
+        }
+        if let Some(ref old) = old_filetable_fd {
+            keep_fds[keep_len] = old.as_raw_fd();
+            keep_len += 1;
+        }
+
         let mut guard = fdtbl.inner.lock();
-        guard
-            .override_at(args.new_thr_fd.as_raw_fd(), None)
-            .expect("failed to add new_thr_fd");
-        if let Some(new_proc_fd) = args.new_proc_fd.as_ref() {
+        let fd_guard = fdtbl.fd.lock();
+        if let Some(ref ft_fd) = *fd_guard {
+            guard
+                .reconcile_after_fork(ft_fd, &keep_fds[..keep_len])
+                .expect("failed to reconcile filetable after fork");
+        }
+        if guard.get_fd_flags(args.new_thr_fd.as_raw_fd()).is_err() {
+            guard
+                .override_at(args.new_thr_fd.as_raw_fd(), None)
+                .expect("failed to add new_thr_fd");
+        }
+        if let Some(new_proc_fd) = args.new_proc_fd.as_ref()
+            && guard.get_fd_flags(new_proc_fd.as_raw_fd()).is_err()
+        {
             guard
                 .override_at(new_proc_fd.as_raw_fd(), None)
                 .expect("failed to add new_proc_fd");
         }
-        if let Some(ref old) = old_filetable_fd {
-            let _ = guard.remove(old.as_raw_fd());
-        }
     }
+
+    let _ = crate::sys::close(args.cur_filetable_fd);
 
     let new_thr_fd = args.new_thr_fd.to_upper().unwrap();
     let new_proc_fd = args.new_proc_fd.map(|x| x.to_upper().unwrap());
