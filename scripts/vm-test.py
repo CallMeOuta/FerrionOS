@@ -133,6 +133,8 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r")
 BRIGHT = 97  # a green value at or above this counts as a lit pixel
 LIT = bytes(0 if v < BRIGHT else 1 for v in range(256))  # bytes.translate table: 1 for a lit green value
@@ -5175,9 +5177,10 @@ def test_net_hardening(args, out):
         boot_out = out / f"boot-{boot}"
         boot_out.mkdir(parents=True, exist_ok=True)
         peer = NetPeer(boot_out)
-        vm = VM(args, boot_out, qemu_flags=peer.qemu_flags(card), make=("net=no",))
+        vm = None
         log = None
         try:
+            vm = VM(args, boot_out, qemu_flags=peer.qemu_flags(card), make=("net=no",))
             if not root_shell(vm, args.timeout):
                 return False, f"boot {boot}: no root shell on the serial console; see {boot_out}"
             # dhcpd starts in the background; wait until it has exited.
@@ -5240,7 +5243,8 @@ def test_net_hardening(args, out):
                     notes.append(f"netstack grew {int(after[1] - before[1]) >> 10} KiB over {answered} ARP senders")
             vm.kill()
         finally:
-            vm.close()
+            if vm is not None:
+                vm.close()
             log = peer.close(f"peer-boot-{boot}.json")
         if not any(entry["type"] == 1 for entry in log["dhcp"]):
             problems.append(f"boot {boot}: the peer saw no DHCP discover, so its replies were not sent")
@@ -5286,7 +5290,7 @@ def test_net_calls(args, out):
     if card not in NET_CARDS:
         return False, f"net-calls runs with net=e1000 (the default) or net=virtio, not net={card}"
     peer = NetPeer(out, serve_lease=True)
-    vm = VM(args, out, qemu_flags=peer.qemu_flags(card), make=("net=no",))
+    vm = None
 
     def run(tag, line, timeout):
         # The status is echoed inside bash: `user`'s login shell is not POSIX.
@@ -5309,6 +5313,7 @@ def test_net_calls(args, out):
             return found.group(1), any(entry["dst"] == f"{found.group(1)}:80" for entry in peer.log["syn"][seen:])
 
     try:
+        vm = VM(args, out, qemu_flags=peer.qemu_flags(card), make=("net=no",))
         if not vm.wait_serial(r"login: ", args.timeout):
             return False, f"no serial login prompt within {args.timeout}s; see {out}"
         vm.type("user\n")
@@ -5324,7 +5329,8 @@ def test_net_calls(args, out):
         (out / "net-calls.txt").write_text(f"exit {status}\n{text}")
         after = lookup_and_connect("after")
     finally:
-        vm.close()
+        if vm is not None:
+            vm.close()
         peer.close("peer.json")
     lines = [line.strip() for line in re.findall(r"net-call-probe: (?:pass|FAIL) .*", text)]
     failed = [line for line in lines if ": FAIL " in line]
@@ -7859,9 +7865,50 @@ OWN_IMAGE["desktop-columns"] = run_desktop_columns
 OWN_IMAGE["desktop-columns-timing"] = run_desktop_columns_timing
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
+def test_net_basics(args, out):
+    """Lab check of NW1's nine network basics items, one line per item, on the card --make net= picks."""
+    import net_lab
+    return net_lab.run_net_basics(
+        args,
+        out,
+        {
+            "VM": VM,
+            "Blocked": Blocked,
+            "NET_CARDS": NET_CARDS,
+            "net_card": net_card,
+            "root_shell": root_shell,
+            "run_status": run_status,
+            "dns_reply": dns_reply,
+            "consecutive_run": consecutive_run,
+            "pcg_prediction": pcg_prediction,
+        },
+    )
+
+
+def test_net_perf(args, out):
+    """Lab (topology A) and QEMU user-network (topology B) baseline measurements with iperf3 and net-probe."""
+    import net_lab
+    return net_lab.run_net_perf(
+        args,
+        out,
+        {
+            "VM": VM,
+            "Blocked": Blocked,
+            "NET_CARDS": NET_CARDS,
+            "net_card": net_card,
+            "root_shell": root_shell,
+            "run_status": run_status,
+            "dns_reply": dns_reply,
+            "command_output": command_output,
+        },
+    )
+
+
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
 OWN_IMAGE["net-hardening"] = test_net_hardening
 OWN_IMAGE["net-calls"] = test_net_calls
+OWN_IMAGE["net-basics"] = test_net_basics
+OWN_IMAGE["net-perf"] = test_net_perf
 # These boot with their own sound device, recorded by QEMU's wav backend.
 OWN_IMAGE["audio-baseline"] = test_audio_baseline
 OWN_IMAGE["audio-ring"] = test_audio_ring
@@ -7901,10 +7948,25 @@ def main():
                         help="gl-exact: select Venus's Vulkan ICD via VK_DRIVER_FILES and expect Zink on Venus")
     parser.add_argument("--venus-icd", default="",
                         help="gl-exact --venus: override VK_DRIVER_FILES path")
+    parser.add_argument("--lab", action="store_true",
+                        help="run inside an unprivileged user and network namespace with no route out")
+    parser.add_argument("--in-lab", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--compare-net-perf", nargs=2, type=Path, metavar=("PASS1", "PASS2"),
+                        help="compare two net-perf.json passes against the within-noise rule without booting")
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(2)
     args = parser.parse_args()
+    if args.compare_net_perf:
+        import net_lab
+        p1 = json.loads(args.compare_net_perf[0].read_text())
+        p2 = json.loads(args.compare_net_perf[1].read_text())
+        ok, checked, mismatches = net_lab.compare_perf_passes(p1, p2)
+        if ok:
+            print(f"PASS compare-net-perf: {checked} measures within noise")
+            sys.exit(0)
+        print(f"FAIL compare-net-perf: {len(mismatches)}/{checked} outside noise: {'; '.join(mismatches)}")
+        sys.exit(1)
     if args.check_wav:
         report = check_wav(rig_signal() if args.signal == "rig" else seq_signal()[0], args.check_wav.read_bytes())
         print(f"{'EXACT' if report['one_piece'] and not report['foreign'] else 'NOT EXACT'} "
@@ -7923,6 +7985,28 @@ def main():
         if assignment.split("=", 1)[0] in ("QEMUFLAGS", "QEMU_DISPLAY", "ARCH", "CONFIG_NAME", "BUILD"):
             parser.error("use --arch, --config and --trace; the harness controls QEMUFLAGS, QEMU_DISPLAY and BUILD")
     out_root = args.out or ROOT / "build" / "vm-test" / args.arch / args.config
+    import net_lab
+    need_lab = args.lab or any(name in net_lab.LAB_TESTS for name in args.tests)
+    if need_lab and not args.in_lab:
+        try:
+            net_lab.reexec_in_lab(sys.argv, Blocked, args.tests)
+        except Blocked as error:
+            for name in args.tests:
+                for run in range(1, args.repeat + 1):
+                    out = out_root / f"{name}-{run}"
+                    out.mkdir(parents=True, exist_ok=True)
+                    result = {"test": name, "run": run, "verdict": "BLOCKED", "note": str(error), "host": {},
+                              "make": list(args.make), "capture_sources": [], "last_capture_source": None,
+                              "trace_events": list(args.trace), "trace_lines": 0}
+                    (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+                    print(f"BLOCKED {name} {run}/{args.repeat}: {error}", flush=True)
+            sys.exit(2)
+    if args.in_lab:
+        try:
+            net_lab.bring_up_loopback(Blocked)
+        except Blocked as error:
+            print(f"BLOCKED lab setup: {error}", flush=True)
+            sys.exit(2)
     failures = blocked = 0
     for name in args.tests:
         for run in range(1, args.repeat + 1):
@@ -8007,6 +8091,22 @@ def main():
             print(f"{verdict} {name} {run}/{args.repeat}: {note}", flush=True)
             if name == "desktop-columns-timing" and verdict == "BLOCKED":
                 break
+        if name == "net-perf" and args.repeat >= 2:
+            p1_path = out_root / "net-perf-1" / "net-perf.json"
+            p2_path = out_root / "net-perf-2" / "net-perf.json"
+            if p1_path.exists() and p2_path.exists():
+                ok_cmp, checked_cmp, mismatches_cmp = net_lab.compare_perf_passes(
+                    json.loads(p1_path.read_text()), json.loads(p2_path.read_text())
+                )
+                if ok_cmp:
+                    print(f"PASS net-perf repeatability: {checked_cmp} measures within noise", flush=True)
+                else:
+                    failures += 1
+                    print(
+                        f"FAIL net-perf repeatability: {len(mismatches_cmp)}/{checked_cmp} outside noise: "
+                        f"{'; '.join(mismatches_cmp)}",
+                        flush=True,
+                    )
     sys.exit(1 if failures else 2 if blocked else 0)
 
 
