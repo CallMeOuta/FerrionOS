@@ -2708,6 +2708,155 @@ def user_bash(vm, timeout):
     return enter_shell(vm, "bash --norc --noprofile --noediting", r"bash-[0-9.]+\$ ", timeout)
 
 
+def x2apic_boot(args, out, expected_entries, fixture=None):
+    out.mkdir(parents=True, exist_ok=True)
+    initial_cpus = len(expected_entries) - 1
+    make = (f"QEMU_SMP={initial_cpus},maxcpus=258,sockets=2,cores=129,threads=1",
+            "QEMU_MACHINE=q35,kernel-irqchip=split", "QEMU_MEM=2048")
+    flags = "-device intel-iommu,intremap=on,eim=on -device host-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"
+    if fixture is not None:
+        flags += " -acpitable file=" + shlex.quote(str(fixture.resolve()))
+    vm = VM(args, out, make=make, qemu_flags=flags)
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, "no root prompt after x2APIC boot"
+        if not enter_shell(vm, "bash --norc --noprofile --noediting", r"bash-[0-9.]+# ", args.timeout):
+            return False, "no root Bash prompt"
+        dump = vm.scratch / "acpi-memory.bin"
+        vm.command(f'pmemsave 0x78000000 0x8000000 "{dump}"')
+        memory = dump.read_bytes()
+        dump.unlink()
+        memory_base = 0x78000000
+        max_table_size = 65536
+
+        def sdt_at(address):
+            start = address - memory_base
+            if not 0 <= start <= len(memory) - 36:
+                raise ValueError("ACPI table lies outside captured firmware memory")
+            size = struct.unpack_from("<I", memory, start + 4)[0]
+            if not 36 <= size <= max_table_size or start + size > len(memory):
+                raise ValueError("invalid ACPI table size")
+            table = memory[start:start + size]
+            if sum(table) & 255:
+                raise ValueError("invalid ACPI table checksum")
+            return table
+
+        tables = set()
+        offset = 0
+        max_candidates = 4096
+        for _ in range(max_candidates):
+            offset = memory.find(b"RSD PTR ", offset)
+            if offset < 0:
+                break
+            rsdp = memory[offset:offset + 36]
+            offset += 8
+            if len(rsdp) != 36 or rsdp[15] < 2 or sum(rsdp) & 255 or sum(rsdp[:20]) & 255:
+                continue
+            xsdt = sdt_at(struct.unpack_from("<Q", rsdp, 24)[0])
+            if xsdt[:4] != b"XSDT" or (len(xsdt) - 36) % 8:
+                return False, "invalid firmware XSDT"
+            selected = {}
+            for entry in range(36, len(xsdt), 8):
+                table = sdt_at(struct.unpack_from("<Q", xsdt, entry)[0])
+                if table[:4] == b"APIC":
+                    selected[table[10:24]] = table
+            if len(selected) != 1:
+                return False, f"expected one MADT identity, found {len(selected)}"
+            tables.update(selected.values())
+        else:
+            return False, "RSDP memory search exceeded candidate limit"
+        del memory
+        if len(tables) != 1:
+            return False, f"expected one selected firmware MADT, found {len(tables)}"
+        madt = tables.pop()
+        if fixture is not None and madt != fixture.read_bytes():
+            return False, "firmware did not select the injected MADT"
+        (out / "madt.bin").write_bytes(madt)
+        enabled = {}
+        offset = 44
+        while offset < len(madt):
+            kind, size = madt[offset:offset + 2]
+            if size < 2 or offset + size > len(madt):
+                return False, "invalid MADT entry length"
+            if kind == 0 and size == 8:
+                apic_id, entry_flags = madt[offset + 3], struct.unpack_from("<I", madt, offset + 4)[0]
+                if entry_flags & 1:
+                    enabled[apic_id] = kind
+            elif kind == 9 and size == 16:
+                apic_id, entry_flags = struct.unpack_from("<II", madt, offset + 4)
+                if entry_flags & 1 and apic_id != 0xFFFFFFFF:
+                    enabled[apic_id] = kind
+            offset += size
+        if enabled != expected_entries:
+            return False, f"unexpected enabled MADT processors: {enabled}"
+        since = vm.mark()
+        vm.type("cat /scheme/sys/cpu; echo X2APIC-$((40+2))\n")
+        found = vm.wait_serial(r"(?s)CPUs: (\d+).*?X2APIC-42", args.timeout, since)
+        if not found:
+            return False, "CPU count missing"
+        count = int(found.group(1))
+        nmi_ok = True
+        if fixture is not None:
+            for apic_id in expected_entries:
+                lapic = vm.command(f"info lapic {apic_id}")
+                (out / f"lapic-{apic_id}.txt").write_text(lapic)
+                lint0 = re.search(r"LVT0\s+0x([0-9a-fA-F]+)", lapic)
+                lint1 = re.search(r"LVT1\s+0x([0-9a-fA-F]+)", lapic)
+                nmi_ok &= bool(lint0 and lint1 and int(lint1.group(1), 16) == 0x400
+                               and (int(lint0.group(1), 16) == 0xA400) == (apic_id == 256))
+        (out / "cpu-count.json").write_text(json.dumps({
+            "expected": len(expected_entries), "online": count,
+            "nmi_ok": nmi_ok if fixture is not None else None,
+            "make": make, "qemu_flags": flags,
+        }) + "\n")
+        note = f"{count}/{len(expected_entries)} processors online"
+        if fixture is not None:
+            note += f"; NMI {'pass' if nmi_ok else 'fail'}"
+        return count == len(expected_entries) and nmi_ok, note
+    finally:
+        vm.close()
+
+
+def test_x2apic_cpus(args, out):
+    """Boot native wide topology, type-9-only, and duplicate/disabled MADT entries."""
+    native_out = out / "native"
+    results = [x2apic_boot(args, native_out, {0: 0, 256: 9})]
+    source = native_out / "madt.bin"
+    if not source.exists():
+        return results[0]
+    native = source.read_bytes()
+    non_cpu = bytearray()
+    offset = 44
+    while offset < len(native):
+        kind, size = native[offset:offset + 2]
+        if size < 2 or offset + size > len(native):
+            return False, "invalid native MADT entry length"
+        if kind not in (0, 4, 9, 10):
+            non_cpu += native[offset:offset + size]
+        offset += size
+    for name, duplicate in (("type9-only", False), ("duplicate-disabled", True)):
+        processors = bytearray()
+        ids = (0, 1, 256) if duplicate else (0, 256)
+        if duplicate:
+            processors += struct.pack("<BBBBI", 0, 8, 1, 1, 1)
+        for apic_id in ids:
+            processors += struct.pack("<BBHIII", 9, 16, 0, apic_id, 1, apic_id)
+        processors += struct.pack("<BBHIII", 9, 16, 0, 0xFFFFFFFF, 1, 1000)
+        processors += struct.pack("<BBHIII", 9, 16, 0, 257, 0, 1001)
+        processors += struct.pack("<BBHIB3x", 10, 12, 0, 0xFFFFFFFF, 1)
+        processors += struct.pack("<BBHIB3x", 10, 12, 15, 256, 0)
+        table = bytearray(native[:44]) + processors + non_cpu
+        struct.pack_into("<I", table, 4, len(table))
+        table[9] = 0
+        table[9] = -sum(table) & 255
+        fixture = out / f"{name}.bin"
+        fixture.write_bytes(table)
+        results.append(x2apic_boot(args, out / name, dict.fromkeys(ids, 9), fixture))
+    return all(ok for ok, _ in results), "; ".join(
+        f"{name}: {note}" for name, (_, note) in zip(
+            ("native", "type9-only", "duplicate-disabled"), results))
+
+
 def test_firefox_headless(vm, args):
     """Logs in as `user` and has `firefox --headless --screenshot` render a local page and then an HTTPS page to PNG, which travels back over the serial console (use --config firefox)."""
     if not user_bash(vm, args.timeout):
@@ -8762,6 +8911,7 @@ OWN_IMAGE["desktop-columns-timing"] = run_desktop_columns_timing
 OWN_IMAGE["display-handoff"] = run_display_handoff
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
+OWN_IMAGE["x2apic-cpus"] = test_x2apic_cpus
 def test_net_basics(args, out):
     """Lab check of NW1's nine network basics items, one line per item, on the card --make net= picks."""
     import net_lab

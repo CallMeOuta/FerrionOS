@@ -1,0 +1,327 @@
+--- a/src/acpi/madt/mod.rs
++++ b/src/acpi/madt/mod.rs
+@@ -83,6 +83,24 @@
+     pub flags: u32,
+ }
+ 
++#[derive(Clone, Copy, Debug)]
++#[repr(C, packed)]
++pub struct MadtLocalX2Apic {
++    _reserved: u16,
++    pub id: u32,
++    pub flags: u32,
++    pub processor: u32,
++}
++
++#[derive(Clone, Copy, Debug)]
++#[repr(C, packed)]
++pub struct MadtLocalX2ApicNmi {
++    pub flags: u16,
++    pub processor: u32,
++    pub lint: u8,
++    _reserved: [u8; 3],
++}
++
+ /// MADT I/O APIC
+ #[derive(Clone, Copy, Debug)]
+ #[repr(C, packed)]
+@@ -152,6 +170,10 @@
+ pub enum MadtEntry {
+     LocalApic(&'static MadtLocalApic),
+     InvalidLocalApic(usize),
++    LocalX2Apic(&'static MadtLocalX2Apic),
++    InvalidLocalX2Apic(usize),
++    LocalX2ApicNmi(&'static MadtLocalX2ApicNmi),
++    InvalidLocalX2ApicNmi(usize),
+     IoApic(&'static MadtIoApic),
+     InvalidIoApic(usize),
+     IntSrcOverride(&'static MadtIntSrcOverride),
+@@ -176,7 +198,7 @@
+             let entry_len =
+                 unsafe { *(self.sdt.data_address() as *const u8).add(self.i + 1) } as usize;
+ 
+-            if self.i + entry_len <= self.sdt.data_len() {
++            if entry_len >= 2 && self.i + entry_len <= self.sdt.data_len() {
+                 let item = match entry_type {
+                     0x0 => {
+                         if entry_len == size_of::<MadtLocalApic>() + 2 {
+@@ -206,6 +228,25 @@
+                             MadtEntry::InvalidIntSrcOverride(entry_len)
+                         }
+                     }
++                    0x9 => {
++                        if entry_len == size_of::<MadtLocalX2Apic>() + 2 {
++                            MadtEntry::LocalX2Apic(unsafe {
++                                &*((self.sdt.data_address() + self.i + 2) as *const MadtLocalX2Apic)
++                            })
++                        } else {
++                            MadtEntry::InvalidLocalX2Apic(entry_len)
++                        }
++                    }
++                    0xA => {
++                        if entry_len == size_of::<MadtLocalX2ApicNmi>() + 2 {
++                            MadtEntry::LocalX2ApicNmi(unsafe {
++                                &*((self.sdt.data_address() + self.i + 2)
++                                    as *const MadtLocalX2ApicNmi)
++                            })
++                        } else {
++                            MadtEntry::InvalidLocalX2ApicNmi(entry_len)
++                        }
++                    }
+                     0xB => {
+                         if entry_len >= size_of::<MadtGicc>() + 2 {
+                             MadtEntry::Gicc(unsafe {
+--- a/src/acpi/madt/arch/x86.rs
++++ b/src/acpi/madt/arch/x86.rs
+@@ -9,7 +9,7 @@
+         start::{kstart_ap, KernelArgsAp},
+     },
+     context::context::Kstack,
+-    cpu_set::LogicalCpuId,
++    cpu_set::{LogicalCpuId, MAX_CPU_COUNT},
+     memory::{
+         Frame, KernelMapper, Page, PageFlags, PhysicalAddress, RmmA, RmmArch, VirtualAddress,
+         PAGE_SIZE,
+@@ -21,11 +21,34 @@
+ 
+ const TRAMPOLINE: usize = 0x8000;
+ static TRAMPOLINE_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/trampoline"));
++const MAX_AP_START_SPINS: usize = 100_000_000;
+ 
+ pub(super) fn init(madt: Madt) {
+     let local_apic = unsafe { the_local_apic() };
+     let me = local_apic.id();
++    local_apic.configure_nmi(madt);
+ 
++    let mut processors = [u32::MAX; MAX_CPU_COUNT as usize];
++    processors[0] = me.get();
++    let mut processor_count = 1;
++    for entry in madt.iter() {
++        let (id, flags) = match entry {
++            MadtEntry::LocalApic(apic) => (u32::from(apic.id), apic.flags),
++            MadtEntry::LocalX2Apic(apic) => (apic.id, apic.flags),
++            _ => continue,
++        };
++        if flags & 1 == 0 || id == u32::MAX || processors[..processor_count].contains(&id) {
++            continue;
++        }
++        assert!(
++            local_apic.x2 || id < u32::from(u8::MAX),
++            "APIC destination requires x2APIC"
++        );
++        assert!(processor_count < processors.len(), "MADT exceeds CPU limit");
++        processors[processor_count] = id;
++        processor_count += 1;
++    }
++
+     if local_apic.x2 {
+         debug!("    X2APIC {}", me.get());
+     } else {
+@@ -64,90 +87,84 @@
+     }
+ 
+     unsafe {
+-        let preliminary_cpu_count = madt.iter().filter(|e| matches!(e, MadtEntry::LocalApic(entry) if u32::from(entry.id) == me.get() || entry.flags & 1 == 1)).count();
+-        crate::profiling::allocate(preliminary_cpu_count as u32);
++        crate::profiling::allocate(processor_count as u32);
+     }
+-    for madt_entry in madt.iter() {
+-        debug!("      {:x?}", madt_entry);
+-        if let MadtEntry::LocalApic(ap_local_apic) = madt_entry {
+-            if u32::from(ap_local_apic.id) == me.get() {
+-                debug!("        This is my local APIC");
+-            } else if ap_local_apic.flags & 1 == 1 {
+-                let cpu_id = LogicalCpuId::next();
++    for (index, &apic_id) in processors[..processor_count].iter().enumerate().skip(1) {
++        assert!(!processors[..index].contains(&apic_id));
++        let cpu_id = LogicalCpuId::next();
+ 
+-                // Allocate a stack
+-                let kstack = Kstack::new(Some(ap_local_apic.id as u32))
+-                    .expect("no more frames in acpi stack_start");
+-                let stack_end = kstack.initial_top() as usize;
++        // Allocate a stack
++        let kstack = Kstack::new(Some(apic_id)).expect("no more frames in acpi stack_start");
++        let stack_end = kstack.initial_top() as usize;
+ 
+-                let pcr_ptr = crate::arch::gdt::allocate_and_init_pcr(cpu_id, stack_end);
++        let pcr_ptr = crate::arch::gdt::allocate_and_init_pcr(cpu_id, stack_end);
+ 
+-                let idt_ptr = crate::arch::idt::allocate_and_init_idt(
+-                    cpu_id,
+-                    ApicId::new(ap_local_apic.id as u32),
+-                );
++        let idt_ptr = crate::arch::idt::allocate_and_init_idt(cpu_id, ApicId::new(apic_id));
+ 
+-                let mut args = KernelArgsAp {
+-                    stack_end: stack_end as *mut u8,
+-                    kstack: Some(kstack),
+-                    cpu_id,
+-                    pcr_ptr,
+-                    idt_ptr,
+-                };
++        let mut args = KernelArgsAp {
++            stack_end: stack_end as *mut u8,
++            kstack: Some(kstack),
++            cpu_id,
++            pcr_ptr,
++            idt_ptr,
++        };
+ 
+-                let ap_ready = (TRAMPOLINE + 8) as *mut u64;
+-                let ap_args_ptr = unsafe { ap_ready.add(1) };
+-                let ap_page_table = unsafe { ap_ready.add(2) };
+-                let ap_code = unsafe { ap_ready.add(3) };
++        let ap_ready = (TRAMPOLINE + 8) as *mut u64;
++        let ap_args_ptr = unsafe { ap_ready.add(1) };
++        let ap_page_table = unsafe { ap_ready.add(2) };
++        let ap_code = unsafe { ap_ready.add(3) };
+ 
+-                // Set the ap_ready to 0, volatile
+-                unsafe {
+-                    ap_ready.write(0);
+-                    ap_args_ptr.write(&mut args as *mut _ as u64);
+-                    ap_page_table.write(page_table_physaddr as u64);
+-                    ap_code.write(kstart_ap as *const () as u64);
++        // Set the ap_ready to 0, volatile
++        unsafe {
++            ap_ready.write(0);
++            ap_args_ptr.write(&mut args as *mut _ as u64);
++            ap_page_table.write(page_table_physaddr as u64);
++            ap_code.write(kstart_ap as *const () as u64);
+ 
+-                    // TODO: Is this necessary (this fence)?
+-                    core::arch::asm!("");
+-                };
+-                AP_READY.store(false, Ordering::SeqCst);
++            // TODO: Is this necessary (this fence)?
++            core::arch::asm!("");
++        };
++        AP_READY.store(false, Ordering::SeqCst);
+ 
+-                // Send INIT IPI
+-                {
+-                    let mut icr = 0x4500;
+-                    if local_apic.x2 {
+-                        icr |= u64::from(ap_local_apic.id) << 32;
+-                    } else {
+-                        icr |= u64::from(ap_local_apic.id) << 56;
+-                    }
+-                    local_apic.set_icr(icr);
+-                }
++        // Send INIT IPI
++        {
++            let mut icr = 0x4500;
++            if local_apic.x2 {
++                icr |= u64::from(apic_id) << 32;
++            } else {
++                icr |= u64::from(apic_id) << 56;
++            }
++            local_apic.set_icr(icr);
++        }
+ 
+-                // Send START IPI
+-                {
+-                    let ap_segment = (TRAMPOLINE >> 12) & 0xFF;
+-                    let mut icr = 0x4600 | ap_segment as u64;
++        // Send START IPI
++        {
++            let ap_segment = (TRAMPOLINE >> 12) & 0xFF;
++            let mut icr = 0x4600 | ap_segment as u64;
+ 
+-                    if local_apic.x2 {
+-                        icr |= u64::from(ap_local_apic.id) << 32;
+-                    } else {
+-                        icr |= u64::from(ap_local_apic.id) << 56;
+-                    }
++            if local_apic.x2 {
++                icr |= u64::from(apic_id) << 32;
++            } else {
++                icr |= u64::from(apic_id) << 56;
++            }
+ 
+-                    local_apic.set_icr(icr);
+-                }
++            local_apic.set_icr(icr);
++        }
+ 
+-                // Wait for trampoline ready
+-                while unsafe { (*ap_ready.cast::<AtomicU8>()).load(Ordering::SeqCst) } == 0 {
+-                    hint::spin_loop();
+-                }
+-                while !AP_READY.load(Ordering::SeqCst) {
+-                    hint::spin_loop();
+-                }
+-
+-                RmmA::invalidate_all();
++        // Wait for trampoline ready
++        let mut ready = false;
++        for _ in 0..MAX_AP_START_SPINS {
++            if unsafe { (*ap_ready.cast::<AtomicU8>()).load(Ordering::SeqCst) } != 0
++                && AP_READY.load(Ordering::SeqCst)
++            {
++                ready = true;
++                break;
+             }
++            hint::spin_loop();
+         }
++        assert!(ready, "application processor did not start");
++
++        RmmA::invalidate_all();
+     }
+ 
+     // Unmap trampoline
+--- a/src/arch/x86_shared/device/local_apic.rs
++++ b/src/arch/x86_shared/device/local_apic.rs
+@@ -137,6 +137,9 @@
+                 .misc_arch_info
+                 .apic_id_opt
+                 .set(Some(self.id()));
++            if let Some(madt) = crate::acpi::madt::madt() {
++                self.configure_nmi(*madt);
++            }
+         }
+     }
+ 
+@@ -158,6 +161,41 @@
+         })
+     }
+ 
++    pub fn configure_nmi(&mut self, madt: crate::acpi::madt::Madt) {
++        use crate::acpi::madt::MadtEntry;
++
++        let id = self.id().get();
++        let processor = madt.iter().find_map(|entry| match entry {
++            MadtEntry::LocalX2Apic(apic) if apic.id == id => Some(apic.processor),
++            MadtEntry::LocalApic(apic) if u32::from(apic.id) == id => {
++                Some(u32::from(apic.processor))
++            }
++            _ => None,
++        });
++        for entry in madt.iter() {
++            let MadtEntry::LocalX2ApicNmi(nmi) = entry else {
++                continue;
++            };
++            if nmi.processor != u32::MAX && Some(nmi.processor) != processor {
++                continue;
++            }
++            assert!(nmi.lint <= 1, "invalid NMI local interrupt input");
++            let polarity = nmi.flags & 3;
++            let trigger = (nmi.flags >> 2) & 3;
++            assert!(polarity != 2 && trigger != 2, "invalid NMI flags");
++            let value = (0b100 << 8)
++                | if polarity == 3 { 1 << 13 } else { 0 }
++                | if trigger == 3 { 1 << 15 } else { 0 };
++            unsafe {
++                if self.x2 {
++                    wrmsr(0x835 + u32::from(nmi.lint), u64::from(value));
++                } else {
++                    self.write(0x350 + 0x10 * u32::from(nmi.lint), value);
++                }
++            }
++        }
++    }
++
+     pub fn version(&self) -> u32 {
+         if self.x2 {
+             unsafe { rdmsr(IA32_X2APIC_VERSION) as u32 }

@@ -92,6 +92,8 @@ For timing evidence on a shared host, run `python3 scripts/vm-test.py desktop-co
 
 `python3 scripts/vm-test.py shm-reuse --config shm-reuse` compares ordinary file writes and shared-map writes with reads through a second shared mapping. It repeats creation, mapping, unmapping and unlinking with different patterns and sizes, including cases that retain an older mapping. The standalone probe exits unsuccessfully on any byte mismatch. The layout client's mapped buffer pool does not remove this independent OS check.
 
+`python3 scripts/vm-test.py x2apic-cpus boot --timeout 120` checks x86_64 application-processor startup on the desktop image. The x2APIC check constructs a sparse KVM topology whose enabled application processor has APIC ID 256, verifies QEMU's actual MADT in guest memory, and compares `/scheme/sys/cpu` with the enabled unique processors. It also boots injected type-9-only and duplicate/disabled tables: a processor in both type 0 and type 9 must start once, and disabled entries and ID `0xFFFFFFFF` must not start. The check saves the MADTs, CPU counts, local-APIC registers and exact QEMU options beside each serial log. Its topology and fixtures live in `x2apic_boot` and `test_x2apic_cpus`; the separate `boot` check retains the ordinary four-CPU topology.
+
 ## What upstream's CI ran
 
 Upstream gates its merge requests on a `.gitlab-ci.yml` that is not part of this checkout, and FerrionOS has no CI of its own yet. The upstream jobs, read on 2026-11-20:
