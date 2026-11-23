@@ -1,0 +1,9 @@
+[package]
+description = "Checks that the disk queue worker never blocks the driver's executor on the wake pipe"
+
+[build]
+template = "custom"
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

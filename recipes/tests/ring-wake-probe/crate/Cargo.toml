@@ -1,0 +1,13 @@
+[package]
+name = "ring-wake-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Checks that the disk queue worker never blocks the driver's executor on the wake pipe"
+publish = false
+
+[dependencies]
+libredox = "0.1.18"
+redox-rings = { git = "https://gitlab.redox-os.org/redox-os/redox-rings.git", rev = "c56099c15a30636e7a528a6b37676daa7d9b6788", features = ["userspace", "sync"] }
+redox_syscall = "0.9.5"
+zerocopy = { version = "0.8.55", features = ["derive"] }

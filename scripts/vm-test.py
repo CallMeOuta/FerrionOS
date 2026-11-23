@@ -1081,6 +1081,298 @@ def test_nvme_queue(vm, args):
     return True, f"completed {rounds} rounds (small {small_rounds}) in {probe_ms / 1000:.1f}s without stalling; see {vm.out}"
 
 
+RING_WAKE_MAX_RUN_S = 240
+RING_WAKE_STALL_LIMIT_S = 30
+RING_WAKE_EXPECTED_ROUNDS = 2420
+RING_WAKE_HOLD_WATCH_GAP_S = 3
+
+
+def parse_watch_iostat(text):
+    """Parses W:iostat lines from a guest_watch capture into {pid: {'name': str, 'fds': [(fd, path)]}}."""
+    procs = {}
+    current_pid = None
+    for raw in text.splitlines():
+        if not raw.startswith("W:iostat "):
+            continue
+        body = raw[len("W:iostat "):]
+        hdr = re.match(r"^(\d+):\s+(.+)$", body)
+        if hdr:
+            current_pid = int(hdr.group(1))
+            procs[current_pid] = {"name": hdr.group(2).strip(), "fds": []}
+            continue
+        if current_pid is None:
+            continue
+        fd_match = re.match(r"^\s*(\d+):\s+\d+\s+\d+\s+[0-9A-Fa-f]+:\s+(.+)$", body)
+        if fd_match:
+            procs[current_pid]["fds"].append((int(fd_match.group(1)), fd_match.group(2).strip()))
+    return procs
+
+
+def parse_watch_syscalls(text):
+    """Parses W:syscall lines from a guest_watch capture into {pid: [syscall_str]}."""
+    syscalls = {}
+    current_pid = None
+    for raw in text.splitlines():
+        if not raw.startswith("W:syscall "):
+            continue
+        body = raw[len("W:syscall "):]
+        hdr = re.match(r"^(\d+):\s+(.+)$", body)
+        if hdr:
+            current_pid = int(hdr.group(1))
+            syscalls.setdefault(current_pid, [])
+            continue
+        if current_pid is not None and body.strip():
+            syscalls[current_pid].append(body.strip())
+    return syscalls
+
+
+def find_second_nvmed(watch_text):
+    """Identifies the unmounted second NVMe driver by the disk scheme it holds in iostat."""
+    procs = parse_watch_iostat(watch_text)
+    mounted_schemes = set()
+    nvmed_schemes = []
+    for pid, info in procs.items():
+        if info["name"].endswith("/redoxfs"):
+            for _, path in info["fds"]:
+                match = re.search(r"(disk\.pci-[0-9A-Fa-f.:_-]+-nvme)", path)
+                if match:
+                    mounted_schemes.add(match.group(1))
+        elif info["name"].endswith("/nvmed"):
+            schemes = set()
+            for _, path in info["fds"]:
+                match = re.search(r"(disk\.pci-[0-9A-Fa-f.:_-]+-nvme)", path)
+                if match:
+                    schemes.add(match.group(1))
+            if len(schemes) == 1:
+                nvmed_schemes.append((pid, next(iter(schemes))))
+    candidates = [(pid, scheme) for pid, scheme in nvmed_schemes if scheme not in mounted_schemes]
+    if len(candidates) != 1:
+        return None, None
+    return candidates[0]
+
+
+def test_ring_wake(vm, args):
+    """Runs ring-wake-probe read-only on the second NVMe disk to verify that the disk queue worker never blocks the driver's executor on the wake pipe (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, "no serial login"
+    login_mark = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no root password prompt"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, login_mark):
+        return False, "serial shell did not become ready"
+    vm.type("bash --norc --noprofile --noediting\n")
+    time.sleep(1)
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo RWRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)RWRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    status, _ = run("unset MAIL MAILPATH MAILCHECK; " + GUEST_WATCH, 30)
+    if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
+        return False, "the guest watcher did not start"
+
+    second_nvmed_pid, disk_scheme = find_second_nvmed((vm.out / "watch-before.watch").read_text())
+    if second_nvmed_pid is None or not disk_scheme:
+        return False, f"could not identify the second NVMe disk from watch-before.watch; see {vm.out}"
+
+    since = vm.mark()
+    started = time.monotonic()
+    status, _ = run(f"(ring-wake-probe /scheme/{disk_scheme}/1; echo RINGWAKE-EXIT=$?) & true", 30)
+    if status != 0:
+        return False, f"failed to start ring-wake-probe (status {status})"
+
+    last_progress = time.monotonic()
+    ticks_per_us = None
+    gaps = []
+    bad_cqes = []
+    stuck_info = None
+    done_info = None
+    error_lines = []
+    exit_code = None
+    watched_failure = False
+    seen_chars = 0
+    deadline = started + RING_WAKE_MAX_RUN_S
+
+    def capture_failure_dumps():
+        guest_watch(vm, "watch-failed-1", "context syscall", 60)
+        time.sleep(RING_WAKE_HOLD_WATCH_GAP_S)
+        guest_watch(vm, "watch-failed-2", "context syscall", 60)
+
+    while time.monotonic() < deadline:
+        chunk = vm.text(since)[seen_chars:]
+        nl = chunk.rfind("\n")
+        if nl >= 0:
+            lines = chunk[:nl + 1]
+            seen_chars += nl + 1
+            for match in re.finditer(r"RINGWAKE-TSC ticks_per_us=([0-9.]+)", lines):
+                ticks_per_us = float(match.group(1))
+                last_progress = time.monotonic()
+            for match in re.finditer(
+                r"(?m)^RINGWAKE-GAP gap_us=([0-9.]+) ok=(\d+)(?: bit_clear_a=(\d+))? bit_clear=(\d+)(?: bad_cqe=(\d+))? worst_us=(\d+)$",
+                lines,
+            ):
+                gaps.append({
+                    "gap_us": float(match.group(1)),
+                    "ok": int(match.group(2)),
+                    "bit_clear_a": int(match.group(3)) if match.group(3) is not None else 0,
+                    "bit_clear": int(match.group(4)),
+                    "bad_cqe": int(match.group(5)) if match.group(5) is not None else 0,
+                    "worst_us": int(match.group(6)),
+                })
+                last_progress = time.monotonic()
+            for match in re.finditer(
+                r"(?m)^RINGWAKE-BADCQE round=(\d+) gap=([0-9.]+) status=(\d+) count=(\d+)$",
+                lines,
+            ):
+                bad_cqes.append({
+                    "round": int(match.group(1)),
+                    "gap_us": float(match.group(2)),
+                    "status": int(match.group(3)),
+                    "count": int(match.group(4)),
+                })
+                last_progress = time.monotonic()
+            for match in re.finditer(
+                r"(?m)^RINGWAKE-STUCK round=(\d+) gap_us=([0-9.]+)(?: bit_clear_a=(\d+))? bit_clear=(\d+) stage=(\S+)(?: waited_a=(\d+))? waited_b=(\d+) got_a=(\d+) got_b=(\d+)$",
+                lines,
+            ):
+                stuck_info = {
+                    "round": int(match.group(1)),
+                    "gap_us": float(match.group(2)),
+                    "bit_clear_a": int(match.group(3)) if match.group(3) is not None else 0,
+                    "bit_clear": int(match.group(4)),
+                    "stage": match.group(5),
+                    "waited_a": int(match.group(6)) if match.group(6) is not None else None,
+                    "waited_b": int(match.group(7)),
+                    "got_a": int(match.group(8)),
+                    "got_b": int(match.group(9)),
+                }
+                last_progress = time.monotonic()
+            for match in re.finditer(
+                r"(?m)^RINGWAKE-DONE rounds=(\d+)(?: bit_clear_a=(\d+))? bit_clear=(\d+)(?: bad_cqe=(\d+))? worst_us=(\d+)$",
+                lines,
+            ):
+                done_info = {
+                    "rounds": int(match.group(1)),
+                    "bit_clear_a": int(match.group(2)) if match.group(2) is not None else 0,
+                    "bit_clear": int(match.group(3)),
+                    "bad_cqe": int(match.group(4)) if match.group(4) is not None else 0,
+                    "worst_us": int(match.group(5)),
+                }
+                last_progress = time.monotonic()
+            for match in re.finditer(r"(?m)^RINGWAKE-ERROR (.+)$", lines):
+                error_lines.append(match.group(1).strip())
+                last_progress = time.monotonic()
+            exit_match = re.search(r"(?m)^RINGWAKE-EXIT=(\d+)$", lines)
+            if exit_match:
+                exit_code = int(exit_match.group(1))
+                break
+            if stuck_info is not None and not watched_failure:
+                capture_failure_dumps()
+                watched_failure = True
+                found_exit = vm.wait_serial(r"(?m)^RINGWAKE-EXIT=(\d+)$", 30, since)
+                if found_exit:
+                    exit_code = int(found_exit.group(1))
+                break
+        if time.monotonic() - last_progress >= RING_WAKE_STALL_LIMIT_S:
+            capture_failure_dumps()
+            watched_failure = True
+            break
+        time.sleep(0.2)
+
+    elapsed_s = round(time.monotonic() - started, 1)
+    bad_cqe_count = max(len(bad_cqes), done_info["bad_cqe"] if done_info else 0)
+    ok = (
+        stuck_info is None
+        and exit_code == 0
+        and done_info is not None
+        and done_info["rounds"] == RING_WAKE_EXPECTED_ROUNDS
+        and done_info["bit_clear"] > 0
+        and bad_cqe_count == 0
+        and not error_lines
+    )
+    if not ok:
+        if not watched_failure:
+            capture_failure_dumps()
+        w1_path = vm.out / "watch-failed-1.watch"
+        w2_path = vm.out / "watch-failed-2.watch"
+        sc1 = parse_watch_syscalls(w1_path.read_text()) if w1_path.exists() else {}
+        sc2 = parse_watch_syscalls(w2_path.read_text()) if w2_path.exists() else {}
+        nvmed_sc1 = sc1.get(second_nvmed_pid, [])
+        nvmed_sc2 = sc2.get(second_nvmed_pid, [])
+
+        def blocked_reader_fds(calls):
+            fds = set()
+            for call in calls:
+                match = re.match(r"^read\((\d+),\s*0x[0-9A-Fa-f]+,\s*1\)$", call)
+                if match:
+                    fds.add(int(match.group(1)))
+            return fds
+
+        common_read_fds = sorted(blocked_reader_fds(nvmed_sc1) & blocked_reader_fds(nvmed_sc2))
+        outcome = "stuck" if stuck_info is not None else "bad_cqe" if bad_cqe_count > 0 else "error"
+        results = {
+            "passed": False,
+            "outcome": outcome,
+            "disk_scheme": disk_scheme,
+            "second_nvmed_pid": second_nvmed_pid,
+            "ticks_per_us": ticks_per_us,
+            "stuck": stuck_info,
+            "done": done_info,
+            "bad_cqe": bad_cqe_count,
+            "bad_cqes": bad_cqes,
+            "errors": error_lines,
+            "exit_code": exit_code,
+            "gaps": gaps,
+            "nvmed_syscall_1": nvmed_sc1,
+            "nvmed_syscall_2": nvmed_sc2,
+            "nvmed_blocked_reader_fds": common_read_fds,
+            "elapsed_s": elapsed_s,
+        }
+        (vm.out / "ring-wake.json").write_text(json.dumps(results, indent=2) + "\n")
+        if stuck_info is not None:
+            return False, (
+                f"stuck at round {stuck_info['round']} gap_us={stuck_info['gap_us']:.2f} "
+                f"bit_clear_a={stuck_info['bit_clear_a']} bit_clear={stuck_info['bit_clear']} "
+                f"waited_a={stuck_info['waited_a']} waited_b={stuck_info['waited_b']} "
+                f"stage={stuck_info['stage']} "
+                f"nvmed(pid={second_nvmed_pid}) syscall1={nvmed_sc1} syscall2={nvmed_sc2}; see {vm.out}"
+            )
+        if bad_cqe_count > 0:
+            return False, (
+                f"bad_cqe={bad_cqe_count} on {disk_scheme} (first={bad_cqes[:1]}, done={done_info}); see {vm.out}"
+            )
+        return False, (
+            f"ring-wake-probe failed (exit={exit_code}, done={done_info}, errors={error_lines}, "
+            f"nvmed_pid={second_nvmed_pid}, syscall1={nvmed_sc1}, syscall2={nvmed_sc2}); see {vm.out}"
+        )
+
+    results = {
+        "passed": True,
+        "outcome": "pass",
+        "disk_scheme": disk_scheme,
+        "second_nvmed_pid": second_nvmed_pid,
+        "ticks_per_us": ticks_per_us,
+        "rounds": done_info["rounds"],
+        "bit_clear_a": done_info["bit_clear_a"],
+        "bit_clear": done_info["bit_clear"],
+        "bad_cqe": bad_cqe_count,
+        "worst_us": done_info["worst_us"],
+        "gaps": gaps,
+        "elapsed_s": elapsed_s,
+    }
+    (vm.out / "ring-wake.json").write_text(json.dumps(results, indent=2) + "\n")
+    return True, (
+        f"completed {done_info['rounds']} rounds on {disk_scheme} "
+        f"(bit_clear_a={done_info['bit_clear_a']}, bit_clear={done_info['bit_clear']}, "
+        f"bad_cqe={bad_cqe_count}, worst={done_info['worst_us']}us) "
+        f"in {elapsed_s}s; see {vm.out}"
+    )
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -7912,6 +8204,7 @@ TESTS["ipc-fd"] = test_ipc_fd
 TESTS["jit-signal"] = test_jit_signal
 TESTS["fdtable-race"] = test_fdtable_race
 TESTS["nvme-queue"] = test_nvme_queue
+TESTS["ring-wake"] = test_ring_wake
 TESTS["firefox-js"] = test_firefox_js
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
