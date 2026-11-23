@@ -47,3 +47,4 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0041](0041-anonymous-page-discard.md) | In-place private anonymous page discard (syscall 219), madvise and POSIX abort |
 | [0042](0042-sparse-page-table-walks.md) | Sparse page-table walks, resident memory accounting and deferred page-table freeing |
 | [0043](0043-pthread-mutex-fastpath.md) | Three-state pthread_mutex WAITING_BIT, constant owner for normal/default mutexes, and private FUTEX_WAKE fast path |
+| [0046](0046-gpu-driver-host.md) | GPUs on real hardware are driven by Linux's drivers in a driver host process |
