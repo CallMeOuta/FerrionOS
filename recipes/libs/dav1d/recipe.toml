@@ -1,0 +1,20 @@
+[package]
+description = "AV1 decoder library"
+
+[source]
+tar = "https://downloads.videolan.org/videolan/dav1d/1.5.5/dav1d-1.5.5.tar.xz"
+blake3 = "3a50849d714251a15b5833163c36459b5de43c9ac54a9c17e0b303752fab8412"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+
+cookbook_meson \
+    -Denable_tests=false \
+    -Denable_tools=false \
+    -Denable_examples=false
+
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/dav1d/COPYING"
+install -Dm644 "${COOKBOOK_SOURCE}/doc/PATENTS" "${COOKBOOK_STAGE}/usr/share/licenses/dav1d/PATENTS"
+"""
