@@ -551,6 +551,12 @@ pub fn fexec_impl(
         let _ = mmap_min_fd.write(&usize::to_ne_bytes(min_mmap_addr));
     }
 
+    let filetable_fd = if extrainfo.same_process {
+        Some(thread_fd.dup_into_upper(b"filetable-binary")?)
+    } else {
+        None
+    };
+
     let addrspace_selection_fd = thread_fd.dup_into_upper(b"current-addrspace")?;
 
     let _ = addrspace_selection_fd.write(&create_set_addr_space_buf(
@@ -565,60 +571,72 @@ pub fn fexec_impl(
         // scenarios. While execve() is undefined according to POSIX if there exist sibling
         // threads, it could still be allowed by keeping certain file descriptors and instead
         // set the active file table.
+        let fail_closed = || -> ! {
+            #[cfg(feature = "proc")]
+            crate::sys::posix_exit(127);
+            #[cfg(not(feature = "proc"))]
+            core::intrinsics::abort();
+        };
         let _siglock = crate::signal::tmp_disable_signals();
-        let fds_to_close = {
-            let guard = crate::current_filetable().inner.lock();
-            let mut fds = alloc::vec::Vec::new();
+        let filetable_fd = filetable_fd.unwrap();
+        {
+            let fdtbl = crate::current_filetable();
+            let mut guard = fdtbl.inner.lock();
+            let fd_guard = fdtbl.fd.lock();
+            let keep_upper = [
+                extrainfo.thr_fd,
+                extrainfo.proc_fd,
+                extrainfo.ns_fd.unwrap_or(usize::MAX),
+                extrainfo.cwd_fd.unwrap_or(usize::MAX),
+                extrainfo.filetable_fd.unwrap_or(usize::MAX),
+                addrspace_selection_fd.as_raw_fd(),
+                filetable_fd.as_raw_fd(),
+                fd_guard.as_ref().map_or(usize::MAX, |g| g.as_raw_fd()),
+            ];
+            let mut fds_to_close = alloc::vec::Vec::new();
             for (fd, flags) in guard.iter() {
-                if fd == addrspace_selection_fd.as_raw_fd() {
-                    continue; // Will be closed below
+                if keep_upper.contains(&fd) {
+                    continue;
                 }
-
-                if flags & O_CLOEXEC == O_CLOEXEC || fd == image_file.as_raw_fd() {
-                    fds.push(fd);
+                if flags & O_CLOEXEC == O_CLOEXEC
+                    || fd == image_file.as_raw_fd()
+                    || FdTblInner::is_upper(fd)
+                {
+                    fds_to_close.push(fd);
                 }
             }
-
-            fds
-        };
-
-        let fds_to_close_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(
-                fds_to_close.as_ptr() as *mut u8,
-                fds_to_close.len() * core::mem::size_of::<usize>(),
-            )
-        };
-
-        {
-            let filetable_fd = thread_fd.dup_into_upper(b"filetable-binary")?;
-            if filetable_fd
-                .call_wo(
-                    fds_to_close_bytes,
-                    CallFlags::empty(),
-                    &[syscall::FileTableVerb::Close as u64],
-                )
-                .is_err()
-            {
-                assert!(fds_to_close.len() <= FdTblInner::CONTEXT_MAX_FILES as usize);
-                for &fd in &fds_to_close {
-                    match unsafe { syscall::syscall1(syscall::SYS_CLOSE, fd) } {
-                        Ok(_) | Err(Error { errno: EBADF }) => {}
-                        Err(_) => {
-                            #[cfg(feature = "proc")]
-                            crate::sys::posix_exit(127);
-                            #[cfg(not(feature = "proc"))]
-                            core::intrinsics::abort();
+            if collect_upper_fds_to_close(&filetable_fd, &keep_upper, &mut fds_to_close).is_err() {
+                fail_closed();
+            }
+            if !fds_to_close.is_empty() {
+                let fds_to_close_bytes: &[u8] = unsafe {
+                    core::slice::from_raw_parts(
+                        fds_to_close.as_ptr() as *const u8,
+                        fds_to_close.len() * core::mem::size_of::<usize>(),
+                    )
+                };
+                if filetable_fd
+                    .call_wo(
+                        fds_to_close_bytes,
+                        CallFlags::empty(),
+                        &[syscall::FileTableVerb::Close as u64],
+                    )
+                    .is_err()
+                {
+                    assert!(fds_to_close.len() <= FdTblInner::CONTEXT_MAX_FILES as usize);
+                    for &fd in &fds_to_close {
+                        match unsafe { syscall::syscall1(syscall::SYS_CLOSE, fd) } {
+                            Ok(_) | Err(Error { errno: EBADF }) => {}
+                            Err(_) => fail_closed(),
                         }
                     }
                 }
+                for fd in fds_to_close {
+                    let _ = guard.remove(fd);
+                }
             }
         }
-        {
-            let mut guard = crate::current_filetable().inner.lock();
-            for fd in fds_to_close {
-                let _ = guard.remove(fd);
-            }
-        }
+        drop(filetable_fd);
 
         unsafe {
             deactivate_tcb(thread_fd)?;
@@ -632,6 +650,35 @@ pub fn fexec_impl(
     } else {
         Ok(None)
     }
+}
+
+pub fn collect_upper_fds_to_close(
+    filetable_fd: &FdGuardUpper,
+    keep: &[usize],
+    out: &mut alloc::vec::Vec<usize>,
+) -> Result<()> {
+    filetable_fd.call_wo(
+        &[],
+        CallFlags::empty(),
+        &[syscall::FileTableVerb::Refresh as u64],
+    )?;
+    let _ = filetable_fd.lseek(0, syscall::SEEK_SET)?;
+    let mut reader = FileBufReader::from_fd(filetable_fd.as_raw_fd());
+    let mut seen = 0usize;
+    for _ in 0..(FdTblInner::CONTEXT_MAX_FILES as usize) {
+        let Some(raw_fd) = reader.read_le_u64()? else {
+            break;
+        };
+        seen += 1;
+        let fd = raw_fd as usize;
+        if FdTblInner::is_upper(fd) && !keep.contains(&fd) && !out.contains(&fd) {
+            out.push(fd);
+        }
+    }
+    if seen == FdTblInner::CONTEXT_MAX_FILES as usize && reader.read_le_u64()?.is_some() {
+        return Err(Error::new(EMFILE));
+    }
+    Ok(())
 }
 fn write_usizes<const N: usize>(fd: &FdGuardUpper, usizes: [usize; N]) -> Result<usize> {
     fd.write(unsafe { plain::as_bytes(&usizes) })

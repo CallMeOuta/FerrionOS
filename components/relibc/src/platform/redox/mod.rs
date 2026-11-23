@@ -1529,45 +1529,48 @@ impl Pal for Sys {
 
         {
             let ns_fd = redox_rt::current_namespace_fd().ok();
-            let cur_ft_raw = cur_filetable_fd.as_raw_fd();
-            if !cloexec_fds.contains(&cur_ft_raw) {
-                cloexec_fds.push(cur_ft_raw);
-            }
-            let keep = [
+            let keep_upper = [
                 child.thr_fd.as_raw_fd(),
                 proc_fd.as_raw_fd(),
-                cwd_fd.as_raw_fd(),
-                new_file_table.as_raw_fd(),
                 ns_fd.unwrap_or(usize::MAX),
             ];
-            cloexec_fds.retain(|fd| !keep.contains(fd));
+            let scan_file_table = child.thr_fd.dup_into_upper(b"filetable-binary")?;
+            redox_rt::proc::collect_upper_fds_to_close(
+                &scan_file_table,
+                &keep_upper,
+                &mut cloexec_fds,
+            )?;
+            drop(scan_file_table);
+            cloexec_fds.retain(|fd| !keep_upper.contains(fd));
 
-            let fds_to_close_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    cloexec_fds.as_ptr() as *const u8,
-                    cloexec_fds.len() * core::mem::size_of::<usize>(),
-                )
-            };
+            if !cloexec_fds.is_empty() {
+                let fds_to_close_bytes: &[u8] = unsafe {
+                    core::slice::from_raw_parts(
+                        cloexec_fds.as_ptr() as *const u8,
+                        cloexec_fds.len() * core::mem::size_of::<usize>(),
+                    )
+                };
 
-            if new_file_table
-                .call_wo(
-                    fds_to_close_bytes,
-                    syscall::CallFlags::empty(),
-                    &[syscall::FileTableVerb::Close as u64],
-                )
-                .is_err()
-            {
-                assert!(
-                    cloexec_fds.len() <= redox_rt::sys::FdTblInner::CONTEXT_MAX_FILES as usize
-                );
-                for &fd in &cloexec_fds {
-                    match new_file_table.call_wo(
-                        &fd.to_ne_bytes(),
+                if new_file_table
+                    .call_wo(
+                        fds_to_close_bytes,
                         syscall::CallFlags::empty(),
                         &[syscall::FileTableVerb::Close as u64],
-                    ) {
-                        Ok(_) | Err(Error { errno: EBADF }) => {}
-                        Err(err) => return Err(Errno::from(err)),
+                    )
+                    .is_err()
+                {
+                    assert!(
+                        cloexec_fds.len() <= redox_rt::sys::FdTblInner::CONTEXT_MAX_FILES as usize
+                    );
+                    for &fd in &cloexec_fds {
+                        match new_file_table.call_wo(
+                            &fd.to_ne_bytes(),
+                            syscall::CallFlags::empty(),
+                            &[syscall::FileTableVerb::Close as u64],
+                        ) {
+                            Ok(_) | Err(Error { errno: EBADF }) => {}
+                            Err(err) => return Err(Errno::from(err)),
+                        }
                     }
                 }
             }
