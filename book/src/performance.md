@@ -23,18 +23,16 @@ dd bs=1M count=1024 if=/scheme/zero of=/scheme/null
 
 - Filesystem read performance
 
-(Add the `neverball` recipe on your filesystem image, by using the `make rp.neverball` or `sudo pkg install neverball` commands, or permanently adding using `neverball = {}` on your filesystem configuration)
+(Uses a large binary installed on the `desktop` image; substitute any large file on your filesystem)
 
 ```sh
-dd bs=1M count=256 if=/usr/games/neverball/neverball of=/scheme/null conv=fdatasync
+dd bs=1M count=256 if=/usr/bin/cosmic-files of=/scheme/null conv=fdatasync
 ```
 
 - Filesystem write performance
 
-(Add the `neverball` recipe on your filesystem image, you can also install it with the `sudo pkg install neverball` command)
-
 ```sh
-dd bs=1M count=256 if=/usr/games/neverball/neverball of=fs_write_speed_bench conv=fdatasync
+dd bs=1M count=256 if=/usr/bin/cosmic-files of=fs_write_speed_bench conv=fdatasync
 ```
 
 - Userspace IPC performance

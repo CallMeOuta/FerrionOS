@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/brianch/offline-chess-puzzles"
-[build]
-template = "cargo"
-dependencies = [
-    "openssl3",
-]

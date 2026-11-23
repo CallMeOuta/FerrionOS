@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/ElliotB256/bevy_combat"
-[build]
-template = "cargo"

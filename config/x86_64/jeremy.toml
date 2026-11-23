@@ -22,26 +22,7 @@ sed = {}
 shellharden = {}
 xz = {}
 
-mgba = {}
-rs-nes = {}
-rust64 = {}
-rustual-boy = {}
-scummvm = {}
 
-devilutionx = {}
-eduke32 = {}
-freeciv = {}
-gigalomania = {}
-love = {}
-mednaffe = {}
-openjazz = {}
-openjk = {}
-openttd = {}
-openttd-opengfx = {}
-openttd-openmsx = {}
-openttd-opensfx = {}
-quakespasm = {}
-sm64ex = {}
 
 cmatrix = {}
 cpal = {}

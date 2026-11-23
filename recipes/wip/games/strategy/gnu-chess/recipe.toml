@@ -1,4 +1,0 @@
-[source]
-tar = "https://ftp.gnu.org/gnu/chess/gnuchess-6.3.0.tar.gz"
-[build]
-template = "configure"

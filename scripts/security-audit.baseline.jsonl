@@ -233,45 +233,13 @@
 {"check": "sources", "subject": "recipes/dev/rustpython", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/wasi-libc", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/wasi-libc/recipe.toml"}
 {"check": "sources", "subject": "recipes/dri/drm-info", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/emulators/dosbox", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/emulators/flycast", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/emulators/libretro-super", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/emulators/libretro-super/recipe.toml"}
-{"check": "sources", "subject": "recipes/emulators/mednafen", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/emulators/mgba", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/emulators/retroarch", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/emulators/retroarch/recipe.toml"}
-{"check": "sources", "subject": "recipes/emulators/rs-nes", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/emulators/rs-nes/recipe.toml"}
-{"check": "sources", "subject": "recipes/emulators/rust64", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/emulators/rust64/recipe.toml"}
-{"check": "sources", "subject": "recipes/emulators/rustual-boy", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/emulators/rustual-boy/recipe.toml"}
 {"check": "sources", "subject": "recipes/emulators/rvvm", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/emulators/rvvm/recipe.toml"}
-{"check": "sources", "subject": "recipes/emulators/scummvm", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/dejavu", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/freefont", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/ibm-plex", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/intel-one-mono", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/noto-color-emoji", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/ttf-hack", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/classicube", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/classicube/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/devilutionx", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/eduke32", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/freeciv", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/freedoom", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/freedoom/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/game-2048", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/game-2048/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/gigalomania", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/gigalomania/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/hematite", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/hematite/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/neverball", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/openjazz", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/openjk", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/games/openttd", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/games/openttd-opengfx", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/openttd-opengfx/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/openttd-openmsx", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/openttd-openmsx/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/openttd-opensfx", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/openttd-opensfx/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/opentyrian", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/games/prboom", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/quakespasm", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/games/redox-games", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/redox-games/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/sm64ex", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/games/sm64ex/recipe.toml"}
-{"check": "sources", "subject": "recipes/games/sopwith", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/games/spacecadetpinball", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/graphics/procedural-wallpapers-rs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/graphics/procedural-wallpapers-rs/recipe.toml"}
 {"check": "sources", "subject": "recipes/gui/orbdata", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/gui/orbital", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/gui/orbital/recipe.toml"}

@@ -54,23 +54,7 @@ The x86_64 desktop image currently installs the COSMIC terminal, file manager an
 
 | Name | GUI Backend | Status recorded upstream |
 |---|---|---|
-| DOSBox | SDL1 | Working Well |
-| Mednafen | SDL2 | Working Well |
-| MGBA | SDL1 | Working Well |
 | RVVM | SDL1 | Working Well |
-
-### Games
-
-| Name  | GUI Backend | Status recorded upstream |
-|---|---|---|
-| Freeciv | SDL2 | Working Well |
-| Gigalomania | SDL1 | Working Well |
-| Neverball | SDL2 | Working Well |
-| OpenTTD | SDL1 | Working Well |
-| OpenTyrian | SDL2 | Working Well |
-| Prboom | SDL2 | Working Well |
-| Quakespam | SDL2 | Working Well |
-| SpaceCadet Pinball | SDL2 | Working Well |
 
 ## Servers
 

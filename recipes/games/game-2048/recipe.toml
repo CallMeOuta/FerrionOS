@@ -1,7 +1,0 @@
-[package]
-description = "Sliding numbers puzzle game, similar to \"Threes\""
-
-[source]
-git = "https://gitlab.redox-os.org/redox-os/2048-rs.git"
-[build]
-template = "cargo"

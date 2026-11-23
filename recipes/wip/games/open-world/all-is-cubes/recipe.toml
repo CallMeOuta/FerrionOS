@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/kpreid/all-is-cubes"
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages all-is-cubes-desktop
-"""

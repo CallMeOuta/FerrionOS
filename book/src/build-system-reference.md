@@ -70,7 +70,7 @@ The `make` targets are documented in the comments of `Makefile` and `mk/*.mk`, a
 - `config/riscv64gc/desktop.toml` - The `desktop` configuration of RISC-V, including the shared desktop configuration.
 - `config/desktop-contain.toml` - `desktop` variant that starts the graphical login through `contain_orblogin`, a part of the `contain` sandbox tool, which aims at limiting the schemes and files that a session can reach. FerrionOS has not verified it, see [Security](./security.md).
 - `config/dev.toml` - The variant with development tools included (`config/aarch64/dev.toml` adapts it to that CPU architecture).
-- `config/$ARCH/demo.toml` - The variant with `desktop` and optional programs and games.
+- `config/$ARCH/demo.toml` - The variant with `desktop` and optional programs and demos.
 - `config/x86_64/rustconf2025.toml` - `demo` variant with two more packages, a demonstration configuration inherited from upstream
 - `config/wayland.toml` - Configuration for Wayland sessions and applications
 - `config/acid.toml` - Configuration with the `acid` test suite.
@@ -119,7 +119,7 @@ The `make` targets are documented in the comments of `Makefile` and `mk/*.mk`, a
 
 ## GNU Make Commands
 
-You can combine `make` commands, but order is significant. For example, `make r.redox-games image` will build the `redox-games` recipe and create a new FerrionOS image, but `make image r.redox-games` will make the FerrionOS image before the recipe building, thus the new recipe binary will not be included on your FerrionOS filesystem.
+You can combine `make` commands, but order is significant. For example, `make r.perg image` will build the `perg` recipe and create a new FerrionOS image, but `make image r.perg` will make the FerrionOS image before the recipe building, thus the new recipe binary will not be included on your FerrionOS filesystem.
 
 ### Build System
 
@@ -177,7 +177,7 @@ You can combine `make` commands, but order is significant. For example, `make r.
 
 - `make f.recipe` (abbreviation of `fetch`) - Download one or multiple recipe sources
 - `make f.--all-binaries` - Update all previously downloaded recipe packages
-- `make r.recipe` (abbreviation of `repo`) - Build one or multiple recipes, checking if the recipe source has changed, and creating the executable, etc. e.g. `make r.redox-games` (it builds the Cookbook and the toolchain first if they are missing, but it does not replace the `make all` command: it builds neither the other recipes of your filesystem configuration nor the image)
+- `make r.recipe` (abbreviation of `repo`) - Build one or multiple recipes, checking if the recipe source has changed, and creating the executable, etc. e.g. `make r.perg` (it builds the Cookbook and the toolchain first if they are missing, but it does not replace the `make all` command: it builds neither the other recipes of your filesystem configuration nor the image)
 
   - Meta-packages need the `--with-package-deps` option, for example: `make r.meta-package,--with-package-deps`
   - The recipe is built even if it's not in your filesystem configuration.

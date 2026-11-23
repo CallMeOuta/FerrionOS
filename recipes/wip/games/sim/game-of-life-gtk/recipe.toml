@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/sixpounder/game-of-life"
-shallow_clone = true
-[build]
-template = "meson"
-dependencies = [
-    "libadwaita",
-    "gtk4",
-]

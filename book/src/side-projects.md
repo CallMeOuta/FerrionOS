@@ -25,7 +25,6 @@ Each component has a recipe directory, `recipes/<category>/<name>/`, with a `rec
 | orbdata, orbutils, orbterm | `recipes/gui/` | Orbital's resources, utilities and terminal emulator |
 | liborbital | `recipes/libs/liborbital` | C bindings to the Orbital client library |
 | Redoxer | `recipes/dev/redoxer` | Upstream's tool that builds and runs a program for the target in a virtual machine |
-| redox-games | `recipes/games/redox-games` | A collection of small terminal games |
 
 Third-party projects that the system relies on have recipes too. Examples are [uutils/coreutils](https://github.com/uutils/coreutils), a Rust rewrite of the GNU core utilities (`recipes/core/uutils`), and [smoltcp](https://github.com/smoltcp-rs/smoltcp), the TCP/IP stack that the network stack in `base` uses.
 

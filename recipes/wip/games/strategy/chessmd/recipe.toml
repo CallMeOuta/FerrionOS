@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/ChessMD/ChessMD"
-rev = "v1.0"
-[build]
-template = "cmake"
-dependencies = [
-    "qt6-base",
-]

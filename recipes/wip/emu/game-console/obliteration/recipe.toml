@@ -1,5 +1,0 @@
-[source]
-git = "https://github.com/obhq/obliteration"
-shallow_clone = true
-[build]
-template = "custom"

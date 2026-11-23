@@ -21,7 +21,7 @@ The cookbook makes packaging simple. First, this page adds a program that alread
 
 ## Existing Recipe
 
-The repository has recipes for many programs. Each one is a directory `recipes/<category>/<name>`, and adding a program to your image means adding its name to your filesystem configuration. This example adds the `redox-games` package, which contains several terminal games.
+The repository has recipes for many programs. Each one is a directory `recipes/<category>/<name>`, and adding a program to your image means adding its name to your filesystem configuration. This example adds the `perg` package, a small Rust text-search tool.
 
 ### Set Up the Build Environment
 
@@ -36,10 +36,10 @@ cd ~/FerrionOS
 make qemu
 ```
 
-The default `desktop` configuration does not include the games.
+The default `desktop` configuration does not include `perg`.
 
 - Log in as `user`, with an empty password.
-- Open a terminal from the bar at the bottom of the screen and type `ls /usr/bin`. `minesweeper` **is not** listed.
+- Open a terminal and type `ls /usr/bin`. `perg` **is not** listed.
 - Close QEMU.
 
 ### Set Up Your Configuration
@@ -52,7 +52,7 @@ Read the [Configuration Settings](./configuration-settings.md) page first.
 include = ["desktop.toml"]
 
 [packages]
-redox-games = {}
+perg = {}
 ```
 
 - Make it the configuration that `make` builds, by adding this line to your [.config](./configuration-settings.md#config) file:
@@ -73,13 +73,13 @@ CI=1 COOKBOOK_LOGS=true make all
 make qemu
 ```
 
-The packages that were cooked for the `desktop` image are reused, so only `redox-games` is cooked.
+The packages that were cooked for the `desktop` image are reused, so only `perg` is cooked.
 
 - Log in as `user`, with an empty password.
-- Open a terminal and type `ls /usr/bin`. `minesweeper` **is** listed.
-- Type `minesweeper`. Play with the arrow keys or `WSAD`, `space` to reveal a spot, and `f` to flag a spot when you suspect a mine. When you type `f`, an `F` appears.
+- Open a terminal and type `ls /usr/bin`. `perg` **is** listed.
+- Run `perg -n root /etc/passwd`. It prints the matching line prefixed with its line number, such as `1: root:...`.
 
-If the cook fails, its log is `build/logs/<target>/redox-games.log`.
+If the cook fails, its log is `build/logs/<target>/perg.log`.
 
 ### Dependencies
 

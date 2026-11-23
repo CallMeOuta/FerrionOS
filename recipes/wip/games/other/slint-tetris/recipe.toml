@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/GaspardCulis/slint-tetris"
-[build]
-template = "cargo"

@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/clovis-p/tanks"
-rev = "0b22b8dfbccf8399419a160a99e5270e57b541c9"
-shallow_clone = true
-[build]
-template = "custom"
-dependencies = ["sdl2"]

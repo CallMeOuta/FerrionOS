@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/gliderkite/formicarium"
-[build]
-template = "cargo"

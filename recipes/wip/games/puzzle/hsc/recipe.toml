@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/HactarCE/Hyperspeedcube"
-branch = "v1"
-shallow_clone = true
-[build]
-template = "cargo"
-cargopackages = ["hyperspeedcube"]

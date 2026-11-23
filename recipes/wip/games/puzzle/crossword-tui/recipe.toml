@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/matrixfrog/crossword"
-[build]
-template = "cargo"
-cargopackages = ["crosstui"]
-[package]
-dependencies = [
-    "crosshare-data"
-]

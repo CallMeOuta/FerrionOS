@@ -1,8 +1,0 @@
-[source]
-git = "https://github.com/FyroxEngine/Fyrox"
-shallow_clone = true
-[build]
-template = "custom"
-script = """
-cookbook_cargo_packages fyrox-template
-"""

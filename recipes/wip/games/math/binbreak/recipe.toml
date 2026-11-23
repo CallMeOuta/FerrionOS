@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/epic-64/binbreak"
-[build]
-template = "cargo"

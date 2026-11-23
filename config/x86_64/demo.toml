@@ -24,16 +24,7 @@ terminfo = {}
 vim = {}
 wget = {}
 
-dosbox = {}
-mednafen = {}
-flycast = {}
 
-freedoom = {}
-neverball = {}
-prboom = {}
-redox-games = {}
-sopwith = {}
-syobonaction = {}
 
 gtk3 = "source"
 nushell = {}

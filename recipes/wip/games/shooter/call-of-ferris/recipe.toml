@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/Andy-Python-Programmer/CallOfFerris"
-[build]
-template = "cargo"

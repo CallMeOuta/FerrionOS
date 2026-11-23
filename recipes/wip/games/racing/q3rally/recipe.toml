@@ -1,7 +1,0 @@
-[source]
-git = "https://github.com/Q3Rally-Team/q3rally"
-[build]
-template = "custom"
-dependencies = [
-    "sdl2",
-]

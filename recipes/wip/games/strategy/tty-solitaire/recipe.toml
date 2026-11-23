@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/mpereira/tty-solitaire"
-rev = "v1.4.1"
-shallow_clone = true
-[build]
-template = "custom"
-dependencies = [
-    "ncursesw",
-]

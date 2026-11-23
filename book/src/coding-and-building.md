@@ -54,7 +54,7 @@ export PATH="$PATH:$HOME/.redoxer/x86_64-unknown-redox/toolchain/bin"
 
 VS Code is helpful for working with unfamiliar code, and its Rust support is good. With the `rust-analyzer` extension installed, as the [overview](https://code.visualstudio.com/docs/languages/rust) describes, you get inferred types and parameter names as inline hints, definitions and references, refactoring support, and a comparison against the repository.
 
-- **Start in the `source` directory of a recipe.** For example, `code ~/FerrionOS/recipes/games/redox-games/source`. The hints appear after a minute or two.
+- **Start in the `source` directory of a recipe.** For example, `code ~/FerrionOS/recipes/tools/perg/source`. The hints appear after a minute or two.
 - **Do not open the whole FerrionOS directory for Rust work.** The analyzer cannot treat the checkout and every fetched source as one project. It is fine for editing recipes, configurations and makefiles.
 - **Do not build the system in a VS Code terminal.** Use a separate terminal, so that you can close VS Code without ending the build.
 
@@ -62,15 +62,15 @@ VS Code is helpful for working with unfamiliar code, and its Rust support is goo
 
 The code of the system's components is not in the FerrionOS repository. A recipe fetches it into `recipes/<category>/<name>/source/` ([Components and Their Sources](./side-projects.md)). This section changes one component in your own checkout, from the first edit to a change that survives a fresh fetch.
 
-The example is the recipe `redox-games`, a collection of terminal games. We change `minesweeper` so that it marks a flagged spot with **P** instead of **F**.
+The example is the recipe `perg`, a small Rust text-search tool. We change `perg -n` so that it prefixes line numbers with `L` (for example `L1: ` instead of `1: `).
 
-To follow it, add `redox-games` to your filesystem configuration and build the image, as [Including Programs in FerrionOS](./including-programs.md) describes. Then start the image with `make qemu`, log in, open a terminal and run `minesweeper`: the letter `f` puts an `F` on the field. Close QEMU, and keep the terminal you ran `make` in. That is your "Build" terminal, in the FerrionOS directory.
+To follow it, add `perg` to your filesystem configuration and build the image, as [Including Programs in FerrionOS](./including-programs.md) describes. Then start the image with `make qemu`, log in, open a terminal and run `perg -n root /etc/passwd`: the output starts with `1: `. Close QEMU, and keep the terminal you ran `make` in. That is your "Build" terminal, in the FerrionOS directory.
 
 ### The Recipe
 
-The recipe is the directory `recipes/games/redox-games`. Its `recipe.toml` tells the cookbook where to get the source and how to build it. `make find.redox-games` prints the directory of a recipe.
+The recipe is the directory `recipes/tools/perg`. Its `recipe.toml` tells the cookbook where to get the source and how to build it. `make find.perg` prints the directory of a recipe.
 
-A cook fetches the source into `recipes/games/redox-games/source` and builds it in `recipes/games/redox-games/target`.
+A cook fetches the source into `recipes/tools/perg/source` and builds it in `recipes/tools/perg/target`.
 
 ### Protect Your Edits
 
@@ -79,31 +79,31 @@ The cookbook owns the `source` directory. A cook fetches first, and a fetch can 
 Before the first edit, fetch the source and set the recipe's rule to `local`:
 
 ```sh
-make f.redox-games
+make f.perg
 ```
 
 ```sh
-make lc.redox-games
+make lc.perg
 ```
 
-Under the `local` rule the cookbook builds what is in `source` and neither fetches nor patches it. `make cc.redox-games` puts the default rule back. The `local` rule does not protect from the `u` targets.
+Under the `local` rule the cookbook builds what is in `source` and neither fetches nor patches it. `make cc.perg` puts the default rule back. The `local` rule does not protect from the `u` targets.
 
 ### Edit Your Code
 
 Open a second terminal, the "Coding" terminal, in the source directory, and edit the file with the editor of your choice:
 
 ```sh
-cd ~/FerrionOS/recipes/games/redox-games/source
+cd ~/FerrionOS/recipes/tools/perg/source
 ```
 
 ```sh
-nano src/minesweeper/main.rs
+nano src/lib.rs
 ```
 
-Search for the definition of the constant `FLAGGED`, near the top of the file, and change its value to `P`:
+Search for `if show_line_number` in `search_in_file`, and change the formatted prefix to start with `L`:
 
-```
-const FLAGGED: &'static str = "P";
+```rust
+s = format!("{}L{}: ", s, idx + 1);
 ```
 
 ### Verify Your Code on Linux
@@ -116,12 +116,10 @@ Most programs for FerrionOS are source-compatible with Linux. Build and test you
 cargo check
 ```
 
-The code of `redox-games` is old, and the compiler prints warnings for it.
-
-- The recipe builds more than one program, so name the one to run:
+- Run the tool on a local file to verify the change:
 
 ```sh
-cargo run --bin minesweeper
+cargo run -- -n root /etc/passwd
 ```
 
 ### Cook and Push
@@ -129,7 +127,7 @@ cargo run --bin minesweeper
 In the "Build" terminal, with QEMU stopped, cook the recipe and push its package into the existing image:
 
 ```sh
-make rp.redox-games
+make rp.perg
 ```
 
 `make rp.<recipe>` is `make r.<recipe>` followed by `make p.<recipe>`. `make all` and `make qemu` do not check whether a recipe needs to be cooked again, so they do not pick up the change.
@@ -137,18 +135,17 @@ make rp.redox-games
 To keep the output for reading, cook with the logging convention of the build:
 
 ```sh
-CI=1 COOKBOOK_LOGS=true make r.redox-games
+CI=1 COOKBOOK_LOGS=true make r.perg
 ```
 
-The output ends with `cook redox-games - successful`, and on a failure the log is `build/logs/<target>/redox-games.log`.
+The output ends with `cook perg - successful`, and on a failure the log is `build/logs/<target>/perg.log`.
 
 ### Test Your Changes
 
 - Start the image with `make qemu`
 - Log in as `user`, with an empty password
 - Open a terminal
-- Run `minesweeper`
-- Move to a square with the arrow keys or `WSAD` and type `f` to set a flag: the character `P` appears
+- Run `perg -n root /etc/passwd`: the line number now starts with `L`, such as `L1: `
 
 You have changed a program and built it into the image.
 
@@ -157,25 +154,26 @@ You have changed a program and built it into the image.
 An edit under `source` exists only in your checkout. A fresh fetch does not have it. The recipe has to carry the change, as a patch file beside `recipe.toml`:
 
 ```sh
-git -C recipes/games/redox-games/source diff > recipes/games/redox-games/my-flag.patch
+git -C recipes/tools/perg/source diff > recipes/tools/perg/my-line-prefix.patch
 ```
 
 List the file in the recipe:
 
 ```toml
 [source]
-git = "https://gitlab.redox-os.org/redox-os/games.git"
-patches = ["my-flag.patch"]
+git = "https://github.com/guerinoni/perg.git"
+rev = "e206fab6bbd9c363c686fa7503d318304e48ddbe"
+patches = ["my-line-prefix.patch"]
 ```
 
 The cookbook applies the patches in order with `patch --strip=1` after each fetch. Then clear the `local` rule and prove the recipe from a clean fetch, which deletes `source` first:
 
 ```sh
-make cc.redox-games
+make cc.perg
 ```
 
 ```sh
-make ucr.redox-games
+make ucr.perg
 ```
 
 FerrionOS carries its own changes to components in the same way, as `ferrion-*.patch` files.
@@ -302,12 +300,12 @@ You can cook one recipe, instead of having `make rebuild` check every recipe of 
 - In your "Build" terminal, in the FerrionOS directory, run:
 
 ```sh
-make r.redox-games
+make r.perg
 ```
 
 The makefiles have a rule for the target `r.recipe`, where `recipe` is the name of a recipe. It cooks the recipe and makes its package.
 
-After the recipe has been cooked, `make p.redox-games` pushes the package into the existing image.
+After the recipe has been cooked, `make p.perg` pushes the package into the existing image.
 
 To keep a log of a failing cook:
 

@@ -1,9 +1,0 @@
-[source]
-git = "https://github.com/Lea-fish/Leafish"
-shallow_clone = true
-[build]
-template = "cargo"
-dependencies = [
-    "gtk3",
-    "openssl3",
-]

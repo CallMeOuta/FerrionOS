@@ -1,4 +1,0 @@
-[source]
-tar = "https://github.com/godotengine/godot/releases/download/4.7.1-stable/godot-4.7.1-stable.tar.xz"
-[build]
-template = "custom"

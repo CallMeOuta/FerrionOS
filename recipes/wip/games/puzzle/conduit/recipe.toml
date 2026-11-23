@@ -1,4 +1,0 @@
-[source]
-git = "https://github.com/WizCrab/conduit-cli-game"
-[build]
-template = "cargo"
