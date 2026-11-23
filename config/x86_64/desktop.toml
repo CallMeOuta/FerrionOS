@@ -85,6 +85,7 @@ linux-lc4-fixtures = {}
 linux-lc5-fixtures = {}
 lock-probe = {}
 update-index-probe = {}
+fork-filetable-probe = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the
 # ferrion-run check uses to show that a profile alone withholds the network.

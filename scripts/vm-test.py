@@ -1006,6 +1006,24 @@ def test_fdtable_race(vm, args):
     return ok, note or "dup2 and F_DUPFD raced open, dup and close without a deadlock"
 
 
+def test_fork_filetable(vm, args):
+    """Five threads churn open, close, pipe2, F_DUPFD_CLOEXEC, dup2, MAP_SHARED mmap, SCM_RIGHTS and malloc while the main thread runs fork+exec and posix_spawn against a descriptor checker, then verifies no probe or checker context remains in KB (use --config desktop)."""
+    ok, note = user_probe(vm, args, "fork-filetable-probe", ("fork-exec-churn", "spawn-churn"), timeout=240)
+    since = vm.mark()
+    vm.type("bash -c 'grep -E \"fork-filetable-(probe|checker)\" /scheme/sys/context || true; echo kb-check-done'\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)kb-check-done\s", 30, since)
+    ctx_out = found.group(1) if found else vm.text(since)
+    (vm.out / "fork-filetable-context.txt").write_text(ctx_out)
+    kb_lines = [line.strip() for line in ctx_out.splitlines() if re.search(r"fork-filetable-(probe|checker)", line) and re.search(r"\bKB\b", line)]
+    if not ok:
+        if kb_lines:
+            return False, f"{note}; stuck KB contexts: {kb_lines}"
+        return False, note
+    if kb_lines:
+        return False, f"probe or checker left in KB after exit: {kb_lines}; see {vm.out / 'fork-filetable-context.txt'}"
+    return True, "multithreaded fork+exec and posix_spawn under descriptor, mmap and malloc churn passed with zero leaks, errors or KB contexts"
+
+
 def test_nvme_queue(vm, args):
     """Runs nvme-queue-probe for 300 s (128 + (r % 64) 128 KiB records compressed to 4 KiB blocks), failing with /scheme/sys watcher dumps if no progress occurs for 20 s (use --config firefox)."""
     if not user_bash(vm, args.timeout):
@@ -8203,6 +8221,7 @@ TESTS["fork-wake"] = test_fork_wake
 TESTS["ipc-fd"] = test_ipc_fd
 TESTS["jit-signal"] = test_jit_signal
 TESTS["fdtable-race"] = test_fdtable_race
+TESTS["fork-filetable"] = test_fork_filetable
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["firefox-js"] = test_firefox_js

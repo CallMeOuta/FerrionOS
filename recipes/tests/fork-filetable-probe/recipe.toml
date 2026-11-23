@@ -1,0 +1,11 @@
+[package]
+description = "Checks multithreaded fork and exec under descriptor, mmap and malloc churn"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/fork-filetable-checker" "${COOKBOOK_RECIPE}/fork-filetable-checker.c" ${LDFLAGS}
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/fork-filetable-probe" "${COOKBOOK_RECIPE}/fork-filetable-probe.c" ${LDFLAGS} -lpthread
+"""
