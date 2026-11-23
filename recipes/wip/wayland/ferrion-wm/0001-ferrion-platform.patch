@@ -1332,7 +1332,7 @@ index 00000000..0a7f71ca
 +}
 +
 +fn is_change_pending(err: &io::Error) -> bool {
-+    matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Other)
++    err.kind() == io::ErrorKind::WouldBlock
 +        && err.to_string() == DISPLAY_CHANGE_PENDING_ERR
 +}
 +

@@ -1954,6 +1954,13 @@ def run_desktop_columns_timing(args, out):
     return run_gated(args, out, run_desktop_columns, Blocked)
 
 
+def run_display_handoff(args, out):
+    """Runs 60 rapid VNC display handoffs with continuous QMP pointer motion; use --config wm-columns."""
+    from display_handoff import run_display_handoff as check
+
+    return check(args, out, VM, root_shell, run_status)
+
+
 def test_shm_read_back(vm, args):
     """Reads through a descriptor what a shared mapping wrote, while mapped and after munmap; size must stay."""
     if not root_shell(vm, args.timeout):
@@ -7949,6 +7956,7 @@ OWN_IMAGE["wayland-client"] = run_wayland_client
 OWN_IMAGE["pointer-latency"] = run_pointer_latency
 OWN_IMAGE["desktop-columns"] = run_desktop_columns
 OWN_IMAGE["desktop-columns-timing"] = run_desktop_columns_timing
+OWN_IMAGE["display-handoff"] = run_display_handoff
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 def test_net_basics(args, out):
