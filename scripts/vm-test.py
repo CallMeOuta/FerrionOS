@@ -3012,12 +3012,23 @@ def test_lockdown(vm, args):
     vm.type("password\n")
     time.sleep(3)
 
+    run_seq = 0
+    timed_out = False
+
     def run(line, end, timeout=30):
         """Types `line` followed by an echo of `end`; returns the output before it, or None."""
+        nonlocal run_seq, timed_out
+        if timed_out:
+            return None
+        run_seq += 1
+        tag = f"{end}-{run_seq}"
         since = vm.mark()
-        vm.type(f"{line}; echo {end}-$((40+2))\n")
-        found = vm.wait_serial(rf"(?s)\n(.*){end}-42", timeout, since)
-        return found.group(1) if found else None
+        vm.type(f"{line}; echo {tag}-$((40+2))\n")
+        found = vm.wait_serial(rf"(?s)\n(.*){re.escape(tag)}-42", timeout, since)
+        if not found:
+            timed_out = True
+            return None
+        return found.group(1)
 
     address = None
     for _ in range(10):
@@ -3260,14 +3271,15 @@ DEV_PARITY_TASKS = {
 }
 # Typed into bash once, before the tasks: quiet progress output and a fresh work folder.
 DEV_PARITY_SETUP = (
-    "export NO_COLOR=1 CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never PIP_DISABLE_PIP_VERSION_CHECK=1 "
-    "npm_config_progress=false npm_config_fund=false npm_config_audit=false npm_config_update_notifier=false; "
+    "export NO_COLOR=1 GIT_PAGER=cat PAGER=cat CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never "
+    "PIP_DISABLE_PIP_VERSION_CHECK=1 npm_config_progress=false npm_config_fund=false npm_config_audit=false "
+    "npm_config_update_notifier=false; "
     f"rm -rf {DEV_PARITY_DIR}; mkdir -p {DEV_PARITY_DIR} && cd {DEV_PARITY_DIR}"
 )
 
 
 def test_dev_parity(vm, args):
-    """Logs in as `user` and tries each developer task in DEV_PARITY_TASKS (git, Rust, Python, Node.js, SSH, Helix, Claude Code, Codex), recording PASS or FAIL with a reason per task; fails only when the login fails (use --config dev-parity)."""
+    """Logs in as `user` and tries each developer task in DEV_PARITY_TASKS (git, Rust, Python, Node.js, SSH, Helix, Claude Code, Codex), recording PASS or FAIL with a reason per task; fails when the login, setup, or shell fails (use --config dev-parity)."""
     if not vm.wait_serial(r"login: ", args.timeout):
         return False, f"no serial login prompt within {args.timeout}s"
     vm.type("user\n")
@@ -3280,25 +3292,44 @@ def test_dev_parity(vm, args):
     if not vm.wait_serial(r"dev-parity-bash-\d", 30, since):
         return False, f"bash did not start after the login; see {vm.out / 'serial.log'}"
 
+    run_seq = 0
+    sync_seq = 0
+    timed_out = False
+
     def run(line, timeout):
         """Types `line`; returns (exit status or None on a timeout, output, seconds taken)."""
+        nonlocal run_seq, timed_out
+        if timed_out:
+            return None, "", 0.0
+        run_seq += 1
+        tag = f"DPRC-{run_seq}"
         since, start = vm.mark(), time.monotonic()
-        vm.type(f"{line}; echo DPRC-$((40+2))=$?\n")
-        found = vm.wait_serial(r"(?s)\n(.*?)DPRC-42=(\d+)\s", timeout, since)
+        vm.type(f"{line}; echo {tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){tag}-42=(\d+)\s", timeout, since)
         took = time.monotonic() - start
         if found:
             return int(found.group(2)), found.group(1), took
+        timed_out = True
         return None, vm.text(since).partition("\n")[2], took
 
     def shell_back():
         """After a timeout: Ctrl-C, then True once bash answers again."""
+        nonlocal sync_seq, timed_out
+        sync_seq += 1
+        tag = f"DPSYNC-{sync_seq}"
         vm.type("\x03")
         time.sleep(1)
         since = vm.mark()
-        vm.type("echo DPSYNC-$((40+2))\n")
-        return vm.wait_serial(r"DPSYNC-42", 60, since) is not None
+        vm.type(f"echo {tag}-$((40+2))\n")
+        if vm.wait_serial(rf"{tag}-42", 60, since) is not None:
+            timed_out = False
+            return True
+        return False
 
-    status, setup, _ = run(DEV_PARITY_SETUP, 60)
+    setup_status, setup, _ = run(DEV_PARITY_SETUP, 60)
+    if setup_status != 0:
+        (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {setup_status}\n{setup}\n")
+        return False, f"setup failed (exit status {setup_status}); see {vm.out / 'setup.txt'}"
     address = None
     for _ in range(10):
         _, output, _ = run("cat /scheme/netcfg/ifaces/eth0/addr/list", 30)
@@ -3307,7 +3338,7 @@ def test_dev_parity(vm, args):
             break
         time.sleep(3)
     network = f"eth0 {address.group(0)}" if address else "eth0 has no address from QEMU's DHCP server"
-    (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {status}\n{setup}\n{network}\n")
+    (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {setup_status}\n{setup}\n{network}\n")
 
     results = []
     lost = None  # the task after which bash stopped answering
@@ -3344,7 +3375,10 @@ def test_dev_parity(vm, args):
     (vm.out / "summary.txt").write_text(f"{network}\n{table}")
     print(table, end="", flush=True)
     passed = sum(verdict == "PASS" for _, verdict, _ in results)
-    return True, f"ran {len(results)} tasks, {passed} PASS; {network}; see {vm.out / 'summary.txt'}"
+    note = f"ran {len(results)} tasks, {passed} PASS; {network}; see {vm.out / 'summary.txt'}"
+    if lost is not None:
+        return False, f"bash stopped answering after {lost} timed out; {note}"
+    return True, note
 
 
 # The pages the firefox-headless test renders, in order: (name, URL, seconds the render may take).
@@ -3524,13 +3558,22 @@ def test_firefox_headless(vm, args):
     if not user_bash(vm, args.timeout):
         return False, "no user Bash prompt after login"
 
+    run_seq = 0
+    timed_out = False
+
     def run(line, timeout):
         """Types `line`; returns (exit status or None on a timeout, output)."""
+        nonlocal run_seq, timed_out
+        if timed_out:
+            return None, ""
+        run_seq += 1
+        tag = f"FFRC-{run_seq}"
         since = vm.mark()
-        vm.type(f"{line}; echo FFRC-$((40+2))=$?\n")
-        found = vm.wait_serial(r"(?s)\n(.*?)FFRC-42=(\d+)\s", timeout, since)
+        vm.type(f"{line}; echo {tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){tag}-42=(\d+)\s", timeout, since)
         if found:
             return int(found.group(2)), found.group(1)
+        timed_out = True
         return None, vm.text(since).partition("\n")[2]
 
     def png_pixels(data):
@@ -3745,11 +3788,37 @@ def test_firefox_js(vm, args):
     else:
         return False, "no bash prompt after login"
 
+    run_seq = 0
+    sync_seq = 0
+    guard_seq = 0
+    timed_out = False
+
     def run(line, timeout):
+        nonlocal run_seq, timed_out
+        if timed_out:
+            return None, ""
+        run_seq += 1
+        tag = f"FXJSRC-{run_seq}"
         since = vm.mark()
-        vm.type(f"{line}; echo FXJSRC-$((40+2))=$?\n")
-        found = vm.wait_serial(r"(?s)\n(.*?)FXJSRC-42=(\d+)\s", timeout, since)
-        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+        vm.type(f"{line}; echo {tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){tag}-42=(\d+)\s", timeout, since)
+        if found:
+            return int(found.group(2)), found.group(1)
+        timed_out = True
+        return None, vm.text(since)
+
+    def shell_back():
+        nonlocal sync_seq, timed_out
+        sync_seq += 1
+        tag = f"FXJSSYNC-{sync_seq}"
+        vm.type("\x03\n")
+        time.sleep(1)
+        since = vm.mark()
+        vm.type(f"echo {tag}-$((40+2))\n")
+        if vm.wait_serial(rf"{tag}-42", 60, since) is not None:
+            timed_out = False
+            return True
+        return False
 
     status, _ = run("unset MAIL MAILPATH MAILCHECK; exec 8< <(sleep 100000); " + GUEST_WATCH, 30)
     if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
@@ -3771,16 +3840,18 @@ def test_firefox_js(vm, args):
         return image, pixels
 
     def guarded(command, timeout, name):
+        nonlocal guard_seq
+        guard_seq += 1
+        hung_tag = f"FXHUNG-{guard_seq}"
         line = (f"{command} > {directory}/{name}.log 2>&1 & fx=$!; n=0; "
                 f"while kill -0 $fx 2>/dev/null && [ $n -lt {timeout} ]; do read -t 1 -u 8; n=$((n+1)); done; "
-                "if kill -0 $fx 2>/dev/null; then echo FXHUNG; false; else wait $fx; fi")
+                f"if kill -0 $fx 2>/dev/null; then echo {hung_tag}; false; else wait $fx; fi")
         started = time.monotonic()
         status, output = run(line, timeout + 120)
         seconds = round(time.monotonic() - started, 1)
-        if status is None or re.search(r"(?m)^FXHUNG\s*$", output):
+        if status is None or re.search(rf"(?m)^{hung_tag}\s*$", output):
             if status is None:
-                vm.type("\x03\n")
-                time.sleep(1)
+                shell_back()
             guest_watch(vm, "watch-failed-1", "context syscall", 60)
             time.sleep(3)
             guest_watch(vm, "watch-failed-2", "context syscall", 60)
@@ -3921,11 +3992,22 @@ def test_firefox_cjk(vm, args):
     if not user_bash(vm, args.timeout):
         return False, "no user Bash prompt after login"
 
+    run_seq = 0
+    timed_out = False
+
     def run(line, timeout):
+        nonlocal run_seq, timed_out
+        if timed_out:
+            return None, ""
+        run_seq += 1
+        tag = f"CJKRC-{run_seq}"
         since = vm.mark()
-        vm.type(f"{line}; echo CJKRC-$((40+2))=$?\n")
-        found = vm.wait_serial(r"(?s)\n(.*?)CJKRC-42=(\d+)\s", timeout, since)
-        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+        vm.type(f"{line}; echo {tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){tag}-42=(\d+)\s", timeout, since)
+        if found:
+            return int(found.group(2)), found.group(1)
+        timed_out = True
+        return None, vm.text(since)
 
     directory = "/tmp/firefox-cjk"
     status, _ = run(f"mkdir -p {directory}/profile; printf '%s' '{encoded}' | base64 -d > {directory}/page.html", 30)
@@ -4086,11 +4168,22 @@ def test_firefox_window(vm, args):
     vm.type("bash --norc --noprofile --noediting\n")
     time.sleep(1)
 
+    run_seq = 0
+    timed_out = False
+
     def run(line, timeout):
+        nonlocal run_seq, timed_out
+        if timed_out:
+            return None, ""
+        run_seq += 1
+        tag = f"FWRC-{run_seq}"
         since = vm.mark()
-        vm.type(f"{line}; echo FWRC-$((40+2))=$?\n")
-        found = vm.wait_serial(r"(?s)\n(.*?)FWRC-42=(\d+)\s", timeout, since)
-        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+        vm.type(f"{line}; echo {tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){tag}-42=(\d+)\s", timeout, since)
+        if found:
+            return int(found.group(2)), found.group(1)
+        timed_out = True
+        return None, vm.text(since)
 
     def keys(text):
         for char in text:
@@ -4392,11 +4485,22 @@ def ferrion_cli_checks(vm, args, port, seen):
     if not vm.wait_serial(r"bash-[0-9.]+# ", 30, since):
         return False, "bash prompt did not appear after root login"
 
+    run_seq = 0
+    timed_out = False
+
     def run(line, timeout=60):
+        nonlocal run_seq, timed_out
+        if timed_out:
+            return None, ""
+        run_seq += 1
+        tag = f"FCLI-END-{run_seq}"
         since = vm.mark()
-        vm.type(f"{line}; echo FCLI-END-$((40+2))=$?\n")
-        found = vm.wait_serial(r"(?s)\n(.*?)FCLI-END-42=(\d+)\s", timeout, since)
-        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+        vm.type(f"{line}; echo {tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){tag}-42=(\d+)\s", timeout, since)
+        if found:
+            return int(found.group(2)), found.group(1)
+        timed_out = True
+        return None, vm.text(since)
 
     def check_json(command, timeout=60, expect=0):
         code, text = run(f"ferrion --json {command}", timeout)
