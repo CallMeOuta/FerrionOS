@@ -130,6 +130,7 @@ import tempfile
 import threading
 import time
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -551,6 +552,8 @@ class VM:
         self.serial = bytearray()
         self.lock = threading.Lock()
         self.typing = threading.Lock()
+        self._cmd_seq = 0
+        self.console_desynced = None
         self.log = open(out / "serial.log", "wb")
         self.reader = threading.Thread(target=self._read_serial, daemon=True)
         self.reader.start()
@@ -672,6 +675,12 @@ class VM:
     def mark(self):
         with self.lock:
             return len(self.serial)
+
+    def _next_cmd_seq(self):
+        if self.console_desynced is not None:
+            raise RuntimeError(f"serial console desynced after unanswered command: {self.console_desynced}")
+        self._cmd_seq += 1
+        return self._cmd_seq
 
     def kill(self):
         """Stops QEMU at once, as pulling the plug would."""
@@ -1522,13 +1531,46 @@ def test_event_poll(vm, args):
     return True, detail
 
 
+@dataclass(frozen=True)
+class Answered:
+    status: int
+    out: str
+
+    def __iter__(self):
+        yield self.status
+        yield self.out
+
+    def __getitem__(self, index):
+        return (self.status, self.out)[index]
+
+
+@dataclass(frozen=True)
+class NoAnswer:
+    out: str
+
+    def __iter__(self):
+        yield None
+        yield self.out
+
+    def __getitem__(self, index):
+        return (None, self.out)[index]
+
+
+def refused(reply):
+    return isinstance(reply, Answered) and reply.status != 0
+
+
 def guest_run(vm, tag, line, timeout):
-    """Runs a line through bash on the serial console; returns (exit status or None, output)."""
+    """Runs a line through bash on the serial console; returns Answered(status, out) or NoAnswer(out)."""
+    seq = vm._next_cmd_seq()
     since = vm.mark()
     # The status is echoed inside bash: `user`'s login shell is not POSIX.
-    vm.type(f"bash -c '{line}; echo {tag}-end-$?'\n")
-    found = vm.wait_serial(rf"(?s)\n(.*){tag}-end-(\d+)", timeout, since)
-    return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+    vm.type(f"bash -c '{line}; echo {tag}-{seq}-end-$?'\n")
+    found = vm.wait_serial(rf"(?s)\n(.*){re.escape(tag)}-{seq}-end-(\d+)", timeout, since)
+    if not found:
+        vm.console_desynced = f"{tag}: {line}"
+        return NoAnswer(vm.text(since))
+    return Answered(int(found.group(2)), found.group(1))
 
 
 def test_foreign_call(vm, args):
@@ -4423,29 +4465,37 @@ def root_shell(vm, timeout):
 
 
 def run_status(vm, line, timeout=120):
-    """Runs a line in the guest's root shell; returns (exit status, output) or (None, output)."""
+    """Runs a line in the guest's root shell; returns Answered(status, out) or NoAnswer(out)."""
+    seq = vm._next_cmd_seq()
     since = vm.mark()
-    vm.type(f"{line}; echo vm-test-status-$?\n")
-    found = vm.wait_serial(r"(?s)\n(.*)vm-test-status-(\d+)", timeout, since)
+    vm.type(f"{line}; echo vm-test-status-{seq}-$?\n")
+    found = vm.wait_serial(rf"(?s)\n(.*)vm-test-status-{seq}-(\d+)", timeout, since)
     if not found:
-        return None, vm.text(since)
-    return int(found.group(2)), found.group(1)
+        vm.console_desynced = line
+        return NoAnswer(vm.text(since))
+    return Answered(int(found.group(2)), found.group(1))
 
 
 MKFS_REUSE_MARK = b"FERRION-MKFS-REUSE"
 
 
 def mkfs_reuse_mount(vm, disk, name, flags=""):
-    """Mounts the volume on `disk` at /scheme/<name>; returns (mounted, entry count or None)."""
-    run_status(vm, f"bash -c 'redoxfs -d {flags} {disk} {name} </dev/null >/tmp/{name}.log 2>&1 & "
-                   "echo $! > /tmp/mr.pid'; sleep 3")
-    _, output = run_status(vm, f"bash -c 'if ls /scheme/{name} >/dev/null 2>&1; then echo mr-state-$((40+2))"
-                               f" $(ls -A /scheme/{name} | wc -l); else echo mr-state-$((40+1)); fi'")
-    found = re.search(r"mr-state-42 +(\d+)|mr-state-41", output)
-    if not found or found.group(1) is None:
+    """Mounts the volume on `disk` at /scheme/<name>; returns ('mounted'|'refused'|'no-answer', entry count or None)."""
+    start_reply = run_status(vm, f"bash -c 'redoxfs -d {flags} {disk} {name} </dev/null >/tmp/{name}.log 2>&1 & "
+                                 "echo $! > /tmp/mr.pid'; sleep 3")
+    if isinstance(start_reply, NoAnswer):
+        return "no-answer", None
+    probe_reply = run_status(vm, f"bash -c 'if ls /scheme/{name} >/dev/null 2>&1; then echo mr-state-$((40+2))"
+                                 f" $(ls -A /scheme/{name} | wc -l); else echo mr-state-$((40+1)); fi'")
+    if isinstance(probe_reply, NoAnswer):
+        return "no-answer", None
+    found = re.search(r"mr-state-42 +(\d+)|mr-state-41", probe_reply.out)
+    if not found:
+        return "no-answer", None
+    if found.group(1) is None:
         run_status(vm, f"cat /tmp/{name}.log")
-        return False, None
-    return True, int(found.group(1))
+        return "refused", None
+    return "mounted", int(found.group(1))
 
 
 def mkfs_reuse_unmount(vm):
@@ -4477,17 +4527,18 @@ def test_mkfs_reuse(args, out):
             status, output = run_status(vm, f"redoxfs-mkfs {disk}")
             if status != 0:
                 return False, f"the first redoxfs-mkfs failed ({status}): {output.strip()[-200:]}"
-            if not mkfs_reuse_mount(vm, disk, "mkfsreuse1")[0]:
-                return False, f"the first volume did not mount; see {vm.out}"
+            state, _ = mkfs_reuse_mount(vm, disk, "mkfsreuse1")
+            if state != "mounted":
+                return False, f"the first volume did not mount ({state}); see {vm.out}"
             run_status(vm, "bash -c 'echo old-volume > /scheme/mkfsreuse1/old.txt; mkdir /scheme/mkfsreuse1/d; "
                            "for i in 1 2 3 4 5 6 7 8 9 10; do echo $i > /scheme/mkfsreuse1/d/$i; done'")
             mkfs_reuse_unmount(vm)
             status, output = run_status(vm, f"redoxfs-mkfs {disk}")
             if status != 0:
                 return False, f"the second redoxfs-mkfs failed ({status}): {output.strip()[-200:]}"
-            mounted, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse2")
-            if not mounted:
-                return False, f"the new volume did not mount (an older header won); see {vm.out}"
+            state, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse2")
+            if state != "mounted":
+                return False, f"the new volume did not mount ({state}; an older header won); see {vm.out}"
             if entries != 0:
                 return False, f"the mount shows {entries} entries: the old volume, not the new one"
             run_status(vm, "echo plain-volume > /scheme/mkfsreuse2/plain.txt")
@@ -4497,11 +4548,16 @@ def test_mkfs_reuse(args, out):
                                             f"redoxfs-mkfs --encrypt --key-file /tmp/mr.key {disk}")
             if status != 0:
                 return False, f"redoxfs-mkfs --encrypt failed ({status}): {output.strip()[-200:]}"
-            if mkfs_reuse_mount(vm, disk, "mkfsreuse3")[0]:
-                return False, "the encrypted volume mounted with no passphrase: an older, unencrypted header won"
-            mounted, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse4", "--key-file /tmp/mr.key")
-            if not mounted or entries != 0:
-                return False, f"the encrypted volume with its passphrase: mounted={mounted}, entries={entries}"
+            state, _ = mkfs_reuse_mount(vm, disk, "mkfsreuse3")
+            if state != "refused":
+                return False, (
+                    "the encrypted volume mounted with no passphrase: an older, unencrypted header won"
+                    if state == "mounted"
+                    else f"the encrypted volume check without a passphrase gave no answer ({state}); see {vm.out}"
+                )
+            state, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse4", "--key-file /tmp/mr.key")
+            if state != "mounted" or entries != 0:
+                return False, f"the encrypted volume with its passphrase: state={state}, entries={entries}"
             mkfs_reuse_unmount(vm)
         finally:
             vm.close()
@@ -4783,8 +4839,10 @@ def one_password_install(args, out, live, target, password):
 
 
 def session_owner(vm):
-    _, output = run_status(vm, "grep launcher /scheme/sys/context")
-    found = re.search(r"(?m)^\s*\d+\s+(\d+)\s.*launcher\s*$", output)
+    reply = run_status(vm, "grep launcher /scheme/sys/context")
+    if isinstance(reply, NoAnswer):
+        return reply
+    found = re.search(r"(?m)^\s*\d+\s+(\d+)\s.*launcher\s*$", reply.out)
     return int(found.group(1)) if found else None
 
 
@@ -4792,6 +4850,8 @@ def wait_session(vm, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         owner = session_owner(vm)
+        if isinstance(owner, NoAnswer):
+            raise RuntimeError("session_owner gave no answer")
         if owner is not None:
             return owner
         time.sleep(2)
@@ -4909,6 +4969,8 @@ def test_one_password(args, out):
             if not root_shell(vm, args.timeout):
                 return False, f"no root shell after the recovery key; see {vm.out}"
             owner = session_owner(vm)
+            if isinstance(owner, NoAnswer):
+                return False, f"session_owner gave no answer after a recovery-key unlock; see {vm.out}"
             if owner is not None:
                 return False, f"a session (euid {owner}) started after a recovery-key unlock; see {vm.out}"
             notes.append("recovery key ends at the login with nobody logged in")
@@ -4983,9 +5045,13 @@ def test_one_password(args, out):
             )
             if code != 0:
                 return False, f"root passwd {second_user} failed ({code}): {err}"
-            status, _ = run_status(vm, f"grep ' {second_user}$' /etc/unlock-slots")
-            if status == 0:
-                return False, f"{second_user} was enrolled automatically before passwd --enroll"
+            reply = run_status(vm, f"grep ' {second_user}$' /etc/unlock-slots")
+            if not refused(reply):
+                return False, (
+                    f"{second_user} was enrolled automatically before passwd --enroll"
+                    if isinstance(reply, Answered)
+                    else f"unlock-slots check for {second_user} gave no answer"
+                )
         finally:
             vm.close()
 
@@ -5076,14 +5142,22 @@ def test_one_password(args, out):
             vm.type("password\n")
             if not vm.wait_serial(r"root:.*# ", 20, since):
                 return False, f"no root shell after fail-closed claim check; see {vm.out}"
-            status_dir, _ = run_status(vm, "ls -ld /var/run/unlock-session")
-            if status_dir == 0:
-                return False, "login recreated missing /var/run/unlock-session instead of failing closed"
+            reply_dir = run_status(vm, "ls -ld /var/run/unlock-session")
+            if not refused(reply_dir):
+                return False, (
+                    "login recreated missing /var/run/unlock-session instead of failing closed"
+                    if isinstance(reply_dir, Answered)
+                    else "unlock-session fail-closed check gave no answer"
+                )
             notes.append("claim marker protected from second account and fails closed when directory is missing")
 
-            status, _ = run_status(vm, "passwd --enroll root")
-            if status == 0:
-                return False, "passwd --enroll root succeeded unexpectedly"
+            reply = run_status(vm, "passwd --enroll root")
+            if not refused(reply):
+                return False, (
+                    "passwd --enroll root succeeded unexpectedly"
+                    if isinstance(reply, Answered)
+                    else "passwd --enroll root gave no answer"
+                )
             code, err = run_prompts(
                 vm,
                 f"passwd --enroll {second_user}",
@@ -5163,10 +5237,10 @@ def test_one_password(args, out):
             )
             if code != 0:
                 return False, f"userdel {second_user} failed ({code}): {err}"
-            status_pw, _ = run_status(vm, f"grep '^{second_user};' /etc/passwd")
-            status_sl, _ = run_status(vm, f"grep ' {second_user}$' /etc/unlock-slots")
-            if status_pw == 0 or status_sl == 0:
-                return False, f"userdel left {second_user} in passwd ({status_pw}) or unlock-slots ({status_sl})"
+            reply_pw = run_status(vm, f"grep '^{second_user};' /etc/passwd")
+            reply_sl = run_status(vm, f"grep ' {second_user}$' /etc/unlock-slots")
+            if not refused(reply_pw) or not refused(reply_sl):
+                return False, f"userdel left {second_user} in passwd ({reply_pw[0]}) or unlock-slots ({reply_sl[0]})"
         finally:
             vm.close()
 
@@ -7617,9 +7691,10 @@ def test_agent_scope(vm, args):
     log, controls, problems, notes = [], [], [], []
 
     def run(tag, line, timeout=120):
-        status, output = guest_run(vm, tag, line, timeout)
+        reply = guest_run(vm, tag, line, timeout)
+        status, output = reply
         log.append(f"$ {line}\nexit {status}\n{output}\n")
-        return status, output
+        return reply
 
     status, _ = run("scinit", "ferrion-run true")
     if status != 0:
@@ -7696,18 +7771,22 @@ def test_agent_scope(vm, args):
     status, output = run("scshare", "ferrion-run --read-only /home/user/.ssh/id_probe cat /home/user/.ssh/id_probe")
     if status != 0 or SCOPE_MARKER not in output:
         problems.append(f"an explicit read-only share was not readable (exit {status})")
-    status, _ = run("scshare-w", "ferrion-run --read-only /home/user/.ssh/id_probe bash -c \"echo x >> /home/user/.ssh/id_probe\"")
-    if status == 0:
-        problems.append("a read-only share was writable")
+    reply = run("scshare-w", "ferrion-run --read-only /home/user/.ssh/id_probe bash -c \"echo x >> /home/user/.ssh/id_probe\"")
+    if not refused(reply):
+        problems.append("a read-only share was writable" if isinstance(reply, Answered) else "a read-only share write gave no answer")
     decoy = "/home/user/.local/state/ferrion-run/decoy-0"
     run("scdecoy", f"mkdir -p {decoy} && echo {SCOPE_MARKER} > {decoy}/x")
     status, output = run("schide", "ferrion-run --files /home/user bash -c "
                                    "\"ls -A /home/user/.local/state/ferrion-run; echo home=\\$HOME\"")
     if "decoy-0" in output.split() or "home=/home/user/.local/state/ferrion-run/" not in output:
         problems.append("inside a session given the whole home, another session's folder was listed or its own home was missing")
-    status, output = run("schide2", f"ferrion-run --files /home/user cat {decoy}/x")
-    if status == 0 or SCOPE_MARKER in output:
-        problems.append("another session's folder was readable inside a session given the whole home")
+    reply = run("schide2", f"ferrion-run --files /home/user cat {decoy}/x")
+    if not refused(reply) or SCOPE_MARKER in reply.out:
+        problems.append(
+            "another session's folder was readable inside a session given the whole home"
+            if isinstance(reply, Answered)
+            else "another session's folder check gave no answer"
+        )
     status, output = run("schide3", "ferrion-run --files /home/user bash -c "
                                     "\"mv /home/user/.local /home/user/.local-moved; mv /home/user/.local/state /home/user/.local/state-moved; "
                                     "cat /home/user/.local-moved/state/ferrion-run/decoy-0/x /home/user/.local/state-moved/ferrion-run/decoy-0/x\"")
