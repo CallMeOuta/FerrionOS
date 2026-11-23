@@ -1,0 +1,14 @@
+[source]
+git = "https://github.com/CallMeOuta/ferrion-hardware.git"
+rev = "f489e7ea367084eaed152d8e789aab72d78a8ebb"
+
+[build]
+template = "custom"
+script = """
+make -C "${COOKBOOK_SOURCE}/driver-host" O="${COOKBOOK_BUILD}" CROSS_COMPILE="${GNU_TARGET}-" -j"${COOKBOOK_MAKE_JOBS}"
+mkdir -p "${COOKBOOK_STAGE}/usr/lib/drivers"
+cp "${COOKBOOK_BUILD}/ferrion-driver-host" "${COOKBOOK_STAGE}/usr/lib/drivers/ferrion-driver-host"
+"""
+
+[package]
+description = "FerrionOS's driver host: Linux's virtio-gpu driver on a shim of Linux's kernel interfaces"
