@@ -4604,31 +4604,74 @@ def run_status(vm, line, timeout=120):
 
 
 MKFS_REUSE_MARK = b"FERRION-MKFS-REUSE"
+MKFS_REUSE_MOUNT_POLLS = 20
+MKFS_REUSE_POLL_S = 0.5
 
 
-def mkfs_reuse_mount(vm, disk, name, flags=""):
-    """Mounts the volume on `disk` at /scheme/<name>; returns ('mounted'|'refused'|'no-answer', entry count or None)."""
-    start_reply = run_status(vm, f"bash -c 'redoxfs -d {flags} {disk} {name} </dev/null >/tmp/{name}.log 2>&1 & "
-                                 "echo $! > /tmp/mr.pid'; sleep 3")
+class MountState(enum.Enum):
+    MOUNTED = "mounted"
+    REFUSED = "refused"
+    TIMED_OUT = "timed-out"
+    NO_ANSWER = "no-answer"
+
+
+@dataclass
+class Mount:
+    name: str
+    pid_file: str
+    state: MountState
+    entries: int | None
+    live: bool = False
+
+
+def mkfs_reuse_mount(vm, disk, name, flags="", active=None):
+    """Mounts the volume on `disk` at /scheme/<name>; returns a Mount with its own PID file and state."""
+    assert active is None or not active.live, f"previous mount {active.name} is still live"
+    pid_file = f"/tmp/mr-{name}.pid"
+    start_reply = run_status(
+        vm,
+        f"bash -c 'rm -f {pid_file}; redoxfs -d {flags} {disk} {name} </dev/null >/tmp/{name}.log 2>&1 & "
+        f"echo $! > {pid_file}'",
+    )
     if isinstance(start_reply, NoAnswer):
-        return "no-answer", None
-    probe_reply = run_status(vm, f"bash -c 'if ls /scheme/{name} >/dev/null 2>&1; then echo mr-state-$((40+2))"
-                                 f" $(ls -A /scheme/{name} | wc -l); else echo mr-state-$((40+1)); fi'")
-    if isinstance(probe_reply, NoAnswer):
-        return "no-answer", None
-    found = re.search(r"mr-state-42 +(\d+)|mr-state-41", probe_reply.out)
-    if not found:
-        return "no-answer", None
-    if found.group(1) is None:
-        run_status(vm, f"cat /tmp/{name}.log")
-        return "refused", None
-    return "mounted", int(found.group(1))
+        return Mount(name, pid_file, MountState.NO_ANSWER, None, live=True)
+    for _ in range(MKFS_REUSE_MOUNT_POLLS):
+        probe_reply = run_status(
+            vm,
+            f"bash -c 'if ls /scheme/{name} >/dev/null 2>&1; then echo mr-state-$((40+2))"
+            f" $(ls -A /scheme/{name} | wc -l); elif grep -qi password: /tmp/{name}.log 2>/dev/null;"
+            f" then echo mr-state-$((40+4)); elif kill -0 $(cat {pid_file} 2>/dev/null) 2>/dev/null;"
+            f" then echo mr-state-$((40+3)); else echo mr-state-$((40+1)); fi'",
+        )
+        if isinstance(probe_reply, NoAnswer):
+            return Mount(name, pid_file, MountState.NO_ANSWER, None, live=True)
+        found = re.search(r"mr-state-42 +(\d+)|mr-state-44|mr-state-43|mr-state-41", probe_reply.out)
+        if not found:
+            return Mount(name, pid_file, MountState.NO_ANSWER, None, live=True)
+        if found.group(1) is not None:
+            return Mount(name, pid_file, MountState.MOUNTED, int(found.group(1)), live=True)
+        if found.group(0) == "mr-state-44":
+            run_status(vm, f"cat /tmp/{name}.log")
+            return Mount(name, pid_file, MountState.REFUSED, None, live=True)
+        if found.group(0) == "mr-state-41":
+            run_status(vm, f"cat /tmp/{name}.log")
+            return Mount(name, pid_file, MountState.REFUSED, None, live=False)
+        time.sleep(MKFS_REUSE_POLL_S)
+    run_status(vm, f"cat /tmp/{name}.log")
+    return Mount(name, pid_file, MountState.TIMED_OUT, None, live=True)
 
 
-def mkfs_reuse_unmount(vm):
+def mkfs_reuse_unmount(vm, mount):
+    if mount is None or not mount.live:
+        return
     # SIGTERM is only seen after the scheme's next request; every commit is already on the disk
     # (the mount's disk cache writes through), so the daemon is stopped outright.
-    run_status(vm, "bash -c 'kill -9 $(cat /tmp/mr.pid)'; sleep 2")
+    run_status(
+        vm,
+        f"bash -c 'pid=$(cat {mount.pid_file} 2>/dev/null); [ -n \"$pid\" ] && kill -9 \"$pid\" 2>/dev/null; "
+        f"rm -f {mount.pid_file}'; sleep 1",
+    )
+    mount.live = False
 
 
 def test_mkfs_reuse(args, out):
@@ -4639,6 +4682,7 @@ def test_mkfs_reuse(args, out):
         extra.write_bytes(MKFS_REUSE_MARK)
         os.truncate(extra, 64 << 20)
         vm = VM(args, out, make=[f"EXTRA_DISK={extra}"])
+        active = None
         try:
             if not root_shell(vm, args.timeout):
                 return False, f"no root shell; see {vm.out}"
@@ -4650,43 +4694,63 @@ def test_mkfs_reuse(args, out):
             if not found:
                 return False, f"the extra disk was not found under /scheme/disk.*; see {vm.out}"
             disk = found.group(1)
+            base_ps = run_status(vm, "ps")
+            if isinstance(base_ps, NoAnswer):
+                return False, f"no answer from ps before mounts; see {vm.out}"
+            base_fs_pids = {
+                fields[0] for line in base_ps.out.splitlines()
+                if (fields := line.split()) and fields[0].isdigit() and any("redoxfs" in f for f in fields[1:])
+            }
 
             status, output = run_status(vm, f"redoxfs-mkfs {disk}")
             if status != 0:
                 return False, f"the first redoxfs-mkfs failed ({status}): {output.strip()[-200:]}"
-            state, _ = mkfs_reuse_mount(vm, disk, "mkfsreuse1")
-            if state != "mounted":
-                return False, f"the first volume did not mount ({state}); see {vm.out}"
+            active = mkfs_reuse_mount(vm, disk, "mkfsreuse1", active=active)
+            if active.state != MountState.MOUNTED:
+                return False, f"the first volume did not mount ({active.state.value}); see {vm.out}"
             run_status(vm, "bash -c 'echo old-volume > /scheme/mkfsreuse1/old.txt; mkdir /scheme/mkfsreuse1/d; "
                            "for i in 1 2 3 4 5 6 7 8 9 10; do echo $i > /scheme/mkfsreuse1/d/$i; done'")
-            mkfs_reuse_unmount(vm)
+            mkfs_reuse_unmount(vm, active)
             status, output = run_status(vm, f"redoxfs-mkfs {disk}")
             if status != 0:
                 return False, f"the second redoxfs-mkfs failed ({status}): {output.strip()[-200:]}"
-            state, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse2")
-            if state != "mounted":
-                return False, f"the new volume did not mount ({state}; an older header won); see {vm.out}"
-            if entries != 0:
-                return False, f"the mount shows {entries} entries: the old volume, not the new one"
+            active = mkfs_reuse_mount(vm, disk, "mkfsreuse2", active=active)
+            if active.state != MountState.MOUNTED:
+                return False, f"the new volume did not mount ({active.state.value}; an older header won); see {vm.out}"
+            if active.entries != 0:
+                return False, f"the mount shows {active.entries} entries: the old volume, not the new one"
             run_status(vm, "echo plain-volume > /scheme/mkfsreuse2/plain.txt")
-            mkfs_reuse_unmount(vm)
+            mkfs_reuse_unmount(vm, active)
 
             status, output = run_status(vm, f"printf %s mkfs-reuse-pass > /tmp/mr.key; "
                                             f"redoxfs-mkfs --encrypt --key-file /tmp/mr.key {disk}")
             if status != 0:
                 return False, f"redoxfs-mkfs --encrypt failed ({status}): {output.strip()[-200:]}"
-            state, _ = mkfs_reuse_mount(vm, disk, "mkfsreuse3")
-            if state != "refused":
+            active = mkfs_reuse_mount(vm, disk, "mkfsreuse3", active=active)
+            if active.state != MountState.REFUSED:
                 return False, (
                     "the encrypted volume mounted with no passphrase: an older, unencrypted header won"
-                    if state == "mounted"
-                    else f"the encrypted volume check without a passphrase gave no answer ({state}); see {vm.out}"
+                    if active.state == MountState.MOUNTED
+                    else f"the encrypted volume check without a passphrase did not finish ({active.state.value}); see {vm.out}"
                 )
-            state, entries = mkfs_reuse_mount(vm, disk, "mkfsreuse4", "--key-file /tmp/mr.key")
-            if state != "mounted" or entries != 0:
-                return False, f"the encrypted volume with its passphrase: state={state}, entries={entries}"
-            mkfs_reuse_unmount(vm)
+            mkfs_reuse_unmount(vm, active)
+            active = mkfs_reuse_mount(vm, disk, "mkfsreuse4", "--key-file /tmp/mr.key", active=active)
+            if active.state != MountState.MOUNTED or active.entries != 0:
+                return False, f"the encrypted volume with its passphrase: state={active.state.value}, entries={active.entries}"
+            mkfs_reuse_unmount(vm, active)
+            ps_reply = run_status(vm, "ps")
+            if isinstance(ps_reply, NoAnswer):
+                return False, f"no answer from ps after unmount; see {vm.out}"
+            end_fs_pids = {
+                fields[0] for line in ps_reply.out.splitlines()
+                if (fields := line.split()) and fields[0].isdigit() and any("redoxfs" in f for f in fields[1:])
+            }
+            leaked = sorted(end_fs_pids - base_fs_pids)
+            if leaked:
+                return False, f"check redoxfs PIDs still running after unmount: {leaked}; see {vm.out}"
         finally:
+            if active is not None and active.live and vm.console_desynced is None:
+                mkfs_reuse_unmount(vm, active)
             vm.close()
         return True, "second redoxfs-mkfs mounted new and empty; --encrypt over a plain volume refused without its passphrase, mounted empty with it"
     finally:
