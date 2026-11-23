@@ -418,6 +418,9 @@ fn print_cached(command: &CliCommand, recipe: &PackageName) {
 fn repo_inner(config: &CliConfig, command: &CliCommand, recipe: &CookRecipe) -> Result<bool> {
     Ok(match *command {
         CliCommand::Fetch | CliCommand::Cook => {
+            if *command == CliCommand::Cook {
+                ensure_sccache_server();
+            }
             let repo_inner_fn = move |logger: &PtyOut| -> Result<bool> {
                 let is_cook = *command == CliCommand::Cook;
                 let fetch_result = handle_fetch(recipe, config, is_cook, logger)?;

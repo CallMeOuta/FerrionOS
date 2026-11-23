@@ -35,7 +35,7 @@ PODMAN_VOLUMES=--volume $(ROOT):$(CONTAINER_WORKDIR)$(PODMAN_VOLUME_FLAG) --volu
 # The containers share the host's network, so sccache's default TCP server would be one
 # server for every checkout, and a cache hit would write into the checkout that started it.
 # A socket in the checkout's own container home gives each checkout its own server.
-PODMAN_ENV=--env PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin --env PODMAN_BUILD=0 --env SCCACHE_SERVER_UDS=/root/.sccache-server.sock
+PODMAN_ENV=--env PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin --env PODMAN_BUILD=0 --env SCCACHE_SERVER_UDS=/root/.sccache-server.sock --env SCCACHE_IDLE_TIMEOUT=0
 PODMAN_CONFIG=--env ARCH=$(ARCH) --env BOARD=$(BOARD) --env CONFIG_NAME=$(CONFIG_NAME) --env FILESYSTEM_CONFIG=$(FILESYSTEM_CONFIG) --env PREFIX_BINARY=$(PREFIX_BINARY) \
 	--env CI=$(CI) --env COOKBOOK_MAKE_JOBS=$(COOKBOOK_MAKE_JOBS) --env COOKBOOK_LOGS=$(COOKBOOK_LOGS) --env COOKBOOK_COMPRESSED=$(COOKBOOK_COMPRESSED) \
 	--env COOKBOOK_VERBOSE=$(COOKBOOK_VERBOSE) --env COOKBOOK_VERBOSE_CMD=$(COOKBOOK_VERBOSE_CMD) \

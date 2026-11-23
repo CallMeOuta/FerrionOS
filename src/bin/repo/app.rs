@@ -26,6 +26,63 @@ use termion::screen::IntoAlternateScreen;
 const MAX_INTERACTIVE_PROMPTS: usize = 2;
 const MAX_NONSTOP_PROMPTS: usize = 64;
 const LOG_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const SCCACHE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const SCCACHE_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_SCCACHE_START_POLLS: usize = 200;
+
+fn sccache_wrapper_program() -> Option<String> {
+    for key in ["CC_WRAPPER", "RUSTC_WRAPPER"] {
+        if let Ok(value) = std::env::var(key)
+            && !value.is_empty()
+            && std::path::Path::new(&value).file_name() == Some(std::ffi::OsStr::new("sccache"))
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+pub fn ensure_sccache_server() {
+    let Some(program) = sccache_wrapper_program() else {
+        return;
+    };
+    let mut child = match std::process::Command::new(&program)
+        .arg("--start-server")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            eprintln!("warning: failed to spawn {program} --start-server: {err}");
+            return;
+        }
+    };
+    for _ in 0..MAX_SCCACHE_START_POLLS {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    eprintln!("warning: {program} --start-server exited with {status}");
+                }
+                return;
+            }
+            Ok(None) => thread::sleep(SCCACHE_START_POLL_INTERVAL),
+            Err(err) => {
+                eprintln!("warning: failed to wait on {program} --start-server: {err}");
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+    eprintln!(
+        "warning: {program} --start-server did not exit within {}s",
+        SCCACHE_START_TIMEOUT.as_secs()
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -382,6 +439,7 @@ pub fn run_tui_cook(config: CliConfig, recipes: Vec<CookRecipe>) -> Result<TuiOu
                     break 'done;
                 }
                 let _ = recipe.reload_recipe();
+                ensure_sccache_server();
                 let mut session = setup_logger(&cooker_status_tx, &name);
                 let handler = handle_cook(
                     &recipe,

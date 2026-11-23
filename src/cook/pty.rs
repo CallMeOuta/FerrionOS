@@ -214,6 +214,8 @@ pub fn setup_pty() -> (
         .expect("Unable to clone pty reader");
 
     let (log_reader, log_writer) = std::io::pipe().expect("Failed to create log pipe");
+    assert_cloexec(log_reader.as_raw_fd());
+    assert_cloexec(log_writer.as_raw_fd());
     let pipes = (pair.slave, log_writer);
     (pty_reader, log_reader, pipes)
 }
@@ -245,6 +247,8 @@ pub fn setup_pty_with_stdin() -> (
         .expect("Unable to clone pty writer");
 
     let (log_reader, log_writer) = std::io::pipe().expect("Failed to create log pipe");
+    assert_cloexec(log_reader.as_raw_fd());
+    assert_cloexec(log_writer.as_raw_fd());
 
     let pipes = (pair.slave, log_writer);
 
@@ -338,6 +342,8 @@ fn openpty(size: PtySize) -> Result<(UnixMasterPty, UnixSlavePty)> {
 
     cloexec(master.fd.as_raw_fd())?;
     cloexec(slave.fd.as_raw_fd())?;
+    assert_cloexec(master.fd.as_raw_fd());
+    assert_cloexec(slave.fd.as_raw_fd());
 
     Ok((master, slave))
 }
@@ -494,6 +500,14 @@ fn cloexec(fd: RawFd) -> Result<()> {
     Ok(())
 }
 
+fn assert_cloexec(fd: RawFd) {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(
+        flags >= 0 && (flags & libc::FD_CLOEXEC) != 0,
+        "descriptor {fd} is missing FD_CLOEXEC"
+    );
+}
+
 impl UnixSlavePty {
     fn track_child(&self, mut child: Child) -> Result<Child> {
         let mut pgids = self.pgids.lock().unwrap();
@@ -566,6 +580,7 @@ impl UnixMasterPty {
                 .try_clone()
                 .map_err(wrap_io_err!("Cloning pty fd"))?,
         );
+        assert_cloexec(fd.as_raw_fd());
         Ok(Box::new(fd))
     }
 
@@ -575,6 +590,7 @@ impl UnixMasterPty {
                 .try_clone()
                 .map_err(wrap_io_err!("Cloning pty fd"))?,
         );
+        assert_cloexec(fd.as_raw_fd());
         Ok(Box::new(fd))
     }
 }
