@@ -83,6 +83,24 @@ pub struct MadtLocalApic {
     pub flags: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+#[repr(C, packed)]
+pub struct MadtLocalX2Apic {
+    _reserved: u16,
+    pub id: u32,
+    pub flags: u32,
+    pub processor: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C, packed)]
+pub struct MadtLocalX2ApicNmi {
+    pub flags: u16,
+    pub processor: u32,
+    pub lint: u8,
+    _reserved: [u8; 3],
+}
+
 /// MADT I/O APIC
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
@@ -152,6 +170,10 @@ pub struct MadtGicd {
 pub enum MadtEntry {
     LocalApic(&'static MadtLocalApic),
     InvalidLocalApic(usize),
+    LocalX2Apic(&'static MadtLocalX2Apic),
+    InvalidLocalX2Apic(usize),
+    LocalX2ApicNmi(&'static MadtLocalX2ApicNmi),
+    InvalidLocalX2ApicNmi(usize),
     IoApic(&'static MadtIoApic),
     InvalidIoApic(usize),
     IntSrcOverride(&'static MadtIntSrcOverride),
@@ -176,7 +198,7 @@ impl Iterator for MadtIter {
             let entry_len =
                 unsafe { *(self.sdt.data_address() as *const u8).add(self.i + 1) } as usize;
 
-            if self.i + entry_len <= self.sdt.data_len() {
+            if entry_len >= 2 && self.i + entry_len <= self.sdt.data_len() {
                 let item = match entry_type {
                     0x0 => {
                         if entry_len == size_of::<MadtLocalApic>() + 2 {
@@ -204,6 +226,25 @@ impl Iterator for MadtIter {
                             })
                         } else {
                             MadtEntry::InvalidIntSrcOverride(entry_len)
+                        }
+                    }
+                    0x9 => {
+                        if entry_len == size_of::<MadtLocalX2Apic>() + 2 {
+                            MadtEntry::LocalX2Apic(unsafe {
+                                &*((self.sdt.data_address() + self.i + 2) as *const MadtLocalX2Apic)
+                            })
+                        } else {
+                            MadtEntry::InvalidLocalX2Apic(entry_len)
+                        }
+                    }
+                    0xA => {
+                        if entry_len == size_of::<MadtLocalX2ApicNmi>() + 2 {
+                            MadtEntry::LocalX2ApicNmi(unsafe {
+                                &*((self.sdt.data_address() + self.i + 2)
+                                    as *const MadtLocalX2ApicNmi)
+                            })
+                        } else {
+                            MadtEntry::InvalidLocalX2ApicNmi(entry_len)
                         }
                     }
                     0xB => {

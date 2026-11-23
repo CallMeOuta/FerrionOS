@@ -137,6 +137,9 @@ impl LocalApic {
                 .misc_arch_info
                 .apic_id_opt
                 .set(Some(self.id()));
+            if let Some(madt) = crate::acpi::madt::madt() {
+                self.configure_nmi(*madt);
+            }
         }
     }
 
@@ -156,6 +159,41 @@ impl LocalApic {
         } else {
             unsafe { (self.read(0x20) >> 24) & u8::MAX as u32 } // id is contained in bits 24:31
         })
+    }
+
+    pub fn configure_nmi(&mut self, madt: crate::acpi::madt::Madt) {
+        use crate::acpi::madt::MadtEntry;
+
+        let id = self.id().get();
+        let processor = madt.iter().find_map(|entry| match entry {
+            MadtEntry::LocalX2Apic(apic) if apic.id == id => Some(apic.processor),
+            MadtEntry::LocalApic(apic) if u32::from(apic.id) == id => {
+                Some(u32::from(apic.processor))
+            }
+            _ => None,
+        });
+        for entry in madt.iter() {
+            let MadtEntry::LocalX2ApicNmi(nmi) = entry else {
+                continue;
+            };
+            if nmi.processor != u32::MAX && Some(nmi.processor) != processor {
+                continue;
+            }
+            assert!(nmi.lint <= 1, "invalid NMI local interrupt input");
+            let polarity = nmi.flags & 3;
+            let trigger = (nmi.flags >> 2) & 3;
+            assert!(polarity != 2 && trigger != 2, "invalid NMI flags");
+            let value = (0b100 << 8)
+                | if polarity == 3 { 1 << 13 } else { 0 }
+                | if trigger == 3 { 1 << 15 } else { 0 };
+            unsafe {
+                if self.x2 {
+                    wrmsr(0x835 + u32::from(nmi.lint), u64::from(value));
+                } else {
+                    self.write(0x350 + 0x10 * u32::from(nmi.lint), value);
+                }
+            }
+        }
     }
 
     pub fn version(&self) -> u32 {
