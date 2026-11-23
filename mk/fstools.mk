@@ -4,7 +4,7 @@ fstools: $(FSTOOLS_TAG) $(FSTOOLS)
 GOING_TO_PODMAN_AGAIN?=0
 
 # These tools run inside Podman if it is used, or on the host if Podman is not used
-$(FSTOOLS): recipes/core/redoxfs/recipe.toml $(wildcard recipes/core/redoxfs/*.patch) | prefix $(CONTAINER_TAG) $(FSTOOLS_TAG)
+$(FSTOOLS): recipes/core/redoxfs/recipe.toml $(wildcard recipes/core/redoxfs/*.patch) recipes/core/installer/recipe.toml $(wildcard recipes/core/installer/*.patch) | prefix $(CONTAINER_TAG) $(FSTOOLS_TAG)
 ifeq ($(PODMAN_BUILD),1)
 ifeq ($(FSTOOLS_IN_PODMAN),1)
 	$(PODMAN_RUN) make $@
