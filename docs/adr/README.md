@@ -48,3 +48,4 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0042](0042-sparse-page-table-walks.md) | Sparse page-table walks, resident memory accounting and deferred page-table freeing |
 | [0043](0043-pthread-mutex-fastpath.md) | Three-state pthread_mutex WAITING_BIT, constant owner for normal/default mutexes, and private FUTEX_WAKE fast path |
 | [0046](0046-gpu-driver-host.md) | GPUs on real hardware are driven by Linux's drivers in a driver host process |
+| [0049](0049-fork-file-table-and-grants.md) | Fork, exec and posix_spawn lock order, child file-table reconciliation, fail-closed close-on-exec, grant snapshots and bounded child cleanup |
