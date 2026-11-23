@@ -4454,14 +4454,27 @@ def boot_copy(args, out, make):
     return VM(args, out, make=make, snapshot=False)
 
 
+PROMPT_REDRAW_S = 3
+
+
+def login(vm, account, password, shell_re, since=0, timeout=60):
+    if not vm.wait_serial(r"login: ", timeout, since):
+        return False, "no login prompt"
+    time.sleep(PROMPT_REDRAW_S)
+    mark = vm.mark()
+    vm.type(f"{account}\n")
+    if password is not None:
+        if not vm.wait_serial(r"(?i)password: ", 20, mark):
+            return False, f"no password prompt for {account}"
+        mark = vm.mark()
+        vm.type(f"{password}\n")
+    if shell_re is not None and not vm.wait_serial(shell_re, 20, mark):
+        return False, f"no {account} shell"
+    return True, None
+
+
 def root_shell(vm, timeout):
-    if not vm.wait_serial(r"login: ", timeout):
-        return False
-    vm.type("root\n")
-    if not vm.wait_serial(r"(?i)password: ", 20):
-        return False
-    vm.type("password\n")
-    return bool(vm.wait_serial(r"root:.*# ", 20))
+    return login(vm, "root", "password", r"root:.*# ", since=0, timeout=timeout)[0]
 
 
 def run_status(vm, line, timeout=120):
@@ -7626,21 +7639,16 @@ def reboot_to_user(vm, args):
     """From `user`'s serial login shell: logs out, reboots as root with `shutdown -r`, and logs in as `user` again; returns a problem or None."""
     since = vm.mark()
     vm.type("exit\n")
-    if not vm.wait_serial(r"login: ", args.timeout, since):
-        return "no login prompt after logging out"
-    since = vm.mark()
-    vm.type("root\n")
-    if not vm.wait_serial(r"(?i)password: ", 20, since):
-        return "no password prompt for root"
-    vm.type("password\n")
-    if not vm.wait_serial(r"root:.*# ", 20, since):
-        return "no root shell"
+    ok, err = login(vm, "root", "password", r"root:.*# ", since, timeout=args.timeout)
+    if not ok:
+        return "no login prompt after logging out" if err == "no login prompt" else err
     since = vm.mark()
     vm.type("shutdown -r\n")
     if not vm.wait_serial(r"login: ", args.timeout * 2, since):
         return "no login prompt after the reboot"
+    time.sleep(PROMPT_REDRAW_S)
     vm.type("user\n")
-    time.sleep(3)
+    time.sleep(PROMPT_REDRAW_S)
     return None
 
 
@@ -7823,28 +7831,23 @@ def test_agent_scope(vm, args):
 
     since = vm.mark()
     vm.type("exit\n")
-    if not vm.wait_serial(r"login: ", args.timeout, since):
-        problems.append("no login prompt after logging out")
+    ok, err = login(vm, "root", "password", r"root:.*# ", since, timeout=args.timeout)
+    if not ok:
+        problems.append("no login prompt after logging out" if err == "no login prompt" else err)
     else:
-        vm.type("root\n")
-        if vm.wait_serial(r"(?i)password: ", 20, since):
-            vm.type("password\n")
-            time.sleep(3)
-            _, output = run("scdisk0", "ferrion-run-probe disk")
-            if "ROUTE raw-disk REACHED" not in output:
-                controls.append("raw-disk as root without ferrion-run")
-            else:
-                counted.append("raw-disk (root)")
-                _, output = run("scdisk1", "ferrion-run ferrion-run-probe disk")
-                if "ROUTE raw-disk REFUSED" not in output:
-                    problems.append("route raw-disk (root) reached a disk under ferrion-run")
-                _, output = run("scdisk2", "ferrion-run ferrion-run-probe schemes")
-                found = re.search(r"SCHEMES (.*)", output)
-                rootns = found.group(1).split() if found else []
-                if not found or set(rootns) - SCOPE_SCHEMES:
-                    problems.append(f"root's session namespace holds {rootns}")
+        _, output = run("scdisk0", "ferrion-run-probe disk")
+        if "ROUTE raw-disk REACHED" not in output:
+            controls.append("raw-disk as root without ferrion-run")
         else:
-            problems.append("no password prompt for root")
+            counted.append("raw-disk (root)")
+            _, output = run("scdisk1", "ferrion-run ferrion-run-probe disk")
+            if "ROUTE raw-disk REFUSED" not in output:
+                problems.append("route raw-disk (root) reached a disk under ferrion-run")
+            _, output = run("scdisk2", "ferrion-run ferrion-run-probe schemes")
+            found = re.search(r"SCHEMES (.*)", output)
+            rootns = found.group(1).split() if found else []
+            if not found or set(rootns) - SCOPE_SCHEMES:
+                problems.append(f"root's session namespace holds {rootns}")
     (vm.out / "agent-scope.txt").write_text("".join(log))
     summary = (f"{len(counted)} routes, {len(counted) - sum(1 for p in problems if p.startswith('route '))} "
                f"refused under ferrion-run; namespace {' '.join(namespace)}")
