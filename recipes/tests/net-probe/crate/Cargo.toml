@@ -1,0 +1,10 @@
+[package]
+name = "net-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Network probe for FerrionOS lab checks and measurements"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
