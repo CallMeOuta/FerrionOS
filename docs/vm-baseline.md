@@ -102,3 +102,64 @@ The first match on both cache-enabled runs validates shipped directory timestamp
 Final-image checks: directory-fsync, boot and shells pass (`fxstart-final/`); headless local/HTTPS and CJK glyph/reference and regional-family checks pass (`fxstart-accepted/`). The shared shell-prompt helper fixes page-setup races under slow Nushell startup. All directories above are under `build/worktrees/fxstart/build/`.
 
 The complete startup performance goal is **not accepted**: screenshots intermittently stall with either cold or reused profiles (issue `.scratch/firefox/issues/05-startup-stall.md`). Cold remote-settings initialization now executes record inserts and COMMIT, but reopening the database still fails with `SQLITE_IOERR_LOCK` (3850), including in an independent read-only SQLite reader. Issue 02 remains blocked on FileLocks; persistence readback and error-free warm starts are not proven. No locking, process-isolation or SQLite-durability workaround was applied.
+
+## Networking (NW0), 2026-11-22
+
+What the `x86_64` `net-test` image (`config/x86_64/net-test.toml`, `desktop.toml` plus `net-probe` and `iperf3` 3.20) does in the unprivileged network lab (`scripts/net_lab.py`, [ADR 0044](adr/0044-network-lab-and-baseline.md)) on both virtual network cards (`e1000` with `e1000d`, and `virtio-net` with `virtio-netd`), measured across two separate topologies: Topology A (`lab_tap`, guest-to-host over `tap0` with `dnsmasq` and `tc netem`) and Topology B (`qemu_user`, `-netdev user` inside the same isolated network namespace with no route out).
+
+- Conditions: QEMU 11.1.3 with KVM (`-machine q35 -smp 4 -m 2048 -enable-kvm -cpu host`), `vhost=off`, no CPU pinning, host `iperf3` 3.22.1, guest `iperf3` 3.20, component commits `kernel` `e7f1d4231d0f`, `base` `20f7573b4dc0`, `relibc` `74b5e7e31504`.
+- All four passes below ran inside quiet windows with `max_load1 <= 5.83` (`e1000` Pass 1: `load1` start `1.67`, end `2.17`, max `5.24`; `e1000` Pass 2: start `3.60`, end `1.91`, max `5.01`; `virtio-net` Pass 1: start `4.46`, end `3.86`, max `5.79`; `virtio-net` Pass 2: start `5.42`, end `2.93`, max `5.83`). They predated the live QEMU `nice`/policy recorder and `/proc` foreign-QEMU detector, so their `nice` column reads `not recorded` and they were compared with `scripts/vm-test.py --compare-net-perf --legacy-unrecorded-nice` (which prints `nice not recorded` in its verdict; the default comparison answers `BLOCKED` when `nice` is unrecorded).
+- Guest CPU columns (`ns/drv/tot`) report median `/scheme/sys/context` `ACTTIME` deltas in seconds per run for `netstack`, the card driver (`e1000d` or `virtio-netd`), and `tot` (sum over processes alive before and after the run). Guest `iperf3` CPU: not measured (its own `cpu_utilization_percent.host_total` fields read `0.0`).
+- Repeatability status: NW0's "twice within noise" rule (`|med1 - med2| <= max(0.10 * max(|med1|, |med2|), spread1, spread2)`) is **met for `e1000`** (`PASS compare-net-perf: 17 measures within noise (nice not recorded)`; `lab_tap.tcp_1b_echo` completed 2 of 3 runs in Pass 2 and is excluded from the checked count) and **not met for `virtio-net`** (`FAIL compare-net-perf: 2/18 outside noise (nice not recorded)`). The two `virtio-net` misses are `lab_tap.tcp_rx_rtt50ms` (`0.1833` vs `0.1179 MB/s`: across six `virtio-net` passes its runs fall in discrete steps of about `0.013 MB/s`, `0.118` to `0.197 MB/s`; NW1 addresses the cause) and `qemu_user.tcp_tx_4` (missed its bound by `0.01 MB/s`: `13.64` against `15.67 MB/s`, bound `2.02`).
+- Notes on red and retried measures: `lab_tap.tcp_loopback` is a red finding on both cards (`unable to receive parameters from client: Operation already in progress`); `lab_tap.ping_100` receives `0/100` replies on both cards; 4-stream runs lost 1 of 3 runs on the control connection and were retried up to `MAX_IPERF_ATTEMPTS` (5) to collect 3 valid samples (cause: a separate open issue in the stack).
+- `net-basics` pre-NW1 status (with `net-hardening` passing on the same image and card): `e1000` passes 4 of 9 items (green: `2_idle_http_rtt`, `4_isn_and_ports`, `5_dns_reply_match`, `9_arp_cache_bound`; red: `1_full_size_frames`, `3_delayed_download_50ms`, `6_ping_100`, `7_tcp_nodelay_1b_echo`, `8_so_error_closed_port`), and `virtio-net` passes 3 of 9 items (same red items plus `2_idle_http_rtt`).
+
+### Topology A (`lab_tap`)
+
+| Measure | Card | Pass 1 median (spread, runs) | Pass 2 median (spread, runs) | Pass 1 / Pass 2 `max_load1` | Pass 1 / Pass 2 `nice` | Pass 1 CPU `ns/drv/tot` (s) | Within noise |
+|---|---|---:|---:|---:|---|---:|---|
+| `tcp_tx_1` (MB/s) | `e1000` | 51.21 (1.41, 3/3) | 49.35 (1.56, 3/3) | 3.26 / 4.37 | not recorded | 3.84 / 8.05 / 13.03 | Yes |
+| `tcp_tx_1` (MB/s) | `virtio-net` | 17.63 (0.64, 3/3) | 17.44 (2.49, 3/3) | 4.72 / 5.01 | not recorded | 1.67 / 8.86 / 13.28 | Yes |
+| `tcp_rx_1` (MB/s) | `e1000` | 70.61 (1.88, 3/3) | 69.63 (3.66, 3/3) | 3.98 / 5.01 | not recorded | 3.99 / 7.87 / 13.18 | Yes |
+| `tcp_rx_1` (MB/s) | `virtio-net` | 58.04 (4.80, 3/3) | 59.43 (0.92, 3/3) | 4.98 / 4.97 | not recorded | 3.22 / 8.14 / 14.54 | Yes |
+| `tcp_tx_4` (MB/s) | `e1000` | 57.10 (2.68, 3/3) | 58.31 (2.12, 3/3) | 4.04 / 5.01 | not recorded | 3.77 / 9.21 / 14.27 | Yes |
+| `tcp_tx_4` (MB/s) | `virtio-net` | 13.57 (3.39, 3/3) | 15.83 (5.27, 3/3) | 5.79 / 5.28 | not recorded | 1.31 / 6.41 / 10.68 | Yes |
+| `tcp_rx_4` (MB/s) | `e1000` | 76.27 (3.76, 3/3) | 75.52 (3.83, 3/3) | 5.24 / 4.67 | not recorded | 3.71 / 9.12 / 14.24 | Yes |
+| `tcp_rx_4` (MB/s) | `virtio-net` | 69.39 (1.23, 3/3) | 72.36 (2.24, 3/3) | 4.76 / 5.20 | not recorded | 2.68 / 8.79 / 14.94 | Yes |
+| `udp_1200` (MB/s, 10M target) | `e1000` | 1.2491 (0.0011, 3/3, 0% loss, 0.052 ms jit) | 1.2487 (0.0003, 3/3, 0% loss, 0.047 ms jit) | 5.24 / 4.65 | not recorded | 0.30 / 0.45 / 1.58 | Yes |
+| `udp_1200` (MB/s, 10M target) | `virtio-net` | 1.2493 (0.0013, 3/3, 0% loss, 0.147 ms jit) | 1.2492 (0.0009, 3/3, 0% loss, 0.132 ms jit) | 4.59 / 5.20 | not recorded | 0.17 / 0.67 / 1.93 | Yes |
+| `tcp_rx_rtt50ms` (MB/s) | `e1000` | 1.2183 (0.0137, 3/3) | 1.2186 (0.0133, 3/3) | 3.52 / 3.32 | not recorded | 0.18 / 0.39 / 1.42 | Yes |
+| `tcp_rx_rtt50ms` (MB/s) | `virtio-net` | 0.1833 (0.0263, 3/3) | 0.1179 (0.0131, 3/3) | 3.28 / 3.88 | not recorded | 0.02 / 0.07 / 0.94 | No (discrete steps) |
+| `tcp_rx_rtt50ms_loss1pct` (MB/s) | `e1000` | 0.5108 (0.2094, 3/3) | 0.4190 (0.1049, 3/3) | 3.01 / 2.36 | not recorded | 0.07 / 0.16 / 1.04 | Yes |
+| `tcp_rx_rtt50ms_loss1pct` (MB/s) | `virtio-net` | 0.0786 (0.0393, 3/3) | 0.0786 (0.0132, 3/3) | 3.01 / 3.33 | not recorded | 0.01 / 0.07 / 0.94 | Yes |
+| `tcp_loopback` | `e1000` | red (`Operation already in progress`) | red (`Operation already in progress`) | 2.17 / 1.91 | not recorded | — | Red |
+| `tcp_loopback` | `virtio-net` | red (`Operation already in progress`) | red (`Operation already in progress`) | 2.44 / 3.33 | not recorded | — | Red |
+| `idle_http_rtt` (ms, p50) | `e1000` | 1.474 (0.164, 3/3, max 8.464) | 1.457 (0.107, 3/3, max 4.234) | 2.20 / 1.86 | not recorded | 0.01 / 0.01 / 0.78 | Yes |
+| `idle_http_rtt` (ms, p50) | `virtio-net` | 16.904 (413.019, 3/3, max 504.736) | 16.624 (328.345, 3/3, max 505.520) | 2.44 / 4.27 | not recorded | 0.01 / 0.06 / 0.86 | Yes |
+| `tcp_1b_echo` (ms, p50) | `e1000` | 0.141 (0.006, 3/3, p99 0.409) | 0.111 (0.065, 2/3, p99 1.224) | 2.04 / 1.77 | not recorded | 0.01 / 0.02 / 0.39 | Excluded (2/3 runs in Pass 2) |
+| `tcp_1b_echo` (ms, p50) | `virtio-net` | 0.119 (0.006, 3/3, p99 503.541) | 0.137 (0.129, 3/3, p99 503.535) | 2.86 / 3.21 | not recorded | 0.01 / 0.03 / 0.56 | Yes |
+| `udp_1b_echo` (ms, p50) | `e1000` | 0.121 (0.068, 3/3, p99 0.442) | 0.112 (0.027, 3/3, p99 0.273) | 2.04 / 1.87 | not recorded | 0.01 / 0.01 / 0.37 | Yes |
+| `udp_1b_echo` (ms, p50) | `virtio-net` | 0.128 (0.031, 3/3, p99 503.490) | 0.107 (0.019, 3/3, p99 503.396) | 3.12 / 3.19 | not recorded | 0.01 / 0.03 / 0.57 | Yes |
+| `ping_100` | `e1000` | no_reply (0/100) | no_reply (0/100) | — | not recorded | — | Red |
+| `ping_100` | `virtio-net` | no_reply (0/100) | no_reply (0/100) | — | not recorded | — | Red |
+
+### Topology B (`qemu_user`)
+
+| Measure | Card | Pass 1 median (spread, runs) | Pass 2 median (spread, runs) | Pass 1 / Pass 2 `max_load1` | Pass 1 / Pass 2 `nice` | Pass 1 CPU `ns/drv/tot` (s) | Within noise |
+|---|---|---:|---:|---:|---|---:|---|
+| `tcp_tx_1` (MB/s) | `e1000` | 46.63 (1.13, 3/3) | 46.03 (1.83, 3/3) | 3.04 / 3.24 | not recorded | 4.09 / 7.80 / 13.03 | Yes |
+| `tcp_tx_1` (MB/s) | `virtio-net` | 13.29 (3.03, 3/3) | 12.93 (1.64, 3/3) | 4.18 / 4.71 | not recorded | 1.40 / 6.35 / 10.17 | Yes |
+| `tcp_rx_1` (MB/s) | `e1000` | 75.91 (2.86, 3/3) | 76.56 (4.86, 3/3) | 3.89 / 3.93 | not recorded | 4.36 / 7.51 / 13.01 | Yes |
+| `tcp_rx_1` (MB/s) | `virtio-net` | 60.47 (1.00, 3/3) | 55.49 (2.56, 3/3) | 4.18 / 5.33 | not recorded | 3.17 / 7.54 / 13.01 | Yes |
+| `tcp_tx_4` (MB/s) | `e1000` | 62.18 (3.01, 3/3) | 62.29 (3.27, 3/3) | 3.89 / 4.17 | not recorded | 3.97 / 8.76 / 13.86 | Yes |
+| `tcp_tx_4` (MB/s) | `virtio-net` | 13.64 (2.02, 3/3) | 15.67 (0.85, 3/3) | 4.73 / 5.52 | not recorded | 1.56 / 7.86 / 12.52 | No (diff 2.03 > 2.02) |
+| `tcp_rx_4` (MB/s) | `e1000` | 73.30 (3.67, 3/3) | 70.93 (16.03, 3/3) | 3.96 / 4.16 | not recorded | 4.62 / 7.36 / 13.39 | Yes |
+| `tcp_rx_4` (MB/s) | `virtio-net` | 66.95 (1.69, 3/3) | 67.10 (5.07, 3/3) | 5.37 / 5.83 | not recorded | 3.01 / 9.08 / 15.62 | Yes |
+| `udp_1200` (MB/s, 10M target) | `e1000` | 1.2487 (0.0005, 3/3, 0% loss, 0.047 ms jit) | 1.2489 (0.0007, 3/3, 0% loss, 0.062 ms jit) | 3.96 / 3.90 | not recorded | 0.32 / 0.46 / 1.59 | Yes |
+| `udp_1200` (MB/s, 10M target) | `virtio-net` | 1.2488 (0.0004, 3/3, 0% loss, 0.090 ms jit) | 1.2494 (0.0009, 3/3, 0% loss, 0.071 ms jit) | 5.37 / 5.83 | not recorded | 0.19 / 0.73 / 2.07 | Yes |
+| `idle_http_rtt` (ms, p50) | `e1000` | 1.686 (0.350, 3/3, max 5.476) | 1.708 (0.177, 3/3, max 4.564) | 3.03 / 2.71 | not recorded | 0.06 / 0.02 / 0.84 | Yes |
+| `idle_http_rtt` (ms, p50) | `virtio-net` | 8.270 (3.944, 3/3, max 483.609) | 9.922 (480.170, 3/3, max 1003.593) | 4.37 / 4.78 | not recorded | 0.06 / 0.08 / 0.95 | Yes |
+| `tcp_1b_echo` (ms, p50) | `e1000` | 0.153 (0.063, 3/3, p99 0.482) | 0.145 (0.070, 3/3, p99 0.375) | 2.28 / 1.91 | not recorded | 0.01 / 0.02 / 0.40 | Yes |
+| `tcp_1b_echo` (ms, p50) | `virtio-net` | 0.173 (0.091, 3/3, p99 12.310) | 0.121 (0.054, 3/3, p99 12.298) | 4.11 / 3.52 | not recorded | 0.01 / 0.03 / 0.48 | Yes |
+| `udp_1b_echo` (ms, p50) | `e1000` | 0.134 (0.002, 3/3, p99 0.415) | 0.137 (0.005, 3/3, p99 0.470) | 2.28 / 1.91 | not recorded | 0.01 / 0.01 / 0.37 | Yes |
+| `udp_1b_echo` (ms, p50) | `virtio-net` | 0.124 (0.029, 3/3, p99 503.687) | 0.105 (0.016, 3/3, p99 503.274) | 4.39 / 3.48 | not recorded | 0.01 / 0.03 / 0.62 | Yes |
