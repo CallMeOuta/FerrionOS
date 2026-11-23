@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FerrionOS contributors <contributors@ferrion.invalid>
+Date: Sun, 22 Nov 2026 22:24:00 -0800
+Subject: [PATCH] backend: Fall back to composited cursor without a cursor plane
+
+Treat ErrorKind::Unsupported from ferrion-wm-backend cursor_size and
+set_cursor as an output without a hardware cursor plane (such as vesad)
+and return software_cursor = true so niri composites the pointer into
+the output frame.
+---
+--- a/src/backend/ferrion.rs	2026-11-22 22:25:08.549099894 -0800
++++ b/src/backend/ferrion.rs	2026-11-22 22:25:08.549145913 -0800
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+-// Added for FerrionOS on 2026-11-21 to niri's backend interface.
++// Added for FerrionOS on 2026-11-21, modified 2026-11-22, to niri's backend interface.
+ // Input adapter follows FerrionOS's MIT ferrion-wm-backend; its notices are
+ // retained in ferrion-vendor/backend/LICENSE.
+ use std::collections::{HashMap, VecDeque};
+@@ -428,13 +428,27 @@
+                 Display::ChangePending => unreachable!("update_cursor requires Active"),
+             };
+             if needs_hide {
+-                self.native.set_cursor(None, (0, 0), (0, 0))?;
++                match self.native.set_cursor(None, (0, 0), (0, 0)) {
++                    Ok(()) => {}
++                    Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
++                    Err(err) => return Err(err.into()),
++                }
+                 if let Display::Active(active) = &mut self.display {
+                     active.cursor = CursorPlane::Hidden;
+                 }
+             }
+             return Ok(false);
+         }
++        let capacity = match self.native.cursor_size() {
++            Ok(capacity) => capacity,
++            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
++                if let Display::Active(active) = &mut self.display {
++                    active.cursor = CursorPlane::Hidden;
++                }
++                return Ok(true);
++            }
++            Err(err) => return Err(err.into()),
++        };
+         let scale = Scale::from(self.output.current_scale().fractional_scale());
+         let (mut texture, sync, geo) = render_to_encompassing_texture(
+             &mut self.renderer,
+@@ -451,7 +465,6 @@
+             .to_physical_precise_round(scale);
+         let hotspot = position - geo.loc;
+         let size = (geo.size.w as u32, geo.size.h as u32);
+-        let capacity = self.native.cursor_size()?;
+         if size.0 > capacity.0
+             || size.1 > capacity.1
+             || hotspot.x < 0
+@@ -464,7 +477,11 @@
+                 Display::ChangePending => unreachable!("update_cursor requires Active"),
+             };
+             if needs_hide {
+-                self.native.set_cursor(None, (0, 0), (0, 0))?;
++                match self.native.set_cursor(None, (0, 0), (0, 0)) {
++                    Ok(()) => {}
++                    Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
++                    Err(err) => return Err(err.into()),
++                }
+                 if let Display::Active(active) = &mut self.display {
+                     active.cursor = CursorPlane::Hidden;
+                 }
+@@ -487,7 +504,16 @@
+         };
+         if changed {
+             if let CursorPlane::Shown(ref bytes, sz, hs) = next {
+-                self.native.set_cursor(Some(bytes), sz, hs)?;
++                match self.native.set_cursor(Some(bytes), sz, hs) {
++                    Ok(()) => {}
++                    Err(err) if err.kind() == io::ErrorKind::Unsupported => {
++                        if let Display::Active(active) = &mut self.display {
++                            active.cursor = CursorPlane::Hidden;
++                        }
++                        return Ok(true);
++                    }
++                    Err(err) => return Err(err.into()),
++                }
+             }
+             if let Display::Active(active) = &mut self.display {
+                 active.cursor = next;

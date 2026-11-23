@@ -28,15 +28,25 @@ pub struct Backend {
     vt: usize,
 }
 
+struct ActiveOutput {
+    drm: Arc<DrmHandle>,
+    dimensions: (u32, u32),
+    cursor: Option<Cursor>,
+}
+
 enum DisplayPhase {
-    Active { cursor: Cursor },
-    ChangeQueued { cursor: Cursor },
+    Active(ActiveOutput),
+    ChangeQueued(ActiveOutput),
     ChangePending,
     Stopped,
 }
 
 fn display_change_pending_err() -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, "display change pending")
+}
+
+fn no_cursor_plane_err() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "no hardware cursor plane")
 }
 
 struct Shared {
@@ -58,7 +68,6 @@ struct Cursor {
     drm: Arc<DrmHandle>,
     crtc: crtc::Handle,
     buffer: DumbBuffer,
-    dimensions: (u32, u32),
 }
 
 impl Backend {
@@ -70,10 +79,10 @@ impl Backend {
         let epoch = Instant::now();
         let input = Arc::new(ConsumerHandle::new_vt()?);
         let vt = consumer_vt(&input)?;
-        let (display, cursor) = Display::open(&input)?;
+        let (display, output) = Display::open(&input)?;
         let (stop_reader, stop_writer) = stop_pipe()?;
         let shared = Arc::new(Shared {
-            phase: Mutex::new(DisplayPhase::Active { cursor }),
+            phase: Mutex::new(DisplayPhase::Active(output)),
             changed: Condvar::new(),
             failure: Mutex::new(None),
             wakeup: Box::new(wakeup),
@@ -132,7 +141,7 @@ impl Backend {
         let phase = self.shared.phase.lock().unwrap();
         assert!(matches!(
             *phase,
-            DisplayPhase::Active { .. } | DisplayPhase::ChangeQueued { .. }
+            DisplayPhase::Active(_) | DisplayPhase::ChangeQueued(_)
         ));
         drop(phase);
         self.display.buffer.as_mut().unwrap().shadow_buf()
@@ -143,8 +152,8 @@ impl Backend {
         {
             let phase = self.shared.phase.lock().unwrap();
             match *phase {
-                DisplayPhase::Active { .. } => {}
-                DisplayPhase::ChangeQueued { .. }
+                DisplayPhase::Active(_) => {}
+                DisplayPhase::ChangeQueued(_)
                 | DisplayPhase::ChangePending
                 | DisplayPhase::Stopped => {
                     return Err(display_change_pending_err());
@@ -169,7 +178,7 @@ impl Backend {
             }),
             Err(error) => {
                 let phase = self.shared.phase.lock().unwrap();
-                if matches!(*phase, DisplayPhase::Active { .. }) {
+                if matches!(*phase, DisplayPhase::Active(_)) {
                     Err(error)
                 } else {
                     Err(display_change_pending_err())
@@ -184,7 +193,7 @@ impl Backend {
             Ok(BackendEvent::DisplayChanged) => {
                 let mut phase = self.shared.phase.lock().unwrap();
                 let prev = std::mem::replace(&mut *phase, DisplayPhase::ChangePending);
-                assert!(matches!(prev, DisplayPhase::ChangeQueued { .. }));
+                assert!(matches!(prev, DisplayPhase::ChangeQueued(_)));
                 drop(prev);
                 Ok(Some(BackendEvent::DisplayChanged))
             }
@@ -203,7 +212,10 @@ impl Backend {
     pub fn cursor_size(&self) -> io::Result<(u32, u32)> {
         let phase = self.shared.phase.lock().unwrap();
         match &*phase {
-            DisplayPhase::Active { cursor } | DisplayPhase::ChangeQueued { cursor } => {
+            DisplayPhase::Active(output) | DisplayPhase::ChangeQueued(output) => {
+                let Some(cursor) = &output.cursor else {
+                    return Err(no_cursor_plane_err());
+                };
                 Ok((cursor.buffer.size().0, cursor.buffer.size().1))
             }
             DisplayPhase::ChangePending | DisplayPhase::Stopped => {
@@ -220,13 +232,14 @@ impl Backend {
     ) -> io::Result<()> {
         self.check_failure()?;
         let mut phase = self.shared.phase.lock().unwrap();
-        let cursor = match &mut *phase {
-            DisplayPhase::Active { cursor } => cursor,
-            DisplayPhase::ChangeQueued { .. }
-            | DisplayPhase::ChangePending
-            | DisplayPhase::Stopped => {
+        let output = match &mut *phase {
+            DisplayPhase::Active(output) => output,
+            DisplayPhase::ChangeQueued(_) | DisplayPhase::ChangePending | DisplayPhase::Stopped => {
                 return Err(display_change_pending_err());
             }
+        };
+        let Some(cursor) = output.cursor.as_mut() else {
+            return Err(no_cursor_plane_err());
         };
         let Some(pixels) = pixels else {
             #[allow(deprecated)]
@@ -272,9 +285,7 @@ impl Backend {
         assert!(matches!(*phase, DisplayPhase::ChangePending));
         let (display, replacement) = Display::open(&self.input)?;
         self.display = display;
-        *phase = DisplayPhase::Active {
-            cursor: replacement,
-        };
+        *phase = DisplayPhase::Active(replacement);
         self.shared.changed.notify_one();
         Ok(())
     }
@@ -300,7 +311,11 @@ impl Drop for Backend {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        if let DisplayPhase::Active { cursor } = prev {
+        if let DisplayPhase::Active(ActiveOutput {
+            cursor: Some(cursor),
+            ..
+        }) = prev
+        {
             #[allow(deprecated)]
             let _ = cursor
                 .drm
@@ -310,7 +325,7 @@ impl Drop for Backend {
 }
 
 impl Display {
-    fn open(input: &ConsumerHandle) -> io::Result<(Self, Cursor)> {
+    fn open(input: &ConsumerHandle) -> io::Result<(Self, ActiveOutput)> {
         let drm = Arc::new(DrmHandle::from_file(input.open_display()?)?);
         drm.set_client_capability(ClientCapability::UniversalPlanes, true)?;
         // Virtual devices use hotspots; physical devices may legitimately omit
@@ -322,6 +337,7 @@ impl Display {
             true,
         )?;
         let resources = drm.resource_handles()?;
+        let mut fallback = None;
         for &connector in resources.connectors() {
             let info = drm.get_connector(connector, true)?;
             if info.state() != connector::State::Connected {
@@ -336,40 +352,67 @@ impl Display {
             }
             for &encoder in info.encoders() {
                 for crtc in resources.filter_crtcs(drm.get_encoder(encoder)?.possible_crtcs()) {
-                    if !has_cursor(&drm, crtc)? {
-                        continue;
+                    if has_cursor(&drm, crtc)? {
+                        return Self::setup_output(drm, connector, mode, dimensions, crtc, true);
                     }
-                    let buffer = CpuBackedBuffer::new(&drm, dimensions, DrmFourcc::Argb8888, 32)?;
-                    let framebuffer = match drm.add_framebuffer(buffer.buffer(), 32, 32) {
-                        Ok(fb) => fb,
-                        Err(error) => {
-                            let _ = buffer.destroy(&drm);
-                            return Err(error);
-                        }
-                    };
-                    let mut display = Self {
-                        drm: Arc::clone(&drm),
-                        framebuffer,
-                        buffer: Some(buffer),
-                        dimensions,
-                        refresh: (mode.vrefresh() > 0)
-                            .then(|| Duration::from_secs_f64(1.0 / f64::from(mode.vrefresh()))),
-                    };
-                    display.buffer.as_mut().unwrap().shadow_buf().fill(0);
-                    display
-                        .buffer
-                        .as_mut()
-                        .unwrap()
-                        .sync_rect(0, 0, dimensions.0, dimensions.1);
-                    drm.set_crtc(crtc, Some(framebuffer), (0, 0), &[connector], Some(mode))?;
-                    let cursor = Cursor::new(Arc::clone(&drm), crtc, dimensions)?;
-                    return Ok((display, cursor));
+                    if fallback.is_none() {
+                        fallback = Some((connector, mode, dimensions, crtc));
+                    }
                 }
             }
         }
+        if let Some((connector, mode, dimensions, crtc)) = fallback {
+            return Self::setup_output(drm, connector, mode, dimensions, crtc, false);
+        }
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "no connected DRM output with a hardware cursor plane",
+            "no connected DRM output",
+        ))
+    }
+
+    fn setup_output(
+        drm: Arc<DrmHandle>,
+        connector: connector::Handle,
+        mode: drm::control::Mode,
+        dimensions: (u32, u32),
+        crtc: crtc::Handle,
+        with_cursor: bool,
+    ) -> io::Result<(Self, ActiveOutput)> {
+        let buffer = CpuBackedBuffer::new(&drm, dimensions, DrmFourcc::Argb8888, 32)?;
+        let framebuffer = match drm.add_framebuffer(buffer.buffer(), 32, 32) {
+            Ok(fb) => fb,
+            Err(error) => {
+                let _ = buffer.destroy(&drm);
+                return Err(error);
+            }
+        };
+        let mut display = Self {
+            drm: Arc::clone(&drm),
+            framebuffer,
+            buffer: Some(buffer),
+            dimensions,
+            refresh: (mode.vrefresh() > 0)
+                .then(|| Duration::from_secs_f64(1.0 / f64::from(mode.vrefresh()))),
+        };
+        display.buffer.as_mut().unwrap().shadow_buf().fill(0);
+        display
+            .buffer
+            .as_mut()
+            .unwrap()
+            .sync_rect(0, 0, dimensions.0, dimensions.1);
+        drm.set_crtc(crtc, Some(framebuffer), (0, 0), &[connector], Some(mode))?;
+        let cursor = if with_cursor {
+            Some(Cursor::new(Arc::clone(&drm), crtc)?)
+        } else {
+            None
+        };
+        Ok((
+            display,
+            ActiveOutput {
+                drm,
+                dimensions,
+                cursor,
+            },
         ))
     }
 }
@@ -405,7 +448,7 @@ fn has_cursor(drm: &DrmHandle, crtc: crtc::Handle) -> io::Result<bool> {
 }
 
 impl Cursor {
-    fn new(drm: Arc<DrmHandle>, crtc: crtc::Handle, dimensions: (u32, u32)) -> io::Result<Self> {
+    fn new(drm: Arc<DrmHandle>, crtc: crtc::Handle) -> io::Result<Self> {
         let width = u32::try_from(drm.get_driver_capability(DriverCapability::CursorWidth)?)
             .map_err(|_| io::Error::other("cursor width overflows"))?;
         let height = u32::try_from(drm.get_driver_capability(DriverCapability::CursorHeight)?)
@@ -420,7 +463,6 @@ impl Cursor {
             buffer: drm.create_dumb_buffer((width, height), DrmFourcc::Argb8888, 32)?,
             drm,
             crtc,
-            dimensions,
         };
         let pitch = cursor.buffer.pitch() as usize;
         {
@@ -455,12 +497,12 @@ fn queue_display_change(shared: &Shared) -> bool {
     let mut phase = shared.phase.lock().unwrap();
     let prev = std::mem::replace(&mut *phase, DisplayPhase::Stopped);
     match prev {
-        DisplayPhase::Active { cursor } => {
-            *phase = DisplayPhase::ChangeQueued { cursor };
+        DisplayPhase::Active(output) => {
+            *phase = DisplayPhase::ChangeQueued(output);
             true
         }
         DisplayPhase::Stopped => false,
-        DisplayPhase::ChangeQueued { .. } | DisplayPhase::ChangePending => {
+        DisplayPhase::ChangeQueued(_) | DisplayPhase::ChangePending => {
             unreachable!("reader queued a second display change before reconfigure")
         }
     }
@@ -480,8 +522,8 @@ fn read_input(
             let mut phase = shared.phase.lock().unwrap();
             loop {
                 match &*phase {
-                    DisplayPhase::Active { cursor } => break Arc::clone(&cursor.drm),
-                    DisplayPhase::ChangeQueued { .. } | DisplayPhase::ChangePending => {
+                    DisplayPhase::Active(output) => break Arc::clone(&output.drm),
+                    DisplayPhase::ChangeQueued(_) | DisplayPhase::ChangePending => {
                         phase = shared.changed.wait(phase).unwrap();
                     }
                     DisplayPhase::Stopped => return Ok(()),
@@ -564,29 +606,31 @@ fn read_input(
                 ConsumerHandleEvent::Events(events) => {
                     for wire in events {
                         let phase = shared.phase.lock().unwrap();
-                        let cursor = match &*phase {
-                            DisplayPhase::Active { cursor } => cursor,
+                        let output = match &*phase {
+                            DisplayPhase::Active(output) => output,
                             DisplayPhase::Stopped => return Ok(()),
-                            DisplayPhase::ChangeQueued { .. } | DisplayPhase::ChangePending => {
+                            DisplayPhase::ChangeQueued(_) | DisplayPhase::ChangePending => {
                                 unreachable!("reader converted input outside Active phase")
                             }
                         };
                         for event in state
-                            .convert(wire.code, wire.a, wire.b, read_us, cursor.dimensions)
+                            .convert(wire.code, wire.a, wire.b, read_us, output.dimensions)
                             .into_iter()
                             .flatten()
                         {
                             if let Input::Motion(motion) = event {
-                                assert!(matches!(&*phase, DisplayPhase::Active { .. }));
-                                #[allow(deprecated)]
-                                cursor.drm.move_cursor(cursor.crtc, (motion.x, motion.y))?;
-                                let timing = CursorTiming {
-                                    read_us,
-                                    completed_us: elapsed_us(epoch),
-                                    x: motion.x,
-                                    y: motion.y,
-                                };
-                                send(&sender, shared, BackendEvent::CursorTiming(timing))?;
+                                if let Some(cursor) = &output.cursor {
+                                    assert!(matches!(&*phase, DisplayPhase::Active(_)));
+                                    #[allow(deprecated)]
+                                    cursor.drm.move_cursor(cursor.crtc, (motion.x, motion.y))?;
+                                    let timing = CursorTiming {
+                                        read_us,
+                                        completed_us: elapsed_us(epoch),
+                                        x: motion.x,
+                                        y: motion.y,
+                                    };
+                                    send(&sender, shared, BackendEvent::CursorTiming(timing))?;
+                                }
                             }
                             send(&sender, shared, BackendEvent::Input(event))?;
                         }
