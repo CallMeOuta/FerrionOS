@@ -2852,6 +2852,13 @@ FIREFOX_WINDOW_DIR = "/tmp/firefox-window"
 FIREFOX_WINDOW_PAGES = {"first": ("1f8a4c", "First page"), "second": ("c2185b", "Second page")}
 FIREFOX_WINDOW_KEYS = {" ": "spc", "-": "minus", ".": "dot", "/": "slash", ":": "shift-semicolon", "\n": "ret"}
 FIREFOX_WINDOW_UNITS = {"KB": 1 / 1024, "MB": 1, "GB": 1024}
+FIREFOX_ADDR_FOCUS_WAIT_S = 15
+FIREFOX_ADDR_FOCUS_ATTEMPTS = 2
+FIREFOX_ADDR_FOCUS_POLL_S = 0.2
+FIREFOX_ADDR_BAR_TOP_OFFSET = 48
+FIREFOX_ADDR_BAR_BOTTOM_OFFSET = 8
+FIREFOX_ADDR_BAR_SIDE_MARGIN = 120
+FIREFOX_ADDR_SELECTED_MIN_PIXELS = 500
 GUEST_WATCH = ("exec 7>&1; coproc GWATCH { exec 1>&7 2>&7; cd /scheme/sys || exit; "
                "while read -r tag files; do echo \"WATCH-BEGIN $tag\"; for f in $files; do "
                "while IFS= read -r l; do echo \"W:$f $l\"; done < \"$f\"; done; echo \"WATCH-END $tag\"; done; }")
@@ -2895,6 +2902,29 @@ def firefox_window_chrome(frame, page):
         return 0
     return len({frame.rgb[(y * frame.width + x) * 3:(y * frame.width + x) * 3 + 3]
                 for y in range(top - 40, top) for x in range(left, right + 1)})
+
+
+def firefox_window_addr_selected(frame, page):
+    """Reports whether Firefox's address bar above `page` shows the blue selection highlight."""
+    left, top, right, _ = page["bounds"]
+    assert left < right and top >= 0
+    if top < FIREFOX_ADDR_BAR_TOP_OFFSET:
+        return False
+    band_top = top - FIREFOX_ADDR_BAR_TOP_OFFSET
+    band_bottom = top - FIREFOX_ADDR_BAR_BOTTOM_OFFSET
+    band_left = min(left + FIREFOX_ADDR_BAR_SIDE_MARGIN, right)
+    band_right = max(right - FIREFOX_ADDR_BAR_SIDE_MARGIN, band_left)
+    count = 0
+    for y in range(band_top, band_bottom):
+        row = y * frame.width
+        for x in range(band_left, band_right):
+            offset = (row + x) * 3
+            r, g, b = frame.rgb[offset], frame.rgb[offset + 1], frame.rgb[offset + 2]
+            if b > 170 and r < 100 and g < 170:
+                count += 1
+                if count >= FIREFOX_ADDR_SELECTED_MIN_PIXELS:
+                    return True
+    return False
 
 
 def guest_watch(vm, tag, files, timeout):
@@ -3004,10 +3034,31 @@ def test_firefox_window(vm, args):
         return finish(False, f"page painted but no Firefox toolbar above it: {results}")
     print(f"FIREFOX first page painted after {first_paint:.1f}s: {page}", flush=True)
 
+    def focus_address_bar(tag, current_page):
+        assert FIREFOX_ADDR_FOCUS_ATTEMPTS > 0 and FIREFOX_ADDR_FOCUS_WAIT_S > 0
+        started = time.monotonic()
+        frame = None
+        for _ in range(FIREFOX_ADDR_FOCUS_ATTEMPTS):
+            vm.command("sendkey ctrl-l")
+            attempt_deadline = time.monotonic() + FIREFOX_ADDR_FOCUS_WAIT_S
+            while time.monotonic() < attempt_deadline:
+                frame = vm.screenshot()
+                if firefox_window_addr_selected(frame, current_page):
+                    return True, round(time.monotonic() - started, 2), None
+                time.sleep(FIREFOX_ADDR_FOCUS_POLL_S)
+        elapsed = round(time.monotonic() - started, 2)
+        shot = f"firefox-window-focus-{tag}-{elapsed:.1f}s.png"
+        (frame or vm.screenshot()).save_png(vm.out / shot)
+        return False, elapsed, shot
+
     second_color = FIREFOX_WINDOW_PAGES["second"][0]
+    first_page = page
+    results["address_focus_s"] = {}
     time.sleep(5)
-    vm.command("sendkey ctrl-l")
-    time.sleep(1)
+    focused, focus_s, focus_shot = focus_address_bar("second", first_page)
+    results["address_focus_s"]["second"] = focus_s
+    if not focused:
+        return finish(False, f"address bar did not select after Ctrl+L for second page ({focus_s}s); see {focus_shot}")
     typed = time.monotonic()
     keys(f"file://{FIREFOX_WINDOW_DIR}/second.html\n")
     frame, page = wait_page(second_color, args.timeout)
@@ -3016,10 +3067,12 @@ def test_firefox_window(vm, args):
     frame.save_png(vm.out / "firefox-window-second.png")
     if not page:
         return finish(False, f"typing the second page's address did not show #{second_color}; see firefox-window-second.png")
-    print(f"FIREFOX second page loaded after {results['second_load_s']}s: {page}", flush=True)
+    print(f"FIREFOX second page loaded after {results['second_load_s']}s (focus {focus_s}s): {page}", flush=True)
 
-    vm.command("sendkey ctrl-l")
-    time.sleep(1)
+    focused, focus_s, focus_shot = focus_address_bar("https", page)
+    results["address_focus_s"]["https"] = focus_s
+    if not focused:
+        return finish(False, f"address bar did not select after Ctrl+L for example.com ({focus_s}s); see {focus_shot}")
     typed = time.monotonic()
     keys("https://example.com/\n")
     deadline = time.monotonic() + 600
@@ -3036,6 +3089,7 @@ def test_firefox_window(vm, args):
     if firefox_window_page(frame, second_color) or results["https"]["light_share"] < 0.5 or len(set(area)) < 3:
         return finish(False, f"https://example.com/ did not replace the second page: {results['https']}; see firefox-window-https.png")
     return finish(True, f"first paint {first_paint:.1f}s, toolbar colors {results['first_chrome_colors']}, "
+                        f"address_focus_s {results['address_focus_s']['second']}/{results['address_focus_s']['https']}, "
                         f"second page {results['second_load_s']}s, example.com {results['https_load_s']}s; see {vm.out}")
 
 
