@@ -1,4 +1,5 @@
 include = ["base.toml"]
+optional_include = ["my_hw-live-accounts.toml"]
 
 [general]
 filesystem_size = 256

@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-import tomllib
 
 MAX_IMAGE_BYTES = 4 * 1024 * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024
@@ -17,6 +16,7 @@ NVME_BYTES = 16 * CHUNK_BYTES
 MOUNT_STEPS = 200
 MAX_KEYS = 256
 MAX_TIMEOUT_SECONDS = 600
+KEY_HOLD_MILLISECONDS = 10
 FEATURES = ("system76_ec_debug", "lpss_debug")
 
 
@@ -148,28 +148,44 @@ def safety(root, image, scratch, out):
     (out / "safety.json").write_text(json.dumps(evidence, indent=2) + "\n")
 
 
+def credentials(root):
+    spec = importlib.util.spec_from_file_location("hw_stick", root / "scripts/hw-stick.py")
+    stick = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stick)
+    account, _ = stick.read_accounts()
+    password = stick.prompt_value("First-boot account password: ", hidden=True, limit=MAX_KEYS - 1)
+    if not password or not password.isascii() or not password.isprintable():
+        raise ValueError("VM keyboard rehearsal requires a printable ASCII password")
+    return account, password
+
+
 def keyboard(vm, text):
     if len(text) > MAX_KEYS:
         raise ValueError("first-boot keyboard input exceeds bound")
-    keys = {" ": "spc", "-": "minus", "/": "slash", ".": "dot", ">": "shift-dot", "\n": "ret"}
+    keys = {" ": "spc", "\n": "ret", "`": "grave_accent", "-": "minus", "=": "equal",
+            "[": "bracket_left", "]": "bracket_right", "\\": "backslash", ";": "semicolon",
+            "'": "apostrophe", ",": "comma", ".": "dot", "/": "slash"}
+    shifted = dict(zip("~_+{}|:\"<>?!@#$%^&*()", "`-=[]\\;',./1234567890"))
     for character in text:
-        if not ((character.isascii() and character.isalnum()) or character in keys):
+        if character in shifted:
+            base = shifted[character]
+            key = "shift-" + keys.get(base, base)
+        elif character.isascii() and character.isupper():
+            key = "shift-" + character.lower()
+        elif (character.isascii() and character.isalnum()) or character in keys:
+            key = keys.get(character, character)
+        else:
             raise ValueError("unsupported first-boot keyboard character")
-        vm.command("sendkey " + keys.get(character, character))
+        vm.command(f"sendkey {key} {KEY_HOLD_MILLISECONDS}")
         time.sleep(0.05)
 
 
-def test(args, out, root, vm_type):
+def test(args, out, root, vm_type, account, password):
     if args.arch != "x86_64":
         return False, "hw-live requires x86_64"
     if not 0 < args.timeout <= MAX_TIMEOUT_SECONDS:
         return False, f"hw-live timeout must be within {MAX_TIMEOUT_SECONDS} seconds"
     config_name = "my_hw_live" if args.config == "desktop" else args.config
-    config_path = root / "config" / f"{config_name}.toml"
-    account = tomllib.loads(config_path.read_text()).get("users", {}).get("root", {})
-    password = account.get("password", "")
-    if not password or password == "password" or len(password) > MAX_KEYS:
-        return False, "hw-live requires its own root password in a private config/my_*.toml"
     args = argparse.Namespace(**{**vars(args), "config": config_name})
     build = root / "build/x86_64" / config_name
     image = build / "redox-live.iso"
@@ -222,16 +238,26 @@ def test(args, out, root, vm_type):
                     login_seconds = vm.elapsed()
                 else:
                     time.sleep(2)
-                    keyboard(vm, "root\n")
+                    keyboard(vm, account + "\n")
                     time.sleep(1)
                     keyboard(vm, password + "\n")
                     time.sleep(2)
-                    keyboard(vm, "echo hw-live-keyboard > /scheme/debug\n")
-                    if not vm.wait_serial("hw-live-keyboard", args.timeout):
-                        raise RuntimeError(f"{cpus}/{input_type}: keyboard login and command failed")
+                    keyboard(vm, f"id > /home/{account}/hw-live-id\n")
+                serial_start = vm.mark()
+                vm.type(account + "\n")
+                if not vm.wait_serial(r"(?i)password: ", args.timeout, serial_start):
+                    raise RuntimeError("private account did not receive a password prompt")
+                vm.type(password + "\n")
+                time.sleep(3)
+                command_start = vm.mark()
+                vm.type("id\n" if desktop else f"cat /home/{account}/hw-live-id\n")
+                identity = vm.wait_serial(r"uid=1000[^\r\n]*gid=1000", args.timeout, command_start)
+                if not identity:
+                    raise RuntimeError(f"{cpus}/{input_type}: private account login or id failed")
+                (case / "id.txt").write_text(identity.group(0) + "\n")
                 frame.save_png(case / "login.png")
                 results.append({"cpus": cpus, "keyboard": input_type, "width": frame.width, "height": frame.height,
-                                "login_seconds": round(login_seconds, 3)})
+                                "login_seconds": round(login_seconds, 3), "account_uid": 1000})
             finally:
                 vm.close()
                 after = digest(disk)

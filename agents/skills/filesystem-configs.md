@@ -9,10 +9,12 @@ A filesystem config names the packages, files, users and size of one image. `mak
 The schema is `redox_installer::Config`, in upstream's installer crate and not in this repository: `src/config/` of `gitlab.redox-os.org/redox-os/installer` at the revision `Cargo.lock` pins, and after a first build also `recipes/core/installer/source/src/config/`. How it merges:
 
 - `include = ["base.toml"]` takes paths relative to the including file. Included configs merge in list order, and the including file merges last.
+- For private accounts, the image installer resolves `optional_include = ["my_accounts.toml"]` after required includes and before the including file. Only a missing file is skipped; malformed or unreadable files fail. Keep these inputs under the git-ignored `my_*` convention. This installer include does not add cookbook package dependencies.
 - `[general]` merges key by key, the later file winning: `filesystem_size` in MiB, `efi_partition_size`, `prompt` and others.
 - `[packages]` merges by name. `name = {}` installs the package with its package dependencies. `name = "<rule>"` also sets the recipe's rule (`source`, `binary`, `local`, `ignore`). `"ignore"` is how a config drops a package that an included config or a meta-package brings: `orbterm = "ignore"` in `config/desktop.toml`. An optional package is written `"<recipe>.<part>" = {}`.
 - `[[files]]` entries are appended, never replaced. To override a file from an included config, add an entry with the same `path` later in the order, as `config/desktop-minimal.toml` does to empty `30_console_switch`. An include brought in twice puts its entries in the order again at the second place: `config/desktop.toml` lists `server.toml` before `desktop-minimal.toml` because both include `minimal.toml`, and the other order let `minimal.toml`'s `30_console_switch` win again. Keys: `path`, `data`, and optionally `symlink` (then `data` is the link target), `directory`, `mode`, `uid`, `gid`, `recursive_chown`, `postinstall`, `append`.
 - `[users.<name>]` and `[groups.<name>]` merge by name, a later table replacing the earlier one whole.
+- A user's `password_hash` accepts an encoded Argon2 hash instead of `password`; supplying both fails. For first-boot images, use the terminal prompt in `scripts/hw-stick.py account`, which saves the hash privately; see [the USB rehearsal](../../docs/testing.md#first-boot-usb-rehearsal).
 
 ## What a change costs
 

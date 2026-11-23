@@ -1,0 +1,399 @@
+Source: https://gitlab.redox-os.org/redox-os/installer
+
+MIT License
+
+Copyright (c) 2017 Redox OS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -33,6 +33,7 @@
+ fscommon = { version = "0.1.1", optional = true }
+ gpt = { version = "3.0.0", optional = true }
+ libc = { version = "0.2.70", optional = true }
++password-hash = { version = "=0.5.0", default-features = false }
+ pkgar = { version = "0.2.4", optional = true }
+ pkgar-core = { version = "0.2.4", optional = true }
+ pkgar-keys = { version = "0.2.4", optional = true }
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -21,6 +21,8 @@
+ pub struct Config {
+     #[serde(default)]
+     pub include: Vec<PathBuf>,
++    #[serde(default)]
++    pub optional_include: Vec<PathBuf>,
+     #[serde(default)]
+     pub general: general::GeneralConfig,
+     #[serde(default)]
+@@ -68,7 +70,9 @@
+                 self.general.unlock_account = unlock_account.clone();
+                 if let Some(account) = unlock_account {
+                     assert!(general::valid_account_name(account));
+-                    self.users.entry(account.clone()).or_default().password = Some(secret.clone());
++                    let user = self.users.entry(account.clone()).or_default();
++                    user.password_hash = None;
++                    user.password = Some(secret.clone());
+                     assert!(self.users.contains_key(account));
+                 }
+             }
+@@ -116,36 +120,65 @@
+ 
+     /// Load installer config from a TOML path
+     pub fn from_file(path: &Path) -> Result<Self> {
+-        let mut config: Config = match fs::read_to_string(&path) {
+-            Ok(config_data) => match toml::from_str(&config_data) {
+-                Ok(config) => config,
+-                Err(err) => {
+-                    bail!("failed to decode '{}': {}", path.display(), err);
+-                }
+-            },
+-            Err(err) => {
+-                bail!("failed to read '{}': {}", path.display(), err);
+-            }
++        const MAX_OPTIONAL_FILES: usize = 128;
++        let mut remaining = MAX_OPTIONAL_FILES;
++        Self::load_file(path, false, None, &mut remaining)?
++            .context("Required configuration is absent")
++    }
++
++    fn load_file(
++        path: &Path,
++        optional: bool,
++        optional_depth: Option<usize>,
++        remaining: &mut usize,
++    ) -> Result<Option<Self>> {
++        const MAX_OPTIONAL_DEPTH: usize = 32;
++        const MAX_OPTIONAL_INCLUDES: usize = 32;
++        if let Some(depth) = optional_depth {
++            if depth >= MAX_OPTIONAL_DEPTH || *remaining == 0 {
++                bail!("Optional configuration traversal limit exceeded");
++            }
++            *remaining -= 1;
++        }
++        let config_data = match fs::read_to_string(path) {
++            Ok(data) => data,
++            Err(err) if optional && err.kind() == std::io::ErrorKind::NotFound => {
++                return Ok(None);
++            }
++            Err(err) => bail!("failed to read '{}': {}", path.display(), err),
+         };
+-
++        let mut config: Config = toml::from_str(&config_data)
++            .map_err(|_| anyhow::anyhow!("failed to decode '{}'", path.display()))?;
++        if config.optional_include.len() > MAX_OPTIONAL_INCLUDES {
++            bail!("Optional configuration include list limit exceeded");
++        }
++        for user in config.users.values() {
++            user.validate_password()?;
++        }
+         let config_dir = path.parent().unwrap();
+-
+-        let mut configs = mem::take(&mut config.include)
+-            .into_iter()
+-            .map(|path| {
+-                Config::from_file(&config_dir.join(&path))
+-                    .with_context(|| format!("Importing from {}", path.display()))
+-            })
+-            .collect::<Result<Vec<Config>>>()?;
+-        configs.push(config); // Put ourself last to ensure that it overwrites anything else.
+-
+-        config = configs.remove(0);
+-
+-        for other_config in configs {
+-            config.merge(other_config);
+-        }
+-
+-        Ok(config)
++        let mut merged = Config::default();
++        for include in mem::take(&mut config.include) {
++            let required = Self::load_file(
++                &config_dir.join(&include),
++                false,
++                optional_depth.map(|depth| depth + 1),
++                remaining,
++            ).with_context(|| format!("Importing from {}", include.display()))?
++                .context("Required configuration is absent")?;
++            merged.merge(required);
++        }
++        for include in mem::take(&mut config.optional_include) {
++            if let Some(included) = Self::load_file(
++                &config_dir.join(&include),
++                true,
++                Some(optional_depth.map_or(0, |depth| depth + 1)),
++                remaining,
++            ).with_context(|| format!("Importing from {}", include.display()))? {
++                merged.merge(included);
++            }
++        }
++        merged.merge(config);
++        Ok(Some(merged))
+     }
+ 
+     /// Load hardcoded install config to fetch bootloaders
+@@ -166,9 +199,12 @@
+     pub fn merge(&mut self, other: Config) {
+         assert!(self.include.is_empty());
+         assert!(other.include.is_empty());
++        assert!(self.optional_include.is_empty());
++        assert!(other.optional_include.is_empty());
+ 
+         let Config {
+             include: _,
++            optional_include: _,
+             general: other_general,
+             packages: other_packages,
+             files: other_files,
+--- a/src/config/user.rs
++++ b/src/config/user.rs
+@@ -3,6 +3,7 @@
+ #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+ pub struct UserConfig {
+     pub password: Option<String>,
++    pub password_hash: Option<String>,
+     pub uid: Option<u32>,
+     pub gid: Option<u32>,
+     pub name: Option<String>,
+@@ -15,6 +16,47 @@
+     pub gid: Option<u32>,
+     // FIXME move this to the UserConfig struct as extra_groups
+     pub members: Vec<String>,
++}
++
++impl UserConfig {
++    pub(crate) fn validate_password(&self) -> anyhow::Result<()> {
++        const MAX_ENCODED_HASH_BYTES: usize = 512;
++        const MAX_MEMORY_KIB: u32 = 262144;
++        const MAX_TIME_COST: u32 = 10;
++        const MAX_PARALLELISM: u32 = 16;
++        if self.password.is_some() && self.password_hash.is_some() {
++            anyhow::bail!("password and password_hash are mutually exclusive");
++        }
++        if let Some(encoded) = &self.password_hash {
++            let invalid = || anyhow::anyhow!("invalid or unsupported Argon2 password_hash");
++            if encoded.is_empty() || encoded.len() > MAX_ENCODED_HASH_BYTES {
++                return Err(invalid());
++            }
++            let hash = password_hash::PasswordHash::new(encoded).map_err(|_| invalid())?;
++            if !matches!(hash.algorithm.as_str(), "argon2d" | "argon2i" | "argon2id")
++                || !matches!(hash.version, None | Some(16) | Some(19))
++                || !hash.params.iter().map(|(name, _)| name.as_str()).eq(["m", "t", "p"])
++            {
++                return Err(invalid());
++            }
++            let memory = hash.params.get_decimal("m").ok_or_else(invalid)?;
++            let time = hash.params.get_decimal("t").ok_or_else(invalid)?;
++            let lanes = hash.params.get_decimal("p").ok_or_else(invalid)?;
++            if !(1..=MAX_PARALLELISM).contains(&lanes)
++                || !(8 * lanes..=MAX_MEMORY_KIB).contains(&memory)
++                || !(1..=MAX_TIME_COST).contains(&time)
++            {
++                return Err(invalid());
++            }
++            let mut salt = [0u8; 64];
++            let salt = hash.salt.ok_or_else(invalid)?
++                .decode_b64(&mut salt).map_err(|_| invalid())?;
++            if salt.len() < 8 || hash.hash.as_ref().is_none_or(|output| output.len() < 16) {
++                return Err(invalid());
++            }
++        }
++        Ok(())
++    }
+ }
+ 
+ impl Display for UserConfig {
+@@ -34,7 +76,7 @@
+         if let Some(shell) = &self.shell {
+             write!(f, " shell={}", shell)?;
+         }
+-        if self.password.as_ref().is_some_and(|s| !s.is_empty()) {
++        if self.password.as_ref().is_some_and(|s| !s.is_empty()) || self.password_hash.is_some() {
+             write!(f, " password=yes")?;
+         }
+ 
+--- a/src/installer.rs
++++ b/src/installer.rs
+@@ -50,7 +50,7 @@
+ 
+ /// Converts a password to a serialized argon2rs hash, understandable
+ /// by redox_users. If the password is blank, the hash is blank.
+-fn hash_password(password: &str) -> Result<String> {
++pub fn hash_password(password: &str) -> Result<String> {
+     if !password.is_empty() {
+         let salt = format!("{:X}", rand::random::<u64>());
+         let config = argon2::Config::default();
+@@ -154,6 +154,9 @@
+     output_dir: impl AsRef<Path>,
+     cookbook: Option<&str>,
+ ) -> Result<()> {
++    for user in config.users.values() {
++        user.validate_password()?;
++    }
+     let output_dir = output_dir.as_ref().to_owned();
+ 
+     if let Some(cookbook) = cookbook.as_ref() {
+@@ -194,17 +197,21 @@
+     let mut groups = vec![];
+ 
+     for (username, user) in config.users {
+-        // plaintext
+-        let password = if let Some(password) = user.password {
+-            password
+-        } else if config.general.prompt.unwrap_or(true) {
+-            prompt_password(
+-                &format!("{}: enter password: ", username),
+-                &format!("{}: confirm password: ", username),
+-            )?
+-            .unwrap_or_default()
++        let password = if let Some(hash) = user.password_hash {
++            hash
+         } else {
+-            String::new()
++            let plaintext = if let Some(password) = user.password {
++                password
++            } else if config.general.prompt.unwrap_or(true) {
++                prompt_password(
++                    &format!("{}: enter password: ", username),
++                    &format!("{}: confirm password: ", username),
++                )?
++                .unwrap_or_default()
++            } else {
++                String::new()
++            };
++            hash_password(&plaintext)?
+         };
+ 
+         let uid = user.uid.unwrap_or(next_uid);
+@@ -242,8 +249,6 @@
+         if uid >= 1000 {
+             prepare_user_home(&output_dir, uid, gid, &home)?;
+         }
+-
+-        let password = hash_password(&password)?;
+ 
+         passwd.push_str(&format!("{username};{uid};{gid};{name};{home};{shell}\n",));
+         shadow.push_str(&format!("{username};{password}\n"));
+@@ -1002,6 +1007,9 @@
+ }
+ 
+ fn install_inner(config: Config, output: &Path) -> Result<()> {
++    for user in config.users.values() {
++        user.validate_password()?;
++    }
+     println!("Installing to {}:\n{}", output.display(), config);
+     let cookbook = config.general.cookbook.clone();
+     let cookbook = cookbook.as_ref().map(|p| p.as_str());
+--- a/src/bin/installer.rs
++++ b/src/bin/installer.rs
+@@ -4,6 +4,7 @@
+ extern crate toml;
+ 
+ use std::cell::RefCell;
++use std::io::{self, IsTerminal, Read};
+ use std::path::Path;
+ use std::rc::Rc;
+ use std::{env, fs, process};
+@@ -35,6 +36,11 @@
+     --list-packages      List packages will be installed
+     --filesystem-size    Output filesystem size in MB
+     --output-config      Path to write the parsed config as another TOML
++
++Hashing a password without installing:
++  redox_installer --hash-password
++    Read 1 to 4096 UTF-8 bytes from non-terminal stdin through EOF, without trimming.
++    Write only the encoded Argon2 hash and a newline to stdout.
+ "#;
+ 
+ fn os_release_quote(value: &str) -> String {
+@@ -107,7 +113,45 @@
+     }
+ }
+ 
++fn hash_stdin_password() -> anyhow::Result<()> {
++    const MAX_PASSWORD_BYTES: usize = 4096;
++    let stdin = io::stdin();
++    if stdin.is_terminal() {
++        anyhow::bail!("--hash-password requires non-terminal stdin");
++    }
++    let mut bytes = [0u8; MAX_PASSWORD_BYTES + 1];
++    let mut input = stdin.lock().take(bytes.len() as u64);
++    let mut length = 0;
++    while length < bytes.len() {
++        match input.read(&mut bytes[length..]) {
++            Ok(0) => break,
++            Ok(count) => length += count,
++            Err(_) => anyhow::bail!("Could not read password from stdin"),
++        }
++    }
++    if length == 0 || length > MAX_PASSWORD_BYTES {
++        anyhow::bail!("Password must contain 1 to 4096 UTF-8 bytes");
++    }
++    let password = std::str::from_utf8(&bytes[..length])
++        .map_err(|_| anyhow::anyhow!("Password must be UTF-8"))?;
++    let hash = redox_installer::hash_password(password)
++        .map_err(|_| anyhow::anyhow!("Could not hash password"))?;
++    println!("{hash}");
++    Ok(())
++}
++
+ fn main() {
++    if env::args_os().any(|arg| arg == "--hash-password") {
++        if env::args_os().len() != 2 {
++            eprintln!("installer: --hash-password must be used alone");
++            process::exit(1);
++        }
++        if let Err(err) = hash_stdin_password() {
++            eprintln!("installer: {err}");
++            process::exit(1);
++        }
++        return;
++    }
+     let mut parser = ArgParser::new(4)
+         .add_opt("b", "cookbook")
+         .add_opt("", "config-name")
+diff --git a/Cargo.lock b/Cargo.lock
+index e5ba405..a54e1bf 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -975,6 +975,16 @@ version = "1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "487f2ccd1e17ce8c1bfab3a65c89525af41cfad4c8659021a1e9a2aacd73b89b"
+ 
++[[package]]
++name = "password-hash"
++version = "0.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
++dependencies = [
++ "base64ct",
++ "subtle",
++]
++
+ [[package]]
+ name = "percent-encoding"
+ version = "2.3.2"
+@@ -1149,6 +1159,7 @@ dependencies = [
+  "gpt",
+  "libc",
+  "libredox",
++ "password-hash",
+  "pkgar",
+  "pkgar-core",
+  "pkgar-keys",

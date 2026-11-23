@@ -9268,16 +9268,17 @@ def test_dma_outside_grant(vm, args):
 def test_hw_live(args, out):
     """Boot the storage-free USB images with real keyboard input and an untouched writable NVMe."""
     import hw_live
+    account, password = hw_live.credentials(ROOT)
     text_out = out / "text"
     text_out.mkdir(exist_ok=True)
-    ok, note = hw_live.test(args, text_out, ROOT, VM)
+    ok, note = hw_live.test(args, text_out, ROOT, VM, account, password)
     if not ok:
         return ok, note
     config = "my_hw_live" if args.config == "desktop" else args.config
     desktop_args = argparse.Namespace(**{**vars(args), "config": config + "_desktop"})
     desktop_out = out / "desktop"
     desktop_out.mkdir(exist_ok=True)
-    ok, desktop_note = hw_live.test(desktop_args, desktop_out, ROOT, VM)
+    ok, desktop_note = hw_live.test(desktop_args, desktop_out, ROOT, VM, account, password)
     return ok, f"text: {note}; desktop: {desktop_note}"
 
 

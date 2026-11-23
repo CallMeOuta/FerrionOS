@@ -5,12 +5,15 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import termios
+import tomllib
 
 FAT_MAX_FILE = (1 << 32) - 1
 MIB = 1 << 20
@@ -24,6 +27,134 @@ COPY_CHUNK = MIB
 BLKGETSIZE64 = 0x80081272
 BLKROGET = 0x125E
 SYSTEM_PATHS = ("/", "/boot", "/boot/efi", "/usr", "/var", "/home")
+ROOT = Path(__file__).resolve().parents[1]
+ACCOUNTS = ROOT / "config/my_hw-live-accounts.toml"
+MAX_ACCOUNT_FILE_BYTES = 4096
+MAX_ACCOUNT_NAME_BYTES = 32
+MAX_PASSWORD_BYTES = 255
+MAX_HASH_BYTES = 512
+ACCOUNT_UID = 1000
+
+
+def prompt_value(prompt, hidden=False, limit=MAX_PASSWORD_BYTES):
+    descriptor = os.open("/dev/tty", os.O_RDWR | os.O_CLOEXEC)
+    settings = termios.tcgetattr(descriptor)
+    try:
+        if hidden:
+            private = termios.tcgetattr(descriptor)
+            private[3] &= ~termios.ECHO
+            termios.tcsetattr(descriptor, termios.TCSAFLUSH, private)
+        os.write(descriptor, prompt.encode())
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as terminal:
+            value = terminal.readline(limit + 2)
+        if not value.endswith("\n") or len(value[:-1].encode("utf-8")) > limit:
+            raise ValueError(f"Input exceeds {limit} UTF-8 bytes")
+        return value[:-1]
+    finally:
+        try:
+            termios.tcsetattr(descriptor, termios.TCSAFLUSH, settings)
+            if hidden:
+                os.write(descriptor, b"\n")
+        finally:
+            os.close(descriptor)
+
+
+def valid_account_name(name):
+    return isinstance(name, str) and re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", name) is not None
+
+
+def read_accounts():
+    try:
+        descriptor = os.open(ACCOUNTS, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise ValueError("Create an account with hw-stick.py account, or explicitly use --no-account") from None
+    with os.fdopen(descriptor, "rb") as source:
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1:
+            raise ValueError("Private account configuration must be a regular file with mode 0600")
+        raw = source.read(MAX_ACCOUNT_FILE_BYTES + 1)
+    if len(raw) > MAX_ACCOUNT_FILE_BYTES:
+        raise ValueError("Private account configuration exceeds the size limit")
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError):
+        raise ValueError("Invalid private account configuration") from None
+    users = data.get("users", {})
+    if not isinstance(users, dict) or len(users) != 1:
+        raise ValueError("Private account configuration must contain exactly one account")
+    name, user = next(iter(users.items()))
+    if not isinstance(user, dict):
+        raise ValueError("Invalid private account configuration")
+    encoded = user.get("password_hash", "")
+    if (not valid_account_name(name) or name == "root" or user.get("uid") != ACCOUNT_UID
+            or user.get("gid") != ACCOUNT_UID or "password" in user
+            or not isinstance(encoded, str) or not encoded.startswith("$argon2")
+            or len(encoded) > MAX_HASH_BYTES or "\n" in encoded):
+        raise ValueError("Private account configuration requires a hashed password and uid/gid 1000")
+    return name, encoded
+
+
+def create_account():
+    if os.path.lexists(ACCOUNTS):
+        raise ValueError("Private account configuration already exists; it was not changed")
+    name = prompt_value("Account name: ", limit=MAX_ACCOUNT_NAME_BYTES)
+    if not valid_account_name(name) or name == "root":
+        raise ValueError("Use a non-root account name of up to 32 lowercase letters, digits, underscores or hyphens")
+    password = prompt_value("Password: ", hidden=True)
+    if not password:
+        raise ValueError("Password must not be empty")
+    confirmation = prompt_value("Confirm password: ", hidden=True)
+    if password != confirmation:
+        raise ValueError("Passwords do not match")
+    result = subprocess.run([str(ROOT / "build/fstools/bin/redox_installer"), "--hash-password"],
+                            input=password.encode("utf-8"), capture_output=True, timeout=30)
+    if result.returncode:
+        raise ValueError("Password hashing failed; rebuild the host installer")
+    encoded = result.stdout.decode("ascii").rstrip("\n")
+    if not encoded.startswith("$argon2") or len(encoded) > MAX_HASH_BYTES or "\n" in encoded:
+        raise ValueError("Host installer returned an invalid password hash")
+    data = (f"[users.{name}]\npassword_hash = {json.dumps(encoded)}\n"
+            f"uid = {ACCOUNT_UID}\ngid = {ACCOUNT_UID}\n"
+            f'home = "/home/{name}"\nshell = "/usr/bin/ion"\n\n'
+            f"[groups.users]\ngid = {ACCOUNT_UID}\nmembers = [{json.dumps(name)}]\n").encode()
+    assert len(data) <= MAX_ACCOUNT_FILE_BYTES
+    descriptor = os.open(ACCOUNTS, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        if os.write(descriptor, data) != len(data):
+            raise OSError("Short write while saving private account configuration")
+        os.fsync(descriptor)
+    except BaseException:
+        ACCOUNTS.unlink()
+        raise
+    finally:
+        os.close(descriptor)
+    print("Created config/my_hw-live-accounts.toml; rebuild both live images before preparing a stick")
+
+
+def require_image_account(args):
+    if args.no_account:
+        return
+    name, encoded = read_accounts()
+    with ExitStack() as inputs:
+        input_file(inputs, args.bootloader)
+        input_file(inputs, args.image)
+    import hw_live
+    scratch = Path(tempfile.mkdtemp(prefix="agent-hw-account-"))
+    try:
+        with hw_live.mounted_copy(ROOT, Path(args.image), scratch) as filesystem:
+            descriptor = os.open(filesystem / "etc/shadow", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise ValueError("Image account database is not a regular file")
+                shadow = source.read(MAX_ACCOUNT_FILE_BYTES + 1)
+            if len(shadow) > MAX_ACCOUNT_FILE_BYTES or f"{name};{encoded}\n".encode() not in shadow.splitlines(keepends=True):
+                raise ValueError("Image does not contain the private account; rebuild it before preparing a stick")
+    finally:
+        mounts = subprocess.run(["findmnt", "-R", str(scratch)], capture_output=True, timeout=10)
+        if mounts.returncode != 1:
+            raise RuntimeError(f"Refusing cleanup with unresolved mount state: {scratch}")
+        shutil.rmtree(scratch)
 
 
 def run_tool(arguments, pass_fds=()):
@@ -157,6 +288,7 @@ def validate_device(device):
 
 
 def create_image(args):
+    require_image_account(args)
     output = Path(args.output).absolute()
     if os.path.lexists(output):
         raise ValueError("Output already exists; choose a new path")
@@ -168,6 +300,7 @@ def create_image(args):
 
 
 def prepare(args):
+    require_image_account(args)
     require_tools(("lsblk", "mkfs.fat", "mmd", "mcopy"))
     device = Path(args.device).resolve(strict=True)
     if not str(device).startswith("/dev/"):
@@ -214,11 +347,13 @@ def main():
                "The boot files are EFI/BOOT/BOOTX64.EFI and /redox-live.iso. "
                "Each input must fit FAT's 4 GiB minus 1 byte file limit.")
     commands = parser.add_subparsers(dest="command")
+    commands.add_parser("account", help="prompt for a private login account and save its password hash")
     create = commands.add_parser("create-image", help="create a regular-file FAT image without root")
     disk = commands.add_parser("prepare", help="erase a removable USB whole disk; requires device write access")
     for command in (create, disk):
         command.add_argument("--bootloader", required=True, help="EFI bootloader file")
         command.add_argument("--image", required=True, help="live image file")
+        command.add_argument("--no-account", action="store_true", help="allow a stick without a login account")
     create.add_argument("--output", required=True, help="new regular-file output path (never overwritten)")
     disk.add_argument("--device", required=True, help="removable USB whole disk under /dev")
     disk.add_argument("--confirm-erase", required=True, metavar="CANONICAL_DEVICE",
@@ -228,11 +363,13 @@ def main():
         parser.print_help()
         return 0
     try:
-        if args.command == "create-image":
+        if args.command == "account":
+            create_account()
+        elif args.command == "create-image":
             create_image(args)
         else:
             prepare(args)
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, RuntimeError, UnicodeError, subprocess.SubprocessError) as error:
         print(f"hw-stick: {error}", file=sys.stderr)
         return 1
     return 0
