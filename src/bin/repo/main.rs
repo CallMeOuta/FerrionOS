@@ -821,7 +821,9 @@ fn apply_special_rules(
         if !recipe.rule.is_empty() {
             continue;
         }
-        if let Some(&special_rule) = special_rules.get(recipe.canon_recipe_name().without_prefix())
+        if let Some(&special_rule) = special_rules
+            .get(recipe.name.without_prefix())
+            .or_else(|| special_rules.get(recipe.canon_recipe_name().without_prefix()))
         {
             if recipe.name.is_host() && special_rule == RecipeRule::Binary {
                 continue;

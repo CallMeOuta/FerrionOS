@@ -59,6 +59,8 @@ Every recipe is cooked under one rule:
 
 In rising precedence a rule comes from the default, from a string value in a filesystem config (`orbterm = "ignore"`), and from `cookbook.lock`, which `make sc.<recipe>`, `bc.`, `lc.` and `nc.` write and `make cc.<recipe>` clears. `make repo-lock` records the checked-out revision of every git recipe in the same file; `make repo-unlock` removes those locks.
 
+A `same_as` recipe uses its own explicit rule when present. Only without one does it inherit the canonical recipe's rule. An empty package entry (`recipe = {}`) is not an explicit rule.
+
 ## Recipe target names
 
 Targets in `mk/repo.mk` that act on recipes are `<letters>.<recipe>`. Each letter is one cookbook action, read left to right:
