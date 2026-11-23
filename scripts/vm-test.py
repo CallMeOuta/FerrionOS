@@ -4152,8 +4152,7 @@ def sendkeys(command, text):
         time.sleep(0.03)
 
 
-def raw_key_slots(image):
-    """The 64 key slots of the newest RedoxFS header in a raw image, as bytes."""
+def raw_header_info(image):
     best = None
     with open(image, "rb") as f:
         offset = 0
@@ -4161,14 +4160,73 @@ def raw_key_slots(image):
             if block[:8] == b"RedoxFS\0" and int.from_bytes(block[8:16], "little") == 8:
                 generation = int.from_bytes(block[40:48], "little")
                 if best is None or generation > best[0]:
-                    best = (generation, block)
+                    best = (generation, offset, block)
             offset += 4096
-            if offset >= 64 << 20 and best:  # the ring sits at the start of the partition
+            if offset >= 64 << 20 and best:
                 break
     if best is None:
         raise RuntimeError(f"no RedoxFS header in {image}")
-    data = best[1]
-    return [data[KEY_SLOTS_AT + 48 * i:KEY_SLOTS_AT + 48 * (i + 1)] for i in range(64)]
+    generation, offset, data = best
+    ring_block = (offset // 4096) - (generation % 256)
+    ring_sector = ring_block * 8
+    slots = [data[KEY_SLOTS_AT + 48 * i:KEY_SLOTS_AT + 48 * (i + 1)] for i in range(64)]
+    return ring_sector, generation, slots
+
+
+def raw_key_slots(image):
+    """The 64 key slots of the newest RedoxFS header in a raw image, as bytes."""
+    return raw_header_info(image)[2]
+
+
+def write_blkdebug_conf(path, sector, count, skip=0):
+    sections = []
+    if skip > 0:
+        skip_entry = (
+            "[inject-error]\n"
+            'event = "write_aio"\n'
+            'iotype = "write"\n'
+            'errno = "0"\n'
+            f'sector = "{sector}"\n'
+            'once = "on"\n'
+        )
+        sections.extend(skip_entry for _ in range(skip))
+    if count is None:
+        sections.append(
+            "[inject-error]\n"
+            'event = "write_aio"\n'
+            'iotype = "write"\n'
+            'errno = "5"\n'
+            f'sector = "{sector}"\n'
+            'once = "off"\n'
+        )
+    else:
+        entry = (
+            "[inject-error]\n"
+            'event = "write_aio"\n'
+            'iotype = "write"\n'
+            'errno = "5"\n'
+            f'sector = "{sector}"\n'
+            'once = "on"\n'
+        )
+        sections.extend(entry for _ in range(count))
+    path.write_text("\n".join(sections))
+
+
+def boot_blkdebug(args, out, disk, extra, disk_blk=None, extra_blk=None):
+    out.mkdir(parents=True, exist_ok=True)
+    d0 = f"blkdebug:{disk_blk}:{disk}" if disk_blk else str(disk)
+    d1 = f"blkdebug:{extra_blk}:{extra}" if extra_blk else str(extra)
+    flags = (
+        f"-drive file={d0},format=raw,if=none,id=drv0 -device nvme,drive=drv0,serial=NVME_SERIAL "
+        f"-drive file={d1},format=raw,if=none,id=drv1 -device nvme,drive=drv1,serial=NVME_EXTRA"
+    )
+    return VM(
+        args,
+        out,
+        make=["disk=none", f"DISK={disk}", f"EXTRA_DISK={extra}"],
+        qemu_flags=flags,
+        snapshot=False,
+    )
 
 
 def config_passphrase(args):
@@ -4550,7 +4608,11 @@ def one_password_install(args, out, live, target, password):
             return None
         since = vm.mark()
         vm.type("redox_installer_tui\n")
-        choice = vm.wait_serial(r"(\d+): (?:removing handle[^\n]*\n)?\S+: 2\.00 GB", args.timeout, since)
+        choice = vm.wait_serial(
+            r"(\d+)(?:removing handle[^\n]*\n)?: (?:removing handle[^\n]*\n)?\S+(?:removing handle[^\n]*\n)?: 2\.00 GB",
+            args.timeout,
+            since,
+        )
         if not choice or not vm.wait_serial(r"Select a drive", 10, since):
             return None
         vm.type(choice.group(1) + "\n")
@@ -4937,10 +4999,10 @@ def test_one_password(args, out):
             status_list_blk, list_blk = run_status(vm, "redoxfs-key list --key-file /tmp/rec.key /")
             run_status(vm, "rm -f /tmp/rec.key")
             if (status_pw_blk != 0 or status_sl_blk != 0 or status_list_blk != 0
-                    or not re.search(rf"(?m)^slot {second_slot}: in use\b", list_blk)):
+                    or re.search(rf"(?m)^slot {second_slot}: in use\b", list_blk)):
                 return False, (f"failed userdel left state inconsistent: passwd={status_pw_blk}, "
                                f"unlock-slots={status_sl_blk}, list_rc={status_list_blk}, list={list_blk!r}")
-            notes.append("failed userdel kept account, unlock-slots record and disk slot intact")
+            notes.append("failed userdel cleared disk slot while keeping account and unlock-slots record for retry")
 
             code, err = run_prompts(
                 vm,
@@ -4977,6 +5039,434 @@ def test_one_password(args, out):
             notes.append("userdel revoked the slot and old slot bytes are absent from the image")
         finally:
             vm.close()
+
+        return True, "; ".join(notes)
+    finally:
+        shutil.rmtree(scratch)
+
+
+def test_key_slot_roll(args, out):
+    """Issue 36: mid-roll NVMe write errors injected via QEMU blkdebug across enroll, change, remove and installer recovery-key creation preserve the key-slot invariants and refuse removed accounts at bootloader unlock (use --config disk-encryption-test after `make live`)."""
+    import mmap
+    passphrase = config_passphrase(args)
+    inst_pass = "ferrion-roll-pass1"
+    changed_pass = "ferrion-roll-pass2"
+    second_user, second_pass = "second", "ferrion-roll-second"
+    third_user, third_pass = "third", "ferrion-roll-third"
+    boot_commit_limit = 64
+    scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-keyroll-"))
+    live = scratch / "live.iso"
+    target = scratch / "target.img"
+    extra = scratch / "extra.img"
+    notes = []
+
+    def run_prompts(vm, cmd, prompts, done_re, marker, transcript_name, timeout=180):
+        since = vm.mark()
+        vm.type(cmd + "\n")
+        for prompt, answer in prompts:
+            if not vm.wait_serial(prompt, 30, since):
+                (vm.out / transcript_name).write_text(vm.text(since))
+                return None, f"{cmd} did not ask {prompt!r}; see {vm.out / transcript_name}"
+            vm.type(answer + "\n")
+            since = vm.mark()
+        vm.wait_serial(done_re, timeout, since)
+        time.sleep(1)
+        vm.type(f"echo {marker}-$?\n")
+        status = vm.wait_serial(rf"{marker}-(\d+)", 60, since)
+        text = vm.text(since)
+        (vm.out / transcript_name).write_text(text)
+        if not status:
+            return None, f"{cmd} produced no exit status; see {vm.out / transcript_name}"
+        return int(status.group(1)), text
+
+    def check_boot_budget(image, g0, label):
+        _, g_start, _ = raw_header_info(image)
+        delta = g_start - g0
+        if delta < 0 or delta > boot_commit_limit:
+            return None, f"setup invalid ({label}): G0={g0}, G_start={g_start} (delta {delta} > {boot_commit_limit})"
+        return g_start, None
+
+    try:
+        shutil.copyfile(ROOT / "build" / args.arch / args.config / "redox-live.iso", live)
+        for path, size in ((target, 2 << 30), (extra, 64 << 20)):
+            path.write_bytes(b"")
+            os.truncate(path, size)
+        recovery = one_password_install(args, out / "install-base", live, target, inst_pass)
+        if not recovery:
+            return False, f"base install did not finish; see {out / 'install-base'}"
+
+        ring_sector, _, _ = raw_header_info(target)
+
+        vm = boot_copy(args, out / "stage-users", [f"DISK={target}", f"EXTRA_DISK={extra}"])
+        try:
+            if not unlock(vm, inst_pass, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"stage-users did not reach root shell; see {vm.out}"
+            for uname, upass in ((second_user, second_pass), (third_user, third_pass)):
+                st, out_add = run_status(vm, f"useradd -m -s /usr/bin/ion {uname}")
+                if st != 0:
+                    return False, f"useradd {uname} failed ({st}): {out_add!r}"
+                code, err = run_prompts(
+                    vm,
+                    f"passwd {uname}",
+                    ((r"new password: ", upass), (r"confirm password: ", upass)),
+                    r"root:.*# ",
+                    f"pw-{uname}",
+                    f"pw-{uname}.txt",
+                )
+                if code != 0:
+                    return False, f"passwd {uname} failed ({code}): {err}"
+        finally:
+            vm.close()
+
+        g0 = raw_header_info(target)[1]
+        target_slot_idx = (g0 - 1) % 256
+        fault_sector = ring_sector + target_slot_idx * 8
+        cfg_enroll_transient = scratch / "enroll-transient.conf"
+        write_blkdebug_conf(cfg_enroll_transient, fault_sector, 1)
+        vm = boot_blkdebug(args, out / "enroll-transient", target, extra, disk_blk=cfg_enroll_transient)
+        try:
+            if not unlock(vm, inst_pass, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"enroll-transient did not reach root shell; see {vm.out}"
+            g_start, invalid = check_boot_budget(target, g0, "enroll-transient")
+            if invalid:
+                return False, invalid
+            code, err = run_prompts(
+                vm,
+                f"passwd --enroll {second_user}",
+                ((rf"password for {second_user}: ", second_pass),
+                 (r"disk password or recovery key: ", inst_pass)),
+                r"root:.*# ",
+                "enroll2-rc",
+                "enroll2.txt",
+            )
+            if code != 0:
+                return False, f"transient-fault passwd --enroll {second_user} failed ({code}): {err}"
+            _, slots_text = run_status(vm, "cat /etc/unlock-slots")
+            match = re.search(rf"(?m)^(\d+) {second_user}$", slots_text)
+            if not match:
+                return False, f"{second_user} missing from /etc/unlock-slots after transient roll fault: {slots_text!r}"
+            second_slot = int(match.group(1))
+        finally:
+            vm.close()
+        g_after = raw_header_info(target)[1]
+        second_slot_bytes = raw_key_slots(target)[second_slot]
+        if second_slot_bytes == bytes(48):
+            return False, f"enrolled slot {second_slot} is empty after transient fault"
+        notes.append(
+            f"enroll-transient ok (G0={g0}, G_start={g_start}, ring_slot={target_slot_idx}, G_after={g_after})"
+        )
+
+        g0 = raw_header_info(target)[1]
+        target_slot_idx = (g0 - 1) % 256
+        fault_sector = ring_sector + target_slot_idx * 8
+        cfg_enroll_exhaust = scratch / "enroll-exhaust.conf"
+        write_blkdebug_conf(cfg_enroll_exhaust, fault_sector, 4)
+        vm = boot_blkdebug(args, out / "enroll-exhaust", target, extra, disk_blk=cfg_enroll_exhaust)
+        try:
+            if not unlock(vm, inst_pass, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"enroll-exhaust did not reach root shell; see {vm.out}"
+            g_start, invalid = check_boot_budget(target, g0, "enroll-exhaust")
+            if invalid:
+                return False, invalid
+            code, err = run_prompts(
+                vm,
+                f"passwd --enroll {third_user}",
+                ((rf"password for {third_user}: ", third_pass),
+                 (r"disk password or recovery key: ", inst_pass)),
+                r"root:.*# ",
+                "enroll3-rc",
+                "enroll3.txt",
+            )
+            if code == 0:
+                return False, f"exhausted-fault passwd --enroll {third_user} succeeded unexpectedly: {err}"
+            _, slots_text = run_status(vm, "cat /etc/unlock-slots")
+            match3 = re.search(rf"(?m)^(\d+) {third_user}$", slots_text)
+            if not match3:
+                return False, f"exhausted-fault enroll left live slot for {third_user} unrecorded in /etc/unlock-slots: {slots_text!r}"
+            third_slot = int(match3.group(1))
+            code_del3, err_del3 = run_prompts(
+                vm,
+                f"userdel {third_user}",
+                ((r"disk password or recovery key: ", inst_pass),),
+                r"root:.*# ",
+                "del3-rc",
+                "del3.txt",
+            )
+            if code_del3 != 0:
+                return False, f"userdel {third_user} after partial enroll failed ({code_del3}): {err_del3}"
+            st_pw3, _ = run_status(vm, f"grep '^{third_user};' /etc/passwd")
+            st_sl3, _ = run_status(vm, f"grep ' {third_user}$' /etc/unlock-slots")
+            if st_pw3 == 0 or st_sl3 == 0:
+                return False, f"userdel {third_user} left passwd ({st_pw3}) or unlock-slots ({st_sl3})"
+        finally:
+            vm.close()
+        g_after = raw_header_info(target)[1]
+        if raw_key_slots(target)[third_slot] != bytes(48):
+            return False, f"slot {third_slot} not cleared after revoking partially enrolled {third_user}"
+        notes.append(
+            f"enroll-exhaust recorded+revoked (G0={g0}, G_start={g_start}, ring_slot={target_slot_idx}, G_after={g_after})"
+        )
+
+        g0 = raw_header_info(target)[1]
+        target_slot_idx = (g0 - 1) % 256
+        fault_sector = ring_sector + target_slot_idx * 8
+        cfg_change = scratch / "change-exhaust.conf"
+        write_blkdebug_conf(cfg_change, fault_sector, 4)
+        vm = boot_blkdebug(args, out / "change-exhaust", target, extra, disk_blk=cfg_change)
+        try:
+            if not unlock(vm, inst_pass, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"change-exhaust did not reach root shell; see {vm.out}"
+            if wait_session(vm, args.timeout) is None:
+                return False, f"change-exhaust did not start user session before login check; see {vm.out}"
+            g_start, invalid = check_boot_budget(target, g0, "change-exhaust")
+            if invalid:
+                return False, invalid
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no login prompt for change-exhaust; see {vm.out}"
+            time.sleep(2)
+            since = vm.mark()
+            vm.type("user\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"user login did not prompt for password; see {vm.out}"
+            vm.type(inst_pass + "\n")
+            if not vm.wait_serial(r"user:\S*\$ ", 20, since):
+                return False, f"no user shell before passwd; see {vm.out}"
+            code_chg, err_chg = run_prompts(
+                vm,
+                "passwd",
+                ((r"current password: ", inst_pass),
+                 (r"new password: ", changed_pass),
+                 (r"confirm password: ", changed_pass)),
+                r"user:\S*\$ ",
+                "passwd-chg-rc",
+                "passwd-chg.txt",
+            )
+            if code_chg != 0:
+                return False, f"passwd did not save new login password on partial disk roll ({code_chg}): {err_chg}"
+            since = vm.mark()
+            vm.type("exit\n")
+            if not vm.wait_serial(r"login: ", args.timeout, since):
+                return False, f"no login prompt after passwd; see {vm.out}"
+            time.sleep(2)
+            since = vm.mark()
+            vm.type("user\n")
+            if not vm.wait_serial(r"(?i)password: ", 20, since):
+                return False, f"no password prompt verifying saved password; see {vm.out}"
+            vm.type(changed_pass + "\n")
+            if not vm.wait_serial(r"user:\S*\$ ", 20, since):
+                return False, f"new login password was rejected after partial disk roll; see {vm.out}"
+        finally:
+            vm.close()
+        g_after = raw_header_info(target)[1]
+        notes.append(
+            f"change-exhaust kept login+disk in step (G0={g0}, G_start={g_start}, ring_slot={target_slot_idx}, G_after={g_after})"
+        )
+
+        g0 = raw_header_info(target)[1]
+        target_slot_idx = (g0 - 1) % 256
+        fault_sector = ring_sector + target_slot_idx * 8
+        cfg_remove = scratch / "remove-transient.conf"
+        write_blkdebug_conf(cfg_remove, fault_sector, 1)
+        vm = boot_blkdebug(args, out / "remove-transient", target, extra, disk_blk=cfg_remove)
+        try:
+            if not unlock(vm, changed_pass, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                return False, f"remove-transient did not unlock with changed_pass or reach root shell; see {vm.out}"
+            g_start, invalid = check_boot_budget(target, g0, "remove-transient")
+            if invalid:
+                return False, invalid
+            code_del2, err_del2 = run_prompts(
+                vm,
+                f"userdel {second_user}",
+                ((r"disk password or recovery key: ", changed_pass),),
+                r"root:.*# ",
+                "del2-rc",
+                "del2.txt",
+            )
+            if code_del2 != 0:
+                return False, f"transient-fault userdel {second_user} failed ({code_del2}): {err_del2}"
+            st_pw2, _ = run_status(vm, f"grep '^{second_user};' /etc/passwd")
+            st_sl2, _ = run_status(vm, f"grep ' {second_user}$' /etc/unlock-slots")
+            if st_pw2 == 0 or st_sl2 == 0:
+                return False, f"userdel {second_user} left passwd ({st_pw2}) or unlock-slots ({st_sl2})"
+        finally:
+            vm.close()
+        g_after = raw_header_info(target)[1]
+        if raw_key_slots(target)[second_slot] != bytes(48):
+            return False, f"slot {second_slot} not cleared after transient-fault userdel"
+        with target.open("rb") as disk_file:
+            with mmap.mmap(disk_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                if mm.find(second_slot_bytes) != -1:
+                    return False, f"removed slot {second_slot}'s old bytes remained in image after transient-fault userdel"
+        notes.append(
+            f"remove-transient cleared ring (G0={g0}, G_start={g_start}, ring_slot={target_slot_idx}, G_after={g_after})"
+        )
+
+        vm = boot_copy(args, out / "refuse-removed", [f"DISK={target}", f"EXTRA_DISK={extra}"])
+        try:
+            if not unlock(vm, second_pass, 1, args.timeout):
+                return False, "no bootloader prompt verifying removed account refusal"
+            if not unlock(vm, changed_pass, 2, 60):
+                return False, f"removed {second_user}'s password was not refused at the bootloader; see {vm.out}"
+            if not root_shell(vm, args.timeout * 2):
+                return False, f"remaining password did not reach root shell; see {vm.out}"
+            notes.append(f"removed {second_user}'s password refused at bootloader")
+
+            stale_a, stale_a_pass = "stale_a", "ferrion-stale-a"
+            stale_b, stale_b_pass = "stale_b", "ferrion-stale-b"
+            for uname, upass in ((stale_a, stale_a_pass), (stale_b, stale_b_pass)):
+                st_u, out_u = run_status(vm, f"useradd -m -s /usr/bin/ion {uname}")
+                if st_u != 0:
+                    return False, f"stale-record-enroll: useradd {uname} failed ({st_u}): {out_u!r}"
+                code_u, err_u = run_prompts(
+                    vm,
+                    f"passwd {uname}",
+                    ((r"new password: ", upass), (r"confirm password: ", upass)),
+                    r"root:.*# ",
+                    f"pw-{uname}",
+                    f"pw-{uname}.txt",
+                )
+                if code_u != 0:
+                    return False, f"stale-record-enroll: passwd {uname} failed ({code_u}): {err_u}"
+            code_ea, err_ea = run_prompts(
+                vm,
+                f"passwd --enroll {stale_a}",
+                ((rf"password for {stale_a}: ", stale_a_pass),
+                 (r"disk password or recovery key: ", changed_pass)),
+                r"root:.*# ",
+                "enroll-a-rc",
+                "enroll-a.txt",
+            )
+            if code_ea != 0:
+                return False, f"stale-record-enroll: passwd --enroll {stale_a} failed ({code_ea}): {err_ea}"
+            _, slots_a = run_status(vm, "cat /etc/unlock-slots")
+            match_a = re.search(rf"(?m)^(\d+) {stale_a}$", slots_a)
+            if not match_a:
+                return False, f"stale-record-enroll: {stale_a} missing from /etc/unlock-slots: {slots_a!r}"
+            stale_a_slot = int(match_a.group(1))
+            _, ctx_out = run_status(vm, "cat /scheme/sys/context")
+            pids = [int(m) for m in re.findall(r"(?m)^\s*(\d+)\s+\d+\s", ctx_out)]
+            max_pid = max(pids) if pids else 0
+            block_paths = [f"/etc/.unlock-slots.tmp.{pid}" for pid in range(max_pid + 1, max_pid + 51)]
+            for start in range(0, len(block_paths), 5):
+                run_status(vm, "mkdir " + " ".join(block_paths[start:start + 5]))
+            code_da_blk, err_da_blk = run_prompts(
+                vm,
+                f"userdel {stale_a}",
+                ((r"disk password or recovery key: ", changed_pass),),
+                r"root:.*# ",
+                "del-a-blk-rc",
+                "del-a-blk.txt",
+            )
+            for start in range(0, len(block_paths), 5):
+                run_status(vm, "rmdir " + " ".join(block_paths[start:start + 5]))
+            if code_da_blk == 0:
+                return False, f"stale-record-enroll: blocked userdel {stale_a} succeeded unexpectedly: {err_da_blk}"
+            code_eb, err_eb = run_prompts(
+                vm,
+                f"passwd --enroll {stale_b}",
+                ((rf"password for {stale_b}: ", stale_b_pass),
+                 (r"disk password or recovery key: ", changed_pass)),
+                r"root:.*# ",
+                "enroll-b-rc",
+                "enroll-b.txt",
+            )
+            if code_eb != 0:
+                return False, f"stale-record-enroll: passwd --enroll {stale_b} failed ({code_eb}): {err_eb}"
+            _, slots_b = run_status(vm, "cat /etc/unlock-slots")
+            match_b = re.search(rf"(?m)^(\d+) {stale_b}$", slots_b)
+            if not match_b:
+                return False, f"stale-record-enroll: {stale_b} missing from /etc/unlock-slots: {slots_b!r}"
+            stale_b_slot = int(match_b.group(1))
+            if stale_b_slot == stale_a_slot:
+                return False, f"stale-record-enroll: {stale_b} reused stale slot {stale_a_slot}"
+            run_status(vm, f"printf %s {changed_pass} > /tmp/k.key")
+            st_ls, out_ls = run_status(vm, "redoxfs-key list --key-file /tmp/k.key /")
+            run_status(vm, "rm -f /tmp/k.key")
+            if (st_ls != 0 or re.search(rf"(?m)^slot {stale_a_slot}: in use\b", out_ls)
+                    or not re.search(rf"(?m)^slot {stale_b_slot}: in use\b", out_ls)):
+                return False, (f"stale-record-enroll: unexpected live slots (stale_a={stale_a_slot}, "
+                               f"stale_b={stale_b_slot}, rc={st_ls}): {out_ls!r}")
+            for uname in (stale_a, stale_b):
+                code_du, err_du = run_prompts(
+                    vm,
+                    f"userdel {uname}",
+                    ((r"disk password or recovery key: ", changed_pass),),
+                    r"root:.*# ",
+                    f"del-{uname}-rc",
+                    f"del-{uname}.txt",
+                )
+                if code_du != 0:
+                    return False, f"stale-record-enroll: cleanup userdel {uname} failed ({code_du}): {err_du}"
+            notes.append(f"stale-record-enroll skipped stale slot {stale_a_slot} and enrolled slot {stale_b_slot}")
+        finally:
+            vm.close()
+        if raw_key_slots(target)[stale_a_slot] != bytes(48) or raw_key_slots(target)[stale_b_slot] != bytes(48):
+            return False, f"stale-record-enroll: slots {stale_a_slot}/{stale_b_slot} not cleared after cleanup"
+
+        for case_name, fault_count, expect_text, expect_cleared in (
+            ("install-cleanup-ok", 4, "cleared slot 1", True),
+            ("install-cleanup-fail", None, "failed to clear slot 1", False),
+        ):
+            inst_img = scratch / f"{case_name}.img"
+            inst_img.write_bytes(b"")
+            os.truncate(inst_img, 2 << 30)
+            live_copy = scratch / f"{case_name}-live.iso"
+            shutil.copyfile(live, live_copy)
+            cfg_inst = scratch / f"{case_name}.conf"
+            write_blkdebug_conf(cfg_inst, ring_sector + 255 * 8, fault_count, skip=1)
+            vm = boot_blkdebug(args, out / case_name, live_copy, inst_img, extra_blk=cfg_inst)
+            try:
+                if not unlock(vm, passphrase, 1, args.timeout) or not root_shell(vm, args.timeout * 2):
+                    return False, f"{case_name}: live image did not reach root shell; see {vm.out}"
+                st_mv, out_mv = run_status(
+                    vm,
+                    "mkdir -p /tmp/pkg-aside; mv /var/lib/packages/*.pkgar_head /tmp/pkg-aside/",
+                )
+                if st_mv != 0:
+                    return False, f"{case_name}: could not trim package heads ({st_mv}): {out_mv!r}"
+                since = vm.mark()
+                vm.type("redox_installer_tui; echo inst-rc-$?\n")
+                choice = vm.wait_serial(
+                    r"(\d+)(?:removing handle[^\n]*\n)?: (?:removing handle[^\n]*\n)?\S+(?:removing handle[^\n]*\n)?: 2\.00 GB",
+                    args.timeout,
+                    since,
+                )
+                if not choice or not vm.wait_serial(r"Select a drive", 10, since):
+                    return False, f"{case_name}: installer did not offer 2 GB disk; see {vm.out}"
+                vm.type(choice.group(1) + "\n")
+                for prompt, answer in (
+                    (r"Encrypt this disk\? \[Y/n\]", ""),
+                    (r"Account name \[\S+\]: ", ""),
+                    (r"Password for \S+: ", inst_pass),
+                    (r"Confirm password: ", inst_pass),
+                ):
+                    if not vm.wait_serial(prompt, 30, since):
+                        return False, f"{case_name}: missing prompt {prompt!r}; see {vm.out}"
+                    vm.type(answer + "\n")
+                    since = vm.mark()
+                done = vm.wait_serial(r"inst-rc-(\d+)|Type SAVED", 300, since)
+                serial_text = vm.text(since)
+                (vm.out / "installer.txt").write_text(serial_text)
+                if not done or done.group(0) == "Type SAVED":
+                    return False, f"{case_name}: installer asked to save recovery key or timed out; see {vm.out / 'installer.txt'}"
+                if int(done.group(1)) == 0:
+                    return False, f"{case_name}: installer exited 0 despite recovery-key fault; see {vm.out / 'installer.txt'}"
+                if "Recovery key (" in serial_text:
+                    return False, f"{case_name}: installer printed recovery key despite fault; see {vm.out / 'installer.txt'}"
+                if expect_text not in serial_text:
+                    return False, f"{case_name}: installer output missing {expect_text!r}; see {vm.out / 'installer.txt'}"
+            finally:
+                vm.close()
+            inst_ring, inst_gen, inst_slots = raw_header_info(inst_img)
+            if inst_ring != ring_sector:
+                return False, f"setup invalid ({case_name}): target ring_sector={inst_ring}, expected {ring_sector}"
+            if expect_cleared and inst_slots[1] != bytes(48):
+                return False, f"{case_name}: slot 1 still populated after installer cleanup"
+            if not expect_cleared and inst_slots[1] == bytes(48):
+                return False, f"{case_name}: slot 1 unexpectedly empty when cleanup fault was permanent"
+            notes.append(f"{case_name} ok (ring_sector={inst_ring}, ring_slot=255, G_after={inst_gen})")
 
         return True, "; ".join(notes)
     finally:
@@ -8264,6 +8754,7 @@ TESTS["dma-outside-grant"] = test_dma_outside_grant
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["one-password"] = test_one_password
+OWN_IMAGE["key-slot-roll"] = test_key_slot_roll
 OWN_IMAGE["wayland-client"] = run_wayland_client
 OWN_IMAGE["pointer-latency"] = run_pointer_latency
 OWN_IMAGE["desktop-columns"] = run_desktop_columns
