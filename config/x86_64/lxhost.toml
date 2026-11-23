@@ -1,0 +1,1 @@
+include = ["desktop.toml", "../../recipes/wip/drivers/ferrion-hardware/source/profiles/qemu/q35-driver-host/profile.toml"]

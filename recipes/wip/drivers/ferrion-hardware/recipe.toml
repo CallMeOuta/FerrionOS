@@ -1,11 +1,20 @@
 [source]
 git = "https://github.com/CallMeOuta/ferrion-hardware.git"
-rev = "f489e7ea367084eaed152d8e789aab72d78a8ebb"
+rev = "f0c42868077f701849cb4c845911333862e7a721"
 
 [build]
 template = "custom"
 script = """
-make -C "${COOKBOOK_SOURCE}/driver-host" O="${COOKBOOK_BUILD}" CROSS_COMPILE="${GNU_TARGET}-" -j"${COOKBOOK_MAKE_JOBS}"
+base_src="${COOKBOOK_ROOT}/recipes/core/base/source"
+relibc_src="${COOKBOOK_ROOT}/recipes/core/relibc/source"
+for dir in "${base_src}/drivers/graphics/driver-graphics" "${relibc_src}/redox-ioctl"; do
+    if [ ! -d "${dir}" ]; then
+        echo "ferrion-hardware: ${dir} is missing; fetch base and relibc first (make f.base f.relibc)" >&2
+        exit 1
+    fi
+done
+make -C "${COOKBOOK_SOURCE}/driver-host" O="${COOKBOOK_BUILD}" CROSS_COMPILE="${GNU_TARGET}-" TARGET="${TARGET}" \
+    CARGO_BUILD="${COOKBOOK_CARGO} build" BASE_SRC="${base_src}" RELIBC_SRC="${relibc_src}" -j"${COOKBOOK_MAKE_JOBS}"
 mkdir -p "${COOKBOOK_STAGE}/usr/lib/drivers"
 cp "${COOKBOOK_BUILD}/ferrion-driver-host" "${COOKBOOK_STAGE}/usr/lib/drivers/ferrion-driver-host"
 """
