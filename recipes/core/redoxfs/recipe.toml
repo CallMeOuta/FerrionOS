@@ -4,7 +4,7 @@ description = "Default filesystem of FerrionOS"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/redoxfs.git"
 rev = "5ba45a6887374ab425326656a276bb3b62eba7dc"
-patches = ["ferrion-passphrase-wipe.patch", "ferrion-key-slots.patch", "ferrion-mkfs-clear-ring.patch", "ferrion-read-only-memory.patch", "ferrion-unchanged-transaction.patch", "ferrion-key-change-stdin.patch", "ferrion-dir-mtime.patch", "ferrion-directory-fsync.patch", "ferrion-file-locks.patch", "ferrion-truncate-tail.patch", "ferrion-empty-write.patch", "ferrion-unlinked-links.patch", "ferrion-rename-into-self.patch", "ferrion-link-name.patch", "ferrion-write-barrier.patch", "ferrion-mkfs-atomic.patch", "ferrion-flush-on-unmount.patch", "ferrion-map-coherence.patch"]
+patches = ["ferrion-passphrase-wipe.patch", "ferrion-key-slots.patch", "ferrion-mkfs-clear-ring.patch", "ferrion-read-only-memory.patch", "ferrion-unchanged-transaction.patch", "ferrion-key-change-stdin.patch", "ferrion-dir-mtime.patch", "ferrion-directory-fsync.patch", "ferrion-file-locks.patch", "ferrion-truncate-tail.patch", "ferrion-empty-write.patch", "ferrion-unlinked-links.patch", "ferrion-rename-into-self.patch", "ferrion-link-name.patch", "ferrion-write-barrier.patch", "ferrion-mkfs-atomic.patch", "ferrion-flush-on-unmount.patch", "ferrion-map-coherence.patch", "ferrion-disk-ring-errors.patch"]
 
 [build]
 template = "custom"

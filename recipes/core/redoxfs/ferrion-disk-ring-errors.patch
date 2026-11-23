@@ -1,0 +1,152 @@
+FerrionOS change to upstream RedoxFS (MIT license, kept), made against upstream commit 5ba45a6887374ab425326656a276bb3b62eba7dc after the existing recipe patches.
+
+RedoxFS reports a block-driver error or short transfer on DiskRing::disk_op as an error of the request instead of completing it, stops submitting new operations once an error is recorded, and drains all in-flight completions so DMA buffer slices are released.
+
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/disk/ring.rs b/src/disk/ring.rs
+--- a/src/disk/ring.rs
++++ b/src/disk/ring.rs
+@@ -179,12 +179,28 @@
+         C: Fn(&mut I, &BufferSlice<'a>),
+     {
+         let mut total_processed = 0;
+-        let mut pending = HashMap::new();
++        let mut first_err: Option<Error> = None;
++        let mut pending: HashMap<u64, (I, usize, BufferSlice<'a>)> = HashMap::new();
+         let mut notified = true;
++        const MAX_INFLIGHT_DRAIN: usize = 1024;
+ 
+-        let process_cqe = |cqe: DiskOpCqe, pending: &mut HashMap<u64, (I, BufferSlice<'a>)>| {
+-            if let Some((mut item, buf)) = pending.remove(&cqe.user_data) {
+-                complete(&mut item, &buf);
++        let process_cqe = |cqe: DiskOpCqe,
++                           pending: &mut HashMap<u64, (I, usize, BufferSlice<'a>)>,
++                           total_processed: &mut usize,
++                           first_err: &mut Option<Error>| {
++            if let Some((mut item, expected_len, buf)) = pending.remove(&cqe.user_data) {
++                if cqe.status != 0 {
++                    if first_err.is_none() {
++                        *first_err = Some(Error::new(cqe.status as i32));
++                    }
++                } else if cqe.count as usize != expected_len {
++                    if first_err.is_none() {
++                        *first_err = Some(Error::new(EIO));
++                    }
++                } else {
++                    complete(&mut item, &buf);
++                    *total_processed += cqe.count as usize;
++                }
+             }
+         };
+ 
+@@ -197,11 +213,21 @@
+         };
+ 
+         for (lba, chunk) in batch {
++            if first_err.is_some() {
++                break;
++            }
+             let len = chunk.as_ref().len();
++            let req_len = match u32::try_from(len) {
++                Ok(req_len) => req_len,
++                Err(_) => {
++                    first_err = Some(Error::new(ENOMEM));
++                    break;
++                }
++            };
+ 
+             let mut buf = loop {
+                 if let Some(buf) = self.allocator.acquire_borrowed_slice(
+-                    u32::try_from(len).map_err(|_| Error::new(ENOMEM))?,
++                    req_len,
+                     1,
+                     AllocationStrategy::Optimal,
+                 ) {
+@@ -211,11 +237,17 @@
+                     notify_on_tail(&mut notified, &mut self.sq);
+                 }
+                 match self.cq.pop(None) {
+-                    Ok(cqe) => process_cqe(cqe, &mut pending),
++                    Ok(cqe) => {
++                        process_cqe(cqe, &mut pending, &mut total_processed, &mut first_err);
++                    }
+                     Err(_) => return Err(Error::new(EIO)),
+                 }
+             };
+ 
++            if first_err.is_some() {
++                break;
++            }
++
+             prepare(&chunk, &mut buf);
+ 
+             let new_id = self.next_id;
+@@ -224,13 +256,13 @@
+                 opcode: opcode as u8,
+                 block: lba,
+                 buf_offset: buf.offset(),
+-                buf_len: len as u32,
++                buf_len: req_len,
+                 user_data: new_id,
+                 file_idx: 0,
+                 pad: [0; 3],
+             };
+ 
+-            pending.insert(new_id, (chunk, buf));
++            pending.insert(new_id, (chunk, len, buf));
+ 
+             loop {
+                 match self.sq.inner.push_back(sqe.clone()) {
+@@ -240,28 +272,49 @@
+                             notify_on_tail(&mut notified, &mut self.sq);
+                         }
+                         match self.cq.pop(None) {
+-                            Ok(cqe) => process_cqe(cqe, &mut pending),
++                            Ok(cqe) => {
++                                process_cqe(
++                                    cqe,
++                                    &mut pending,
++                                    &mut total_processed,
++                                    &mut first_err,
++                                );
++                            }
+                             Err(_) => return Err(Error::new(EIO)),
+                         }
+                     }
+-                    Err(RingPushError::Broken(_)) => return Err(Error::new(EIO)),
++                    Err(RingPushError::Broken(_)) => {
++                        pending.remove(&new_id);
++                        return Err(Error::new(EIO));
++                    }
+                 }
+             }
+ 
+             notified = false;
+-            total_processed += len;
+         }
+ 
+         if !notified {
+             notify_on_tail(&mut notified, &mut self.sq);
+         }
+ 
++        let mut drained = 0usize;
+         while !pending.is_empty() {
++            if drained >= MAX_INFLIGHT_DRAIN {
++                return Err(Error::new(EIO));
++            }
++            drained += 1;
+             match self.cq.pop(None) {
+-                Ok(cqe) => process_cqe(cqe, &mut pending),
++                Ok(cqe) => {
++                    process_cqe(cqe, &mut pending, &mut total_processed, &mut first_err);
++                }
+                 Err(_) => return Err(Error::new(EIO)),
+             }
+         }
++        assert!(pending.is_empty());
++
++        if let Some(err) = first_err {
++            return Err(err);
++        }
+ 
+         Ok(total_processed)
+     }
