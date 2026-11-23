@@ -1,0 +1,12 @@
+--- a/configure
++++ b/configure
+@@ -6301,6 +6301,9 @@
+         ;;
+     minix)
+         ;;
++    redox)
++        enable section_data_rel_ro
++        ;;
+     none)
+         ;;
+     *)
