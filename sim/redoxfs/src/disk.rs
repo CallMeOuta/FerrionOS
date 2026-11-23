@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
-use redoxfs::{Allocator, Disk, HEADER_RING};
+use redoxfs::{Allocator, BlockPtr, Disk, HEADER_RING, Header};
 use syscall::error::{EIO, EROFS, Error, Result};
 
 use crate::rng::Rng;
@@ -11,7 +11,6 @@ pub const SECTOR: usize = 512;
 pub const SECTORS_PER_BLOCK: usize = BLOCK / SECTOR;
 pub const CACHE_LIMIT: usize = 1 << 15;
 pub const ENUMERATION_CACHE_LIMIT: usize = 1 << 10;
-const HEADER_GENERATION_OFFSET: usize = 40;
 
 pub type Block = Box<[u8; BLOCK]>;
 
@@ -78,18 +77,38 @@ pub struct Recording {
     pub events: Vec<Event>,
 }
 
+type PtrStamp = (u64, u64, u64);
+
+fn ptr_stamp<T>(ptr: BlockPtr<T>) -> PtrStamp {
+    let addr = ptr.addr();
+    (addr.index(), addr.level().blocks(), ptr.hash())
+}
+
+fn header_roots(header: &Header) -> [PtrStamp; 3] {
+    [
+        ptr_stamp(header.tree),
+        ptr_stamp(header.alloc),
+        ptr_stamp(header.release),
+    ]
+}
+
 pub struct Guard {
     pub free: Allocator,
     pub free_generation: u64,
     pub header_generation: u64,
+    pub roots: [PtrStamp; 3],
+    pub wrote_non_header: bool,
 }
 
 impl Guard {
-    pub fn new(free: Allocator, generation: u64) -> Guard {
+    pub fn new(free: Allocator, header: &Header) -> Guard {
+        let generation = header.generation();
         Guard {
             free,
             free_generation: generation,
             header_generation: generation,
+            roots: header_roots(header),
+            wrote_non_header: false,
         }
     }
 }
@@ -121,12 +140,6 @@ pub fn free_ranges(allocator: &Allocator) -> Vec<(u64, u64)> {
         }
     }
     merged
-}
-
-pub fn header_generation(bytes: &[u8]) -> u64 {
-    let mut word = [0; 8];
-    word.copy_from_slice(&bytes[HEADER_GENERATION_OFFSET..HEADER_GENERATION_OFFSET + 8]);
-    u64::from_le_bytes(word)
 }
 
 pub enum DiskState {
@@ -261,7 +274,9 @@ impl SimDisk {
             return;
         };
         if block < HEADER_RING {
-            let generation = header_generation(data);
+            let mut header = Header::default();
+            header.copy_from_slice(data);
+            let generation = header.generation();
             if generation != guard.header_generation + 1 || generation % HEADER_RING != block {
                 self.violations.push(format!(
                     "header write of generation {generation} to ring slot {block} after generation {}",
@@ -269,11 +284,26 @@ impl SimDisk {
                 ));
             }
             guard.header_generation = generation;
-        } else if !allocator_contains(&guard.free, block) {
-            self.violations.push(format!(
-                "write to block {block} that is not free in the committed generation {}",
-                guard.free_generation
-            ));
+            if !guard.wrote_non_header
+                && header_roots(&header) == guard.roots
+                && guard.free_generation + 1 == generation
+            {
+                guard.free_generation = generation;
+            }
+        } else {
+            if guard.header_generation != guard.free_generation {
+                self.violations.push(format!(
+                    "non-header write to block {block} at generation {} while guard free set is generation {}",
+                    guard.header_generation, guard.free_generation
+                ));
+            }
+            if !allocator_contains(&guard.free, block) {
+                self.violations.push(format!(
+                    "write to block {block} that is not free in the committed generation {}",
+                    guard.free_generation
+                ));
+            }
+            guard.wrote_non_header = true;
         }
     }
 
@@ -335,6 +365,7 @@ impl SimDisk {
             inflight,
             writes: self.writes,
             flushes: self.flushes,
+            read_errors: self.read_errors,
         }
     }
 }
@@ -345,6 +376,7 @@ pub struct Lost {
     inflight: Option<Pending>,
     pub writes: u64,
     pub flushes: u64,
+    pub read_errors: u64,
 }
 
 impl Lost {
@@ -371,6 +403,7 @@ impl Drop for SimDisk {
                 inflight,
                 writes: self.writes,
                 flushes: self.flushes,
+                read_errors: self.read_errors,
             };
             LOST.with(|slot| *slot.borrow_mut() = Some(lost));
         }

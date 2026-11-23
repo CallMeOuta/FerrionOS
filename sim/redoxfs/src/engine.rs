@@ -128,14 +128,41 @@ enum DurableCheck {
     AfterFlush { media_current: bool },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CrashPlan {
+    after: u32,
+    kind: CrashKind,
+    salt: u64,
+}
+
+#[derive(Default)]
+struct Armed {
+    crash: Option<CrashPlan>,
+    read_error: Option<u32>,
+    enumerate: Option<u64>,
+}
+
+enum After {
+    Ran {
+        fs_ok: bool,
+        actual: std::result::Result<Option<u32>, Errno>,
+        read_error_fired: bool,
+        remaining_crash: Option<CrashPlan>,
+    },
+    PowerLost {
+        lost: disk::Lost,
+        plan: CrashPlan,
+        before: Model,
+        read_error_fired: bool,
+    },
+}
+
 pub struct Engine {
     pub profile: Profile,
     fs: Option<FileSystem<SimDisk>>,
     pub model: Model,
     handles: [Slot; MAX_HANDLES as usize],
-    pending_crash: Option<(u32, CrashKind, u64)>,
-    pending_read_error: Option<u32>,
-    pending_enumerate: Option<u64>,
+    armed: Armed,
     password: Option<String>,
     lost: Option<disk::Lost>,
     touched: Vec<NodeId>,
@@ -251,9 +278,7 @@ impl Engine {
             fs: None,
             model,
             handles: [Slot::Free; MAX_HANDLES as usize],
-            pending_crash: None,
-            pending_read_error: None,
-            pending_enumerate: None,
+            armed: Armed::default(),
             password,
             touched: Vec::new(),
             fatal: None,
@@ -269,7 +294,7 @@ impl Engine {
 
     fn adopt(&mut self, mut fs: FileSystem<SimDisk>, why: Mounted) {
         assert!(!fs.disk.is_crashed(), "adopting a crashed disk");
-        fs.disk.guard = Some(Guard::new(fs.allocator().clone(), fs.header.generation()));
+        fs.disk.guard = Some(Guard::new(fs.allocator().clone(), &fs.header));
         fs.barriers = self.profile.barriers;
         self.handles = [Slot::Free; MAX_HANDLES as usize];
         if let DurableCheck::AfterFlush { media_current } = &mut self.durable_check {
@@ -797,10 +822,11 @@ impl Engine {
             .disk
             .guard
             .as_ref()
-            .is_none_or(|guard| guard.free_generation != generation);
+            .is_none_or(|guard| guard.free_generation != generation || guard.wrote_non_header);
         if stale {
             let free = fs.allocator().clone();
-            fs.disk.guard = Some(Guard::new(free, generation));
+            let header = fs.header;
+            fs.disk.guard = Some(Guard::new(free, &header));
         }
     }
 
@@ -827,6 +853,62 @@ impl Engine {
         }
     }
 
+    fn run_step(
+        &mut self,
+        op: &Op,
+        data: &[u8],
+        armed: Armed,
+    ) -> std::result::Result<After, String> {
+        let crash_ctx = armed.crash.map(|plan| (plan, self.model.clone()));
+        {
+            let fs = self.fs();
+            if let Some((plan, _)) = &crash_ctx {
+                fs.disk.arm_crash(u64::from(plan.after));
+            }
+            if let Some(nth) = armed.read_error {
+                fs.disk.arm_read_error(u64::from(nth));
+            }
+            if armed.enumerate.is_some() {
+                fs.disk.start_recording();
+            }
+        }
+        let read_errors_before = self.fs().disk.read_errors;
+        let actual = self.run_fs(op, data).map_err(errno);
+        if let Some(fatal) = self.fatal.take() {
+            return Err(fatal);
+        }
+        let crashed = self.fs.as_ref().is_none_or(|fs| fs.disk.is_crashed());
+        if !crashed {
+            let fs = self.fs();
+            fs.disk.disarm_crash();
+            fs.disk.disarm_read_error();
+            let read_error_fired = fs.disk.read_errors != read_errors_before;
+            return Ok(After::Ran {
+                fs_ok: actual.is_ok(),
+                actual,
+                read_error_fired,
+                remaining_crash: crash_ctx.map(|(plan, _)| plan),
+            });
+        }
+        let lost = match self.fs.take() {
+            Some(fs) => fs.disk.into_lost(),
+            None => match self.lost.take() {
+                Some(lost) => lost,
+                None => return Err("file system unmounted without a lost disk".to_string()),
+            },
+        };
+        let read_error_fired = lost.read_errors != read_errors_before;
+        let Some((plan, before)) = crash_ctx else {
+            return Err("disk lost power without an armed crash plan".to_string());
+        };
+        Ok(After::PowerLost {
+            lost,
+            plan,
+            before,
+            read_error_fired,
+        })
+    }
+
     pub fn step(&mut self, step: &Step) -> std::result::Result<(), String> {
         assert_eq!(
             self.fs.as_ref().expect("mounted file system").barriers,
@@ -834,16 +916,20 @@ impl Engine {
         );
         match &step.op {
             Op::Crash { after, kind, salt } => {
-                self.pending_crash = Some((*after, *kind, *salt));
+                self.armed.crash = Some(CrashPlan {
+                    after: *after,
+                    kind: *kind,
+                    salt: *salt,
+                });
                 return Ok(());
             }
             Op::ReadError { nth } => {
-                self.pending_read_error = Some(*nth);
+                self.armed.read_error = Some(*nth);
                 return Ok(());
             }
             Op::Enumerate { salt } => {
                 if !self.profile.encrypted {
-                    self.pending_enumerate = Some(*salt);
+                    self.armed.enumerate = Some(*salt);
                 }
                 return Ok(());
             }
@@ -852,34 +938,17 @@ impl Engine {
         self.now = step.time;
         let op = &step.op;
         if !self.applicable(op) {
-            self.pending_crash = None;
-            self.pending_read_error = None;
-            self.pending_enumerate = None;
+            self.armed = Armed::default();
             return Ok(());
         }
         self.stats.ops += 1;
-        let crash = self.pending_crash.take();
-        let read_error = self.pending_read_error.take();
-        let enumerate = self.pending_enumerate.take();
-        let before = (crash.is_some() || enumerate.is_some()).then(|| self.model.clone());
+        let armed = std::mem::take(&mut self.armed);
+        let enum_ctx = armed.enumerate.map(|salt| (salt, self.model.clone()));
         let data = match op {
             Op::Write { len, pattern, .. } => pattern.bytes(*len as usize),
             _ => Vec::new(),
         };
         let expected = self.expected(op);
-        {
-            let fs = self.fs();
-            if let Some((after, _, _)) = crash {
-                fs.disk.arm_crash(u64::from(after));
-            }
-            if let Some(nth) = read_error {
-                fs.disk.arm_read_error(u64::from(nth));
-            }
-            if enumerate.is_some() {
-                fs.disk.start_recording();
-            }
-        }
-        let read_errors_before = self.fs().disk.read_errors;
         let writes_before = self.fs().disk.writes;
         let generation_before = self.fs().header.generation();
         let uuid_before = self.fs().header.uuid();
@@ -887,49 +956,49 @@ impl Engine {
             Op::Close(slot) => self.handle_node(*slot),
             _ => None,
         };
-        let actual = self.run_fs(op, &data).map_err(errno);
-        if let Some(fatal) = self.fatal.take() {
-            return Err(fatal);
-        }
-        let (crashed, read_error_fired) = match self.fs.as_mut() {
-            Some(fs) => {
-                fs.disk.disarm_crash();
-                fs.disk.disarm_read_error();
-                (
-                    fs.disk.is_crashed(),
-                    fs.disk.read_errors != read_errors_before,
-                )
-            }
-            None => (true, false),
-        };
+        let (fs_ok, actual, read_error_fired, remaining_crash) =
+            match self.run_step(op, &data, armed)? {
+                After::PowerLost {
+                    lost,
+                    plan,
+                    before,
+                    read_error_fired,
+                } => {
+                    if read_error_fired {
+                        self.stats.read_errors += 1;
+                    }
+                    let mut after = before.clone();
+                    if expected.is_ok() {
+                        match op {
+                            Op::Close(_) => {
+                                after.close(close_target.expect("open handle"), true);
+                            }
+                            Op::Remount => {
+                                after.close_all();
+                            }
+                            _ => {
+                                std::mem::swap(&mut self.model, &mut after);
+                                self.apply(op, &data, None);
+                                std::mem::swap(&mut self.model, &mut after);
+                            }
+                        }
+                    }
+                    return self.crash(lost, plan.kind, plan.salt, vec![before, after], op);
+                }
+                After::Ran {
+                    fs_ok,
+                    actual,
+                    read_error_fired,
+                    remaining_crash,
+                } => (fs_ok, actual, read_error_fired, remaining_crash),
+            };
         if read_error_fired {
             self.stats.read_errors += 1;
-        }
-        if crashed {
-            let before = before.expect("model before a crash");
-            let mut after = before.clone();
-            if expected.is_ok() {
-                match op {
-                    Op::Close(_) => {
-                        after.close(close_target.expect("open handle"), true);
-                    }
-                    Op::Remount => {
-                        after.close_all();
-                    }
-                    _ => {
-                        std::mem::swap(&mut self.model, &mut after);
-                        self.apply(op, &data, None);
-                        std::mem::swap(&mut self.model, &mut after);
-                    }
-                }
-            }
-            let (_, kind, salt) = crash.expect("armed crash");
-            return self.crash(kind, salt, vec![before, after], op);
         }
         let outcome = self.judge(op, expected, actual.clone(), read_error_fired)?;
         let wrote = self.fs().disk.writes - writes_before;
         let refused = !outcome && expected.err().is_some() && expected.err() == actual.err();
-        let unchanged = matches!(op, Op::Fsync(_)) && actual.is_ok();
+        let unchanged = matches!(op, Op::Fsync(_)) && fs_ok;
         if wrote != 0 && (refused || unchanged) {
             return Err(format!(
                 "{step}: wrote {wrote} blocks although it changed nothing"
@@ -960,14 +1029,20 @@ impl Engine {
         if outcome && matches!(op, Op::Reformat) && self.fs().header.uuid() == uuid_before {
             return Err(format!("{step}: the new file system kept the old UUID"));
         }
-        if let Some(salt) = enumerate {
+        if let Some((salt, before)) = enum_ctx {
             let recording = self.fs().disk.stop_recording().expect("recording");
-            self.enumerate(&recording, salt, before.as_ref().expect("model before"), op)?;
+            self.enumerate(&recording, salt, &before, op)?;
         }
         self.refresh_guard();
-        if let Some((_, kind, salt)) = crash {
+        if let Some(plan) = remaining_crash {
+            let lost = self
+                .fs
+                .take()
+                .expect("mounted file system")
+                .disk
+                .into_lost();
             let model = self.model.clone();
-            return self.crash(kind, salt, vec![model], op);
+            return self.crash(lost, plan.kind, plan.salt, vec![model], op);
         }
         let generation_after = self.fs().header.generation();
         let threshold = generation_after / ALLOC_GC_THRESHOLD * ALLOC_GC_THRESHOLD;
@@ -991,7 +1066,7 @@ impl Engine {
             (Err(want), Err(got)) if want == got => return Ok(false),
             _ => {}
         }
-        if read_error_fired && actual.is_err() {
+        if read_error_fired && actual == Err(EIO) {
             return Ok(false);
         }
         if actual == Err(ENOSPC) {
@@ -1021,16 +1096,13 @@ impl Engine {
 
     fn crash(
         &mut self,
+        lost: disk::Lost,
         kind: CrashKind,
         salt: u64,
         candidates: Vec<Model>,
         op: &Op,
     ) -> std::result::Result<(), String> {
         self.stats.crashes += 1;
-        let lost = match self.fs.take() {
-            Some(fs) => fs.disk.into_lost(),
-            None => self.lost.take().expect("disk lost in a power loss"),
-        };
         let mut rng = Rng::new(salt);
         let image = lost.crash_image(kind, &mut rng);
         self.stats.writes += lost.writes;
