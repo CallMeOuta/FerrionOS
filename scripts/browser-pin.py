@@ -28,13 +28,12 @@ URL_TIMEOUT_S = 20
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_RETRIES = 2
 MAX_ESR_BRANCHES = 16
-MAX_TAGS_SCANNED = 8192
+MAX_HEADS_SCANNED = 512
 
 VERSION_RE = re.compile(r"^\d+\.\d+(\.\d+)?(esr)?$")
 TAR_VERSION_RE = re.compile(r"^firefox-(\d+\.\d+(?:\.\d+)?(?:esr)?)\.source\.tar\.(?:xz|bz2|gz)$")
 ESR_KEY_RE = re.compile(r"^FIREFOX_ESR(\d+|_NEXT)?$")
 ESR_BRANCH_RE = re.compile(r"^refs/heads/esr(\d+)$")
-RELEASE_TAG_RE = re.compile(r"^refs/tags/FIREFOX_(\d+)_(\d+)(?:_(\d+))?(esr)?_RELEASE$")
 
 EXIT_GREEN = 0
 EXIT_RED = 1
@@ -210,8 +209,8 @@ def read_product_details(fetcher):
 
 def cross_check_mozilla_git(latest_release, esr_lines, fetcher):
     cmd = [
-        "git", "ls-remote", "--heads", "--tags", MOZILLA_GIT_REPO,
-        "refs/heads/release", "refs/heads/esr*", "refs/tags/FIREFOX_*_RELEASE",
+        "git", "ls-remote", "--heads", MOZILLA_GIT_REPO,
+        "refs/heads/release", "refs/heads/esr*",
     ]
     last_err = None
     output = None
@@ -231,12 +230,10 @@ def cross_check_mozilla_git(latest_release, esr_lines, fetcher):
 
     esr_branches = []
     has_release_branch = False
-    newest_release_tag = None
-    newest_esr_tags = {}
     scanned = 0
     for line in output.splitlines():
         scanned += 1
-        if scanned > MAX_TAGS_SCANNED:
+        if scanned > MAX_HEADS_SCANNED:
             break
         parts = line.split("\t")
         if len(parts) != 2:
@@ -249,59 +246,50 @@ def cross_check_mozilla_git(latest_release, esr_lines, fetcher):
         if m_br:
             if len(esr_branches) < MAX_ESR_BRANCHES:
                 esr_branches.append(f"esr{m_br.group(1)}")
-            continue
-        m_tag = RELEASE_TAG_RE.match(ref)
-        if not m_tag:
-            continue
-        maj, minor, patch, esr_flag = m_tag.group(1), m_tag.group(2), m_tag.group(3), m_tag.group(4)
-        ver = f"{maj}.{minor}.{patch}" if patch is not None else f"{maj}.{minor}"
-        if esr_flag:
-            ver += "esr"
-            line_name = f"esr{maj}"
-            cur = newest_esr_tags.get(line_name)
-            if cur is None or parse_version_tuple(ver) > parse_version_tuple(cur[0]):
-                newest_esr_tags[line_name] = (ver, ref.removeprefix("refs/tags/"))
-        else:
-            if newest_release_tag is None or parse_version_tuple(ver) > parse_version_tuple(newest_release_tag[0]):
-                newest_release_tag = (ver, ref.removeprefix("refs/tags/"))
 
-    if not has_release_branch or newest_release_tag is None:
-        raise CheckFailure("sources disagree: Mozilla git missing release branch or release tags")
-    if newest_release_tag[0] != latest_release:
-        raise CheckFailure(
-            f"sources disagree: product-details release={latest_release} vs git tag {newest_release_tag[0]}"
-        )
-    rel_tag_url = f"{MOZILLA_RAW_BASE}/refs/tags/{newest_release_tag[1]}/browser/config/version.txt"
-    _, rel_body = fetcher.fetch(rel_tag_url)
+    if not has_release_branch:
+        raise CheckFailure("sources disagree: Mozilla git missing refs/heads/release")
+    rel_branch_url = f"{MOZILLA_RAW_BASE}/refs/heads/release/browser/config/version.txt"
+    _, rel_body = fetcher.fetch(rel_branch_url)
     rel_vtxt = rel_body.decode("utf-8", errors="replace").strip()
-    if rel_vtxt != latest_release:
+    if not VERSION_RE.match(rel_vtxt) or rel_vtxt.endswith("esr"):
+        raise CheckFailure(f"sources disagree: unparseable release branch version.txt={rel_vtxt!r}")
+    rel_pd_tuple = parse_version_tuple(latest_release)[:3]
+    rel_br_tuple = parse_version_tuple(rel_vtxt)[:3]
+    if rel_pd_tuple > rel_br_tuple:
         raise CheckFailure(
-            f"sources disagree: product-details release={latest_release} vs tag version.txt={rel_vtxt!r}"
+            f"sources disagree: product-details release={latest_release} exceeds branch version.txt={rel_vtxt}"
+        )
+    if rel_br_tuple[0] - rel_pd_tuple[0] > 1:
+        raise CheckFailure(
+            f"sources disagree: product-details release={latest_release} far behind branch version.txt={rel_vtxt}"
         )
 
     git_verified = {
         "release_branch": has_release_branch,
+        "release_branch_version_txt": rel_vtxt,
         "esr_branches": sorted(esr_branches, key=lambda s: int(s[3:])),
-        "release_tag": newest_release_tag[1],
-        "release_version_txt": rel_vtxt,
-        "esr_tags": {},
+        "esr_branch_versions": {},
     }
     for line_name, pd_ver in sorted(esr_lines.items(), key=lambda kv: int(kv[0][3:]), reverse=True):
         if line_name not in esr_branches:
             raise CheckFailure(f"sources disagree: product-details lists {line_name} ({pd_ver}) missing from git heads")
-        tag_info = newest_esr_tags.get(line_name)
-        if tag_info is None or tag_info[0] != pd_ver:
-            raise CheckFailure(
-                f"sources disagree: product-details {line_name}={pd_ver} vs git tag {tag_info[0] if tag_info else 'none'}"
-            )
-        esr_url = f"{MOZILLA_RAW_BASE}/refs/tags/{tag_info[1]}/browser/config/version.txt"
+        esr_url = f"{MOZILLA_RAW_BASE}/refs/heads/{line_name}/browser/config/version.txt"
         _, esr_body = fetcher.fetch(esr_url)
         esr_vtxt = esr_body.decode("utf-8", errors="replace").strip()
-        if f"{esr_vtxt}esr" != pd_ver:
+        if not VERSION_RE.match(esr_vtxt):
+            raise CheckFailure(f"sources disagree: unparseable {line_name} branch version.txt={esr_vtxt!r}")
+        pd_tuple = parse_version_tuple(pd_ver)[:3]
+        br_tuple = parse_version_tuple(esr_vtxt)[:3]
+        if br_tuple[0] != pd_tuple[0]:
             raise CheckFailure(
-                f"sources disagree: product-details {line_name}={pd_ver} vs tag version.txt={esr_vtxt!r}"
+                f"sources disagree: product-details {line_name}={pd_ver} major != branch version.txt={esr_vtxt}"
             )
-        git_verified["esr_tags"][line_name] = {"tag": tag_info[1], "version_txt": esr_vtxt}
+        if pd_tuple > br_tuple:
+            raise CheckFailure(
+                f"sources disagree: product-details {line_name}={pd_ver} exceeds branch version.txt={esr_vtxt}"
+            )
+        git_verified["esr_branch_versions"][line_name] = esr_vtxt
     return git_verified
 
 
