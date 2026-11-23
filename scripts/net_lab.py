@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import tomllib
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +33,33 @@ MAX_PCAP_PACKETS = 500_000
 MAX_ECHO_CONNS = 256
 MAX_ECHO_STEPS = 200_000
 MAX_DHCP_POLLS = 60
+MAX_IPERF_ATTEMPTS = 5
+MAX_PROC_ENTRIES = 65_536
+MAX_ANCESTOR_HOPS = 64
+MAX_TASK_ENTRIES = 1024
+SCHED_POLICIES = {
+    0: "SCHED_OTHER",
+    1: "SCHED_FIFO",
+    2: "SCHED_RR",
+    3: "SCHED_BATCH",
+    5: "SCHED_IDLE",
+}
+
+
+class _ForeignQemuDetected(Exception):
+    def __init__(self, entries):
+        self.entries = entries
+        super().__init__(format_foreign_qemus(entries))
+
+
+def format_foreign_qemus(entries):
+    parts = []
+    for entry in entries:
+        parts.append(
+            f"pid={entry.get('pid')} name={entry.get('name')} "
+            f"started_at={entry.get('started_at')} cwd={entry.get('cwd')}"
+        )
+    return "; ".join(parts)
 
 LAB_BASE_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping")
 LAB_PERF_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping", "iperf3")
@@ -601,9 +629,49 @@ def run_net_basics(args, out, ctx):
         return False, f"net-basics runs with net=e1000 or net=virtio, not net={card}"
     driver = "virtio-netd" if card == "virtio" else "e1000d"
     require_tools(LAB_BASE_TOOLS, ctx["Blocked"])
+    deadline_str, deadline_ts = parse_window_deadline(getattr(args, "window_deadline", None))
     load_start = [round(v, 2) for v in os.getloadavg()]
     items = {}
     boots_syns = []
+
+    def timed_guard_start():
+        return (
+            os.getloadavg()[0],
+            list_foreign_qemus(),
+            sample_own_qemu_priority(),
+        )
+
+    def timed_guard_end(start_state):
+        load_before, f_before, q_before = start_state
+        load_after = os.getloadavg()[0]
+        f_after = list_foreign_qemus()
+        q_after = sample_own_qemu_priority()
+        max_l = round(max(load_before, load_after), 2)
+        seen = {}
+        for entry in [*f_before, *f_after]:
+            seen[(entry["pid"], entry["started_at"])] = entry
+        foreign = [seen[k] for k in sorted(seen)]
+        q_summary = summarize_priority_samples([*q_before, *q_after])
+        after_deadline = deadline_ts is not None and time.time() > deadline_ts
+        reasons = []
+        if max_l > LOAD_LIMIT:
+            reasons.append("load")
+        if foreign:
+            reasons.append("foreign_qemu")
+        if after_deadline:
+            reasons.append("window_deadline")
+        if q_summary is None:
+            reasons.append("priority_unrecorded")
+        elif not q_summary["constant"]:
+            reasons.append("nice_changed")
+        return {
+            "max_load1": max_l,
+            "foreign_qemu": foreign,
+            "qemu_priority": q_summary,
+            "ended_after_deadline": after_deadline,
+            "host_limited_reasons": reasons,
+            "host_limited": bool(reasons),
+        }
 
     for boot in (1, 2):
         boot_out = out / f"boot-{boot}"
@@ -655,19 +723,25 @@ def run_net_basics(args, out, ctx):
                     "driver_survived": pid_same,
                 }
 
+                g2 = timed_guard_start()
                 _, http_out = ctx["run_status"](
                     vm,
                     f"net-probe http-bench {LAB_HOST}:{HTTP_PORT} /ping --count 20 --interval-ms 1000 --timeout-ms 5000",
                     90,
                 )
+                g2_res = timed_guard_end(g2)
                 http_json = parse_json_line(http_out) or {"ok": False, "raw": http_out.strip()}
                 items["2_idle_http_rtt"] = {
-                    "pass": bool(http_json.get("ok"))
+                    "pass": (not g2_res["host_limited"])
+                    and bool(http_json.get("ok"))
                     and http_json.get("total_p50_ms", 9999.0) < 10.0
                     and http_json.get("total_max_ms", 9999.0) <= 100.0,
+                    "blocked": g2_res["host_limited"],
                     "result": http_json,
+                    **g2_res,
                 }
 
+                g3 = timed_guard_start()
                 lab.set_netem(delay_ms=50)
                 try:
                     blob_bytes = 16 * 1024 * 1024
@@ -678,6 +752,7 @@ def run_net_basics(args, out, ctx):
                     )
                 finally:
                     lab.set_netem(None)
+                g3_res = timed_guard_end(g3)
                 m = re.search(r"(\d+)\s+([\d.]+)\s+([\d.]+)", dl_out)
                 if m:
                     dl_size = int(m.group(1))
@@ -686,11 +761,15 @@ def run_net_basics(args, out, ctx):
                 else:
                     dl_size, dl_time, dl_mbps = 0, 0.0, 0.0
                 items["3_delayed_download_50ms"] = {
-                    "pass": dl_size == 16 * 1024 * 1024 and dl_mbps >= 4.0,
+                    "pass": (not g3_res["host_limited"])
+                    and dl_size == 16 * 1024 * 1024
+                    and dl_mbps >= 4.0,
+                    "blocked": g3_res["host_limited"],
                     "size_bytes": dl_size,
                     "time_s": round(dl_time, 3),
                     "mb_per_s": round(dl_mbps, 4),
                     "target_mb_per_s": 4.0,
+                    **g3_res,
                 }
 
                 lookup_answers = []
@@ -718,6 +797,7 @@ def run_net_basics(args, out, ctx):
                     "rtt": ping_100["rtt"],
                 }
 
+                g7 = timed_guard_start()
                 _, opt_out = ctx["run_status"](
                     vm,
                     "net-probe sockopts tcp --nodelay 1 --keepalive 1 --rcvbuf 262144 --sndbuf 262144 --rcvtimeo-ms 1500 --sndtimeo-ms 1500",
@@ -729,14 +809,18 @@ def run_net_basics(args, out, ctx):
                     f"net-probe echo-bench tcp {LAB_HOST}:{TCP_ECHO_PORT} --count 200 --bytes 1 --nodelay --timeout-ms 5000",
                     120,
                 )
+                g7_res = timed_guard_end(g7)
                 echo_json = parse_json_line(echo_out) or {"ok": False, "raw": echo_out.strip()}
                 nodelay_val = opt_json.get("get", {}).get("nodelay", {}).get("value")
                 items["7_tcp_nodelay_1b_echo"] = {
-                    "pass": bool(echo_json.get("ok"))
+                    "pass": (not g7_res["host_limited"])
+                    and bool(echo_json.get("ok"))
                     and echo_json.get("p99_ms", 9999.0) < 5.0
                     and nodelay_val == 1,
+                    "blocked": g7_res["host_limited"],
                     "echo": echo_json,
                     "sockopts": opt_json,
+                    **g7_res,
                 }
 
                 _, so_out = ctx["run_status"](
@@ -820,10 +904,12 @@ def run_net_basics(args, out, ctx):
     }
 
     ordered_keys = sorted(items.keys())
+    blocked_items = [k for k in ordered_keys if items[k].get("blocked")]
     report = {
         "card": card,
         "driver": driver,
         "vhost": "off",
+        "window_deadline": deadline_str,
         "loadavg_start": load_start,
         "loadavg_end": [round(v, 2) for v in os.getloadavg()],
         "items": {k: items[k] for k in ordered_keys},
@@ -831,17 +917,20 @@ def run_net_basics(args, out, ctx):
     (out / "net-basics.json").write_text(json.dumps(report, indent=2) + "\n")
     lines = []
     for key in ordered_keys:
-        status = "PASS" if items[key]["pass"] else "FAIL"
+        status = "BLOCKED" if items[key].get("blocked") else ("PASS" if items[key]["pass"] else "FAIL")
         lines.append(f"{status} {key}")
     (out / "net-basics.txt").write_text("\n".join(lines) + "\n")
     passed = [k for k in ordered_keys if items[k]["pass"]]
-    failed = [k for k in ordered_keys if not items[k]["pass"]]
+    failed = [k for k in ordered_keys if not items[k]["pass"] and not items[k].get("blocked")]
     summary = (
         f"card {card}: {len(passed)}/{len(ordered_keys)} green "
-        f"(green: {', '.join(passed) or 'none'}; red: {', '.join(failed) or 'none'}); "
-        f"see {out / 'net-basics.json'}"
+        f"(green: {', '.join(passed) or 'none'}; red: {', '.join(failed) or 'none'}"
+        + (f"; blocked: {', '.join(blocked_items)}" if blocked_items else "")
+        + f"); see {out / 'net-basics.json'}"
     )
-    return not failed, summary
+    if blocked_items and not failed:
+        raise ctx["Blocked"](summary)
+    return not failed and not blocked_items, summary
 
 
 def parse_iperf_json(text):
@@ -895,11 +984,22 @@ def run_iperf_series(
     cpu_samples = []
     iperf_cpu_samples = []
     load_peaks = []
+    qemu_prios = []
+    iperf_prios = []
     wrapped = f"bash /tmp/ip.sh {watchdog_s} {cmd_base}"
     timeout = watchdog_s + 25
-    for _ in range(runs):
+    max_attempts = max(runs, MAX_IPERF_ATTEMPTS)
+    attempts = 0
+    for _ in range(max_attempts):
+        if len(samples) >= runs:
+            break
+        attempts += 1
         if lab is not None:
             lab.ensure_iperf()
+        check_foreign_qemus()
+        qemu_prios.extend(sample_own_qemu_priority())
+        if lab is not None:
+            iperf_prios.extend(sample_iperf_priority(lab))
         load_before = os.getloadavg()[0]
         ctx_before = context_snapshot(vm, run_status)
         status, out = run_status(vm, wrapped, timeout)
@@ -909,6 +1009,10 @@ def run_iperf_series(
         ctx_after = context_snapshot(vm, run_status)
         load_after = os.getloadavg()[0]
         load_peaks.append(round(max(load_before, load_after), 2))
+        check_foreign_qemus()
+        qemu_prios.extend(sample_own_qemu_priority())
+        if lab is not None:
+            iperf_prios.extend(sample_iperf_priority(lab))
         cpu_samples.append(cpu_delta(ctx_before, ctx_after, ("netstack", driver, "iperf3")))
         data = parse_iperf_json(out)
         if status == 124:
@@ -963,14 +1067,21 @@ def run_iperf_series(
             else:
                 errors.append("missing TCP sum")
 
+    q_prio = summarize_priority_samples(qemu_prios)
+    i_prio = summarize_priority_samples(iperf_prios)
     if not samples:
         return {
             "status": fail_status,
             "runs": [],
+            "runs_completed": 0,
+            "runs_requested": runs,
+            "attempts": attempts,
             "errors": errors,
             "cpu_s": cpu_samples,
             "iperf_cpu_percent": iperf_cpu_samples,
             "max_load1": max(load_peaks) if load_peaks else None,
+            "qemu_priority": q_prio,
+            "iperf_server_priority": i_prio,
         }
     if is_udp:
         rates = [s["mb_per_s"] for s in samples]
@@ -980,6 +1091,9 @@ def run_iperf_series(
             "status": "ok",
             "unit": "MB/s",
             "runs": rates,
+            "runs_completed": len(rates),
+            "runs_requested": runs,
+            "attempts": attempts,
             "median": round(statistics.median(rates), 4),
             "spread": round(max(rates) - min(rates), 4),
             "lost_percent_median": round(statistics.median(losses), 3),
@@ -988,17 +1102,24 @@ def run_iperf_series(
             "cpu_s": cpu_samples,
             "iperf_cpu_percent": iperf_cpu_samples,
             "max_load1": max(load_peaks),
+            "qemu_priority": q_prio,
+            "iperf_server_priority": i_prio,
         }
     return {
         "status": "ok",
         "unit": "MB/s",
         "runs": samples,
+        "runs_completed": len(samples),
+        "runs_requested": runs,
+        "attempts": attempts,
         "median": round(statistics.median(samples), 4),
         "spread": round(max(samples) - min(samples), 4),
         "errors": errors,
         "cpu_s": cpu_samples,
         "iperf_cpu_percent": iperf_cpu_samples,
         "max_load1": max(load_peaks),
+        "qemu_priority": q_prio,
+        "iperf_server_priority": i_prio,
     }
 
 
@@ -1007,14 +1128,24 @@ def run_latency_series(vm, run_status, cmd, metric_key, driver, runs=3, timeout=
     extra = []
     cpu_samples = []
     load_peaks = []
+    qemu_prios = []
     errors = []
-    for _ in range(runs):
+    max_attempts = max(runs, MAX_IPERF_ATTEMPTS)
+    attempts = 0
+    for _ in range(max_attempts):
+        if len(samples) >= runs:
+            break
+        attempts += 1
+        check_foreign_qemus()
+        qemu_prios.extend(sample_own_qemu_priority())
         load_before = os.getloadavg()[0]
         ctx_before = context_snapshot(vm, run_status)
         status, out = run_status(vm, cmd, timeout)
         ctx_after = context_snapshot(vm, run_status)
         load_after = os.getloadavg()[0]
         load_peaks.append(round(max(load_before, load_after), 2))
+        check_foreign_qemus()
+        qemu_prios.extend(sample_own_qemu_priority())
         cpu_samples.append(cpu_delta(ctx_before, ctx_after, ("netstack", driver, "net-probe")))
         data = parse_json_line(out)
         if status == 0 and data and data.get("ok") and data.get(metric_key) is not None:
@@ -1022,18 +1153,26 @@ def run_latency_series(vm, run_status, cmd, metric_key, driver, runs=3, timeout=
             extra.append(data)
         else:
             errors.append(f"exit {status}: {out.strip()[-160:]}")
+    q_prio = summarize_priority_samples(qemu_prios)
     if not samples:
         return {
             "status": "error",
             "runs": [],
+            "runs_completed": 0,
+            "runs_requested": runs,
+            "attempts": attempts,
             "errors": errors,
             "cpu_s": cpu_samples,
             "max_load1": max(load_peaks) if load_peaks else None,
+            "qemu_priority": q_prio,
         }
     return {
         "status": "ok",
         "unit": "ms",
         "runs": samples,
+        "runs_completed": len(samples),
+        "runs_requested": runs,
+        "attempts": attempts,
         "median": round(statistics.median(samples), 3),
         "spread": round(max(samples) - min(samples), 3),
         "p99_median": round(statistics.median([e["p99_ms"] for e in extra if "p99_ms" in e]), 3)
@@ -1047,10 +1186,289 @@ def run_latency_series(vm, run_status, cmd, metric_key, driver, runs=3, timeout=
         "errors": errors,
         "cpu_s": cpu_samples,
         "max_load1": max(load_peaks),
+        "qemu_priority": q_prio,
     }
 
 
-def compare_perf_passes(pass1, pass2):
+def parse_window_deadline(raw, now=None):
+    if not raw:
+        return None, None
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    now_ts = time.time() if now is None else float(now)
+    if re.match(r"^\d{2}:\d{2}:\d{2}$", text):
+        base = datetime.fromtimestamp(now_ts)
+        h, m, s = (int(part) for part in text.split(":"))
+        target = base.replace(hour=h, minute=m, second=s, microsecond=0)
+        if target.timestamp() < now_ts - 43_200:
+            target = target + timedelta(days=1)
+        return text, target.timestamp()
+    try:
+        return text, datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        pass
+    try:
+        return text, float(text)
+    except ValueError:
+        raise ValueError(f"invalid --window-deadline {raw!r}; expected HH:MM:SS, ISO-8601 or epoch") from None
+
+
+def _proc_boot_time():
+    try:
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _parse_proc_stat(text):
+    rparen = text.rfind(")")
+    lparen = text.find("(")
+    if lparen < 0 or rparen <= lparen:
+        return None, None, None, None, None
+    comm = text[lparen + 1 : rparen]
+    fields = text[rparen + 2 :].split()
+    if len(fields) < 20:
+        return comm, None, None, None, None
+    try:
+        ppid = int(fields[1])
+        nice = int(fields[16])
+        start_ticks = int(fields[19])
+        policy = int(fields[38]) if len(fields) > 38 else None
+    except ValueError:
+        return comm, None, None, None, None
+    return comm, ppid, nice, start_ticks, policy
+
+
+def _policy_name(policy_id):
+    if policy_id is None:
+        return None
+    return SCHED_POLICIES.get(policy_id, f"POLICY_{policy_id}")
+
+
+def read_proc_priority(pid):
+    pairs = set()
+    task_dir = Path(f"/proc/{pid}/task")
+    try:
+        task_entries = list(task_dir.iterdir())[:MAX_TASK_ENTRIES]
+    except OSError:
+        task_entries = []
+    for entry in task_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_txt = (entry / "stat").read_text()
+        except OSError:
+            continue
+        _, _, nice, _, policy = _parse_proc_stat(stat_txt)
+        if nice is not None and policy is not None:
+            pairs.add((nice, policy))
+    if not pairs:
+        try:
+            stat_txt = Path(f"/proc/{pid}/stat").read_text()
+            _, _, nice, _, policy = _parse_proc_stat(stat_txt)
+            if nice is not None and policy is not None:
+                pairs.add((nice, policy))
+        except OSError:
+            return None
+    if not pairs:
+        return None
+    return sorted(pairs)
+
+
+def summarize_priority_samples(samples):
+    unique_sets = []
+    seen_sets = set()
+    for sample in samples:
+        if not sample:
+            continue
+        norm = tuple(sorted({(int(pair[0]), int(pair[1])) for pair in sample}))
+        if norm and norm not in seen_sets:
+            seen_sets.add(norm)
+            unique_sets.append(norm)
+    if not unique_sets:
+        return None
+    all_pairs = sorted({pair for s in unique_sets for pair in s})
+    observed = [{"nice": n, "policy": _policy_name(p), "policy_id": p} for n, p in all_pairs]
+    constant = len(unique_sets) == 1
+    single = constant and len(unique_sets[0]) == 1
+    return {
+        "nice": unique_sets[0][0][0] if single else None,
+        "policy": _policy_name(unique_sets[0][0][1]) if single else None,
+        "policy_id": unique_sets[0][0][1] if single else None,
+        "constant": constant,
+        "observed": observed,
+        "sample_sets": [
+            [{"nice": n, "policy": _policy_name(p), "policy_id": p} for n, p in s]
+            for s in unique_sets
+        ],
+    }
+
+
+def scan_qemus(self_pid=None):
+    owner_pid = os.getpid() if self_pid is None else int(self_pid)
+    btime = _proc_boot_time()
+    clk_tck = os.sysconf("SC_CLK_TCK")
+    ppids = {}
+    qemus = []
+    proc_root = Path("/proc")
+    try:
+        entries = list(proc_root.iterdir())[:MAX_PROC_ENTRIES]
+    except OSError:
+        return [], []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            stat_txt = (entry / "stat").read_text()
+        except OSError:
+            continue
+        comm, ppid, _, start_ticks, _ = _parse_proc_stat(stat_txt)
+        if ppid is not None:
+            ppids[pid] = ppid
+        argv0 = ""
+        try:
+            raw_cmd = (entry / "cmdline").read_bytes()
+            if raw_cmd:
+                argv0 = os.path.basename(raw_cmd.split(b"\0", 1)[0].decode("utf-8", "replace"))
+        except OSError:
+            pass
+        name = argv0 if argv0.startswith("qemu-system-") else (comm or "")
+        if not name.startswith("qemu-system-"):
+            continue
+        started_at = None
+        if btime is not None and start_ticks is not None and clk_tck > 0:
+            started_at = datetime.fromtimestamp(btime + start_ticks / clk_tck).astimezone().isoformat(timespec="seconds")
+        try:
+            cwd = os.readlink(str(entry / "cwd"))
+        except OSError:
+            cwd = None
+        qemus.append((pid, name, started_at, cwd))
+    own_pids = []
+    foreign = []
+    for pid, name, started_at, cwd in sorted(qemus):
+        cur = pid
+        is_own = False
+        for _ in range(MAX_ANCESTOR_HOPS):
+            if cur == owner_pid:
+                is_own = True
+                break
+            nxt = ppids.get(cur)
+            if nxt is None or nxt <= 1 or nxt == cur:
+                break
+            cur = nxt
+        if is_own:
+            own_pids.append(pid)
+        else:
+            foreign.append({"pid": pid, "name": name, "started_at": started_at, "cwd": cwd})
+    return own_pids, foreign
+
+
+def list_foreign_qemus(self_pid=None):
+    return scan_qemus(self_pid)[1]
+
+
+def check_foreign_qemus(self_pid=None):
+    foreign = list_foreign_qemus(self_pid)
+    if foreign:
+        raise _ForeignQemuDetected(foreign)
+
+
+def sample_own_qemu_priority(self_pid=None):
+    own_pids, _ = scan_qemus(self_pid)
+    out = []
+    for pid in own_pids:
+        pairs = read_proc_priority(pid)
+        if pairs:
+            out.append(pairs)
+    return out
+
+
+def sample_iperf_priority(lab):
+    out = []
+    for proc in lab.iperf_servers.values():
+        if proc.poll() is None:
+            pairs = read_proc_priority(proc.pid)
+            if pairs:
+                out.append(pairs)
+    return out
+
+
+def is_legacy_pre_guard_pass(pass_data):
+    cond = pass_data.get("conditions", {})
+    return (
+        "qemu_priority" not in cond
+        and "foreign_qemu" not in cond
+        and "window_deadline" not in cond
+    )
+
+
+def _priority_signature(qp):
+    if not isinstance(qp, dict) or not qp.get("constant"):
+        return None
+    obs = qp.get("observed") or []
+    sig = tuple(
+        sorted(
+            (int(o["nice"]), str(o["policy"]))
+            for o in obs
+            if o.get("nice") is not None and o.get("policy") is not None
+        )
+    )
+    if sig:
+        return sig
+    if qp.get("nice") is not None and qp.get("policy") is not None:
+        return ((int(qp["nice"]), str(qp["policy"])),)
+    return None
+
+
+def _format_priority_sig(sig, qp):
+    if sig is None:
+        n = qp.get("nice") if isinstance(qp, dict) else None
+        p = qp.get("policy") if isinstance(qp, dict) else None
+        return f"{n} ({p})"
+    if len(sig) == 1:
+        return f"{sig[0][0]} ({sig[0][1]})"
+    return "[" + ", ".join(f"{n} ({p})" for n, p in sig) + "]"
+
+
+def compare_perf_passes(pass1, pass2, allow_legacy_unrecorded_nice=False):
+    c1 = pass1.get("conditions", {})
+    c2 = pass2.get("conditions", {})
+    if c1.get("host_limited") or c2.get("host_limited"):
+        r1 = c1.get("host_limited_reasons") or (["load"] if c1.get("host_limited") else [])
+        r2 = c2.get("host_limited_reasons") or (["load"] if c2.get("host_limited") else [])
+        return (
+            None,
+            0,
+            [
+                f"host_limited pass cannot be compared "
+                f"(pass1 max_load1={c1.get('max_load1')} reasons={r1}, "
+                f"pass2 max_load1={c2.get('max_load1')} reasons={r2})"
+            ],
+        )
+    legacy_ok = (
+        allow_legacy_unrecorded_nice
+        and is_legacy_pre_guard_pass(pass1)
+        and is_legacy_pre_guard_pass(pass2)
+    )
+    if not legacy_ok:
+        qp1 = c1.get("qemu_priority")
+        qp2 = c2.get("qemu_priority")
+        sig1 = _priority_signature(qp1)
+        sig2 = _priority_signature(qp2)
+        if sig1 is None or sig2 is None or sig1 != sig2:
+            return (
+                None,
+                0,
+                [
+                    f"not comparable: nice {_format_priority_sig(sig1, qp1)} "
+                    f"against {_format_priority_sig(sig2, qp2)}"
+                ],
+            )
     mismatches = []
     checked = 0
     for topo in ("lab_tap", "qemu_user"):
@@ -1061,6 +1479,10 @@ def compare_perf_passes(pass1, pass2):
             if a.get("status") != "ok" or b.get("status") != "ok":
                 continue
             if "median" not in a or "median" not in b:
+                continue
+            req1 = int(a.get("runs_requested", 3))
+            req2 = int(b.get("runs_requested", 3))
+            if len(a.get("runs", [])) < req1 or len(b.get("runs", [])) < req2:
                 continue
             med1, med2 = float(a["median"]), float(b["median"])
             sp1, sp2 = float(a.get("spread", 0.0)), float(b.get("spread", 0.0))
@@ -1080,6 +1502,7 @@ def run_net_perf(args, out, ctx):
         return False, f"net-perf runs with net=e1000 or net=virtio, not net={card}"
     driver = "virtio-netd" if card == "virtio" else "e1000d"
     require_tools(LAB_PERF_TOOLS, ctx["Blocked"])
+    deadline_str, deadline_ts = parse_window_deadline(getattr(args, "window_deadline", None))
     host_iperf = ctx["command_output"](["iperf3", "--version"])
     host_iperf_line = host_iperf.splitlines()[0] if host_iperf else None
     load_start = [round(v, 2) for v in os.getloadavg()]
@@ -1099,10 +1522,29 @@ def run_net_perf(args, out, ctx):
             "loadavg_start": load_start,
             "loadavg_end": None,
             "max_load1": None,
+            "qemu_priority": None,
+            "iperf_server_priority": None,
+            "foreign_qemu": [],
+            "window_deadline": deadline_str,
+            "ended_after_deadline": False,
+            "host_limited_reasons": [],
             "host_limited": False,
         },
         "topologies": {},
     }
+
+    foreign_start = list_foreign_qemus()
+    if foreign_start:
+        report["conditions"]["loadavg_end"] = [round(v, 2) for v in os.getloadavg()]
+        report["conditions"]["max_load1"] = round(max(max_load1, report["conditions"]["loadavg_end"][0]), 2)
+        report["conditions"]["foreign_qemu"] = foreign_start
+        report["conditions"]["host_limited_reasons"] = ["foreign_qemu"]
+        report["conditions"]["host_limited"] = True
+        (out / "net-perf.json").write_text(json.dumps(report, indent=2) + "\n")
+        raise ctx["Blocked"](
+            f"card {card} vhost=off HOST_LIMITED reasons=foreign_qemu "
+            f"({format_foreign_qemus(foreign_start)}); see {out / 'net-perf.json'}"
+        )
 
     topo_a_out = out / "topology-a-lab-tap"
     topo_a_out.mkdir(parents=True, exist_ok=True)
@@ -1115,6 +1557,7 @@ def run_net_perf(args, out, ctx):
         enable_lo_helpers=True,
     )
     vm_a = None
+    foreign_abort = None
     try:
         lab.start()
         vm_a = ctx["VM"](
@@ -1130,8 +1573,8 @@ def run_net_perf(args, out, ctx):
         if not guest_ip:
             return False, f"topology A: no DHCP lease; see {topo_a_out}"
         _, iv_out = ctx["run_status"](vm_a, "iperf3 --version | head -n 1", 30)
-        m_iv = re.search(r"iperf\s+[^\r\n]+", iv_out)
-        report["conditions"]["guest_iperf3"] = m_iv.group(0).strip() if m_iv else iv_out.strip()
+        m_iv = re.search(r"iperf\s+\d+\.\d+\S*", iv_out)
+        report["conditions"]["guest_iperf3"] = m_iv.group(0).strip() if m_iv else None
         install_iperf_watchdog(vm_a, ctx["run_status"])
 
         measures_a = {}
@@ -1346,30 +1789,73 @@ def run_net_perf(args, out, ctx):
             vm_b.kill()
         finally:
             vm_b.close()
+    except _ForeignQemuDetected as exc:
+        foreign_abort = exc.entries
     finally:
         if vm_a is not None:
             vm_a.close()
         lab.close()
 
+    foreign_end = list_foreign_qemus()
+    seen_foreign = {}
+    for entry in [*foreign_start, *(foreign_abort or ()), *foreign_end]:
+        seen_foreign[(entry["pid"], entry["started_at"])] = entry
+    pass_qemu_pairs = []
+    pass_iperf_pairs = []
     for topo in report["topologies"].values():
         for m in topo["measures"].values():
             ml = m.get("max_load1")
             if ml is not None:
                 max_load1 = max(max_load1, ml)
+            qp = m.get("qemu_priority")
+            if isinstance(qp, dict):
+                for s in qp.get("sample_sets") or [qp.get("observed", [])]:
+                    pass_qemu_pairs.append([(o["nice"], o["policy_id"]) for o in s])
+            ip = m.get("iperf_server_priority")
+            if isinstance(ip, dict):
+                for s in ip.get("sample_sets") or [ip.get("observed", [])]:
+                    pass_iperf_pairs.append([(o["nice"], o["policy_id"]) for o in s])
     load_end = [round(v, 2) for v in os.getloadavg()]
     max_load1 = round(max(max_load1, load_end[0]), 2)
+    foreign_qemu = [seen_foreign[k] for k in sorted(seen_foreign)]
+    qemu_prio_summary = summarize_priority_samples(pass_qemu_pairs)
+    iperf_prio_summary = summarize_priority_samples(pass_iperf_pairs)
+    ended_after_deadline = deadline_ts is not None and time.time() > deadline_ts
+    reasons = []
+    if max_load1 > LOAD_LIMIT:
+        reasons.append("load")
+    if foreign_qemu:
+        reasons.append("foreign_qemu")
+    if ended_after_deadline:
+        reasons.append("window_deadline")
+    if qemu_prio_summary is None:
+        reasons.append("priority_unrecorded")
+    elif not qemu_prio_summary["constant"]:
+        reasons.append("nice_changed")
     report["conditions"]["loadavg_end"] = load_end
     report["conditions"]["max_load1"] = max_load1
-    report["conditions"]["host_limited"] = max_load1 > LOAD_LIMIT
+    report["conditions"]["qemu_priority"] = qemu_prio_summary
+    report["conditions"]["iperf_server_priority"] = iperf_prio_summary
+    report["conditions"]["foreign_qemu"] = foreign_qemu
+    report["conditions"]["ended_after_deadline"] = ended_after_deadline
+    report["conditions"]["host_limited_reasons"] = reasons
+    report["conditions"]["host_limited"] = bool(reasons)
 
     (out / "net-perf.json").write_text(json.dumps(report, indent=2) + "\n")
+    if foreign_abort:
+        raise ctx["Blocked"](
+            f"card {card} vhost=off HOST_LIMITED reasons={','.join(reasons)} "
+            f"({format_foreign_qemus(foreign_qemu)}); see {out / 'net-perf.json'}"
+        )
     table_lines = []
     for topo_name, topo in report["topologies"].items():
         for mname, m in topo["measures"].items():
             if m.get("status") == "ok":
+                done_n = m.get("runs_completed", len(m.get("runs", [])))
+                req_n = m.get("runs_requested", 3)
                 table_lines.append(
                     f"{topo_name} {card} {mname}: median={m.get('median')} {m.get('unit', '')} "
-                    f"spread={m.get('spread')} max_load1={m.get('max_load1')}"
+                    f"spread={m.get('spread')} runs={done_n}/{req_n} max_load1={m.get('max_load1')}"
                 )
             else:
                 table_lines.append(f"{topo_name} {card} {mname}: {m.get('status')} {m.get('errors', '')}")
@@ -1386,8 +1872,9 @@ def run_net_perf(args, out, ctx):
             else:
                 non_ok.append(f"{topo_name}.{mname}({m.get('status')})")
     status_tag = "HOST_LIMITED" if report["conditions"]["host_limited"] else "QUALIFIED"
+    reason_str = f" reasons={','.join(reasons)}" if reasons else ""
     summary = (
-        f"card {card} vhost=off {status_tag} max_load1={max_load1}; "
+        f"card {card} vhost=off {status_tag} max_load1={max_load1}{reason_str}; "
         f"{ok_count}/{len(table_lines)} ok"
         + (f" (non-ok: {', '.join(non_ok)})" if non_ok else "")
         + f"; see {out / 'net-perf.json'}"

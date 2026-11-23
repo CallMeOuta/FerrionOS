@@ -8359,6 +8359,10 @@ def main():
     parser.add_argument("--in-lab", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--compare-net-perf", nargs=2, type=Path, metavar=("PASS1", "PASS2"),
                         help="compare two net-perf.json passes against the within-noise rule without booting")
+    parser.add_argument("--legacy-unrecorded-nice", action="store_true",
+                        help="--compare-net-perf: permit comparing pre-guard passes whose QEMU nice was not recorded")
+    parser.add_argument("--window-deadline", default=None, metavar="TIME",
+                        help="net-perf: quiet-window deadline (HH:MM:SS or ISO-8601); ending past it marks host-limited")
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(2)
@@ -8367,11 +8371,23 @@ def main():
         import net_lab
         p1 = json.loads(args.compare_net_perf[0].read_text())
         p2 = json.loads(args.compare_net_perf[1].read_text())
-        ok, checked, mismatches = net_lab.compare_perf_passes(p1, p2)
+        ok, checked, mismatches = net_lab.compare_perf_passes(
+            p1, p2, allow_legacy_unrecorded_nice=args.legacy_unrecorded_nice
+        )
+        legacy_note = (
+            " (nice not recorded)"
+            if args.legacy_unrecorded_nice
+            and net_lab.is_legacy_pre_guard_pass(p1)
+            and net_lab.is_legacy_pre_guard_pass(p2)
+            else ""
+        )
+        if ok is None:
+            print(f"BLOCKED compare-net-perf: {'; '.join(mismatches)}")
+            sys.exit(2)
         if ok:
-            print(f"PASS compare-net-perf: {checked} measures within noise")
+            print(f"PASS compare-net-perf: {checked} measures within noise{legacy_note}")
             sys.exit(0)
-        print(f"FAIL compare-net-perf: {len(mismatches)}/{checked} outside noise: {'; '.join(mismatches)}")
+        print(f"FAIL compare-net-perf: {len(mismatches)}/{checked} outside noise{legacy_note}: {'; '.join(mismatches)}")
         sys.exit(1)
     if args.check_wav:
         report = check_wav(rig_signal() if args.signal == "rig" else seq_signal()[0], args.check_wav.read_bytes())
@@ -8504,7 +8520,10 @@ def main():
                 ok_cmp, checked_cmp, mismatches_cmp = net_lab.compare_perf_passes(
                     json.loads(p1_path.read_text()), json.loads(p2_path.read_text())
                 )
-                if ok_cmp:
+                if ok_cmp is None:
+                    blocked += 1
+                    print(f"BLOCKED net-perf repeatability: {'; '.join(mismatches_cmp)}", flush=True)
+                elif ok_cmp:
                     print(f"PASS net-perf repeatability: {checked_cmp} measures within noise", flush=True)
                 else:
                     failures += 1
