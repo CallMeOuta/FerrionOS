@@ -1,0 +1,10 @@
+[package]
+description = "Verifies blocked waits return only when signalled or interrupted by a pending signal"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -pthread -o "${COOKBOOK_STAGE}/usr/bin/blocked-wait-probe" "${COOKBOOK_RECIPE}/blocked-wait-probe.c" ${LDFLAGS} -lpthread
+"""

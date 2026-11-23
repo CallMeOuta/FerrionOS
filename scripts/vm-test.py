@@ -1688,6 +1688,283 @@ def test_ring_wake(vm, args):
     )
 
 
+BLOCKED_WAIT_TIMEOUT_S = 260
+BLOCKED_WAIT_MIN_ARMED_SHARE = 0.6
+BLOCKED_WAIT_MIN_ARMED_SHARE_IDLE = 0.25
+
+
+def test_blocked_wait(vm, args):
+    """Logs in as root, identifies the unmounted second NVMe disk, runs blocked-wait-probe to verify that a blocked wait returns only when its condition is signalled or a signal is pending and that system daemons stay alive, then runs `ls /` afterwards (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, "no serial login"
+    login_mark = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no root password prompt"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, login_mark):
+        return False, "serial shell did not become ready"
+    vm.type("bash --norc --noprofile --noediting\n")
+    time.sleep(1)
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo BWRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)BWRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    status, _ = run("unset MAIL MAILPATH MAILCHECK; " + GUEST_WATCH, 30)
+    if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
+        return False, "the guest watcher did not start"
+
+    second_nvmed_pid, disk_scheme = find_second_nvmed((vm.out / "watch-before.watch").read_text())
+    if second_nvmed_pid is None or not disk_scheme:
+        return False, f"could not identify the second NVMe disk from watch-before.watch; see {vm.out}"
+
+    since = vm.mark()
+    started = time.monotonic()
+    vm.type(f"blocked-wait-probe /scheme/{disk_scheme}/1; echo BWAIT-EXIT=$?\n")
+    found = vm.wait_serial(r"(?m)^BWAIT-EXIT=(\d+)$", BLOCKED_WAIT_TIMEOUT_S, since)
+    probe_exit = int(found.group(1)) if found else None
+
+    post_mark = vm.mark()
+    vm.type("ls / >/dev/null && echo BWAIT-ALIVE-$((40+2))\n")
+    post_spawn_ok = bool(vm.wait_serial(r"(?m)^BWAIT-ALIVE-42$", 30, post_mark))
+
+    elapsed_s = round(time.monotonic() - started, 1)
+    serial = vm.text()
+    probe_text = vm.text(since)
+
+    tsc_match = re.search(r"BLOCKED-WAIT-TSC ticks_per_us=([0-9.]+)", probe_text)
+    ticks_per_us = float(tsc_match.group(1)) if tsc_match else None
+
+    part_a_match = re.search(
+        r"(?m)^BLOCKED-WAIT-PARTA early_rounds=(\d+) early_ok=(\d+) early_eintr=(\d+) "
+        r"early_data=(\d+) early_other=(\d+) early_min_ms=(-?\d+) early_max_ms=(-?\d+) "
+        r"ctrl_rounds=(\d+) ctrl_timedout=(\d+) ctrl_eintr=(\d+) ctrl_data=(\d+) "
+        r"ctrl_other=(\d+) ctrl_min_ms=(-?\d+) ctrl_max_ms=(-?\d+)$",
+        probe_text,
+    )
+    part_a = (
+        {
+            "early_rounds": int(part_a_match.group(1)),
+            "early_ok": int(part_a_match.group(2)),
+            "early_eintr": int(part_a_match.group(3)),
+            "early_data": int(part_a_match.group(4)),
+            "early_other": int(part_a_match.group(5)),
+            "early_min_ms": int(part_a_match.group(6)),
+            "early_max_ms": int(part_a_match.group(7)),
+            "ctrl_rounds": int(part_a_match.group(8)),
+            "ctrl_timedout": int(part_a_match.group(9)),
+            "ctrl_eintr": int(part_a_match.group(10)),
+            "ctrl_data": int(part_a_match.group(11)),
+            "ctrl_other": int(part_a_match.group(12)),
+            "ctrl_min_ms": int(part_a_match.group(13)),
+            "ctrl_max_ms": int(part_a_match.group(14)),
+        }
+        if part_a_match
+        else None
+    )
+
+    part_a2_match = re.search(
+        r"(?m)^BLOCKED-WAIT-PARTA2 bcast_rounds=(\d+) bcast_timedout=(\d+) bcast_eintr=(\d+) "
+        r"bcast_data=(\d+) bcast_other=(\d+) bcast_min_ms=(-?\d+) bcast_max_ms=(-?\d+) "
+        r"ctrl_rounds=(\d+) ctrl_timedout=(\d+) ctrl_eintr=(\d+) ctrl_data=(\d+) "
+        r"ctrl_other=(\d+) ctrl_min_ms=(-?\d+) ctrl_max_ms=(-?\d+)$",
+        probe_text,
+    )
+    part_a2 = (
+        {
+            "bcast_rounds": int(part_a2_match.group(1)),
+            "bcast_timedout": int(part_a2_match.group(2)),
+            "bcast_eintr": int(part_a2_match.group(3)),
+            "bcast_data": int(part_a2_match.group(4)),
+            "bcast_other": int(part_a2_match.group(5)),
+            "bcast_min_ms": int(part_a2_match.group(6)),
+            "bcast_max_ms": int(part_a2_match.group(7)),
+            "ctrl_rounds": int(part_a2_match.group(8)),
+            "ctrl_timedout": int(part_a2_match.group(9)),
+            "ctrl_eintr": int(part_a2_match.group(10)),
+            "ctrl_data": int(part_a2_match.group(11)),
+            "ctrl_other": int(part_a2_match.group(12)),
+            "ctrl_min_ms": int(part_a2_match.group(13)),
+            "ctrl_max_ms": int(part_a2_match.group(14)),
+        }
+        if part_a2_match
+        else None
+    )
+
+    bctrl_match = re.search(
+        r"(?m)^BLOCKED-WAIT-PARTBCTRL rounds=(\d+) timedout=(\d+) eintr=(\d+) "
+        r"ok=(\d+) err=(\d+) fallbacks=(\d+) forks=(\d+) elapsed_ms=(\d+)$",
+        probe_text,
+    )
+    part_bctrl = (
+        {
+            "rounds": int(bctrl_match.group(1)),
+            "timedout": int(bctrl_match.group(2)),
+            "eintr": int(bctrl_match.group(3)),
+            "ok": int(bctrl_match.group(4)),
+            "err": int(bctrl_match.group(5)),
+            "fallbacks": int(bctrl_match.group(6)),
+            "forks": int(bctrl_match.group(7)),
+            "elapsed_ms": int(bctrl_match.group(8)),
+        }
+        if bctrl_match
+        else None
+    )
+
+    def parse_sweep_part(tag):
+        pat = (
+            rf"(?m)^BLOCKED-WAIT-PART{tag} rounds=(\d+) armed_ok=(\d+) eintr=(\d+) "
+            rf"fb_eintr=(\d+) fallbacks=(\d+) ok=(\d+) err=(\d+) forks=(\d+)"
+            rf"(?: w0=(\d+)/(\d+) wto=(\d+)/(\d+) woth=(\d+)/(\d+)/(-?\d+))? elapsed_ms=(\d+)$"
+        )
+        m = re.search(pat, probe_text)
+        if not m:
+            return None
+        info = {
+            "rounds": int(m.group(1)),
+            "armed_ok": int(m.group(2)),
+            "eintr": int(m.group(3)),
+            "fb_eintr": int(m.group(4)),
+            "fallbacks": int(m.group(5)),
+            "ok": int(m.group(6)),
+            "err": int(m.group(7)),
+            "forks": int(m.group(8)),
+            "elapsed_ms": int(m.group(16)),
+        }
+        if m.group(9) is not None:
+            info["by_wait_rc"] = {
+                "ok": {"rounds": int(m.group(9)), "eintr": int(m.group(10))},
+                "etimedout": {"rounds": int(m.group(11)), "eintr": int(m.group(12))},
+                "other": {"rounds": int(m.group(13)), "eintr": int(m.group(14)), "last_rc": int(m.group(15))},
+            }
+        return info
+
+    part_c1 = parse_sweep_part("C1")
+    part_c2 = parse_sweep_part("C2")
+    part_b = parse_sweep_part("B")
+    part_bidle = parse_sweep_part("BIDLE")
+    part_bpump = parse_sweep_part("BPUMP")
+
+    lead_buckets = {}
+    for match in re.finditer(r"(?m)^BLOCKED-WAIT-LEADS part=(\S+) buckets=(\S+)$", probe_text):
+        buckets = {}
+        for item in match.group(2).split(","):
+            k, v = item.split(":", 1)
+            buckets[int(k)] = int(v)
+        lead_buckets[match.group(1)] = buckets
+
+    deaths = {
+        "procmgr": len(re.findall(r"panicked at src/procmgr\.rs|EXCEPTION RAISED[^\r\n]*NAME procmgr", serial)),
+        "udsd": len(re.findall(r"ipcd failed:|EXCEPTION RAISED[^\r\n]*NAME udsd", serial)),
+        "nvmed": len(re.findall(r"panicked at [^\r\n]*executor|EXCEPTION RAISED[^\r\n]*NAME nvmed", serial)),
+    }
+    other_exceptions = sorted({
+        match.group(1).strip()
+        for match in re.finditer(r"EXCEPTION RAISED[^\r\n]*NAME ([^\r\n,]+)", serial)
+        if match.group(1).strip() not in ("procmgr", "udsd", "nvmed")
+    })
+    deaths["other"] = len(other_exceptions)
+
+    warnings = {
+        "procmgr": len(re.findall(r"procmgr: event queue wait interrupted; retrying", serial)),
+        "udsd": len(re.findall(r"udsd: event queue wait interrupted; retrying", serial)),
+        "executor": len(re.findall(r"executor: event queue wait interrupted; retrying", serial)),
+    }
+
+    def armed_enough(part, min_share):
+        return (
+            part is not None
+            and part["rounds"] > 0
+            and part["armed_ok"] >= part["rounds"] * min_share
+        )
+
+    any_death = any(v > 0 for v in deaths.values())
+    part_a_ok = (
+        part_a is not None
+        and part_a["early_rounds"] == 50
+        and part_a["early_ok"] == 50
+        and part_a["early_eintr"] == 0
+        and part_a["early_data"] == 50
+        and part_a["ctrl_rounds"] == 10
+        and part_a["ctrl_timedout"] == 10
+        and part_a["ctrl_eintr"] == 0
+        and part_a["ctrl_data"] == 10
+    )
+    part_a2_ok = (
+        part_a2 is not None
+        and part_a2["bcast_rounds"] == 50
+        and part_a2["bcast_timedout"] == 50
+        and part_a2["bcast_eintr"] == 0
+        and part_a2["bcast_data"] == 50
+        and part_a2["ctrl_rounds"] == 10
+        and part_a2["ctrl_timedout"] == 10
+        and part_a2["ctrl_eintr"] == 0
+        and part_a2["ctrl_data"] == 10
+    )
+    part_b_ok = (
+        part_bctrl is not None
+        and part_bctrl["rounds"] == 200
+        and part_bctrl["eintr"] == 0
+        and part_bctrl["ok"] == 200
+        and armed_enough(part_b, BLOCKED_WAIT_MIN_ARMED_SHARE)
+        and part_b["eintr"] == 0
+        and armed_enough(part_bidle, BLOCKED_WAIT_MIN_ARMED_SHARE_IDLE)
+        and part_bidle["eintr"] == 0
+        and armed_enough(part_bpump, BLOCKED_WAIT_MIN_ARMED_SHARE)
+        and part_bpump["eintr"] == 0
+    )
+    part_c_ok = (
+        armed_enough(part_c1, BLOCKED_WAIT_MIN_ARMED_SHARE)
+        and part_c1["eintr"] == 0
+        and part_c2 is not None
+        and part_c2["rounds"] > 0
+        and part_c2["eintr"] == 0
+    )
+    ok = not any_death and part_a_ok and part_a2_ok and part_b_ok and part_c_ok and probe_exit == 0 and post_spawn_ok
+
+    results = {
+        "passed": ok,
+        "disk_scheme": disk_scheme,
+        "second_nvmed_pid": second_nvmed_pid,
+        "ticks_per_us": ticks_per_us,
+        "deaths": deaths,
+        "other_daemon_exceptions": other_exceptions,
+        "warnings": warnings,
+        "part_a": part_a,
+        "part_a2": part_a2,
+        "part_c1": part_c1,
+        "part_c2": part_c2,
+        "part_bctrl": part_bctrl,
+        "part_b": part_b,
+        "part_bidle": part_bidle,
+        "part_bpump": part_bpump,
+        "lead_buckets": lead_buckets,
+        "probe_exit": probe_exit,
+        "post_spawn_ok": post_spawn_ok,
+        "elapsed_s": elapsed_s,
+    }
+    (vm.out / "blocked-wait.json").write_text(json.dumps(results, indent=2) + "\n")
+    if not ok:
+        return False, (
+            f"deaths={deaths} part_a={part_a} part_a2={part_a2} c1={part_c1} c2={part_c2} "
+            f"bctrl={part_bctrl} b={part_b} bidle={part_bidle} bpump={part_bpump} "
+            f"warnings={warnings} exit={probe_exit} post_spawn_ok={post_spawn_ok}; see {vm.out}"
+        )
+    return True, (
+        f"part_a early_eintr=0/50 early_data=50/50 ctrl_eintr=0/10; "
+        f"part_a2 bcast_eintr=0/50 bcast_data=50/50 ctrl_eintr=0/10; bctrl=0/200; 0 deaths, 0 spurious EINTR "
+        f"(c1={part_c1['armed_ok']}/{part_c1['rounds']} eintr=0 fb={part_c1['fb_eintr']}; "
+        f"c2={part_c2['rounds']}; "
+        f"b={part_b['armed_ok']}/{part_b['rounds']} eintr=0 fb={part_b['fb_eintr']}; "
+        f"bidle={part_bidle['armed_ok']}/{part_bidle['rounds']} eintr=0 fb={part_bidle['fb_eintr']}; "
+        f"bpump={part_bpump['armed_ok']}/{part_bpump['rounds']} eintr=0 fb={part_bpump['fb_eintr']}); "
+        f"warnings={warnings}; {elapsed_s}s; see {vm.out}"
+    )
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -9316,6 +9593,7 @@ TESTS["fork-filetable"] = test_fork_filetable
 TESTS["exec-handles"] = test_exec_handles
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
+TESTS["blocked-wait"] = test_blocked_wait
 TESTS["firefox-js"] = test_firefox_js
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call
