@@ -116,6 +116,8 @@
 
 import argparse
 import base64
+import contextlib
+import enum
 import json
 import os
 import re
@@ -443,25 +445,56 @@ class RFB:
         return resized, covered
 
 
+SWTPM_START_S = 10
+QUIT_WAIT_S = 20
+TERM_WAIT_S = 20
+KILL_WAIT_S = 10
+
+
+class SwtpmPhase(enum.Enum):
+    CTRL_RUNNING = "ctrl_running"
+    STOPPED = "stopped"
+    DATA_RUNNING = "data_running"
+    CLOSED = "closed"
+
+
 class Swtpm:
     """A software TPM 2.0 that QEMU reaches as a tpm-crb device, for one boot."""
 
     def __init__(self):
         self.dir = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-tpm-"))
         self.ctrl = self.dir / "ctrl.sock"
-        self.proc = self._start("--ctrl", f"type=unixio,path={self.ctrl}")
+        self.proc = None
+        self.phase = SwtpmPhase.STOPPED
+        try:
+            self._start(SwtpmPhase.CTRL_RUNNING, "--ctrl", f"type=unixio,path={self.ctrl}")
+        except BaseException:
+            self.close()
+            raise
         self.qemu_flags = (f"-chardev socket,id=chrtpm,path={self.ctrl} -tpmdev emulator,id=tpm0,chardev=chrtpm "
                            "-device tpm-crb,tpmdev=tpm0")
 
-    def _start(self, *channels):
+    def _start(self, phase, *channels):
+        assert self.phase != SwtpmPhase.CLOSED
+        assert phase in (SwtpmPhase.CTRL_RUNNING, SwtpmPhase.DATA_RUNNING)
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(timeout=KILL_WAIT_S)
+        self.proc = None
+        self.phase = SwtpmPhase.STOPPED
         proc = subprocess.Popen(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={self.dir}", *channels],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         socket_path = Path(channels[-1].split("path=")[1])
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + SWTPM_START_S
         while not socket_path.exists():
             if time.monotonic() > deadline or proc.poll() is not None:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=KILL_WAIT_S)
                 raise RuntimeError("swtpm did not start")
             time.sleep(0.05)
+        self.proc = proc
+        self.phase = phase
         return proc
 
     def read_pcrs(self, pcrs):
@@ -470,12 +503,13 @@ class Swtpm:
         A QEMU that quits cleanly shuts swtpm down and its PCRs are lost; after a kill,
         swtpm stores its volatile state and a second swtpm resumes from it on a data
         socket that tpm2_pcrread can reach."""
+        assert self.phase == SwtpmPhase.CTRL_RUNNING
         subprocess.run(["swtpm_ioctl", "--unix", str(self.ctrl), "-v"], check=True, capture_output=True)
         subprocess.run(["swtpm_ioctl", "--unix", str(self.ctrl), "-s"], check=True, capture_output=True)
-        self.proc.wait(timeout=20)
+        self.proc.wait(timeout=TERM_WAIT_S)
         data = self.dir / "data.sock"
-        self.proc = self._start("--flags", "not-need-init", "--server", f"type=unixio,path={data}",
-                                "--ctrl", f"type=unixio,path={data}.ctrl")
+        self._start(SwtpmPhase.DATA_RUNNING, "--flags", "not-need-init", "--server", f"type=unixio,path={data}",
+                    "--ctrl", f"type=unixio,path={data}.ctrl")
         try:
             text = subprocess.run(["tpm2_pcrread", "-T", f"swtpm:path={data}",
                                    "sha256:" + ",".join(map(str, pcrs))],
@@ -485,10 +519,17 @@ class Swtpm:
         return {int(i): v.lower() for i, v in re.findall(r"(\d+)\s*:\s*0x([0-9A-Fa-f]{64})", text)}
 
     def close(self):
-        if self.proc.poll() is None:
-            self.proc.kill()
-        self.proc.wait(timeout=20)
-        shutil.rmtree(self.dir)
+        if self.phase == SwtpmPhase.CLOSED:
+            return
+        try:
+            if self.proc is not None:
+                if self.proc.poll() is None:
+                    self.proc.kill()
+                self.proc.wait(timeout=TERM_WAIT_S)
+        finally:
+            self.proc = None
+            self.phase = SwtpmPhase.CLOSED
+            shutil.rmtree(self.dir, ignore_errors=True)
 
 
 PROCESS_TREE_LIMIT = 64
@@ -516,53 +557,65 @@ class VM:
         self.last_capture_source = None
         self.trace_path = (out / "qemu-trace.log").resolve()
         self.trace_path.unlink(missing_ok=True)
-        self.scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-"))
-        self.monitor_path = self.scratch / "monitor.sock"
-        self.vnc_path = self.scratch / "vnc.sock"
-        self.tpm = Swtpm() if tpm else None
-        # Without -snapshot the guest writes to the disk; only for copies given by DISK= in `make`.
-        flags = f"{'-snapshot ' if snapshot else ''}-monitor unix:{self.monitor_path},server=on,wait=off"
-        if self.is_3d:
-            flags += f" -vnc unix:{self.vnc_path}"
-        events = getattr(args, "trace", [])
-        if events:
-            flags += " -D " + shlex.quote(str(self.trace_path))
-            flags += "".join(" -trace " + shlex.quote(f"enable={event}") for event in events)
-        if self.tpm:
-            flags += " " + self.tpm.qemu_flags
-        if qemu_flags:
-            flags += " " + qemu_flags
-        env = dict(os.environ, CI="1", COOKBOOK_LOGS="true", QEMUFLAGS=flags)
-        if self.is_3d:
-            # A desktop-wide EGL_PLATFORM=wayland overrides QEMU's headless GBM display.
-            env.pop("EGL_PLATFORM", None)
-        # `-o` takes each target exactly as make spells it, relative to the
-        # repository root (an absolute path would not match): neither the image
-        # nor the package repository behind it is ever rebuilt by a test.
-        build = image.parent.relative_to(ROOT)
-        command = ["make", "-s", "-o", str(build / "harddrive.img"), "-o", str(build / "repo.tag"), "qemu",
-                   "-o", str(build / "redox-live.iso"),
-                   f"ARCH={args.arch}", f"CONFIG_NAME={args.config}", *args.make, *make,
-                   "QEMU_DISPLAY=egl-headless" if self.is_3d else "QEMU_DISPLAY=none"]
-        if self.is_3d:
-            command.append("QEMU_RENDER_NODE=" + (render_node or boot_render_node()))
-        self.start = time.monotonic()
-        self.proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, start_new_session=True)
-        self.serial = bytearray()
-        self.lock = threading.Lock()
-        self.typing = threading.Lock()
-        self._cmd_seq = 0
-        self.console_desynced = None
-        self.log = open(out / "serial.log", "wb")
-        self.reader = threading.Thread(target=self._read_serial, daemon=True)
-        self.reader.start()
+        self._stack = contextlib.ExitStack()
+        self.priority = None
+        self.monitor = None
+        self.vnc = None
+        self.tpm = None
         try:
+            self.scratch = Path(tempfile.mkdtemp(prefix="ferrion-vm-test-"))
+            self._stack.callback(shutil.rmtree, self.scratch, True)
+            self.monitor_path = self.scratch / "monitor.sock"
+            self.vnc_path = self.scratch / "vnc.sock"
+            if tpm:
+                self.tpm = Swtpm()
+                self._stack.callback(self.tpm.close)
+            # Without -snapshot the guest writes to the disk; only for copies given by DISK= in `make`.
+            flags = f"{'-snapshot ' if snapshot else ''}-monitor unix:{self.monitor_path},server=on,wait=off"
+            if self.is_3d:
+                flags += f" -vnc unix:{self.vnc_path}"
+            events = getattr(args, "trace", [])
+            if events:
+                flags += " -D " + shlex.quote(str(self.trace_path))
+                flags += "".join(" -trace " + shlex.quote(f"enable={event}") for event in events)
+            if self.tpm:
+                flags += " " + self.tpm.qemu_flags
+            if qemu_flags:
+                flags += " " + qemu_flags
+            env = dict(os.environ, CI="1", COOKBOOK_LOGS="true", QEMUFLAGS=flags)
+            if self.is_3d:
+                # A desktop-wide EGL_PLATFORM=wayland overrides QEMU's headless GBM display.
+                env.pop("EGL_PLATFORM", None)
+            # `-o` takes each target exactly as make spells it, relative to the
+            # repository root (an absolute path would not match): neither the image
+            # nor the package repository behind it is ever rebuilt by a test.
+            build = image.parent.relative_to(ROOT)
+            command = ["make", "-s", "-o", str(build / "harddrive.img"), "-o", str(build / "repo.tag"), "qemu",
+                       "-o", str(build / "redox-live.iso"),
+                       f"ARCH={args.arch}", f"CONFIG_NAME={args.config}", *args.make, *make,
+                       "QEMU_DISPLAY=egl-headless" if self.is_3d else "QEMU_DISPLAY=none"]
+            if self.is_3d:
+                command.append("QEMU_RENDER_NODE=" + (render_node or boot_render_node()))
+            self.start = time.monotonic()
+            self.log = open(out / "serial.log", "wb")
+            self._stack.callback(self.log.close)
+            self.serial = bytearray()
+            self.lock = threading.Lock()
+            self.typing = threading.Lock()
+            self._cmd_seq = 0
+            self.console_desynced = None
+            self.reader = threading.Thread(target=self._read_serial, daemon=True)
+            self.proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, start_new_session=True)
+            self._stack.callback(self._join_reader)
+            self._stack.callback(self._close_sockets)
+            self._stack.callback(self._stop_qemu)
+            self.reader.start()
             self.monitor = self._connect_monitor()
             if self.is_3d:
                 self.vnc = self._connect_vnc()
                 self.rfb = RFB(self.vnc)
-        except (RuntimeError, OSError):
+        except BaseException:
             self.close()
             raise
 
@@ -685,7 +738,7 @@ class VM:
     def kill(self):
         """Stops QEMU at once, as pulling the plug would."""
         os.killpg(self.proc.pid, signal.SIGKILL)
-        self.proc.wait(timeout=20)
+        self.proc.wait(timeout=TERM_WAIT_S)
 
     def qemu_priority(self):
         """Returns the nice value and I/O class the host gave QEMU, or None when no QEMU process is found."""
@@ -702,29 +755,58 @@ class VM:
                 continue
         return None
 
-    def close(self):
-        self.priority = self.qemu_priority()
+    def _wait_group(self, wait_s):
+        deadline = time.monotonic() + wait_s
         if self.proc.poll() is None:
             try:
-                if hasattr(self, "monitor"):
-                    self.monitor.sendall(b"quit\n")
-                else:
-                    os.killpg(self.proc.pid, signal.SIGTERM)
-                self.proc.wait(timeout=20)
-            except (OSError, subprocess.TimeoutExpired):
-                os.killpg(self.proc.pid, signal.SIGTERM)
-                self.proc.wait(timeout=20)
-        if hasattr(self, "monitor"):
-            self.monitor.close()
-        if hasattr(self, "vnc"):
-            self.vnc.close()
-        self.reader.join(timeout=5)
-        self.log.close()
-        if self.tpm:
-            self.tpm.close()
-        for path in self.scratch.iterdir():
-            path.unlink()
-        self.scratch.rmdir()
+                self.proc.wait(timeout=wait_s)
+            except subprocess.TimeoutExpired:
+                return False
+        while True:
+            try:
+                os.killpg(self.proc.pid, 0)
+            except ProcessLookupError:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def _stop_qemu(self):
+        self.priority = self.qemu_priority()
+        if self.proc.poll() is not None:
+            try:
+                os.killpg(self.proc.pid, 0)
+            except ProcessLookupError:
+                return
+        elif self.monitor is not None:
+            try:
+                self.monitor.sendall(b"quit\n")
+                if self._wait_group(QUIT_WAIT_S):
+                    return
+            except OSError:
+                pass
+        for sig, wait_s in ((signal.SIGTERM, TERM_WAIT_S), (signal.SIGKILL, KILL_WAIT_S)):
+            try:
+                os.killpg(self.proc.pid, sig)
+            except ProcessLookupError:
+                pass
+            if self._wait_group(wait_s):
+                return
+        raise RuntimeError(f"QEMU process group {self.proc.pid} did not exit after SIGKILL")
+
+    def _join_reader(self):
+        if self.reader.ident is not None:
+            self.reader.join(timeout=5)
+
+    def _close_sockets(self):
+        for name in ("vnc", "monitor"):
+            sock = getattr(self, name, None)
+            if sock is not None:
+                setattr(self, name, None)
+                sock.close()
+
+    def close(self):
+        self._stack.close()
 
 
 def firmware_status_lines(frame):
