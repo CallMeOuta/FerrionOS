@@ -1,14 +1,13 @@
 FerrionOS change to the upstream installer (MIT license, kept), made against upstream commit 16d39fe1f20f15fc97fa3aaa216ac7e449637d41 after ferrion-live-disk.patch:
 - the text and graphical installers encrypt the disk unless the user says no; general.install_unencrypted = true skips the question for unattended test installations.
 - creating an encrypted filesystem refuses unless /scheme/rand/status reports seeded: yes.
-- after the target volume is closed, redoxfs-key adds a recovery key in its own slot, which the installer shows once and asks the user to confirm they saved.
+- after the target volume is closed, redoxfs-key adds a recovery key in its own slot, which the installer shows once and asks the user to confirm they saved; on any outcome other than complete Applied, the installer clears the slot before failing (or reports the slot number if cleanup also fails) and never shows the key.
 - the passphrase is no longer trimmed, and the installed filesystem.toml never holds general.encrypt_disk: it is written from the parsed configuration without it, and fast cloning falls back to copying files when the live image's configuration holds one. --output-config still writes the whole configuration.
 
-diff --git a/gui/src/main.rs b/gui/src/main.rs
-index 7a3afd9..b4d818c 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/gui/src/main.rs b/gui/src/main.rs
 --- a/gui/src/main.rs
 +++ b/gui/src/main.rs
-@@ -30,11 +30,33 @@ pub enum TargetKind {
+@@ -30,11 +30,33 @@
      Image,
  }
  
@@ -43,7 +42,7 @@ index 7a3afd9..b4d818c 100644
  }
  
  #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-@@ -68,6 +90,11 @@ enum Page {
+@@ -68,6 +90,11 @@
      Sudo(String),
      Install(usize, String),
      Success(String),
@@ -55,7 +54,7 @@ index 7a3afd9..b4d818c 100644
      Error(String),
  }
  
-@@ -104,12 +131,15 @@ enum Message {
+@@ -104,12 +131,15 @@
      ProfileChooseLive(bool),
      ProfileChoosePassword(bool),
      ProfileEnterPassword(String),
@@ -71,7 +70,7 @@ index 7a3afd9..b4d818c 100644
      Exit,
      Error(String),
  }
-@@ -433,6 +463,7 @@ impl Application for Window {
+@@ -433,6 +463,7 @@
              Message::ProfileChoosePassword(password) => {
                  if let Page::Profile { selected, .. } = &mut self.page {
                      selected.password_opt = if password { Some("".to_string()) } else { None };
@@ -79,7 +78,7 @@ index 7a3afd9..b4d818c 100644
                  }
              }
              Message::ProfileEnterPassword(password) => {
-@@ -440,6 +471,11 @@ impl Application for Window {
+@@ -440,6 +471,11 @@
                      selected.password_opt = Some(password);
                  }
              }
@@ -91,7 +90,7 @@ index 7a3afd9..b4d818c 100644
              Message::ProfileConfirm => {
                  if let Page::Profile {
                      target,
-@@ -447,6 +483,15 @@ impl Application for Window {
+@@ -447,6 +483,15 @@
                      selected: profile,
                  } = &self.page
                  {
@@ -107,7 +106,7 @@ index 7a3afd9..b4d818c 100644
                      if let Some(worker) = &self.worker_opt {
                          match worker.command_sender.send((
                              target.clone(),
-@@ -535,6 +580,21 @@ impl Application for Window {
+@@ -535,6 +580,21 @@
              Message::Success(description) => {
                  self.page = Page::Success(description);
              }
@@ -129,7 +128,7 @@ index 7a3afd9..b4d818c 100644
              Message::Error(err) => {
                  self.page = Page::Error(err);
              }
-@@ -834,24 +894,33 @@ impl Application for Window {
+@@ -834,24 +894,33 @@
  
                  widgets.push(
                      checkbox(selected.password_opt.is_some())
@@ -172,10 +171,11 @@ index 7a3afd9..b4d818c 100644
                          .into(),
                  );
              }
-@@ -882,6 +951,32 @@ impl Application for Window {
+@@ -881,6 +950,32 @@
+                     ]
                      .into(),
                  );
-             }
++            }
 +            Page::Recovery {
 +                key,
 +                description,
@@ -201,15 +201,13 @@ index 7a3afd9..b4d818c 100644
 +                    ]
 +                    .into(),
 +                );
-+            }
+             }
              Page::Error(err) => {
                  widgets.push(text(format!("{}", err)).into());
-             }
-diff --git a/gui/src/worker.rs b/gui/src/worker.rs
-index af110a9..a6fa845 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/gui/src/worker.rs b/gui/src/worker.rs
 --- a/gui/src/worker.rs
 +++ b/gui/src/worker.rs
-@@ -217,6 +217,7 @@ pub(crate) fn install<F: FnMut(Message)>(
+@@ -217,6 +217,7 @@
      #[cfg(target_os = "linux")]
      let mut should_install_systemd_boot = false;
      let password_opt = profile.password_opt.filter(|s| !s.is_empty());
@@ -217,7 +215,7 @@ index af110a9..a6fa845 100644
      let mut config: Config = match profile.kind {
          InstallConfigKind::Desktop => toml::from_str(include_str!("../../config/desktop.toml"))
              .expect("Cannot parse compiled desktop.toml"),
-@@ -274,14 +275,58 @@ pub(crate) fn install<F: FnMut(Message)>(
+@@ -274,14 +275,42 @@
          message!("Installation is completed.");
          Ok(())
      }) {
@@ -258,29 +256,13 @@ index af110a9..a6fa845 100644
 +}
 +
 +fn add_recovery_key(disk_path: &str, password: &str) -> anyhow::Result<String> {
-+    let mut child = std::process::Command::new("redoxfs-key")
-+        .args(["add", "--recovery", "--key-file", "-", disk_path])
-+        .stdin(std::process::Stdio::piped())
-+        .stdout(std::process::Stdio::piped())
-+        .spawn()
-+        .map_err(|err| format_err!("could not start redoxfs-key: {err}"))?;
-+    // Taking and dropping the pipe closes stdin even if writing fails.
-+    let sent = child.stdin.take().unwrap().write_all(password.as_bytes());
-+    let output = child.wait_with_output()?;
-+    sent?;
-+    if !output.status.success() {
-+        return Err(format_err!("redoxfs-key exited with {}", output.status));
-+    }
-+    String::from_utf8(output.stdout)?
-+        .lines()
-+        .find_map(|line| line.split_once("): ").map(|(_, key)| key.to_string()))
-+        .ok_or_else(|| format_err!("redoxfs-key printed no recovery key"))
++    redox_installer::add_recovery_key(Path::new(disk_path), password.as_bytes())
 +}
 +
  #[allow(unused)]
  pub(crate) fn install_clone_disk<F: FnMut(Message)>(
      target: TargetConfig,
-@@ -412,14 +457,17 @@ pub(crate) fn install_clone_disk<F: FnMut(Message)>(
+@@ -412,14 +441,17 @@
                  }
              };
  
@@ -300,7 +282,7 @@ index af110a9..a6fa845 100644
  
              // Sort and remove duplicates
              files.sort();
-@@ -449,19 +497,17 @@ pub(crate) fn install_clone_disk<F: FnMut(Message)>(
+@@ -449,19 +481,17 @@
      });
  
      match res {
@@ -327,11 +309,10 @@ index af110a9..a6fa845 100644
 -        start.elapsed()
 -    )));
  }
-diff --git a/src/bin/installer.rs b/src/bin/installer.rs
-index ebc26f6..73d38c3 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/bin/installer.rs b/src/bin/installer.rs
 --- a/src/bin/installer.rs
 +++ b/src/bin/installer.rs
-@@ -135,16 +135,14 @@ fn main() {
+@@ -135,16 +135,14 @@
          redox_installer::Config::default()
      };
  
@@ -350,8 +331,7 @@ index ebc26f6..73d38c3 100644
      config.files.push(redox_installer::FileConfig {
          path: "filesystem.toml".to_string(),
          data: merged_toml,
-diff --git a/src/bin/installer_tui.rs b/src/bin/installer_tui.rs
-index 76458ee..db33184 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/bin/installer_tui.rs b/src/bin/installer_tui.rs
 --- a/src/bin/installer_tui.rs
 +++ b/src/bin/installer_tui.rs
 @@ -1,4 +1,4 @@
@@ -360,7 +340,7 @@ index 76458ee..db33184 100644
  use pkgar::{ext::EntryExt, PackageHead};
  use pkgar_core::PackageSrc;
  use pkgar_keys::PublicKeyFile;
-@@ -242,16 +242,84 @@ fn choose_disk() -> PathBuf {
+@@ -242,16 +242,74 @@
      }
  }
  
@@ -395,22 +375,12 @@ index 76458ee..db33184 100644
 +}
 +
 +fn add_recovery_key(disk_path: &Path, password: &[u8]) -> Result<()> {
++    let key = redox_installer::add_recovery_key(disk_path, password)?;
 +    eprintln!("Save the recovery key below somewhere other than this disk.");
 +    eprintln!("It will be shown once. To unlock at startup, type all 48 digits without spaces.");
 +    io::stderr().flush()?;
-+    let mut child = process::Command::new("redoxfs-key")
-+        .args(["add", "--recovery", "--key-file", "-"])
-+        .arg(disk_path)
-+        .stdin(process::Stdio::piped())
-+        .spawn()
-+        .context("Could not start redoxfs-key to create the recovery key")?;
-+    // Taking and dropping the pipe closes stdin even if writing fails.
-+    let sent = child.stdin.take().unwrap().write_all(password);
-+    let status = child.wait().context("Could not wait for redoxfs-key")?;
-+    sent.context("Could not send the disk passphrase to redoxfs-key")?;
-+    if !status.success() {
-+        bail!("Recovery key creation failed; installation is not complete");
-+    }
++    println!("Recovery key (type all digits without spaces): {key}");
++    io::stdout().flush()?;
 +    loop {
 +        eprint!("Type SAVED after saving your recovery key: ");
 +        io::stderr().flush()?;
@@ -450,7 +420,7 @@ index 76458ee..db33184 100644
      };
  
      let instant = std::time::Instant::now();
-@@ -323,15 +391,16 @@ fn main() {
+@@ -323,15 +381,16 @@
  
          // Slow install method via file copy
          with_redoxfs_mount(fs, None, |mount_path| {
@@ -471,7 +441,7 @@ index 76458ee..db33184 100644
  
              // Perform config install (after packages have been converted to files)
              eprintln!("configuring system");
-@@ -357,6 +426,13 @@ fn main() {
+@@ -357,6 +416,13 @@
  
              Ok(())
          })
@@ -485,11 +455,10 @@ index 76458ee..db33184 100644
      });
  
      match res {
-diff --git a/src/config/general.rs b/src/config/general.rs
-index 417ff2d..3858d7f 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/config/general.rs b/src/config/general.rs
 --- a/src/config/general.rs
 +++ b/src/config/general.rs
-@@ -12,6 +12,8 @@ pub struct GeneralConfig {
+@@ -12,6 +12,8 @@
      pub skip_partitions: Option<bool>,
      /// Set a plain text password to encrypt the disk
      pub encrypt_disk: Option<String>,
@@ -498,7 +467,7 @@ index 417ff2d..3858d7f 100644
      /// Use live disk for bootloader config, default is false
      pub live_disk: Option<bool>,
      /// If set, write bootloader disk into this path
-@@ -33,6 +35,7 @@ impl GeneralConfig {
+@@ -33,6 +35,7 @@
          if let Some(encrypt_disk) = other.encrypt_disk {
              self.encrypt_disk = Some(encrypt_disk);
          }
@@ -506,11 +475,10 @@ index 417ff2d..3858d7f 100644
          self.live_disk = other.live_disk.or(self.live_disk);
          if let Some(write_bootloader) = other.write_bootloader {
              self.write_bootloader = Some(write_bootloader);
-diff --git a/src/config/mod.rs b/src/config/mod.rs
-index b0c4b13..2f76a41 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/config/mod.rs b/src/config/mod.rs
 --- a/src/config/mod.rs
 +++ b/src/config/mod.rs
-@@ -34,6 +34,15 @@ pub struct Config {
+@@ -34,6 +34,15 @@
  }
  
  impl Config {
@@ -526,11 +494,10 @@ index b0c4b13..2f76a41 100644
      /// Load installer config from a TOML path
      pub fn from_file(path: &Path) -> Result<Self> {
          let mut config: Config = match fs::read_to_string(&path) {
-diff --git a/src/installer.rs b/src/installer.rs
-index 93de28b..a1212f9 100644
+diff -ruN '--exclude=.git' '--exclude=*.orig' a/src/installer.rs b/src/installer.rs
 --- a/src/installer.rs
 +++ b/src/installer.rs
-@@ -73,10 +73,8 @@ pub fn prompt_password(prompt: &str, confirm_prompt: &str) -> Result<Option<Stri
+@@ -73,10 +73,8 @@
  
      for i in 0..3 {
          print!("{}", prompt);
@@ -542,7 +509,7 @@ index 93de28b..a1212f9 100644
          password.take_if(|s| s.is_empty());
  
          if password.is_none() {
-@@ -84,6 +82,7 @@ pub fn prompt_password(prompt: &str, confirm_prompt: &str) -> Result<Option<Stri
+@@ -84,6 +82,7 @@
          }
  
          print!("\n{}", confirm_prompt);
@@ -550,10 +517,116 @@ index 93de28b..a1212f9 100644
          let confirm_password = stdin.read_passwd(&mut stdout)?;
  
          // Note: Actually comparing two Option<String> values
-@@ -96,6 +95,19 @@ pub fn prompt_password(prompt: &str, confirm_prompt: &str) -> Result<Option<Stri
+@@ -96,6 +95,125 @@
      bail!("passwords do not match, giving up");
  }
  
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum KeyOutcome {
++    Applied { complete: bool },
++    Unchanged,
++    Unknown,
++}
++
++fn parse_key_outcome(status: process::ExitStatus) -> KeyOutcome {
++    match status.code() {
++        Some(0) => KeyOutcome::Applied { complete: true },
++        Some(2) => KeyOutcome::Unchanged,
++        Some(3) => KeyOutcome::Applied { complete: false },
++        _ => KeyOutcome::Unknown,
++    }
++}
++
++fn parse_reported_slot(stdout: &str) -> Option<usize> {
++    for line in stdout.lines() {
++        let Some(rest) = line.trim().strip_prefix("slot ") else {
++            continue;
++        };
++        let Some((number, _)) = rest.split_once(':') else {
++            continue;
++        };
++        let slot = number.parse::<usize>().ok()?;
++        if slot < 64 {
++            return Some(slot);
++        }
++    }
++    None
++}
++
++fn remove_recovery_slot(disk_path: &Path, slot: usize, password: &[u8]) -> Result<()> {
++    assert!(slot < 64);
++    let slot_arg = slot.to_string();
++    let mut child = process::Command::new("redoxfs-key")
++        .args(["remove", "--key-file", "-", "--slot", &slot_arg])
++        .arg(disk_path)
++        .stdin(process::Stdio::piped())
++        .stdout(process::Stdio::piped())
++        .stderr(process::Stdio::piped())
++        .spawn()
++        .context("could not start redoxfs-key to clear recovery slot")?;
++    let sent = child.stdin.take().unwrap().write_all(password);
++    let output = child
++        .wait_with_output()
++        .context("could not wait for redoxfs-key cleanup")?;
++    if output.status.success() {
++        sent.context("could not send passphrase to redoxfs-key cleanup")?;
++    }
++    match parse_key_outcome(output.status) {
++        KeyOutcome::Applied { complete: true } => Ok(()),
++        outcome => {
++            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
++            bail!("cleanup outcome {outcome:?}: {stderr}");
++        }
++    }
++}
++
++pub fn add_recovery_key(disk_path: &Path, password: &[u8]) -> Result<String> {
++    let mut child = process::Command::new("redoxfs-key")
++        .args(["add", "--recovery", "--key-file", "-"])
++        .arg(disk_path)
++        .stdin(process::Stdio::piped())
++        .stdout(process::Stdio::piped())
++        .stderr(process::Stdio::piped())
++        .spawn()
++        .context("Could not start redoxfs-key to create the recovery key")?;
++    let sent = child.stdin.take().unwrap().write_all(password);
++    let output = child
++        .wait_with_output()
++        .context("Could not wait for redoxfs-key")?;
++    let outcome = parse_key_outcome(output.status);
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
++    let slot_opt = parse_reported_slot(&stdout);
++    if outcome == (KeyOutcome::Applied { complete: true }) {
++        sent.context("Could not send the disk passphrase to redoxfs-key")?;
++        if let Some(key) = stdout
++            .lines()
++            .find_map(|line| line.split_once("): ").map(|(_, key)| key.to_string()))
++        {
++            return Ok(key);
++        }
++    }
++    if outcome == KeyOutcome::Unchanged {
++        bail!("Recovery key creation failed ({stderr}); installation is not complete");
++    }
++    let reason = if stderr.is_empty() {
++        format!("outcome {outcome:?}")
++    } else {
++        stderr
++    };
++    if let Some(slot) = slot_opt {
++        match remove_recovery_slot(disk_path, slot, password) {
++            Ok(()) => bail!(
++                "Recovery key creation did not complete ({reason}); cleared slot {slot}; installation is not complete"
++            ),
++            Err(rm_err) => bail!(
++                "Recovery key creation did not complete ({reason}); failed to clear slot {slot} ({rm_err}); remove it with redoxfs-key remove --slot {slot}"
++            ),
++        }
++    }
++    bail!("Recovery key creation ended in an unknown state ({reason}); installation is not complete");
++}
++
 +/// Require a seeded random source before generating disk keys on FerrionOS.
 +pub fn require_seeded_random() -> Result<()> {
 +    #[cfg(target_os = "redox")]
@@ -570,7 +643,7 @@ index 93de28b..a1212f9 100644
  fn install_packages(config: &Config, dest: &Path, cookbook: Option<&str>) -> anyhow::Result<()> {
      let target = &get_target();
  
-@@ -363,6 +375,9 @@ where
+@@ -363,6 +481,9 @@
      D: Disk + Send + 'static,
      F: FnOnce(FileSystem<D>) -> Result<T>,
  {
@@ -580,7 +653,7 @@ index 93de28b..a1212f9 100644
      let ctime = SystemTime::now().duration_since(UNIX_EPOCH)?;
      let fs = FileSystem::create(disk, password_opt, ctime.as_secs(), ctime.subsec_nanos())
          .map_err(syscall_error)?;
-@@ -549,6 +564,9 @@ where
+@@ -549,6 +670,9 @@
      P: AsRef<Path>,
      F: FnOnce(FileSystem<DiskIo<fscommon::StreamSlice<DiskWrapper>>>) -> Result<T>,
  {
@@ -590,7 +663,7 @@ index 93de28b..a1212f9 100644
      let bootloader_efi_name = bootloader_efi_name()?;
      // Open disk and read metadata
      eprintln!(
-@@ -815,7 +833,26 @@ pub fn try_fast_install<D: redoxfs::Disk, F: FnMut(u64, u64)>(
+@@ -815,7 +939,26 @@
          }
      }
  
