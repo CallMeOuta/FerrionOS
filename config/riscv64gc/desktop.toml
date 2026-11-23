@@ -5,4 +5,3 @@ include = ["../desktop.toml"]
 [general]
 
 [packages]
-netsurf = "ignore"

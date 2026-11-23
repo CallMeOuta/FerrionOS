@@ -10,7 +10,6 @@ dependencies = [
     "freefont",
     "hicolor-icon-theme",
     "installer-gui",
-    "netsurf",
     "orbdata",
     "orbital",
     "orbutils",

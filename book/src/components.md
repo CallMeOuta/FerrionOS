@@ -36,7 +36,6 @@ The `desktop` config currently installs these desktop apps:
 - COSMIC Files - File manager
 - COSMIC Editor - Text editor
 - COSMIC Terminal - Terminal emulator
-- NetSurf - Web browser
 - The graphical installer
 
 Which desktop apps FerrionOS ships is not settled and may change.

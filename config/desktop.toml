@@ -15,24 +15,11 @@ freefont = {}
 hicolor-icon-theme = {}
 installer-gui = {}
 libxkbcommon = "source"
-netsurf = {}
 noto-sans-cjk = {}
 patchelf = {}
 pop-icon-theme = {}
 shared-mime-info = {}
 orbterm = "ignore"
-
-[[files]]
-path = "/usr/share/ui/apps/00_netsurf"
-data = """
-name=Netsurf
-binary=/usr/bin/netsurf-fb
-icon=/usr/share/icons/apps/internet-web-browser.png
-accept=*.html
-author=The Netsurf Developers
-description=Web browser
-"""
-postinstall = true
 
 [[files]]
 path = "/usr/share/ui/apps/redox-installer-gui"

@@ -127,7 +127,7 @@ What the scan covered and found clean:
 
 - No image file of any staged package has the upstream name in its file name.
 - All 31 PNG files of orbdata were looked at; the two above are the only ones with a logo.
-- No PNG is embedded in `orbital`, `orblogin`, `launcher`, `background`, `viewer`, the installer's GUI, the three COSMIC programs or NetSurf, so no about dialog draws an upstream image. Their text was not read.
+- No PNG is embedded in `orbital`, `orblogin`, `launcher`, `background`, `viewer`, the installer's GUI or the three COSMIC programs, so no about dialog draws an upstream image. Their text was not read.
 - pop-icon-theme ships 294 files named after other distributions (`distributor-logo*.svg`, `start-here-*.svg`, `*-logo-icon.svg`) and cosmic-icons one `start-here-symbolic.svg`. None is upstream's, and none of the programs above asks for them by name.
 
 Why two files are not the size of the ones they replace: orblogin and the wallpaper program scale an image to cover the screen and leave one of the screen's own size untouched. At 1280x800, the reference screen, both are drawn pixel for pixel; the old login image was drawn at 1.25 times with 80 pixels cut top and bottom.

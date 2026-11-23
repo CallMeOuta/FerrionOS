@@ -65,9 +65,9 @@ The `make` targets are documented in the comments of `Makefile` and `mk/*.mk`, a
 - `config/server.toml` - The variant with some important tools without Orbital. It cooks far fewer packages than `desktop`.
 - `config/x86_64/server-demo.toml` - `server` variant with a demonstration of a server software stack
 - `config/desktop-minimal.toml` - The minimal `desktop` variant: `minimal` with Orbital.
-- `config/desktop.toml` - The variant with some important CLI and GUI programs (this is the default configuration of the build system). It currently installs the COSMIC terminal, file manager and text editor, NetSurf and Orbital. Which desktop apps FerrionOS ships is not settled and may change.
+- `config/desktop.toml` - The variant with some important CLI and GUI programs (this is the default configuration of the build system). It currently installs the COSMIC terminal, file manager, text editor and Orbital. Which desktop apps FerrionOS ships is not settled and may change.
 - `config/x86_64/desktop.toml` - The `desktop` configuration of x86_64: the shared one with the fish, zsh and Nushell shells added, and Nushell as the login shell of `user`.
-- `config/riscv64gc/desktop.toml` - The `desktop` configuration of RISC-V: the shared one without NetSurf.
+- `config/riscv64gc/desktop.toml` - The `desktop` configuration of RISC-V, including the shared desktop configuration.
 - `config/desktop-contain.toml` - `desktop` variant that starts the graphical login through `contain_orblogin`, a part of the `contain` sandbox tool, which aims at limiting the schemes and files that a session can reach. FerrionOS has not verified it, see [Security](./security.md).
 - `config/dev.toml` - The variant with development tools included (`config/aarch64/dev.toml` adapts it to that CPU architecture).
 - `config/$ARCH/demo.toml` - The variant with `desktop` and optional programs and games.

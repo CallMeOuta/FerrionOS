@@ -62,7 +62,6 @@ nano = {}
 nasm = {}
 ncurses = {}
 netdb = {}
-netsurf = {}
 netutils = {}
 nghttp2 = {}
 openssl1 = {}

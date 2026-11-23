@@ -1,17 +1,12 @@
 [source]
 tar = "https://download.gimp.org/pub/gegl/0.4/gegl-0.4.72.tar.xz"
+blake3 = "6c9a0d828ffe17718752bbc405b7de1e5a2ec85d1fe5a1c3d531b5e04bf11d48"
 patches = [
     "redox.patch"
 ]
 
 [build]
 template = "custom"
-mesonflags = [
-    "-Ddocs=false",
-    "-Dgtk-doc=false",
-    "-Dintrospection=false",
-    "-Dparallel-tests=false",
-]
 dependencies = [
     "cairo",
     "libpng",
@@ -20,11 +15,17 @@ dependencies = [
     "babl",
     "json-glib",
     "libjpeg",
-    "libnsgif",
     "poly2tri-c",
 ]
 script = """
 DYNAMIC_INIT
 CFLAGS="-std=c11"
+COOKBOOK_MESON_FLAGS+=(
+    -Ddocs=false
+    -Dgtk-doc=false
+    -Dintrospection=false
+    -Dparallel-tests=false
+    --force-fallback-for=libnsgif
+)
 cookbook_meson
 """

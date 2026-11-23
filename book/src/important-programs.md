@@ -38,7 +38,7 @@ Most GUI applications run through Orbital, the display server and window manager
 
 ## Applications
 
-The x86_64 desktop image currently installs the COSMIC terminal, file manager and text editor and NetSurf. Which desktop apps FerrionOS ships is not settled and may change.
+The x86_64 desktop image currently installs the COSMIC terminal, file manager and text editor; Firefox is built separately as a GTK3 Wayland browser. Which desktop apps FerrionOS ships is not settled and may change.
 
 | Name | GUI Backend | Status recorded upstream |
 |---|--|---|
@@ -47,7 +47,6 @@ The x86_64 desktop image currently installs the COSMIC terminal, file manager an
 | COSMIC Reader | winit | Working Well |
 | COSMIC Store | winit | Not Tested |
 | COSMIC Terminal | winit | Working Well |
-| Netsurf | SDL1 | Working Well |
 | FFplay | SDL2 | Working Well |
 | Servo | winit | Often Crashes |
 

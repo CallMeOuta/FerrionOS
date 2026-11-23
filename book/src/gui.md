@@ -15,7 +15,6 @@ The `desktop` configuration currently installs these programs with a graphical i
 - COSMIC Terminal (`cosmic-term`), a terminal emulator
 - COSMIC Files (`cosmic-files`), a file manager
 - COSMIC Editor (`cosmic-edit`), a text editor
-- NetSurf (`netsurf`), a web browser
 - The graphical installer (`installer-gui`)
 - Orbital's own utilities (`orbutils`)
 

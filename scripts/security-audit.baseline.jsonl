@@ -419,7 +419,6 @@
 {"check": "sources", "subject": "recipes/tui/pls", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tui/pls/recipe.toml"}
 {"check": "sources", "subject": "recipes/tui/zoxide", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tui/zoxide/recipe.toml"}
 {"check": "sources", "subject": "recipes/video/sdl-player", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/video/sdl-player/recipe.toml"}
-{"check": "sources", "subject": "recipes/web/netsurf", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "downloads", "subject": "prebuilt toolchain", "status": "fail", "note": "toolchain tarball downloaded with no pinned hash (mk/prefix.mk:128)", "fix": "download it with ch_download (mk/ch.mk) and a pinned sha256"}
 {"check": "downloads", "subject": "prebuilt package key", "status": "fail", "note": "the key that verifies prebuilt packages is downloaded with no pinned hash (mk/prefix.mk:151)", "fix": "check the key in to the repository or pin its sha256 with ch_download"}
 {"check": "downloads", "subject": "build container base", "status": "fail", "note": "container starts from a tag, not a digest (podman/redox-base-containerfile:3)", "fix": "pin the base image as debian:trixie@sha256:<digest>"}
