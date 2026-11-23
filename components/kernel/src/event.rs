@@ -90,7 +90,12 @@ impl EventQueue {
             (Err(Error { errno: EAGAIN }), false) => {
                 // proceed writing timeout
             }
-            (err, _) => return err,
+            (err, _) => {
+                if block {
+                    context::current().write(token.token()).wake = None;
+                }
+                return err;
+            }
         };
 
         // TODO: let the scheduler write this for us?
