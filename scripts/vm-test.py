@@ -2946,20 +2946,53 @@ LOCKDOWN_DRIVERS = ["pcid", "acpid", "nvmed", "e1000d", "xhcid", "vesad"]
 HARDWARE_SCHEMES = ["irq", "serio", "kernel.acpi", "pci", "acpi"]
 
 
-def test_lockdown(vm, args):
-    """Every driver works (login screen, keypress, DHCP, disk, driver processes) while root reaches no raw hardware."""
+def wait_and_login_screen(vm, args):
+    """Logs in through VT 3 text login for wm-session configs, or Orbital login otherwise."""
+    if args.config.startswith("wm-session"):
+        deadline = time.monotonic() + args.timeout
+        login = None
+        while time.monotonic() < deadline:
+            frame = vm.screenshot()
+            if frame.kind() == "text":
+                login = settle(vm, 10, still=1.5)
+                break
+            time.sleep(0.5)
+        if login is None:
+            return None, None, f"no text login on VT 3 within {args.timeout}s"
+        login.save_png(vm.out / "login.png")
+        sendkeys(vm.command, "user\n")
+        session_deadline = time.monotonic() + args.timeout
+        desktop = None
+        while time.monotonic() < session_deadline:
+            frame = vm.screenshot()
+            if frame.has_ground_row() and frame.rgb != login.rgb:
+                desktop = settle(vm, 10, still=1.5)
+                break
+            time.sleep(0.5)
+        if desktop is None:
+            desktop = settle(vm, 5)
+        desktop.save_png(vm.out / "desktop.png")
+        return login, desktop, None
     kind = None
     while vm.elapsed() < args.timeout and kind != "login":
         kind = vm.screenshot().kind()
         time.sleep(0.2)
     if kind != "login":
-        return False, f"no graphical login within {args.timeout}s"
+        return None, None, f"no graphical login within {args.timeout}s"
     login = settle(vm, 10)
     login.save_png(vm.out / "login.png")
     # The login screen has `user` filled in and an empty password: Enter logs in.
     vm.command("sendkey ret")
     desktop = settle(vm, 30, still=2.0)
     desktop.save_png(vm.out / "desktop.png")
+    return login, desktop, None
+
+
+def test_lockdown(vm, args):
+    """Every driver works (login screen, keypress, DHCP, disk, driver processes) while root reaches no raw hardware."""
+    login, desktop, err = wait_and_login_screen(vm, args)
+    if err:
+        return False, err
     problems = []
     if desktop.rgb == login.rgb:
         problems.append("Enter on the login screen changed nothing, so keyboard input is broken")
@@ -3073,17 +3106,9 @@ def iostat_processes(iostat):
 
 def test_driver_namespaces(vm, args):
     """Every namespace handle a running driver holds names only memory and pipe (ferrion-audiod: memory and rand), read from /scheme/sys/iostat; Enter on the login screen still reaches the desktop."""
-    kind = None
-    while vm.elapsed() < args.timeout and kind != "login":
-        kind = vm.screenshot().kind()
-        time.sleep(0.2)
-    if kind != "login":
-        return False, f"no graphical login within {args.timeout}s"
-    login = settle(vm, 10)
-    login.save_png(vm.out / "login.png")
-    vm.command("sendkey ret")
-    desktop = settle(vm, 30, still=2.0)
-    desktop.save_png(vm.out / "desktop.png")
+    login, desktop, err = wait_and_login_screen(vm, args)
+    if err:
+        return False, err
     problems = []
     if desktop.rgb == login.rgb:
         problems.append("Enter on the login screen changed nothing, so input through inputd is broken")
@@ -5503,18 +5528,18 @@ def one_password_install(args, out, live, target, password):
         vm.close()
 
 
-def session_owner(vm):
-    reply = run_status(vm, "grep launcher /scheme/sys/context")
+def session_owner(vm, proc="launcher"):
+    reply = run_status(vm, f"grep {proc} /scheme/sys/context")
     if isinstance(reply, NoAnswer):
         return reply
-    found = re.search(r"(?m)^\s*\d+\s+(\d+)\s.*launcher\s*$", reply.out)
+    found = re.search(rf"(?m)^\s*\d+\s+(\d+)\s.*{re.escape(proc)}\b", reply.out)
     return int(found.group(1)) if found else None
 
 
-def wait_session(vm, timeout):
+def wait_session(vm, timeout, proc="launcher"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        owner = session_owner(vm)
+        owner = session_owner(vm, proc=proc)
         if isinstance(owner, NoAnswer):
             raise RuntimeError("session_owner gave no answer")
         if owner is not None:
@@ -5563,6 +5588,10 @@ def test_one_password(args, out):
             return None, f"{cmd} produced no exit status; see {vm.out / transcript_name}"
         return int(status.group(1)), text
 
+    is_wm_session = args.config.startswith("wm-session")
+    session_proc = "ferrion-wm" if is_wm_session else "launcher"
+    login_kind = "text" if is_wm_session else "login"
+    user_uid = None
     try:
         shutil.copyfile(ROOT / "build" / args.arch / args.config / "redox-live.iso", live)
         for path, size in ((target, 2 << 30), (extra, 64 << 20)):
@@ -5572,7 +5601,6 @@ def test_one_password(args, out):
         if not recovery:
             return False, f"the installer did not finish with one password; see {out / 'install'}"
 
-        user_uid = None
         vm = boot_copy(args, out / "password", disk)
         try:
             if not vm.wait_serial(r"user[\s\S]{0,400}Password \(1/\d+\)", args.timeout):
@@ -5580,23 +5608,27 @@ def test_one_password(args, out):
             sendkeys(vm.command, password + "\n")
             if not root_shell(vm, args.timeout * 2):
                 return False, f"no root shell on the serial console; see {vm.out}"
-            owner = wait_session(vm, args.timeout)
+            owner = wait_session(vm, args.timeout, proc=session_proc)
             frame = settle(vm, 20, still=2.0)
             frame.save_png(vm.out / "desktop.png")
             _, env = run_status(vm, "grep REDOXFS_UNLOCK /scheme/sys/env")
             _, uid = run_status(vm, "grep '^user;' /etc/passwd")
             uid = re.search(r"user;(\d+);", uid)
             if ("REDOXFS_UNLOCK_KIND=passphrase" not in env or not uid or owner != int(uid.group(1))
-                    or frame.kind() == "login"):
-                return False, (f"no session of user after the unlock (launcher euid {owner}, screen {frame.kind()}, "
+                    or frame.kind() == login_kind):
+                return False, (f"no session of user after the unlock ({session_proc} euid {owner}, screen {frame.kind()}, "
                                f"env {env.strip()!r}); see {vm.out}")
             user_uid = int(uid.group(1))
             notes.append("bootloader password reached user's desktop")
-            _, context = run_status(vm, "grep launcher /scheme/sys/context")
-            for pid in re.findall(r"(?m)^\s*(\d+)\s+\d+\s.*launcher\s*$", context):
+            _, context = run_status(vm, f"grep {session_proc} /scheme/sys/context")
+            for pid in re.findall(rf"(?m)^\s*(\d+)\s+\d+\s.*{re.escape(session_proc)}\b", context):
                 run_status(vm, f"kill {pid}")
-            if screen_kind_within(vm, ("login",), args.timeout) is None:
+            if screen_kind_within(vm, (login_kind,), args.timeout) is None:
                 return False, f"after the session ended the login screen did not come back; see {vm.out}"
+            time.sleep(2)
+            post_logout_owner = session_owner(vm, proc=session_proc)
+            if post_logout_owner is not None:
+                return False, f"{session_proc} auto-restarted after logout (euid {post_logout_owner}); see {vm.out}"
             notes.append("logout shows the login")
             since = vm.mark()
             vm.type("exit\n")
@@ -5628,12 +5660,20 @@ def test_one_password(args, out):
         try:
             if not unlock(vm, recovery, 1, args.timeout):
                 return False, "no bootloader prompt for the recovery key"
-            if screen_kind_within(vm, ("login",), args.timeout * 2) is None:
-                return False, f"the recovery key did not end at the login screen; see {vm.out}"
-            settle(vm, 10).save_png(vm.out / "login.png")
-            if not root_shell(vm, args.timeout):
-                return False, f"no root shell after the recovery key; see {vm.out}"
-            owner = session_owner(vm)
+            if is_wm_session:
+                if not root_shell(vm, args.timeout * 2):
+                    return False, f"no root shell after the recovery key; see {vm.out}"
+                frame = settle(vm, 10)
+                frame.save_png(vm.out / "login.png")
+                if frame.kind() != login_kind:
+                    return False, f"the recovery key did not end at the login screen ({frame.kind()}); see {vm.out}"
+            else:
+                if screen_kind_within(vm, (login_kind,), args.timeout * 2) is None:
+                    return False, f"the recovery key did not end at the login screen; see {vm.out}"
+                settle(vm, 10).save_png(vm.out / "login.png")
+                if not root_shell(vm, args.timeout):
+                    return False, f"no root shell after the recovery key; see {vm.out}"
+            owner = session_owner(vm, proc=session_proc)
             if isinstance(owner, NoAnswer):
                 return False, f"session_owner gave no answer after a recovery-key unlock; see {vm.out}"
             if owner is not None:
@@ -5648,7 +5688,7 @@ def test_one_password(args, out):
                 return False, "no bootloader prompt after passwd"
             if not unlock(vm, new, 2, 60):
                 return False, f"the old password was not refused at the bootloader; see {vm.out}"
-            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout) != user_uid:
+            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout, proc=session_proc) != user_uid:
                 return False, f"the new password did not log user in; see {vm.out}"
             notes.append("after passwd the old password is refused and the new one opens and logs in")
 
@@ -5693,7 +5733,7 @@ def test_one_password(args, out):
                 return False, "no bootloader prompt after admin-reset recovery"
             if not unlock(vm, recovered, 2, 60):
                 return False, f"the pre-reset disk password was not refused; see {vm.out}"
-            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout) != user_uid:
+            if not root_shell(vm, args.timeout * 2) or wait_session(vm, args.timeout, proc=session_proc) != user_uid:
                 return False, f"the recovered password did not open and log user in; see {vm.out}"
             notes.append("after admin reset, passwd with previous disk password rewraps the slot and logs user in")
 
@@ -5729,7 +5769,7 @@ def test_one_password(args, out):
                 return False, f"unenrolled {second_user}'s password was not refused at the bootloader; see {vm.out}"
             if not root_shell(vm, args.timeout * 2):
                 return False, f"no root shell after second-unenrolled check; see {vm.out}"
-            if wait_session(vm, args.timeout) != user_uid:
+            if wait_session(vm, args.timeout, proc=session_proc) != user_uid:
                 return False, f"user session did not start before claim-integrity check; see {vm.out}"
             notes.append("unenrolled second account refused at bootloader")
 
@@ -5852,14 +5892,14 @@ def test_one_password(args, out):
                 return False, f"no bootloader prompt for enrolled {second_user}"
             if not root_shell(vm, args.timeout * 2):
                 return False, f"enrolled {second_user} password did not unlock the disk; see {vm.out}"
-            owner = wait_session(vm, args.timeout)
+            owner = wait_session(vm, args.timeout, proc=session_proc)
             _, env = run_status(vm, "grep REDOXFS_UNLOCK /scheme/sys/env")
             _, uid = run_status(vm, f"grep '^{second_user};' /etc/passwd")
             uid = re.search(rf"{second_user};(\d+);", uid)
             if (f"REDOXFS_UNLOCK_SLOT={second_slot}" not in env
                     or "REDOXFS_UNLOCK_KIND=passphrase" not in env
                     or not uid or owner != int(uid.group(1))):
-                return False, (f"enrolled {second_user} did not launch its session (launcher euid {owner}, "
+                return False, (f"enrolled {second_user} did not launch its session ({session_proc} euid {owner}, "
                                f"expected {uid.group(1) if uid else None}, env {env.strip()!r}); see {vm.out}")
             notes.append(f"passwd --enroll unlocked and launched {second_user}'s session")
 
