@@ -3818,9 +3818,18 @@ def test_firefox_js(vm, args):
             return True
         return False
 
-    status, _ = run("unset MAIL MAILPATH MAILCHECK; exec 8< <(sleep 100000); " + GUEST_WATCH, 30)
+    tick_setup = (
+        "unset MAIL MAILPATH MAILCHECK && "
+        "coproc TICK { trap '' INT; while read -r _; do :; done; } && "
+        "t0=${TICK[0]} && t1=${TICK[1]} && "
+        "exec 8<&$t0 9>&$t1 && eval \"exec ${t0}<&- ${t1}>&-\" && "
+        "unset TICK TICK_PID t0 t1 && "
+        ": <&8 && { read -t 1 -u 8; [ $? -gt 128 ]; } && "
+        "{ " + GUEST_WATCH + "; }"
+    )
+    status, _ = run(tick_setup, 30)
     if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
-        return False, "the guest watcher did not start"
+        return False, f"the guest watcher or guard timer did not start (status {status})"
 
     def fetch_png(name):
         since = vm.mark()
@@ -3841,12 +3850,19 @@ def test_firefox_js(vm, args):
         nonlocal guard_seq
         guard_seq += 1
         hung_tag = f"FXHUNG-{guard_seq}"
-        line = (f"{command} > {directory}/{name}.log 2>&1 & fx=$!; n=0; "
-                f"while kill -0 $fx 2>/dev/null && [ $n -lt {timeout} ]; do read -t 1 -u 8; n=$((n+1)); done; "
-                f"if kill -0 $fx 2>/dev/null; then echo {hung_tag}; false; else wait $fx; fi")
+        err_tag = f"FXGUARDERR-{guard_seq}"
+        line = (f"{command} > {directory}/{name}.log 2>&1 & fx=$!; end=$((SECONDS + {timeout})); guard_err=''; "
+                f"while kill -0 $fx 2>/dev/null && [ $SECONDS -lt $end ]; do "
+                f"read -t 1 -u 8; tick_rc=$?; if [ $tick_rc -le 128 ]; then guard_err=$tick_rc; break; fi; done; "
+                f"if [ -n \"$guard_err\" ]; then echo {err_tag}=$guard_err; false; "
+                f"elif kill -0 $fx 2>/dev/null; then echo {hung_tag}; false; else wait $fx; fi")
         started = time.monotonic()
         status, output = run(line, timeout + 120)
         seconds = round(time.monotonic() - started, 1)
+        err_match = re.search(rf"(?m)^{err_tag}=(\d+)\s*$", output)
+        if err_match:
+            run("kill -9 $fx 2>/dev/null; wait $fx 2>/dev/null", 30)
+            raise RuntimeError(f"firefox-js guard tick failed during {name} (read rc={err_match.group(1)})")
         if status is None or re.search(rf"(?m)^{hung_tag}\s*$", output):
             if status is None:
                 shell_back()
