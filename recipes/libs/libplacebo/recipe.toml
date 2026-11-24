@@ -1,0 +1,27 @@
+[package]
+description = "Reusable library for GPU-accelerated video and image rendering primitives"
+
+[source]
+git = "https://code.videolan.org/videolan/libplacebo.git"
+rev = "275f7dea27924cdd34ab2e6c20e448b6bc4fab65"
+patches = [
+    "ferrion-j1-decl.patch",
+]
+
+[build]
+template = "custom"
+dependencies = [
+    "libstdcxx",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_meson \
+    -Dauto_features=disabled \
+    -Ddemos=false \
+    -Dtests=false \
+    -Dbench=false \
+    -Dfuzz=false
+
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/libplacebo/LICENSE"
+"""
