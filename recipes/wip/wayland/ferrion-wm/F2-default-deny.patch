@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FerrionOS contributors <contributors@ferrion.invalid>
+Date: Mon, 23 Nov 2026 15:47:00 -0800
+Subject: [PATCH] niri: Default-deny privileged Wayland globals on main socket
+
+FerrionOS change to niri (GPL-3.0-or-later, kept), made against pinned
+commit ef54ab5421d13ffed2b5fc1f0308998cac4808d0 after the existing
+recipe patches.
+
+Mark main-socket Wayland clients restricted when built with the ferrion
+feature and gate MutterX11InteropManagerState with
+client_is_unrestricted alongside the other privileged globals.
+---
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -2731,7 +2731,7 @@
+             .unwrap();
+ 
+         let mutter_x11_interop_state =
+-            MutterX11InteropManagerState::new::<State, _>(&display_handle, move |_| true);
++            MutterX11InteropManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
+ 
+         #[cfg(test)]
+         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
+@@ -2812,7 +2812,7 @@
+                 .insert_source(socket_source, move |client, _, state| {
+                     state.niri.insert_client(NewClient {
+                         client,
+-                        restricted: false,
++                        restricted: cfg!(feature = "ferrion"),
+                         credentials_unknown: false,
+                     });
+                 })
