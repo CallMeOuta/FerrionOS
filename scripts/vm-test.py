@@ -3330,15 +3330,13 @@ def test_dev_parity(vm, args):
     if setup_status != 0:
         (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {setup_status}\n{setup}\n")
         return False, f"setup failed (exit status {setup_status}); see {vm.out / 'setup.txt'}"
-    address = None
-    for _ in range(10):
-        _, output, _ = run("cat /scheme/netcfg/ifaces/eth0/addr/list", 30)
-        address = re.search(r"\b10\.0\.2\.\d+", output)
-        if address:
-            break
-        time.sleep(3)
-    network = f"eth0 {address.group(0)}" if address else "eth0 has no address from QEMU's DHCP server"
-    (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {setup_status}\n{setup}\n{network}\n")
+    dns_status, dns_output, _ = run("cat /etc/net/dns", 30)
+    if dns_status is None and not shell_back():
+        (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {setup_status}\n{setup}\n")
+        return False, f"bash stopped answering while reading /etc/net/dns; see {vm.out / 'setup.txt'}"
+    dns_values = " ".join(dns_output.split()) if dns_status == 0 else ""
+    resolver = f"resolver config (/etc/net/dns): {dns_values or 'none'}"
+    (vm.out / "setup.txt").write_text(f"$ {DEV_PARITY_SETUP}\nexit status {setup_status}\n{setup}\n{resolver}\n")
 
     results = []
     lost = None  # the task after which bash stopped answering
@@ -3372,10 +3370,10 @@ def test_dev_parity(vm, args):
 
     width = max(len(task) for task, _, _ in results)
     table = "".join(f"{task:<{width}}  {verdict}  {reason}\n" for task, verdict, reason in results)
-    (vm.out / "summary.txt").write_text(f"{network}\n{table}")
+    (vm.out / "summary.txt").write_text(f"{resolver}\n{table}")
     print(table, end="", flush=True)
     passed = sum(verdict == "PASS" for _, verdict, _ in results)
-    note = f"ran {len(results)} tasks, {passed} PASS; {network}; see {vm.out / 'summary.txt'}"
+    note = f"ran {len(results)} tasks, {passed} PASS; {resolver}; see {vm.out / 'summary.txt'}"
     if lost is not None:
         return False, f"bash stopped answering after {lost} timed out; {note}"
     return True, note
