@@ -11,6 +11,8 @@ mod stream;
 use self::dgram::UdsDgramScheme;
 use self::stream::UdsStreamScheme;
 
+const MAX_NEXT_EVENT_EINTR_RETRIES: usize = 64;
+
 fn main() {
     daemon::Daemon::new(daemon_runner);
 }
@@ -76,9 +78,24 @@ fn inner(daemon: daemon::Daemon) -> anyhow::Result<()> {
     libredox::call::setrens(0, 0)?;
 
     loop {
-        let event = event_queue
-            .next_event()
-            .map_err(|e| anyhow::anyhow!("error occured in event queue: {e}"))?;
+        let mut eintr_retries: usize = 0;
+        let event = loop {
+            match event_queue.next_event() {
+                Ok(event) => break event,
+                Err(e) if e.errno() == libredox::errno::EINTR => {
+                    if eintr_retries >= MAX_NEXT_EVENT_EINTR_RETRIES {
+                        anyhow::bail!(
+                            "udsd: event queue wait exceeded MAX_NEXT_EVENT_EINTR_RETRIES ({MAX_NEXT_EVENT_EINTR_RETRIES})"
+                        );
+                    }
+                    eintr_retries += 1;
+                    eprintln!("udsd: event queue wait interrupted; retrying");
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("error occured in event queue: {e}"));
+                }
+            }
+        };
 
         match event.user_data {
             EventSource::UdsStreamSocket => {

@@ -55,7 +55,7 @@ pub fn queue_get_events(
         return Err(Error::new(EINVAL));
     }
     let mut event = syscall::Event::default();
-    let res = syscall::read(queue, &mut event)?;
+    let res = redox_rt::sys::posix_read(queue, &mut event)?;
     assert_eq!(
         res,
         size_of::<syscall::Event>(),
