@@ -1,3 +1,11 @@
+#include <features.h>
+
+#if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+#ifndef __XSI_VISIBLE
+#define __XSI_VISIBLE 1
+#endif
+#endif
+
 #include <openlibm_math.h>
 
 // Missing typedefs
@@ -113,4 +121,22 @@ typedef double double_t;
 
 #ifndef M_SQRT1_2l
 #define M_SQRT1_2l  0.707106781186547524400844362104849039L /* 1/sqrt(2) */
+#endif
+
+#if (defined(_BSD_SOURCE) || defined(_GNU_SOURCE)) && !__BSD_VISIBLE
+#ifdef __cplusplus
+extern "C" {
+#endif
+OLM_DLLEXPORT float j0f(float);
+OLM_DLLEXPORT float j1f(float);
+OLM_DLLEXPORT float jnf(int, float);
+OLM_DLLEXPORT float y0f(float);
+OLM_DLLEXPORT float y1f(float);
+OLM_DLLEXPORT float ynf(int, float);
+OLM_DLLEXPORT double lgamma_r(double, int *);
+OLM_DLLEXPORT float lgammaf_r(float, int *);
+OLM_DLLEXPORT long double lgammal_r(long double, int *);
+#ifdef __cplusplus
+}
+#endif
 #endif

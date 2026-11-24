@@ -1178,6 +1178,55 @@ def test_printf_precision(vm, args):
     return True, f"{len(guest_cases)}/{len(glibc_cases)} cases match host glibc byte-for-byte (null: {dot_s_null})"
 
 
+def test_math_bessel(vm, args):
+    """Checks math.h Bessel and gamma values in FerrionOS against host glibc (use --config desktop)."""
+    import math
+
+    src = ROOT / "recipes" / "tests" / "math-bessel-probe" / "math-bessel-probe.c"
+    with tempfile.TemporaryDirectory(prefix="ferrion-math-ref-") as scratch:
+        ref_bin = Path(scratch) / "math-bessel-probe"
+        subprocess.run(
+            ["gcc", "-std=gnu17", "-O2", "-Wall", "-Wextra", "-Werror=implicit-function-declaration",
+             str(src), "-o", str(ref_bin), "-lm"],
+            check=True,
+        )
+        glibc_text = subprocess.check_output([str(ref_bin)], text=True)
+    (vm.out / "glibc.txt").write_text(glibc_text)
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("bash -c 'math-bessel-probe; echo math-bessel-exit-$?'\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)math-bessel-exit-(\d+)\s", 60, since)
+    raw = found.group(1) if found else vm.text(since)
+    status = int(found.group(2)) if found else None
+    prefixes = ("double ", "float ", "double_sign ", "float_sign ", "math-bessel-probe:")
+    guest_lines = [line.rstrip("\r") for line in raw.splitlines() if line.startswith(prefixes)]
+    guest_text = "\n".join(guest_lines) + ("\n" if guest_lines else "")
+    (vm.out / "guest.txt").write_text(guest_text)
+    if status != 0 or "math-bessel-probe: DONE" not in guest_lines:
+        return False, f"math-bessel-probe failed (exit {status}); see {vm.out / 'guest.txt'}"
+    glibc_rows = [line.split() for line in glibc_text.splitlines() if line.startswith(prefixes[:4])]
+    guest_rows = [line.split() for line in guest_lines if line.startswith(prefixes[:4])]
+    diffs = []
+    if len(glibc_rows) != len(guest_rows):
+        diffs.append(f"row count guest={len(guest_rows)} glibc={len(glibc_rows)}")
+    for g, r in zip(guest_rows, glibc_rows):
+        if len(g) != len(r) or g[0] != r[0] or g[1] != r[1]:
+            diffs.append(f"row mismatch guest={g} glibc={r}")
+            continue
+        gv, rv = float(g[2]), float(r[2])
+        tol = 1e-12 if g[0].startswith("double") else 1e-5
+        if not math.isclose(gv, rv, rel_tol=tol, abs_tol=tol):
+            diffs.append(f"{g[1]}: guest={g[2]} glibc={r[2]}")
+        if g[0].endswith("_sign") and g[3] != r[3]:
+            diffs.append(f"{g[1]} signgam: guest={g[3]} glibc={r[3]}")
+    if diffs:
+        return False, f"{len(diffs)} diffs ({'; '.join(diffs[:4])}); see {vm.out}"
+    return True, f"{len(guest_rows)}/{len(glibc_rows)} Bessel and gamma values match host glibc"
+
+
 def test_jit_signal(vm, args):
     """What SpiderMonkey's JIT asks of signals and memory: SIGSEGV and SIGILL handlers that read and change the machine context and resume, faults on PROT_NONE loads, non-executable and RW-to-RX code pages, a handler on a thread's alternate stack, and SIG_DFL after a handler (use --config firefox)."""
     passes = ("segv-store", "sigill-ud2", "segv-exec-nx", "wx-reserve", "wx-exec", "wx-store-faults",
@@ -10054,6 +10103,7 @@ TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 TESTS["firefox-window"] = test_firefox_window
 TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
+TESTS["math-bessel"] = test_math_bessel
 TESTS["printf-precision"] = test_printf_precision
 TESTS["file-locks"] = test_file_locks
 TESTS["gpu-context"] = test_gpu_context

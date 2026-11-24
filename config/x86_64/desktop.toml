@@ -84,6 +84,7 @@ linux-lc3-fixtures = {}
 linux-lc4-fixtures = {}
 linux-lc5-fixtures = {}
 lock-probe = {}
+math-bessel-probe = {}
 printf-precision-probe = {}
 update-index-probe = {}
 fork-filetable-probe = {}

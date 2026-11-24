@@ -1,0 +1,16 @@
+[package]
+description = "Checks math.h Bessel and gamma prototypes and values against glibc"
+
+[build]
+template = "custom"
+dependencies = [
+    "relibc",
+]
+script = """
+DYNAMIC_INIT
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -std=gnu17 -O2 -Wall -Wextra -Werror=implicit-function-declaration \
+    -isystem "${COOKBOOK_SYSROOT}/usr/include" \
+    -o "${COOKBOOK_STAGE}/usr/bin/math-bessel-probe" \
+    "${COOKBOOK_RECIPE}/math-bessel-probe.c" ${LDFLAGS} -lm
+"""
