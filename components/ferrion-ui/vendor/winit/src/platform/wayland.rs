@@ -82,6 +82,10 @@ pub trait WindowExtWayland {
     /// Returns `xdg_toplevel` of the window or [`None`] if the window is X11 window.
     fn xdg_toplevel(&self) -> Option<NonNull<c_void>>;
 
+    fn xdg_surface(&self) -> Option<NonNull<c_void>>;
+
+    fn window_geometry_offset(&self) -> (i32, i32);
+
     /// Rune: the radius, in logical points, of the arc the window's content takes at its bottom
     /// corners. A client-side frame (`sctk-adwaita`) draws a one-point border around the window
     /// and rounds its corners while it floats, so the content's own square corners would show
@@ -109,6 +113,28 @@ impl WindowExtWayland for Window {
             crate::platform_impl::Window::X(_) => None,
             #[cfg(wayland_platform)]
             crate::platform_impl::Window::Wayland(window) => window.xdg_toplevel(),
+        }
+    }
+
+    #[inline]
+    fn xdg_surface(&self) -> Option<NonNull<c_void>> {
+        #[allow(clippy::single_match)]
+        match &self.window {
+            #[cfg(x11_platform)]
+            crate::platform_impl::Window::X(_) => None,
+            #[cfg(wayland_platform)]
+            crate::platform_impl::Window::Wayland(window) => window.xdg_surface(),
+        }
+    }
+
+    #[inline]
+    fn window_geometry_offset(&self) -> (i32, i32) {
+        #[allow(clippy::single_match)]
+        match &self.window {
+            #[cfg(x11_platform)]
+            crate::platform_impl::Window::X(_) => (0, 0),
+            #[cfg(wayland_platform)]
+            crate::platform_impl::Window::Wayland(window) => window.window_geometry_offset(),
         }
     }
 

@@ -635,6 +635,17 @@ impl WindowState {
         0.
     }
 
+    #[inline]
+    pub fn window_geometry_offset(&self) -> (i32, i32) {
+        match self.frame.as_ref().filter(|frame| !frame.is_hidden()) {
+            Some(frame) => {
+                let (x, y) = frame.location();
+                (-x, -y)
+            },
+            None => (0, 0),
+        }
+    }
+
     /// Get the outer size of the window.
     #[inline]
     pub fn outer_size(&self) -> LogicalSize<u32> {

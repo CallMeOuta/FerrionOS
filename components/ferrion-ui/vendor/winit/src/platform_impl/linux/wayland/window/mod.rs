@@ -12,6 +12,7 @@ use sctk::reexports::client::{Proxy, QueueHandle};
 use sctk::compositor::{CompositorState, Region, SurfaceData};
 use sctk::reexports::protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 use sctk::shell::xdg::window::{Window as SctkWindow, WindowDecorations};
+use sctk::shell::xdg::XdgSurface;
 use sctk::shell::WaylandSurface;
 
 use tracing::warn;
@@ -234,6 +235,15 @@ impl Window {
 
     pub(crate) fn xdg_toplevel(&self) -> Option<NonNull<c_void>> {
         NonNull::new(self.window.xdg_toplevel().id().as_ptr().cast())
+    }
+
+    pub(crate) fn xdg_surface(&self) -> Option<NonNull<c_void>> {
+        NonNull::new(self.window.xdg_surface().id().as_ptr().cast())
+    }
+
+    #[inline]
+    pub(crate) fn window_geometry_offset(&self) -> (i32, i32) {
+        self.window_state.lock().unwrap().window_geometry_offset()
     }
 }
 
