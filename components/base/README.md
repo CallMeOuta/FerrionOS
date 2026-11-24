@@ -1,47 +1,63 @@
 # Base
 
-Repository containing various system daemons, that are considered fundamental for the OS.
+Essential userspace system daemons and libraries for FerrionOS (`components/base`). Derived from the upstream project at the revision recorded in [`components/upstream.toml`](../upstream.toml), under the license in [`LICENSE`](LICENSE).
 
-You can see what each component does in the following list:
+Hardware drivers live in `ferrion-hardware` (pinned by `recipes/core/drivers/recipe.toml`, see [`docs/adr/0047-drivers-in-ferrion-hardware.md`](../../docs/adr/0047-drivers-in-ferrion-hardware.md)).
 
-- audiod : Daemon used to process the sound drivers audio
-- bootstrap : First code that the kernel executes, responsible for spawning the init daemon
-- daemon : Redox daemon library
-- drivers
-- init : Daemon used to start most system components and programs
-- initfs : Filesystem with the necessary system components to run RedoxFS
-- ipcd : Daemon used for inter-process communication
-- logd : Daemon used to log system components and daemons
-- netstack : Daemon used for networking
-- ptyd : Daemon used for pseudo-terminal
-- ramfs : RAM filesystem
-- randd : Daemon used for random number generation
-- zerod : Daemon used to discard all writes and fill read buffers with zero
-- selftests : Driver selftests
+## Components
 
-## How To Contribute
+- `audiod` - Sound daemon (FerrionOS images run `ferrion-audiod` instead, configured in `config/base.toml`)
+- `bootstrap` - First userspace binary executed by the kernel, responsible for launching `init` and core namespace services
+- `config` - Configuration override library
+- `daemon` - FerrionOS daemon library
+- `dhcpd` - DHCP client daemon
+- `getty` - TTY initialization and login launcher
+- `graphics-ipc` - Shared graphics IPC definitions
+- `init` - System service launcher
+- `initfs` - Bootstrap filesystem library and archive tools used before mounting the root filesystem
+- `inputd` - Input multiplexer daemon
+- `ipcd` - Inter-process communication daemon
+- `logd` - System logging daemon
+- `netstack` - Userspace networking stack daemon
+- `ptyd` - Pseudo-terminal daemon
+- `ramfs` - In-memory filesystem daemon
+- `randd` - Random number generator daemon
+- `scheme-utils` - Shared helpers for scheme daemons
+- `selftests` - Guest selftests (including `virtio-fsd`)
+- `udsd` - Unix domain socket daemon
+- `zerod` - Zero and null device daemon
 
-To learn how to contribute you need to read the following document:
+## Building and checking in FerrionOS
 
-- [CONTRIBUTING.md](https://gitlab.redox-os.org/redox-os/redox/-/blob/master/CONTRIBUTING.md)
+Read [`agents/skills/component-sources.md`](../../agents/skills/component-sources.md) before modifying this tree.
 
-If you want to contribute to drivers read its [README](drivers/README.md)
+Cook `base` from the repository root:
 
-## Development
+```sh
+CI=1 COOKBOOK_LOGS=true make r.base
+```
 
-To learn how to do development with these system components inside the Redox build system you need to read the [Build System](https://doc.redox-os.org/book/build-system-reference.html) and [Coding and Building](https://doc.redox-os.org/book/coding-and-building.html) pages.
+When boot filesystem contents change, also cook `initfs` (`CI=1 COOKBOOK_LOGS=true make r.base,initfs`). Push into an existing image with `make rp.base,initfs` (with QEMU stopped), or rebuild the image with `make image`.
 
-### How To Build
+Verify changes with the VM checks in [`scripts/vm-test.py`](../../scripts/vm-test.py) (see [`docs/testing.md`](../../docs/testing.md)):
 
-It is recommended to build this system component via the Redox build system, you can learn how to do it on the [Building Redox](https://doc.redox-os.org/book/podman-build.html) page.
+- `boot`, `shells`, and `logout`
+- `nsmgr-bounds`, `scheme-create`, `driver-namespaces`, `login-namespace`, and `lockdown`
+- `rand-seed`, `resolver`, `net-basics`, `net-hardening`, and `net-calls`
 
-To build and test outside the build system, [install redoxer](https://doc.redox-os.org/book/ci.html) then use `check.sh` script to build or test:
+For contribution policy, see [`CONTRIBUTING.md`](../../CONTRIBUTING.md) and [`docs/code-policy.md`](../../docs/code-policy.md).
 
-- `./check.sh` - Check build for x86_64
-- `./check.sh --arch=ARCH` - Check build for specific ARCH (`aarch64`, `i586`, `riscv64gc`)
-- `./check.sh --all` - Check build for all ARCH
-- `./check.sh --test` - Check the base system boots up on x86_64
-- `make test-selftests` - Run all driver selftests under `selftests/`
-- `make test-virtio-fs` - Run the virtio-fsd selftest
+## Standalone Makefile targets
 
-You can also use `make install` to inspect the content on `./sysroot`, or `make test-gui` to test booting with orbital interactively.
+Outside the cookbook, `Makefile` and `./check.sh` provide direct build and selftest targets using `redoxer`:
+
+- `./check.sh` - Run checks for `TARGET` (defaults to `x86_64-unknown-redox`)
+- `./check.sh --test` - Run `cargo test` instead of `cargo check`
+- `./check.sh --clippy` - Run `cargo clippy` instead of `cargo check`
+- `./check.sh --all-target` - Run the command across all supported target architectures
+- `./check.sh --target=<target>` - Override the target triple (for example, `x86_64-unknown-redox`)
+- `./check.sh --arch=<arch>` - Override the target architecture (`x86_64`, `aarch64`, `riscv64gc`)
+- `./check.sh --help` - Print `check.sh` usage
+- `make test-selftests` - Run all selftests under `selftests/`
+- `make test-virtio-fs` - Run the `virtio-fsd` selftest
+- `make install` - Stage output into `./sysroot`
