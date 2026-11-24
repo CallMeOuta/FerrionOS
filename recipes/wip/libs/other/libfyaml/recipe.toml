@@ -1,9 +1,0 @@
-
-[source]
-tar = "https://github.com/pantoniou/libfyaml/releases/download/v0.9.6/libfyaml-0.9.6.tar.gz"
-patches = [
-    "redox.patch"
-]
-
-[build]
-template = "cmake"

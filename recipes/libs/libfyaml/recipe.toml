@@ -1,0 +1,22 @@
+[package]
+description = "Feature-complete YAML 1.2 and JSON parser and emitter library"
+
+[source]
+tar = "https://github.com/pantoniou/libfyaml/releases/download/v0.9.6/libfyaml-0.9.6.tar.gz"
+blake3 = "18c2deb847c782bcccaabd18bed64a6ad7ab9f900794913bd3b0435b2ddf6112"
+patches = [
+    "redox.patch",
+]
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+
+cookbook_cmake \
+    -DBUILD_TESTING=OFF \
+    -DENABLE_NETWORK=OFF \
+    -DENABLE_LIBCLANG=OFF
+
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/libfyaml/LICENSE"
+"""
