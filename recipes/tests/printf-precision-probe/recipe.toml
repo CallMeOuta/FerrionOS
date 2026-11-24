@@ -1,0 +1,10 @@
+[package]
+description = "Checks printf bare-dot precision against glibc"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/printf-precision-probe" "${COOKBOOK_RECIPE}/printf-precision-probe.c" ${LDFLAGS}
+"""

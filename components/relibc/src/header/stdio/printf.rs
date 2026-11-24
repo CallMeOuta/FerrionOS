@@ -668,10 +668,7 @@ impl<'a, T: c_str::Kind> Iterator for PrintfIter<'a, T> {
         let min_width = pop_int(&mut self.format).unwrap_or(Number::Static(0));
         let precision = if let Some(('.', rest)) = self.format.split_first_char() {
             self.format = rest;
-            match pop_int(&mut self.format) {
-                int @ Some(_) => int,
-                None => return Some(Err(())),
-            }
+            Some(pop_int(&mut self.format).unwrap_or(Number::Static(0)))
         } else {
             None
         };
@@ -1036,7 +1033,7 @@ pub(crate) unsafe fn inner_printf<T: c_str::Kind>(
                     let (log, exp) = float_exp(float);
                     // TODO: .is_uppercase()?
                     let exp_fmt = if fmt as u32 & 32 == 32 { 'e' } else { 'E' };
-                    let precision = precision.unwrap_or(6);
+                    let precision = precision.unwrap_or(6).max(1);
                     let use_exp_format = exp < -4 || exp >= precision as isize;
 
                     if use_exp_format {
