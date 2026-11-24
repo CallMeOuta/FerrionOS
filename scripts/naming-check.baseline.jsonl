@@ -83,19 +83,6 @@
 {"path": "components/redoxfs/tests/tests.rs", "line": 43, "class": "fail", "text": "let res = with_redoxfs(move |fs| {"}
 {"path": "components/redoxfs/tests/tests.rs", "line": 44, "class": "fail", "text": "// At redox, we mount on /scheme/ path, no need an empty dir"}
 {"path": "components/redoxfs/tests/tests.rs", "line": 53, "class": "fail", "text": "\"CARGO_BIN_EXE_redoxfs\","}
-{"path": "components/relibc/README.md", "line": 1, "class": "fail", "text": "# Redox C Library (relibc)"}
-{"path": "components/relibc/README.md", "line": 9, "class": "fail", "text": "The motivation for this project is twofold: Reduce issues that the Redox developers were having with [newlib](https://sourceware.org/newlib/), and create a more stable and safe alternative to C standard libraries written in C. It is mainly designed to be used under Redox, as an alternative to newlib, but it also supports Linux via the [sc](https://crates.io/crates/sc) crate."}
-{"path": "components/relibc/README.md", "line": 11, "class": "fail", "text": "Currently Redox and Linux are supported."}
-{"path": "components/relibc/README.md", "line": 15, "class": "fail", "text": "`redox-rt` is a runtime library that provides much of the code that enables POSIX on Redox, like `fork`, `exec`, signal handling, etc."}
-{"path": "components/relibc/README.md", "line": 30, "class": "fail", "text": "- `src/platform/redox` - Redox-specific code"}
-{"path": "components/relibc/README.md", "line": 46, "class": "fail", "text": "To build relibc out of the Redox build system, do the following steps:"}
-{"path": "components/relibc/README.md", "line": 96, "class": "fail", "text": "## Build relibc inside the Redox build system"}
-{"path": "components/relibc/README.md", "line": 98, "class": "fail", "text": "Inside of your Redox build system, run:"}
-{"path": "components/relibc/README.md", "line": 113, "class": "fail", "text": "Note: Do not edit `relibc` inside `prefix` folder! Do your work on `relibc` folder directly inside your Redox build system instead."}
-{"path": "components/relibc/README.md", "line": 120, "class": "fail", "text": "+ `./check.sh --test` - Run all tests in x86_64 Redox using Redoxer"}
-{"path": "components/relibc/README.md", "line": 126, "class": "fail", "text": "- Will run statically linked test in Linux, dynamically linked in Redox"}
-{"path": "components/relibc/README.md", "line": 131, "class": "fail", "text": "- Redoxer is needed to run tests for Redox without `--host`. You can install it using `cargo install redoxer`"}
-{"path": "components/relibc/README.md", "line": 164, "class": "fail", "text": "- Redox OS"}
 {"path": "components/relibc/check.sh", "line": 11, "class": "fail", "text": "echo \"  Wrapper for Makefile / Cargo to run checks or tests on Redox OS targets.\""}
 {"path": "components/relibc/check.sh", "line": 19, "class": "fail", "text": "echo \"  --all-target        Run the command on all supported Redox architectures\""}
 {"path": "components/relibc/check.sh", "line": 162, "class": "fail", "text": "echo \"Running $CMD_ACTION for all supported Redox targets...\""}
