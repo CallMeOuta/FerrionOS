@@ -1,0 +1,41 @@
+[package]
+description = "Library for reading and writing Tagged Image File Format (TIFF) images"
+
+[source]
+tar = "https://download.osgeo.org/libtiff/tiff-4.7.2.tar.xz"
+blake3 = "0d6693223ec93ee264d2eb63840808b2278e00e037f9c9e8ead051a42d1852a0"
+
+[build]
+template = "custom"
+dependencies = [
+    "libjpeg",
+    "zlib",
+]
+script = """
+DYNAMIC_INIT
+
+COOKBOOK_CMAKE_FLAGS+=(
+    -Dtiff-tools=OFF
+    -Dtiff-tests=OFF
+    -Dtiff-contrib=OFF
+    -Dtiff-docs=OFF
+    -Dtiff-cxx=OFF
+    -Dtiff-opengl=OFF
+    -Djbig=OFF
+    -Dlerc=OFF
+    -Dlzma=OFF
+    -Dzstd=OFF
+    -Dwebp=OFF
+    -Dlibdeflate=OFF
+    -Djpeg12=OFF
+    -Dold-jpeg=OFF
+    -Dzlib=ON
+    -Djpeg=ON
+)
+if [ "${COOKBOOK_DYNAMIC}" = "1" ]; then
+    COOKBOOK_CMAKE_FLAGS+=(-Dtiff-static=OFF)
+fi
+cookbook_cmake
+
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE.md" "${COOKBOOK_STAGE}/usr/share/licenses/libtiff/LICENSE.md"
+"""
