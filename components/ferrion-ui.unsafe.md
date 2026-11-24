@@ -17,3 +17,12 @@ crates/rune/src/platform/wayland_shm/watch.rs | set_fd_nonblock | `fd` is assert
 crates/rune/src/platform/wayland_shm/watch.rs | own_fd | `raw` is asserted non-negative and freshly created by `create_eventfd` or `create_pipe`, transferring sole ownership into `OwnedFd`.
 crates/rune/src/platform/wayland_shm/watch.rs | write_signal_bytes | `fd` is asserted non-negative and owned by `StopSignal`, and `buf` is asserted non-empty and valid for `buf.len()` bytes.
 crates/rune/src/platform/wayland_shm/watch.rs | poll_two_fds | asserts `pfds.len() == 2` and both descriptors (the live Wayland connection fd borrowed by `ReadEventsGuard` and `StopSignal`'s open fd) are non-negative before calling `libc::poll`.
+crates/rune/src/clipboard/wayland/io.rs | create_pipe | passes a valid 2-element `RawFd` array to `libc::pipe` and asserts both returned descriptors are non-negative on success.
+crates/rune/src/clipboard/wayland/io.rs | set_fd_cloexec | `fd` is asserted non-negative and freshly opened by `create_pipe` before applying `F_SETFD`/`FD_CLOEXEC`.
+crates/rune/src/clipboard/wayland/io.rs | get_fd_flags | `fd` is asserted non-negative and open before querying file status flags via `F_GETFL`.
+crates/rune/src/clipboard/wayland/io.rs | set_fd_flags | `fd` is asserted non-negative and open before applying `O_NONBLOCK` flags via `F_SETFL`.
+crates/rune/src/clipboard/wayland/io.rs | own_fd | `raw` is asserted non-negative and freshly created by `create_pipe`, transferring sole ownership into `OwnedFd`.
+crates/rune/src/clipboard/wayland/io.rs | write_fd_nonblocking | asserts `fd >= 0` and `!buf.is_empty()` before calling `libc::write` on the non-blocking clipboard pipe with valid `buf.as_ptr()` and `buf.len()`.
+crates/rune/src/clipboard/wayland/io.rs | read_fd_nonblocking | asserts `fd >= 0` and `!buf.is_empty()` before calling `libc::read` into the valid mutable buffer `buf` from the non-blocking clipboard pipe.
+crates/rune/src/clipboard/wayland/io.rs | poll_fds | asserts `!pfds.is_empty()`, `pfds.len() <= MAX_POLL_FDS`, and every `pfd.fd >= 0` (the live Wayland connection fd, wake pipe, and active transfer pipes) before calling `libc::poll`.
+crates/rune/src/clipboard/wayland/io.rs | foreign_display_backend | asserts `display.as_ptr().addr() != 0` on winit's live `wl_display` handle, which outlives the clipboard IO thread and is never closed by a foreign `Backend`.

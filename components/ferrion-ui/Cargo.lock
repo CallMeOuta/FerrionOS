@@ -692,6 +692,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipboard-demo"
+version = "0.0.1"
+dependencies = [
+ "rune",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

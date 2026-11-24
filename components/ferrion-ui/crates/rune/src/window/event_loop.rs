@@ -107,6 +107,16 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
         crate::native_menu::bar_waits();
     }
     let event_loop = builder.build().inspect_err(|_| crate::render::discard_prewarm()).map_err(event_loop_error)?;
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    {
+        use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+        if let Ok(handle) = event_loop.display_handle()
+            && let RawDisplayHandle::Wayland(d) = handle.as_raw()
+        {
+            crate::clipboard::wayland::attach_display(d.display);
+            crate::clipboard::warm();
+        }
+    }
     #[cfg(target_os = "macos")]
     if !beside.session() {
         crate::render::discard_prewarm();

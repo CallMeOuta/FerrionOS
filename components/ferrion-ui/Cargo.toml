@@ -22,6 +22,7 @@ members = [
     "examples/launcher",
     "examples/cpu-refusal",
     "examples/layer-shell-demo",
+    "examples/clipboard-demo",
 ]
 # Default cargo check/test targets: the core framework, libraries and theme.
 # Excludes examples/*, www/app, rune-luau (C++ Luau build via cc/mlua), rune-notify/rune-mac

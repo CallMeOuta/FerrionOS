@@ -33,6 +33,8 @@ mod macos;
 mod native;
 #[cfg(target_os = "linux")]
 mod primary;
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+pub(crate) mod wayland;
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_os = "macos")]
@@ -300,6 +302,11 @@ impl Backend for Board {
 #[cfg(target_os = "windows")]
 pub(crate) fn clear_secret_now() {
     native::clear_secret_now();
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+pub(crate) fn warm() {
+    native::warm();
 }
 
 /// Called by the shared event-loop exit path, including overlay-only applications.

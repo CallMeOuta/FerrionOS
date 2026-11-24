@@ -235,7 +235,11 @@ impl Dispatch<WlPointer, ()> for State {
                 state.step_pointer(pointer::Event::Reset);
                 state.input.push(Input::Leave);
             }
-            wl_pointer::Event::Button { button, state: wayland_client::WEnum::Value(button_state), .. } if state.over.inside() => {
+            wl_pointer::Event::Button { serial, button, state: wayland_client::WEnum::Value(button_state), .. } if state.over.inside() => {
+                #[cfg(not(feature = "x11"))]
+                crate::clipboard::wayland::record_overlay_serial(serial);
+                #[cfg(feature = "x11")]
+                let _ = serial;
                 let pressed = button_state == wl_pointer::ButtonState::Pressed;
                 match pointer::button_from_linux(button) {
                     crate::PointerButton::Primary => {
@@ -295,17 +299,25 @@ impl Dispatch<WlKeyboard, ()> for State {
     fn event(state: &mut Self, _: &WlKeyboard, event: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         use xkbcommon::xkb;
         match event {
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Enter { serial, surface, .. } => {
                 state.step_repeat(repeat::Event::Stop);
                 state.reset_compose();
                 let focus_event = if state.surface.as_ref() == Some(&surface) {
+                    #[cfg(not(feature = "x11"))]
+                    crate::clipboard::wayland::record_overlay_focus(true, serial);
+                    #[cfg(feature = "x11")]
+                    let _ = serial;
                     keyboard::FocusEvent::EnterOurs
                 } else {
+                    #[cfg(not(feature = "x11"))]
+                    crate::clipboard::wayland::record_overlay_focus(false, 0);
                     keyboard::FocusEvent::EnterOther
                 };
                 state.step_keyboard_focus(focus_event);
             }
             wl_keyboard::Event::Leave { surface, .. } if state.surface.as_ref() == Some(&surface) => {
+                #[cfg(not(feature = "x11"))]
+                crate::clipboard::wayland::record_overlay_focus(false, 0);
                 state.step_repeat(repeat::Event::Stop);
                 state.reset_compose();
                 state.step_keyboard_focus(keyboard::FocusEvent::LeaveOurs);
@@ -338,7 +350,11 @@ impl Dispatch<WlKeyboard, ()> for State {
             wl_keyboard::Event::RepeatInfo { rate, delay } => {
                 state.step_repeat(repeat::Event::RepeatInfo { rate, delay_ms: delay });
             }
-            wl_keyboard::Event::Key { key, state: wayland_client::WEnum::Value(key_state), .. } if state.keyboard_focus.focused() => {
+            wl_keyboard::Event::Key { serial, key, state: wayland_client::WEnum::Value(key_state), .. } if state.keyboard_focus.focused() => {
+                #[cfg(not(feature = "x11"))]
+                crate::clipboard::wayland::record_overlay_serial(serial);
+                #[cfg(feature = "x11")]
+                let _ = serial;
                 match key_state {
                     wl_keyboard::KeyState::Pressed => {
                         state.emit_key(key, true, false);

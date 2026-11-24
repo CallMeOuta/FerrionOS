@@ -6,7 +6,7 @@ use super::*;
 use arboard_unix as arboard;
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
-const UNSUPPORTED_CLIPBOARD: &str = "clipboard not supported on this platform yet";
+const NO_WAYLAND_CLIPBOARD: &str = "no Wayland clipboard attached to this process";
 
 impl Client {
     pub(super) fn read_for(&self, purpose: Purpose) {
@@ -62,16 +62,68 @@ fn worker() -> &'static mpsc::Sender<Request> {
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
-struct UnsupportedClipboard;
+enum UnixClipboard {
+    Connected(super::wayland::WaylandClipboard),
+    Unavailable(String),
+}
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
-impl Backend for UnsupportedClipboard {
-    fn write(&mut self, _: &ClipboardWrite) -> Result<(), String> { Err(UNSUPPORTED_CLIPBOARD.into()) }
-    fn text(&mut self) -> Option<Zeroizing<String>> { None }
-    fn content(&mut self, _: bool) -> Option<ClipboardContent> { None }
-    fn revision(&self) -> Option<u64> { None }
-    fn clear(&mut self) -> Result<(), String> { Err(UNSUPPORTED_CLIPBOARD.into()) }
-    fn unavailable_error(&self) -> Option<&'static str> { Some(UNSUPPORTED_CLIPBOARD) }
+impl UnixClipboard {
+    fn open() -> Self {
+        match super::wayland::WaylandClipboard::connect() {
+            Ok(cb) => Self::Connected(cb),
+            Err(err) => Self::Unavailable(err.to_string()),
+        }
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+impl Backend for UnixClipboard {
+    fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> {
+        if matches!(self, Self::Unavailable(_)) {
+            *self = Self::open();
+        }
+        match self {
+            Self::Connected(cb) => cb.write(copy),
+            Self::Unavailable(err) => Err(err.clone()),
+        }
+    }
+    fn text(&mut self) -> Option<Zeroizing<String>> {
+        if matches!(self, Self::Unavailable(_)) {
+            *self = Self::open();
+        }
+        match self {
+            Self::Connected(cb) => cb.text(),
+            Self::Unavailable(_) => None,
+        }
+    }
+    fn content(&mut self, all: bool) -> Option<ClipboardContent> {
+        if matches!(self, Self::Unavailable(_)) {
+            *self = Self::open();
+        }
+        match self {
+            Self::Connected(cb) => cb.content(all),
+            Self::Unavailable(_) => None,
+        }
+    }
+    fn revision(&self) -> Option<u64> {
+        match self {
+            Self::Connected(cb) => cb.revision(),
+            Self::Unavailable(_) => None,
+        }
+    }
+    fn clear(&mut self) -> Result<(), String> {
+        match self {
+            Self::Connected(cb) => cb.clear(),
+            Self::Unavailable(err) => Err(err.clone()),
+        }
+    }
+    fn unavailable_error(&self) -> Option<&'static str> {
+        match self {
+            Self::Connected(_) => None,
+            Self::Unavailable(_) => Some(NO_WAYLAND_CLIPBOARD),
+        }
+    }
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
@@ -79,7 +131,7 @@ fn worker() -> &'static mpsc::Sender<Request> {
     if cfg!(test) {
         panic!("unit test reached the OS clipboard; install a test clipboard (`rt.use_clipboard` or `Client::use_memory`)");
     }
-    &WORKER.get_or_init(|| Worker::spawn(|| Some(UnsupportedClipboard))).sender
+    &WORKER.get_or_init(|| Worker::spawn(|| Some(UnixClipboard::open()))).sender
 }
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -94,8 +146,16 @@ pub(super) fn clear_secret_now() {
     if let Some(w) = WORKER.get() { w.sender.send(Request::Clear(None)).ok(); }
 }
 
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+pub(super) fn warm() {
+    let tx = worker();
+    tx.send(Request::Clear(None)).ok();
+}
+
 pub(super) fn shutdown() {
     if let Some(worker) = WORKER.get() { worker.stop(); }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    super::wayland::detach_display();
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), feature = "x11")))]
@@ -146,7 +206,10 @@ fn run_worker<B: Backend>(recv: mpsc::Receiver<Request>, mut open: impl FnMut() 
             Ok(request) => request,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
         };
-        if matches!(request, Request::Clear(_)) && core.hold.is_free() { continue; }
+        if matches!(request, Request::Clear(_)) && core.hold.is_free() {
+            if clipboard.is_none() { clipboard = open(); }
+            continue;
+        }
         if clipboard.is_none() { clipboard = open(); }
         let Some(cb) = &mut clipboard else {
             if let Request::Write(copy, notify) = request && let Some(slot) = copy.slot() {
