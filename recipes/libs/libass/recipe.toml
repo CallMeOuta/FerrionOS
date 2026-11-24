@@ -1,0 +1,26 @@
+[package]
+description = "Portable subtitle renderer for the ASS/SSA subtitle format"
+
+[source]
+tar = "https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz"
+blake3 = "39e3ffb3884b6e58789a6ae271369eadaac9e0277efc85919535400671631543"
+script = """
+autotools_recursive_regenerate
+"""
+
+[build]
+template = "custom"
+dependencies = [
+    "fontconfig",
+    "freetype2",
+    "fribidi",
+    "harfbuzz",
+    "libiconv",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_configure --disable-asm
+
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/libass/COPYING"
+"""
