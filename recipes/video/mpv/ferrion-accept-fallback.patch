@@ -1,0 +1,11 @@
+--- a/input/ipc-unix.c
++++ b/input/ipc-unix.c
+@@ -373,7 +373,7 @@
+             goto done;
+ 
+         if (fds[1].revents & POLLIN) {
+-#ifdef SOCK_CLOEXEC
++#if defined(SOCK_CLOEXEC) && !defined(__redox__)
+             int client_fd = accept4(ipc_fd, NULL, NULL, SOCK_CLOEXEC);
+ #else
+             int client_fd = accept(ipc_fd, NULL, NULL);
