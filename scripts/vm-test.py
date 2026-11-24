@@ -4308,6 +4308,7 @@ def test_firefox_js(vm, args):
     run_seq = 0
     sync_seq = 0
     guard_seq = 0
+    out_seq = 0
     timed_out = False
 
     def run(line, timeout):
@@ -4365,12 +4366,29 @@ def test_firefox_js(vm, args):
             (vm.out / f"{name}.png").write_bytes(image)
         return image, pixels
 
+    def fetch_stdout(name):
+        nonlocal out_seq
+        out_seq += 1
+        begin_tag = f"FXJSOUT-BEGIN-{out_seq}"
+        end_tag = f"FXJSOUT-END-{out_seq}"
+        out_status, raw = run(
+            f"echo {begin_tag}-$((40+2)); cat {directory}/{name}.out; rc=$?; echo; "
+            f"echo {end_tag}-$((40+2)); (exit $rc)",
+            90,
+        )
+        if out_status != 0:
+            return None, f"could not read {name}.out (status {out_status})"
+        match = re.search(rf"(?s)(?:^|\n){re.escape(begin_tag)}-42\n(.*?)\n{re.escape(end_tag)}-42(?:\n|$)", raw)
+        if not match:
+            return None, f"missing {name}.out markers"
+        return match.group(1), None
+
     def guarded(command, timeout, name):
         nonlocal guard_seq
         guard_seq += 1
         hung_tag = f"FXHUNG-{guard_seq}"
         err_tag = f"FXGUARDERR-{guard_seq}"
-        line = (f"{command} > {directory}/{name}.log 2>&1 & fx=$!; end=$((SECONDS + {timeout})); guard_err=''; "
+        line = (f"{command} > {directory}/{name}.out 2> {directory}/{name}.err & fx=$!; end=$((SECONDS + {timeout})); guard_err=''; "
                 f"while kill -0 $fx 2>/dev/null && [ $SECONDS -lt $end ]; do "
                 f"read -t 1 -u 8; tick_rc=$?; if [ $tick_rc -le 128 ]; then guard_err=$tick_rc; break; fi; done; "
                 f"if [ -n \"$guard_err\" ]; then echo {err_tag}=$guard_err; false; "
@@ -4403,7 +4421,7 @@ def test_firefox_js(vm, args):
             '<body style="background:#fff;font:32px sans-serif"><h1 id="out">running</h1>'
             f"<script>{FIREFOX_JS_SCRIPT}</script></body>")
     prefs = ('user_pref("browser.dom.window.dump.enabled", true);\n'
-             'user_pref("devtools.console.stdout.content", true);\n'
+             'user_pref("devtools.console.stdout.content", false);\n'
              'user_pref("dom.max_script_run_time", 0);\n')
     encoded_page = base64.b64encode(page.encode()).decode()
     encoded_prefs = base64.b64encode(prefs.encode()).decode()
@@ -4423,8 +4441,12 @@ def test_firefox_js(vm, args):
     for name, url, size, timeout, required in FIREFOX_JS_PAGES:
         line = f"{firefox} --window-size={size} --screenshot {directory}/{name}.png {url}"
         status, seconds = guarded(line, timeout, name)
-        _, log = run(f"grep -a FXJS {directory}/{name}.log; grep -a -v '^\\[INFO' {directory}/{name}.log | head -n 80", 90)
-        (vm.out / f"{name}.log").write_text(f"$ {line}\nexit status {status}, {seconds}s\n{log}")
+        out_text, out_error = fetch_stdout(name)
+        _, err_log = run(f"grep -a -v '^\\[INFO' {directory}/{name}.err | head -n 80", 90)
+        (vm.out / f"{name}.log").write_text(
+            f"$ {line}\nexit status {status}, {seconds}s\n"
+            f"=== stdout ===\n{out_text or ''}\n=== stderr ===\n{err_log}"
+        )
         image, pixels = fetch_png(name)
         entry = {"url": url, "status": status, "seconds": seconds, "png": list(pixels) if pixels else None}
         if status is None:
@@ -4437,16 +4459,19 @@ def test_firefox_js(vm, args):
             reason = None
         if name == "js":
             page_result = None
-            for report in re.finditer(r"FXJS (\{.*\})", log):
-                try:
-                    page_result = json.loads(report.group(1))
-                    break
-                except ValueError:
-                    continue
+            if out_text is not None:
+                for report in re.finditer(r"(?m)^FXJS (\{.*\})\s*$", out_text):
+                    try:
+                        page_result = json.loads(report.group(1))
+                        break
+                    except ValueError:
+                        continue
             entry["page"] = page_result
             wasm = (page_result or {}).get("wasm", {})
             traps = [wasm.get(key, "") for key in ("loadOob", "loadFar", "storeOob", "unreachable")]
-            if not page_result:
+            if out_error:
+                reason = reason or out_error
+            elif not page_result:
                 reason = reason or "the page printed no FXJS line"
             elif page_result.get("checksum") != FIREFOX_JS_CHECKSUM:
                 reason = reason or f"checksum {page_result.get('checksum')}, want {FIREFOX_JS_CHECKSUM}"
@@ -4471,7 +4496,7 @@ def test_firefox_js(vm, args):
         line = (f"{firefox} --window-size=1280,900 --screenshot {directory}/{name}.png "
                 f"file://{directory}/{name}.html")
         status, seconds = guarded(line, 600, name)
-        _, log = run(f"grep -a -i 'error\\|kernelbench' {directory}/{name}.log | tail -n 40", 60)
+        _, log = run(f"grep -a -i 'error\\|kernelbench' {directory}/{name}.out {directory}/{name}.err | tail -n 40", 60)
         (vm.out / f"{name}.log").write_text(f"$ {line}\nexit status {status}, {seconds}s\n{log}")
         _, pixels = fetch_png(name)
         results[name] = {"status": status, "seconds": seconds, "png": list(pixels) if pixels else None}
