@@ -21,7 +21,7 @@
   "branding/orbital-background.toml": 3,
   "build.sh": 0,
   "components/base/.gitignore": 4,
-  "components/base/Cargo.toml": 10,
+  "components/base/Cargo.toml": 9,
   "components/base/Makefile": 15,
   "components/base/audiod/Cargo.toml": 0,
   "components/base/audiod/src/lib.rs": 6,

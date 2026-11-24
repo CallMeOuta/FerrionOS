@@ -4,7 +4,7 @@ authors = ["4lDO2 <4lDO2@protonmail.com>"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Libc-independent runtime for Redox"
+description = "Libc-independent runtime for FerrionOS"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

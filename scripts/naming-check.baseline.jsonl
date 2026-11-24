@@ -1,8 +1,6 @@
-{"path": "components/base/Cargo.toml", "line": 32, "class": "fail", "text": "# Low-level Redox OS crates should be kept in sync using workspace dependencies"}
 {"path": "components/base/check.sh", "line": 11, "class": "fail", "text": "echo \"  Wrapper for redoxer to run checks or tests on Redox OS targets.\""}
 {"path": "components/base/check.sh", "line": 16, "class": "fail", "text": "echo \"  --all-target        Run the command on all supported Redox architectures\""}
 {"path": "components/base/check.sh", "line": 92, "class": "fail", "text": "echo \"Running $CMD_ACTION for all supported Redox targets...\""}
-{"path": "components/base/daemon/Cargo.toml", "line": 3, "class": "fail", "text": "description = \"Redox daemon library\""}
 {"path": "components/base/getty/src/main.rs", "line": 297, "class": "fail", "text": "// FIXME enable this once redox supports controlling ttys"}
 {"path": "components/base/graphics-ipc/src/redox_uapi_exts.rs", "line": 1, "class": "fail", "text": "//! All types and constants in this module are Redox OS specific uapi extensions."}
 {"path": "components/base/graphics-ipc/src/redox_uapi_exts.rs", "line": 2, "class": "fail", "text": "//! They should not be used outside of Redox OS specific programs."}
@@ -22,10 +20,8 @@
 {"path": "components/kernel/src/scheme/mod.rs", "line": 2, "class": "fail", "text": "//! A scheme is a primitive for handling filesystem syscalls in Redox."}
 {"path": "components/kernel/src/scheme/sys/uname.rs", "line": 6, "class": "fail", "text": "\"Redox\\n{}\\n{}\\n{}\\n\","}
 {"path": "components/kernel/src/scheme/user.rs", "line": 1087, "class": "fail", "text": "// Redox's schemes currently rely on doesn't allow one-way messages, there's no current"}
-{"path": "components/kernel/syscall/Cargo.toml", "line": 11, "class": "fail", "text": "description = \"A Rust library to access raw Redox system calls\""}
 {"path": "components/kernel/syscall/src/arch/x86.rs", "line": 145, "class": "fail", "text": "// TODO: Some of these don't get set by Redox yet. Should they?"}
 {"path": "components/kernel/syscall/src/call.rs", "line": 202, "class": "fail", "text": "// align_of::<usize>() is >= 4 on all architectures supported by Redox, whereas the kernel"}
-{"path": "components/redoxfs/Cargo.toml", "line": 3, "class": "fail", "text": "description = \"The Redox Filesystem\""}
 {"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 114, "class": "fail", "text": "/// Creates the disk for backing the Redoxfs."}
 {"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 120, "class": "fail", "text": "/// Creates an empty Redoxfs."}
 {"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 121, "class": "fail", "text": "fn create_redoxfs(disk: DiskSparse, reserved_size: u64) -> bool {"}
@@ -56,8 +52,6 @@
 {"path": "components/relibc/check.sh", "line": 11, "class": "fail", "text": "echo \"  Wrapper for Makefile / Cargo to run checks or tests on Redox OS targets.\""}
 {"path": "components/relibc/check.sh", "line": 19, "class": "fail", "text": "echo \"  --all-target        Run the command on all supported Redox architectures\""}
 {"path": "components/relibc/check.sh", "line": 162, "class": "fail", "text": "echo \"Running $CMD_ACTION for all supported Redox targets...\""}
-{"path": "components/relibc/redox-ioctl/Cargo.toml", "line": 7, "class": "fail", "text": "description = \"Ioctl definitions and (de)serialization for Redox\""}
-{"path": "components/relibc/redox-rt/Cargo.toml", "line": 7, "class": "fail", "text": "description = \"Libc-independent runtime for Redox\""}
 {"path": "components/relibc/redox-rt/src/arch/aarch64.rs", "line": 77, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
 {"path": "components/relibc/redox-rt/src/arch/i686.rs", "line": 67, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
 {"path": "components/relibc/redox-rt/src/arch/riscv64.rs", "line": 53, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}

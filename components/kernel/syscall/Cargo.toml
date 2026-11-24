@@ -8,11 +8,10 @@ name = "redox_syscall"
 # When publishing to crates.io, bump the version in its own commit, that
 # doesn't change anything else.
 version = "0.10.0"
-description = "A Rust library to access raw Redox system calls"
+description = "A Rust library to access raw FerrionOS system calls"
 license = "MIT"
 authors = ["Jeremy Soller <jackpot51@gmail.com>"]
-repository = "https://gitlab.redox-os.org/redox-os/kernel"
-documentation = "https://docs.rs/redox_syscall"
+repository = "https://github.com/CallMeOuta/FerrionOS"
 edition = "2021"
 
 [lib]
