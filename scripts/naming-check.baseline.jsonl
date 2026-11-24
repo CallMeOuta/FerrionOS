@@ -5,6 +5,19 @@
 {"path": "components/base/selftests/virtio-fsd/src/fsutil.rs", "line": 1, "class": "fail", "text": "// Redox open flags sit in the upper 16 bits; mode is the low 16 when packed for openat."}
 {"path": "components/base/selftests/virtio-fsd/src/fsutil.rs", "line": 31, "class": "fail", "text": "// Redox EWOULDBLOCK is 41; Linux aliases it to EAGAIN (11)."}
 {"path": "components/base/selftests/virtio-fsd/src/tests/fcntl.rs", "line": 156, "class": "fail", "text": "// Zero-byte write on a regular file is a no-op; Redox returns Ok."}
+{"path": "components/ferrion-ui/vendor/winit/FEATURES.md", "line": 11, "class": "fail", "text": "- Redox OS, via Orbital"}
+{"path": "components/ferrion-ui/vendor/winit/FEATURES.md", "line": 174, "class": "fail", "text": "|Feature                          |Windows|MacOS   |Linux x11   |Linux Wayland  |Android|iOS    |Web      |Redox OS|"}
+{"path": "components/ferrion-ui/vendor/winit/FEATURES.md", "line": 195, "class": "fail", "text": "|Feature          |Windows|MacOS |Linux x11|Linux Wayland|Android|iOS      |Web      |Redox OS|"}
+{"path": "components/ferrion-ui/vendor/winit/FEATURES.md", "line": 201, "class": "fail", "text": "|Feature                 |Windows   |MacOS   |Linux x11|Linux Wayland|Android|iOS    |Web      |Redox OS|"}
+{"path": "components/ferrion-ui/vendor/winit/FEATURES.md", "line": 224, "class": "fail", "text": "|Feature                             |Windows|MacOS |Linux x11|Linux Wayland|Android|iOS    |Web      |Redox OS|"}
+{"path": "components/ferrion-ui/vendor/winit/FEATURES.md", "line": 231, "class": "fail", "text": "|Feature                             |Windows|MacOS |Linux x11|Linux Wayland|Android|iOS    |Web      |Redox OS|"}
+{"path": "components/ferrion-ui/vendor/winit/build.rs", "line": 17, "class": "fail", "text": "redox: { target_os = \"redox\" },"}
+{"path": "components/ferrion-ui/vendor/winit/build.rs", "line": 22, "class": "fail", "text": "orbital_platform: { redox },"}
+{"path": "components/ferrion-ui/vendor/winit/src/changelog/v0.28.md", "line": 93, "class": "fail", "text": "- Added Orbital support for Redox OS"}
+{"path": "components/ferrion-ui/vendor/winit/src/event.rs", "line": 654, "class": "fail", "text": "/// On Android, iOS, Redox and Web, this type is a no-op."}
+{"path": "components/ferrion-ui/vendor/winit/src/platform/orbital.rs", "line": 1, "class": "fail", "text": "//! # Orbital / Redox OS"}
+{"path": "components/ferrion-ui/vendor/winit/src/platform/orbital.rs", "line": 3, "class": "fail", "text": "//! Redox OS has some functionality not yet present that will be implemented"}
+{"path": "components/ferrion-ui/vendor/winit/src/platform_impl/orbital/mod.rs", "line": 192, "class": "fail", "text": "Some(\"Redox Device\".to_owned())"}
 {"path": "components/kernel/linkers/aarch64.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
 {"path": "components/kernel/linkers/i586.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
 {"path": "components/kernel/linkers/riscv64.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}

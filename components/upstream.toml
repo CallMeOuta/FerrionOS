@@ -60,3 +60,61 @@ dropped = [".gitlab-ci.yml", ".travis.yml"]
 
 [redoxfs.licenses]
 "LICENSE" = "93feb465f692bf21fe310c2d7d2e906982950222897304ddddbcdab873cd11b8"
+
+[ferrion-ui]
+kind = "subset"
+url = "https://github.com/anomalyco/rune"
+rev = "f9a63aa3799b65f160921b4c659bd2fb0103f9da"
+added = [
+    "examples/cpu-refusal",
+    "examples/layer-shell-demo",
+    "examples/clipboard-demo",
+    "examples/popup-menu-demo",
+]
+
+[ferrion-ui.include]
+"LICENSE" = "66aed1269d38e8aa2c090fbe20c52775e0fa9b32"
+"THIRD_PARTY_NOTICES.md" = "cfc461e0baaf33d6f4f9aa688138060417c90e92"
+"Cargo.toml" = "1cdf0806b830c141acf2ba4d36e57307911d8ce1"
+"Cargo.lock" = "30549a938be049c4945c1aea23a8f42a01888eba"
+"rust-toolchain.toml" = "cf59912a1d7e02c567f9af99f3b478ac3d4bbc33"
+"clippy.toml" = "5d5eb8a0c90ee8004f6cdc82e909dafac4597369"
+".cargo/config.toml" = "6ff57ccdca63b2684253f11c9918f8ea0ef84ce5"
+"crates/rune" = "0318492f68c5cdb9a622617595003939af78712a"
+"crates/rune-core" = "aa21f435d7cdad8a13188160c4912c6f0ef4cbd5"
+"crates/rune-edit" = "ab7d478a588b6ea456b9250b8407c1d87dd23f91"
+"crates/rune-gpu" = "067e4397b3a6aa16b440c6bbff5f1800dc8a3224"
+"crates/rune-image" = "423a8587bdfe8ee17c0641fcb61b4ea72a4f1b6e"
+"crates/rune-kit" = "464fa30ab65beadc7f40d307cbb0d45689a1f222"
+"crates/rune-media" = "7b00caa0eebacbd470375a9f2a1a27e32fd4e589"
+"crates/rune-motion" = "c85c57cfa90fcf0ef1d65ebb86ac17b1422e8ae9"
+"crates/rune-ref" = "da4a7e259e869fca20622087fd0e6c0b11960969"
+"crates/rune-spell" = "44a61b6cbd238b551b6f0dbbe90ca83a63022383"
+"crates/rune-staging" = "369c5cae030182fd6b6603d7d10308136acedb6a"
+"crates/rune-taffy" = "be7f5af6def6ddb2d01056d8be26ff8536ee174f"
+"crates/rune-text" = "99ae013e997848ddb22288353a51f2a85f28287f"
+"crates/procwatch" = "e8dc5ee35f61777e9d56317cabd453b925fa37d1"
+"crates/rune-highlights" = "062260fc79e0c39f17dfdc9835fba471c2c5fa84"
+"themes/opencode" = "45ae4f4904adb3607320c14ff6d6aed17cba8a2b"
+"examples/hello" = "a6b9b764a6da0f9718297938b39e3c6df06ac921"
+"examples/settings" = "a16e9a8738176f695a476411310658a79286a02c"
+"examples/launcher" = "5e8c60d70acac64dacff03ef6c892b88657fa0b8"
+"vendor" = "3a2178215b72db0835496d33aa76abdbb547d503"
+
+[ferrion-ui.licenses]
+"LICENSE" = "b1fe69afe2f6fe0884efc8936dab69bbdf3a319b3828a965ee1304fbd6a60021"
+"THIRD_PARTY_NOTICES.md" = "70c32b69923163c75a9e74d5584f04bcb40f2afcc049107936b2dccf8c78add2"
+"crates/rune-highlights/vendor/LICENSE.md" = "13d92be18d5ceac526f33cc96b6902a14d168f3e1d4b16be738f0fa70da7fe98"
+"crates/rune-kit/assets/math/FONT_NOTICE.txt" = "752ba9eff7a281f5ad789528ea078b46149b10e72296625108c26a94695ad03e"
+"crates/rune-kit/assets/math/OFL.txt" = "f19c674290e5dc79f02e8efe16139ab56a06a7128876f5b1579ffd0db5bc897e"
+"crates/rune/assets/IBMPlexMono-LICENSE.txt" = "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+"crates/rune/assets/Inter-LICENSE.txt" = "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a"
+"themes/opencode/assets/fonts/IBMPlexMono-LICENSE.txt" = "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+"themes/opencode/assets/fonts/Inter-LICENSE.txt" = "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a"
+"vendor/parley_engine/LICENSE-APACHE" = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+"vendor/parley_engine/LICENSE-MIT" = "90add54c7f70850e6b573b0e74bf6f03bc0f19b3e8d6e1ddc4b5483d26d6133a"
+"vendor/sctk-adwaita/LICENSE" = "65fc947f4bac882a2cd104ef73c246b1b037059df9f2b3a58b7f77f0b9e56071"
+"vendor/tiny-skia-path/LICENSE" = "6d41e05f1d54fe726997cb0334ec539f1dff50600b1d5d90462ec2b392770ced"
+"vendor/wgpu-hal/LICENSE.APACHE" = "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+"vendor/wgpu-hal/LICENSE.MIT" = "dc0d97139e8205818c703741c7be7cb3b96888bd5917b8d6fc6133731e403c21"
+"vendor/winit/LICENSE" = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
