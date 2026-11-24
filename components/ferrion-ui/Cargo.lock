@@ -1924,6 +1924,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "layer-shell-demo"
+version = "0.0.1"
+dependencies = [
+ "rune",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

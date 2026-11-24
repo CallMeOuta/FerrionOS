@@ -303,7 +303,11 @@ impl OverlayCore {
             // A new swap chain holds none of ours, and its waitable object is its own.
             #[cfg(target_os = "windows")]
             slot: Slot::default(),
-            a11y, alpha, surface, config, backing, scale,
+            a11y,
+            target: OverlayRenderTarget::Gpu { alpha, surface },
+            config,
+            backing,
+            scale,
         })
     }
 
@@ -316,15 +320,18 @@ impl OverlayCore {
         let max_dim = gpu.device.limits().max_texture_dimension_2d;
         (live.config.width, live.config.height) = overlay_rescale_size(self.at.size, scale, max_dim);
         live.settle();
+        let OverlayRenderTarget::Gpu { surface, alpha } = &mut live.target else {
+            return;
+        };
         // DX12 `configure` calls `ResizeBuffers` on the same swap chain, preserving its waitable
         // semaphore and count; on failure `surface_refused` -> `release` resets the slot.
-        if let Err(error) = crate::window::configure(&live.surface, gpu, &live.config) {
+        if let Err(error) = crate::window::configure(surface, gpu, &live.config) {
             self.surface_refused(app, format!("could not resize its GPU surface: {error}"));
             return;
         }
         #[cfg(target_os = "macos")]
-        crate::platform::macos::sync_contents_scale(&live.surface, scale);
-        if let Some(alpha) = &mut live.alpha {
+        crate::platform::macos::sync_contents_scale(surface, scale);
+        if let Some(alpha) = alpha {
             alpha.resize(&gpu.device, (live.config.width, live.config.height));
         }
         app.rt_mut().set_viewport(self.at.size, scale);
@@ -369,9 +376,8 @@ impl OverlayCore {
                 // The wait for the swap chain's room is unregistered before the surface drops.
                 #[cfg(target_os = "windows")]
                 live.slot.reset();
-                let Live { alpha, surface, backing, .. } = live;
-                drop(alpha);
-                drop(surface);
+                let Live { target, backing, .. } = live;
+                drop(target);
                 Some(backing)
             }
             Some(SurfaceEffect::Parked(backing)) => Some(backing),
@@ -385,5 +391,115 @@ impl OverlayCore {
         self.x11.take();
         drop(backing);
         self.shared.native.lock().unwrap().0 = None;
+    }
+
+    pub(super) fn set_availability(&self, a: Availability) {
+        let v = match a {
+            Availability::Unknown => 0,
+            Availability::Available => 1,
+            Availability::Unavailable => 2,
+        };
+        self.shared.availability.store(v, Ordering::Release);
+    }
+
+    pub(super) fn accent_changed(&mut self, rt: &mut RuntimeCore, accent: crate::SystemAccent) {
+        if accent == rt.system_accent() {
+            return;
+        }
+        rt.set_system_accent(accent);
+        self.dirty = true;
+    }
+
+    pub(super) fn scroll_bars_changed(
+        &mut self,
+        rt: &mut RuntimeCore,
+        bars: crate::platform::scroll_bars::SystemScrollBars,
+    ) {
+        if bars == rt.system_scroll_bars_state() {
+            return;
+        }
+        rt.set_system_scroll_bars_state(bars);
+        self.dirty = true;
+    }
+
+    pub(super) fn theme_changed(&mut self, rt: &mut RuntimeCore, dark: bool) {
+        self.dark = dark;
+        rt.set_system_dark(dark);
+        self.dirty = true;
+    }
+
+    pub(super) fn resolve_size(&mut self, event_loop: &ActiveEventLoop) {
+        let at = Placement {
+            size: self.canvas_size,
+            ..self.at
+        };
+        #[cfg(target_os = "macos")]
+        if let Some(rect) = self.panel.as_ref().map_or_else(
+            || crate::platform::macos::overlay_rect(at, &self.options),
+            |panel| panel.rect(at, &self.options),
+        ) {
+            self.at.size = (rect.size.width as f32, rect.size.height as f32);
+            return;
+        }
+        if let Some(monitor) = monitor(event_loop, &self.options.display) {
+            let area = monitor.size().to_logical::<f32>(monitor.scale_factor());
+            let rect = crate::overlay::options::local_rect(
+                at,
+                self.options.placement,
+                (area.width, area.height),
+            );
+            self.at.size = (rect[2], rect[3]);
+            if self.exclusive_zone.is_some_and(|z| z > 0) && self.canvas_size.0 <= 0.0 {
+                self.at.size.0 = area.width;
+            }
+        }
+    }
+}
+
+pub(super) enum OverlayRenderTarget {
+    Gpu {
+        alpha: Option<crate::render::surface_alpha::AlphaSurface>,
+        surface: wgpu::Surface<'static>,
+    },
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    Cpu(Box<wayland_cpu::OverlayCpu>),
+}
+
+impl Live {
+    pub(super) fn is_cpu(&self) -> bool {
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if matches!(self.target, OverlayRenderTarget::Cpu(_)) {
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn gpu_surface(&self) -> Option<&wgpu::Surface<'static>> {
+        match &self.target {
+            OverlayRenderTarget::Gpu { surface, .. } => Some(surface),
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            OverlayRenderTarget::Cpu(_) => None,
+        }
+    }
+
+    pub(super) fn gpu_alpha(&self) -> Option<&crate::render::surface_alpha::AlphaSurface> {
+        match &self.target {
+            OverlayRenderTarget::Gpu { alpha, .. } => alpha.as_ref(),
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            OverlayRenderTarget::Cpu(_) => None,
+        }
+    }
+
+    pub(super) fn gpu_parts_mut(
+        &mut self,
+    ) -> Option<(
+        &wgpu::Surface<'static>,
+        &mut Option<crate::render::surface_alpha::AlphaSurface>,
+    )> {
+        match &mut self.target {
+            OverlayRenderTarget::Gpu { alpha, surface } => Some((surface, alpha)),
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            OverlayRenderTarget::Cpu(_) => None,
+        }
     }
 }

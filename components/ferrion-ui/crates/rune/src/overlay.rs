@@ -67,6 +67,10 @@ mod requests;
 use requests::{Requests, Update, Visibility};
 #[path = "overlay/surface.rs"]
 mod surface;
+use surface::OverlayRenderTarget;
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+#[path = "overlay/wayland_cpu.rs"]
+mod wayland_cpu;
 #[path = "overlay/xwayland.rs"]
 pub(crate) mod xwayland;
 
@@ -388,8 +392,7 @@ struct Live {
     /// (`window::slot`). Before the surface so an outstanding wait goes first.
     #[cfg(target_os = "windows")]
     slot: Slot,
-    alpha: Option<crate::render::surface_alpha::AlphaSurface>,
-    surface: wgpu::Surface<'static>,
+    target: surface::OverlayRenderTarget,
     config: wgpu::SurfaceConfiguration,
     backing: Backing,
     scale: f32,
@@ -402,6 +405,8 @@ pub(in crate::overlay) struct OverlayCore {
     presence: Presence,
     animate_reveal: bool, // `ConfiguredOverlay::animate_reveal`
     options: OverlayOptions,
+    layer: crate::OverlayLayer,
+    exclusive_zone: Option<i32>,
     canvas_size: (f32, f32),
     name: &'static str,
     at: Placement,
@@ -474,6 +479,8 @@ impl OverlayCore {
         at: Placement,
         interactive: bool,
         options: OverlayOptions,
+        layer: crate::OverlayLayer,
+        exclusive_zone: Option<i32>,
         on_created: Option<Box<dyn FnMut(crate::OverlayCreated)>>,
         macos_level: Option<isize>,
         animate_reveal: bool,
@@ -495,6 +502,8 @@ impl OverlayCore {
             presence: Presence::default(),
             animate_reveal,
             options,
+            layer,
+            exclusive_zone,
             canvas_size: at.size,
             name,
             at,
@@ -543,38 +552,15 @@ impl OverlayCore {
         }
     }
 
-    fn set_availability(&self, a: Availability) {
-        let v = match a {
-            Availability::Unknown => 0,
-            Availability::Available => 1,
-            Availability::Unavailable => 2,
-        };
-        self.shared.availability.store(v, Ordering::Release);
-    }
-
     /// Marks the overlay `Unavailable` and keeps why, for `OverlayHandle::failure`.
     fn fail(&self, reason: String) {
-        eprintln!("rune: overlay {} can't show: {reason}", self.name);
-        *self.shared.failure.lock().unwrap() = Some(reason);
+        let mut guard = self.shared.failure.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_deref() != Some(reason.as_str()) {
+            eprintln!("rune: overlay {} can't show: {reason}", self.name);
+            *guard = Some(reason);
+        }
+        drop(guard);
         self.set_availability(Availability::Unavailable);
-    }
-
-    pub(super) fn accent_changed(&mut self, rt: &mut RuntimeCore, accent: crate::SystemAccent) {
-        if accent == rt.system_accent() { return; }
-        rt.set_system_accent(accent);
-        self.dirty = true;
-    }
-
-    pub(super) fn scroll_bars_changed(&mut self, rt: &mut RuntimeCore, bars: crate::platform::scroll_bars::SystemScrollBars) {
-        if bars == rt.system_scroll_bars_state() { return; }
-        rt.set_system_scroll_bars_state(bars);
-        self.dirty = true;
-    }
-
-    pub(super) fn theme_changed(&mut self, rt: &mut RuntimeCore, dark: bool) {
-        self.dark = dark;
-        rt.set_system_dark(dark);
-        self.dirty = true;
     }
 
     /// Moving the window under a still pointer (`place`, `set_placement`, a resize that keeps
@@ -675,25 +661,18 @@ impl OverlayCore {
             let scale = live.scale;
             live.scale = 0.0;
             self.rescale(app, &gpu, scale);
+        } else {
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            if live.is_cpu() {
+                let scale = live.scale;
+                live.scale = 0.0;
+                self.rescale_cpu(app, scale);
+            }
         }
         if let Some(Backing::Window(w)) = self.surface.live().map(|l| &l.backing) {
             let w = w.clone();
             self.place_window(app.rt_mut(), event_loop, &w);
             if let Some(gpu) = self.gpu.clone() { self.rescale(app, &gpu, crate::window::backing_scale(&w)); }
-        }
-    }
-
-    fn resolve_size(&mut self, event_loop: &ActiveEventLoop) {
-        let at = Placement { size: self.canvas_size, ..self.at };
-        #[cfg(target_os = "macos")]
-        if let Some(rect) = self.panel.as_ref().map_or_else(|| crate::platform::macos::overlay_rect(at, &self.options), |panel| panel.rect(at, &self.options)) {
-            self.at.size = (rect.size.width as f32, rect.size.height as f32);
-            return;
-        }
-        if let Some(monitor) = monitor(event_loop, &self.options.display) {
-            let area = monitor.size().to_logical::<f32>(monitor.scale_factor());
-            let rect = crate::overlay::options::local_rect(at, self.options.placement, (area.width, area.height));
-            self.at.size = (rect[2], rect[3]);
         }
     }
 

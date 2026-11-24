@@ -79,7 +79,13 @@ impl OverlayCore {
         if !surface && !parks { return; }
         self.resolve_size(event_loop);
         let made = if wayland {
-            self.layer(app, event_loop).or_else(|| self.xwayland(app))
+            self.layer(app, event_loop).or_else(|| {
+                if self.shared.failure.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                    None
+                } else {
+                    self.xwayland(app)
+                }
+            })
         } else if self.surface.parked().is_some() || self.window(app, event_loop).is_some() {
             // macOS made the surface with its panel; elsewhere the window waits parked.
             match self.surface.take_live() {
@@ -201,7 +207,7 @@ impl OverlayCore {
     fn hide_window(&mut self, app: &mut dyn OverlayApp, fade: Duration) {
         // A hide need not report a blur, and a hidden overlay hears none: what it held is
         // released.
-        if self.options.keys == KeyPolicy::OnDemand { app.rt_mut().keys_lost(); }
+        if self.options.keys.accepts_keys() { app.rt_mut().keys_lost(); }
         self.mods = Default::default();
         self.control_click = false;
         self.ime.clear();
@@ -212,7 +218,7 @@ impl OverlayCore {
         let Some(live) = self.surface.live() else { return };
         match &live.backing {
             Backing::Window(window) => {
-                if self.options.keys == KeyPolicy::OnDemand {
+                if self.options.keys.accepts_keys() {
                     crate::platform::ime::cancel(window);
                     window.set_ime_allowed(false);
                 }
@@ -277,7 +283,25 @@ impl OverlayCore {
             _ => None,
         };
         let wake = self.shared.wake.lock().unwrap().clone();
-        let mut layer = crate::platform::layer_shell::LayerSurface::new(display, self.name, self.at, self.interactive, &self.options, output, wake)?;
+        let span_width = self.exclusive_zone.is_some_and(|z| z > 0) && self.canvas_size.0 <= 0.0;
+        let mut layer = match crate::platform::layer_shell::LayerSurface::try_new(
+            display,
+            self.name,
+            self.at,
+            self.interactive,
+            &self.options,
+            self.layer,
+            self.exclusive_zone,
+            span_width,
+            output,
+            wake,
+        ) {
+            Ok(layer) => layer,
+            Err(err) => {
+                self.fail(err.to_string());
+                return None;
+            }
+        };
         layer.set_buffer_scale(scale);
         if let Some((w, h)) = layer.configured_size() {
             if w > 0 { self.at.size.0 = w as f32; }
@@ -287,6 +311,9 @@ impl OverlayCore {
             capture_exclusion: OverlaySupport::Unsupported, global_pointer: OverlaySupport::Unsupported,
             nonactivating_keys: if layer.supports_keys() { OverlaySupport::Supported } else { OverlaySupport::Unsupported },
         };
+        if crate::gpu::backend::uses_cpu() {
+            return self.attach_layer_cpu(app, layer, scale);
+        }
         self.attach(app, Backing::Layer(layer), scale as f32)
     }
 
@@ -428,10 +455,9 @@ impl OverlayCore {
             self.release();
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {
-                let Some(Live { alpha, surface, backing, .. }) = self.surface.take_live() else { return };
+                let Some(Live { target, backing, .. }) = self.surface.take_live() else { return };
                 // The surface goes before the device that made it and the window it draws into.
-                drop(alpha);
-                drop(surface);
+                drop(target);
                 self.surface.park(backing);
             }
         }

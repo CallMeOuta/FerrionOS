@@ -32,7 +32,7 @@ impl OverlayCore {
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         let deadline = deadline.into_iter().chain(self.presence.drawing().then(|| {
             match self.surface.live().map(|l| &l.backing) {
-                Some(Backing::Layer(layer)) => layer.repeat_deadline(),
+                Some(Backing::Layer(layer)) => layer.repeat_deadline().into_iter().chain(layer.shm_stall_deadline()).min(),
                 _ => None,
             }
         }).flatten()).min();
@@ -162,7 +162,7 @@ impl AnyHost for OverlayHost {
             app.window_focus(*focused);
             if !*focused {
                 core.control_click = false;
-                if core.options.keys == KeyPolicy::OnDemand
+                if core.options.keys.accepts_keys()
                     && let Some(window) = core.surface.live().and_then(|l| l.backing.window())
                 {
                     crate::platform::ime::cancel(window);
@@ -259,7 +259,7 @@ impl AnyHost for OverlayHost {
                 host_events::refresh_focus_preferences(app.rt_mut(), None);
                 core.dirty = true;
             }
-            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if core.options.keys == KeyPolicy::OnDemand => {
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if core.options.keys.accepts_keys() => {
                 if event.state == winit::event::ElementState::Pressed
                     && let Some(window) = core.surface.live().and_then(|l| l.backing.window())
                     && let Some(text) = crate::platform::ime::take_direct_commit(window)
@@ -270,7 +270,7 @@ impl AnyHost for OverlayHost {
                     core.dirty |= app.keyboard(&event, core.mods);
                 }
             }
-            WindowEvent::Ime(ime) if core.options.keys == KeyPolicy::OnDemand => {
+            WindowEvent::Ime(ime) if core.options.keys.accepts_keys() => {
                 if let Some(window) = core.surface.live().and_then(|l| l.backing.window()) {
                     host_events::ime(app.rt_mut(), window, &mut core.ime, ime);
                     core.dirty = true;

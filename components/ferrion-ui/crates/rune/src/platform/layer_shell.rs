@@ -16,22 +16,26 @@ use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_region::WlRegion;
 use wayland_client::protocol::wl_registry::WlRegistry;
+use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::protocol::{wl_output::{self, WlOutput}, wl_seat::{self, WlSeat}, wl_pointer::{self, WlPointer}, wl_keyboard::{self, WlKeyboard}, wl_touch::{self, WlTouch}};
 use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1};
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1};
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{self, KeyboardInteractivity, ZwlrLayerSurfaceV1};
 
-use super::layer_shell_machine::{configure_wait, connection, exclusive_zone, frame_callback, keyboard, pointer, readiness, repeat, touch, watch_loop};
-use crate::el::Align;
-use crate::overlay::{Placement, ScreenEdge};
+use super::layer_shell_machine::{configure_wait, connection, frame_callback, keyboard, pointer, readiness, repeat, touch, watch_loop};
+use super::wayland_shm::ShmRing;
+use crate::overlay::Placement;
 use crate::runtime::Waker;
-use crate::{OverlayInput, OverlayOptions, OverlayPlacement};
+use crate::{OverlayInput, OverlayLayer, OverlayOptions};
 
 mod compose;
+mod cpu;
 mod dead;
+pub(crate) use cpu::LayerSurfaceError;
+use cpu::protocol_layer;
 pub(crate) use dead::display_error;
 use dead::{classify_turn_error, format_wayland_error};
 
@@ -87,6 +91,7 @@ struct State {
     mod_state: Option<keyboard::ModState>,
     repeat_seq: crate::machine::Seq,
     repeat: repeat::State,
+    released_buffers: Vec<u64>,
 }
 
 impl Dispatch<WlOutput, ()> for State {
@@ -784,6 +789,10 @@ pub(crate) struct LayerSurface {
     output: Option<WlOutput>,
     seat: Option<WlSeat>,
     options: OverlayOptions,
+    exclusive_zone: Option<i32>,
+    span_width: bool,
+    shm: Option<WlShm>,
+    shm_ring: Option<ShmRing>,
     queue: EventQueue<State>,
     state: State,
     layer: ZwlrLayerSurfaceV1,
@@ -878,10 +887,26 @@ fn drain_event_queue(queue: &mut EventQueue<State>, state: &mut State) {
 impl LayerSurface {
     /// None when the display isn't Wayland, the compositor lacks layer-shell, or it never
     /// configures the surface within `configure_wait::TIMEOUT`.
-    #[allow(unsafe_code)]
+    #[cfg(test)]
     pub fn new(display: RawDisplayHandle, namespace: &str, at: Placement, interactive: bool, options: &OverlayOptions, output_id: Option<u32>, wake: Option<Waker>) -> Option<LayerSurface> {
-        let RawDisplayHandle::Wayland(display) = display else { return None };
-        let want_keys = options.keys == crate::KeyPolicy::OnDemand;
+        Self::try_new(display, namespace, at, interactive, options, OverlayLayer::Overlay, None, false, output_id, wake).ok()
+    }
+
+    #[allow(unsafe_code, clippy::too_many_arguments)]
+    pub(crate) fn try_new(
+        display: RawDisplayHandle,
+        namespace: &str,
+        at: Placement,
+        interactive: bool,
+        options: &OverlayOptions,
+        overlay_layer: OverlayLayer,
+        exclusive_zone: Option<i32>,
+        span_width: bool,
+        output_id: Option<u32>,
+        wake: Option<Waker>,
+    ) -> Result<LayerSurface, LayerSurfaceError> {
+        let RawDisplayHandle::Wayland(display) = display else { return Err(LayerSurfaceError::NotWayland) };
+        let want_keys = options.keys.accepts_keys();
         if want_keys { compose::warm(); }
         // SAFETY: winit owns this `wl_display` for the life of the event loop, which outlives
         // every overlay; a foreign backend never closes it.
@@ -889,11 +914,10 @@ impl LayerSurface {
         let conn = Connection::from_backend(backend);
         let (globals, mut queue) = match registry_queue_init::<State>(&conn) {
             Ok(pair) => pair,
-            Err(_) => {
-                if let Some(reason) = conn.backend().last_error().and_then(|e| format_wayland_error(&e)) {
-                    eprintln!("rune: Wayland layer surface '{namespace}' failed: the display connection failed: {reason}");
-                }
-                return None;
+            Err(err) => {
+                let reason = conn.backend().last_error().and_then(|e| format_wayland_error(&e)).unwrap_or_else(|| err.to_string());
+                eprintln!("rune: Wayland layer surface '{namespace}' failed: the display connection failed: {reason}");
+                return Err(LayerSurfaceError::DisplayConnection(reason));
             }
         };
         let qh = queue.handle();
@@ -901,14 +925,14 @@ impl LayerSurface {
             destroy_globals(&conn, globals);
             drain_event_queue(&mut queue, &mut State::default());
             queue.flush().ok();
-            return None;
+            return Err(LayerSurfaceError::MissingCompositor);
         };
         let Ok(shell) = globals.bind::<ZwlrLayerShellV1, _, _>(&qh, 1..=4, ()) else {
             conn.backend().destroy_object(&compositor.id()).ok();
             destroy_globals(&conn, globals);
             drain_event_queue(&mut queue, &mut State::default());
             queue.flush().ok();
-            return None;
+            return Err(LayerSurfaceError::MissingLayerShell);
         };
         let output = output_id.and_then(|id| {
             globals.contents().with_list(|list| list.iter().find(|g| g.name == id && g.interface == "wl_output").map(|g| {
@@ -922,74 +946,54 @@ impl LayerSurface {
         let region = compositor.create_region(&qh, ());
         surface.set_input_region(Some(&region));
         region.destroy();
-        // Preserve existing overlay-layer semantics. There is no layer above Overlay;
-        // relative ordering of peers is compositor policy, unlike AppKit's numeric levels.
-        let layer = shell.get_layer_surface(&surface, output.as_ref(), Layer::Overlay, namespace.to_owned(), &qh, ());
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let layer = shell.get_layer_surface(&surface, output.as_ref(), protocol_layer(overlay_layer), namespace.to_owned(), &qh, ());
+        let initial_keys = match options.keys {
+            crate::KeyPolicy::Exclusive => KeyboardInteractivity::Exclusive,
+            crate::KeyPolicy::None | crate::KeyPolicy::OnDemand => KeyboardInteractivity::None,
+        };
+        layer.set_keyboard_interactivity(initial_keys);
         let shapes = globals.bind::<WpCursorShapeManagerV1, _, _>(&qh, 1..=1, ()).ok();
         let state = State { surface: Some(surface.clone()), want_pointer, want_keys, shapes, ..State::default() };
-        let mut this = LayerSurface { namespace: namespace.to_owned(), conn, globals: Some(globals), seat_global, regions: std::cell::RefCell::new(Some(Vec::new())), compositor, shell, output, seat, options: options.clone(), queue, state, layer, surface, display: display.display, watch: None };
+        let mut this = LayerSurface {
+            namespace: namespace.to_owned(),
+            conn,
+            globals: Some(globals),
+            seat_global,
+            regions: std::cell::RefCell::new(Some(Vec::new())),
+            compositor,
+            shell,
+            output,
+            seat,
+            options: options.clone(),
+            exclusive_zone,
+            span_width,
+            shm: None,
+            shm_ring: None,
+            queue,
+            state,
+            layer,
+            surface,
+            display: display.display,
+            watch: None,
+        };
         this.place(at);
         this.surface.commit();
         match wait_for_configure(&this.conn, &mut this.queue, &mut this.state, configure_wait::TIMEOUT) {
             configure_wait::Outcome::Done => {}
             configure_wait::Outcome::TimedOut => {
                 eprintln!("rune: Wayland layer surface '{namespace}' timed out waiting for initial configure");
-                return None;
+                return Err(LayerSurfaceError::ConfigureTimeout(configure_wait::TIMEOUT));
             }
             configure_wait::Outcome::Error => {
-                if let Some(reason) = this.conn.backend().last_error().and_then(|e| format_wayland_error(&e)) {
-                    eprintln!("rune: Wayland layer surface '{namespace}' failed: the display connection failed: {reason}");
-                }
-                return None;
+                let reason = this.conn.backend().last_error().and_then(|e| format_wayland_error(&e)).unwrap_or_else(|| "display connection error".into());
+                eprintln!("rune: Wayland layer surface '{namespace}' failed: the display connection failed: {reason}");
+                return Err(LayerSurfaceError::DisplayConnection(reason));
             }
         }
-        if this.state.readiness.closed() { return None; }
+        if this.state.readiness.closed() { return Err(LayerSurfaceError::Closed); }
         this.watch = wake.and_then(|wake| WaylandWatch::spawn(this.conn.clone(), wake));
-        Some(this)
+        Ok(this)
     }
-
-    pub fn set_placement(&mut self, placement: Option<OverlayPlacement>) {
-        self.options.placement = placement;
-    }
-
-    pub fn place(&mut self, at: Placement) {
-        self.layer.set_exclusive_zone(exclusive_zone(self.options.placement));
-        match self.options.placement {
-            Some(OverlayPlacement::FullScreen) => {
-                self.layer.set_size(0, 0);
-                self.layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-                self.layer.set_margin(0, 0, 0, 0);
-                return;
-            }
-            Some(OverlayPlacement::Rect { x, y, width, height }) => {
-                self.layer.set_size(width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32);
-                self.layer.set_anchor(Anchor::Top | Anchor::Left);
-                self.layer.set_margin(y.round() as i32, 0, 0, x.round() as i32);
-                return;
-            }
-            _ => {}
-        }
-        let at = match self.options.placement {
-            Some(OverlayPlacement::Edge { edge, margin, align, inset }) => Placement { size: at.size, edge, margin, align, inset },
-            _ => at,
-        };
-        let (margin, inset) = (at.margin.round() as i32, at.inset.round() as i32);
-        let (vertical, top, bottom) = match at.edge {
-            ScreenEdge::Top => (Anchor::Top, margin, 0),
-            ScreenEdge::Bottom => (Anchor::Bottom, 0, margin),
-        };
-        let (horizontal, left, right) = match at.align {
-            Align::Start => (Anchor::Left, inset, 0),
-            Align::Center => (Anchor::empty(), 0, 0),
-            Align::End => (Anchor::Right, 0, inset),
-        };
-        self.layer.set_size(at.size.0.ceil() as u32, at.size.1.ceil() as u32);
-        self.layer.set_anchor(vertical | horizontal);
-        self.layer.set_margin(top, right, bottom, left);
-    }
-
-    pub fn configured_size(&self) -> Option<(u32, u32)> { self.state.readiness.size() }
 
     /// Sets the surface's pending input region; true when it changed, so it waits for a commit.
     pub fn input_regions(&self, regions: &[[f32; 4]], interactive: bool) -> bool {
@@ -1028,7 +1032,12 @@ impl LayerSurface {
 
     pub fn request_keys(&self) -> bool {
         if !keyboard::can_request_keys(self.options.keys, self.layer.version()) { return false; }
-        self.layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+        let mode = match self.options.keys {
+            crate::KeyPolicy::Exclusive => KeyboardInteractivity::Exclusive,
+            crate::KeyPolicy::OnDemand => KeyboardInteractivity::OnDemand,
+            crate::KeyPolicy::None => return false,
+        };
+        self.layer.set_keyboard_interactivity(mode);
         self.surface.commit();
         self.queue.flush().ok();
         true
@@ -1095,6 +1104,7 @@ impl LayerSurface {
     pub fn dispatch(&mut self) -> Changes {
         let armed = self.state.repeat.attempt();
         self.turn();
+        self.drain_released_buffers();
         if !self.state.readiness.closed() && let Some(attempt) = armed {
             self.state.fire_repeat(attempt, crate::time::now());
         }
@@ -1112,55 +1122,12 @@ impl LayerSurface {
     /// `wl_keyboard.keymap` (each virtual keyboard a paste tool makes sends a few).
     pub fn drain(&mut self) -> bool {
         self.turn();
+        self.drain_released_buffers();
         self.state.step_repeat(repeat::Event::Stop);
         self.state.reset_compose();
         self.state.step_pointer(pointer::Event::Reset);
         self.state.input.clear();
         self.state.readiness.closed()
-    }
-
-    fn turn(&mut self) {
-        let was_closed = self.state.readiness.closed();
-        if was_closed {
-            self.watch = None;
-            return;
-        }
-        let dispatch_err = self.queue.dispatch_pending(&mut self.state).err();
-        let flush_err = self.queue.flush().err();
-        let last_err = self.conn.backend().last_error();
-        let (kind, reason) = classify_turn_error(dispatch_err, flush_err, last_err);
-        match connection::turn_action(was_closed, kind, self.state.readiness.closed()) {
-            connection::TurnAction::Continue => if let Some(watch) = &self.watch { watch.turned(); },
-            connection::TurnAction::StopClosed | connection::TurnAction::AlreadyClosed => self.watch = None,
-            connection::TurnAction::FailAndClose => self.fail_connection(reason),
-        }
-    }
-
-    fn flush_checked(&mut self) {
-        if self.state.readiness.closed() { return; }
-        let flush_err = self.queue.flush().err();
-        let (kind, reason) = classify_turn_error(None, flush_err, self.conn.backend().last_error());
-        if kind.is_some_and(connection::is_fatal) {
-            self.fail_connection(reason);
-        }
-    }
-
-    fn fail_connection(&mut self, reason: Option<String>) {
-        let was_closed = self.state.readiness.closed();
-        readiness::step(&mut self.state.readiness, readiness::Event::Closed);
-        frame_callback::step(&mut self.state.frame, frame_callback::Event::Reset);
-        if let Some((_, cb)) = self.state.frame_callback.take() {
-            self.conn.backend().destroy_object(&cb.id()).ok();
-        }
-        self.state.step_repeat(repeat::Event::Stop);
-        self.state.input.clear();
-        self.watch = None;
-        if !was_closed {
-            match reason {
-                Some(reason) => eprintln!("rune: Wayland layer surface '{}' closed: the display connection failed: {reason}", self.namespace),
-                None => eprintln!("rune: Wayland layer surface '{}' closed: the display connection failed", self.namespace),
-            }
-        }
     }
 
     pub fn raw_handles(&self) -> (RawDisplayHandle, RawWindowHandle) {
@@ -1201,6 +1168,8 @@ impl Drop for LayerSurface {
         if let Some(output) = self.output.take() {
             if output.version() >= 3 { output.release(); } else { backend.destroy_object(&output.id()).ok(); }
         }
+        if let Some(ring) = &mut self.shm_ring { ring.clear_slots(); }
+        if let Some(shm) = self.shm.take() { backend.destroy_object(&shm.id()).ok(); }
         self.layer.destroy();
         self.surface.destroy();
         if self.shell.version() >= 3 { self.shell.destroy(); } else { backend.destroy_object(&self.shell.id()).ok(); }

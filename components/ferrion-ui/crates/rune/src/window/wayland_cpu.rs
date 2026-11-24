@@ -24,7 +24,7 @@ use crate::window::{WakeEvent, sync_screen_origin_core};
 pub(crate) const CPU_PAINTER_THREADS_MAX: usize = 6;
 pub(crate) const CPU_PAINTER_THREADS_DEFAULT: usize = 4;
 
-fn painter_threads() -> usize {
+pub(crate) fn painter_threads() -> usize {
     let requested = rune_core::env::var("RUNE_CPU_THREADS")
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or_else(|| {
@@ -33,7 +33,7 @@ fn painter_threads() -> usize {
     requested.clamp(1, CPU_PAINTER_THREADS_MAX)
 }
 
-fn needs_gpu_kind(why: NeedsGpu) -> (u16, &'static str) {
+pub(crate) fn needs_gpu_kind(why: NeedsGpu) -> (u16, &'static str) {
     match why {
         NeedsGpu::LinearBlend => (1 << 0, "linear-blend"),
         NeedsGpu::NativeSurface => (1 << 1, "native-surface"),

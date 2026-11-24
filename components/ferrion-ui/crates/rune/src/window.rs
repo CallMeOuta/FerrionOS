@@ -35,10 +35,10 @@ mod host;
 mod keys;
 pub mod spec;
 mod state;
-mod surface;
+pub(crate) mod surface;
 pub(crate) mod titlebar;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-mod wayland_cpu;
+pub(crate) mod wayland_cpu;
 #[cfg(target_os = "windows")]
 mod win32;
 /// `crate::warm_gpu_cache` on Windows (`win32::handover`).

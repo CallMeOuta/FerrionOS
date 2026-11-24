@@ -314,7 +314,11 @@ pub(crate) mod keyboard {
     /// Whether a layer-shell overlay with `policy` may request keyboard interactivity on
     /// `zwlr_layer_surface_v1` `layer_version`.
     pub(crate) fn can_request_keys(policy: crate::KeyPolicy, layer_version: u32) -> bool {
-        policy == crate::KeyPolicy::OnDemand && layer_version >= 4
+        match policy {
+            crate::KeyPolicy::None => false,
+            crate::KeyPolicy::OnDemand => layer_version >= 4,
+            crate::KeyPolicy::Exclusive => layer_version >= 1,
+        }
     }
 
     /// Whether a layer-shell overlay reports `nonactivating_keys` support.
@@ -738,6 +742,8 @@ pub(crate) mod compose_cache;
 pub(crate) mod frame_callback;
 pub(crate) mod pointer;
 
+pub(crate) const MAX_EXCLUSIVE_ZONE: i32 = 16384;
+
 /// The `zwlr_layer_surface_v1.set_exclusive_zone` value for `placement`: `-1` lets a full-screen
 /// overlay cover bars and other surfaces that reserve space; other placements keep `0` so they
 /// neither reserve space nor ignore other surfaces' exclusive zones.
@@ -745,6 +751,14 @@ pub(crate) fn exclusive_zone(placement: Option<crate::OverlayPlacement>) -> i32 
     match placement {
         Some(crate::OverlayPlacement::FullScreen) => -1,
         Some(crate::OverlayPlacement::Edge { .. } | crate::OverlayPlacement::Rect { .. }) | None => 0,
+    }
+}
+
+#[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(dead_code))]
+pub(crate) fn resolved_exclusive_zone(placement: Option<crate::OverlayPlacement>, explicit: Option<i32>) -> i32 {
+    match explicit {
+        Some(zone) => zone.clamp(-1, MAX_EXCLUSIVE_ZONE),
+        None => exclusive_zone(placement),
     }
 }
 

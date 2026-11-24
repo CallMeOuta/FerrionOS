@@ -41,7 +41,15 @@ impl OverlayFrame<'_> {
         ) else {
             return false;
         };
-        let ok = crate::window::reblend_core(&live.surface, gpu, &mut live.config, renderer, &mut live.alpha, self.app.rt_mut());
+        let config = &mut live.config;
+        let Some((surface, alpha)) = (match &mut live.target {
+            OverlayRenderTarget::Gpu { surface, alpha } => Some((&*surface, alpha)),
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            OverlayRenderTarget::Cpu(_) => None,
+        }) else {
+            return false;
+        };
+        let ok = crate::window::reblend_core(surface, gpu, config, renderer, alpha, self.app.rt_mut());
         #[cfg(target_os = "windows")]
         live.slot.reconfigured(ok);
         ok
@@ -58,6 +66,7 @@ impl FrameHost for OverlayFrame<'_> {
         if let Some(Live { backing: Backing::Layer(layer), .. }) = self.core.surface.live_mut() {
             let changes = layer.dispatch();
             if changes.closed {
+                self.core.fail("Wayland compositor closed the layer surface".into());
                 self.core.hide(self.app);
                 return Gate::Skip;
             }
@@ -133,7 +142,7 @@ impl FrameHost for OverlayFrame<'_> {
         // has room, built from what changed by then (`slot`).
         #[cfg(target_os = "windows")]
         if let Some(wake) = self.core.slot_wake.clone() && let Some(live) = self.core.surface.live_mut() {
-            if live.slot.take_surface(&live.surface, move || wake()) == Take::Later {
+            if let Some(surface) = live.gpu_surface() && live.slot.take_surface(surface, move || wake()) == Take::Later {
                 // The registered wait asks for this frame (`WakeEvent::FrameSlot`): not a miss,
                 // and no timer of its own to turn the loop with (`waits_for_slot`).
                 return Gate::Skip;
@@ -235,11 +244,14 @@ impl FrameHost for OverlayFrame<'_> {
         let (Some(live), Some(gpu)) = (self.core.surface.live(), self.core.gpu.as_ref()) else {
             return Acquire::Missed(crate::window::Missed::Unconfigured);
         };
+        let Some(surface) = live.gpu_surface() else {
+            return Acquire::Missed(crate::window::Missed::Unconfigured);
+        };
         // wgpu checks the panel's occlusion itself before it hands out a drawable.
         #[cfg(target_os = "macos")]
-        let _shown = if self.presume { crate::platform::macos::PresumeShown::new(&live.surface) } else { None };
+        let _shown = if self.presume { crate::platform::macos::PresumeShown::new(surface) } else { None };
         match crate::window::acquire_checked(
-            &live.surface,
+            surface,
             gpu,
             &live.config,
             true,
@@ -281,7 +293,9 @@ impl FrameHost for OverlayFrame<'_> {
             self.materials_checked = true;
             if let Some(live) = self.core.surface.live_mut() {
                 let Backing::Window(window) = &live.backing;
-                if live.materials.update(self.app.rt().transparent, !self.app.rt().paint.materials().is_empty(), window, &live.surface) {
+                if let OverlayRenderTarget::Gpu { surface, .. } = &live.target
+                    && live.materials.update(self.app.rt().transparent, !self.app.rt().paint.materials().is_empty(), window, surface)
+                {
                     return PostStepCheck::Reacquire(ReacquireReason::NativeMaterials);
                 }
             }
@@ -353,7 +367,7 @@ impl FrameHost for OverlayFrame<'_> {
         ) else {
             return false;
         };
-        let target = live.alpha.as_ref().map_or(&prepared.view, |a| &a.view);
+        let target = live.gpu_alpha().map_or(&prepared.view, |a| &a.view);
         let comp_animating = if self.app.has_compositor() {
             self.app.render_compositor(OverlayRenderArgs {
                 device: &gpu.device,
@@ -370,7 +384,7 @@ impl FrameHost for OverlayFrame<'_> {
             draw_ui(renderer, gpu, &mut prepared.encoder, target, self.app.rt_mut(), prepared.size, [0.0; 4]);
             false
         };
-        if let Some(alpha) = &live.alpha {
+        if let Some(alpha) = live.gpu_alpha() {
             alpha.draw(&mut prepared.encoder, &prepared.view);
         }
         comp_animating
@@ -490,7 +504,7 @@ impl OverlayCore {
 
     /// One input event a layer or XWayland surface read on its own connection.
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-    fn surface_input(&mut self, app: &mut dyn OverlayApp, input: crate::platform::layer_shell::Input) {
+    pub(super) fn surface_input(&mut self, app: &mut dyn OverlayApp, input: crate::platform::layer_shell::Input) {
         use crate::platform::layer_shell::Input;
         match input {
             Input::Move(x, y) => {
@@ -547,7 +561,7 @@ impl OverlayCore {
 
     /// Syncs OS IME allowance and cursor area for overlays that accept on-demand keyboard focus.
     fn sync_ime(&mut self, app: &mut dyn OverlayApp) {
-        if self.options.keys == KeyPolicy::OnDemand
+        if self.options.keys.accepts_keys()
             && let Some(window) = self.surface.live().and_then(|l| l.backing.window())
         {
             #[cfg(target_os = "macos")]
@@ -559,6 +573,10 @@ impl OverlayCore {
     }
 
     pub(super) fn draw_frame(&mut self, app: &mut dyn OverlayApp, prewarm: bool) -> bool {
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.surface.live().is_some_and(Live::is_cpu) {
+            return self.draw_wayland_cpu(app, prewarm);
+        }
         let mut frame = OverlayFrame {
             core: self,
             app,

@@ -92,6 +92,22 @@ pub enum KeyPolicy {
     /// `WS_EX_NOACTIVATE`, and `request_keys` takes the foreground only when Windows lets this
     /// process (it just had the user's input, or was given the right); a click always does.
     OnDemand,
+    Exclusive,
+}
+
+impl KeyPolicy {
+    pub(crate) fn accepts_keys(self) -> bool {
+        !matches!(self, KeyPolicy::None)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverlayLayer {
+    Background,
+    Bottom,
+    Top,
+    #[default]
+    Overlay,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -162,6 +178,8 @@ pub struct ConfiguredOverlay<T: 'static> {
     pub(crate) runtime: crate::app::RuntimeConfig<T>,
     pub(crate) font_smoothing: Option<crate::FontSmoothing>,
     pub(crate) macos_level: Option<isize>,
+    pub(crate) layer: OverlayLayer,
+    pub(crate) exclusive_zone: Option<i32>,
     pub(crate) animate_reveal: bool,
     pub(crate) release_after: Option<std::time::Duration>,
 }
@@ -239,6 +257,8 @@ impl<T: 'static> ConfiguredOverlay<T> {
     /// `OverlayOptions::level`; `OverlayHandle::set_macos_level` changes it later. At any
     /// level a macOS overlay goes exactly where it's placed, over the menu bar too.
     pub fn macos_level(mut self, level: isize) -> Self { self.macos_level = Some(level); self }
+    pub fn layer(mut self, layer: OverlayLayer) -> Self { self.layer = layer; self }
+    pub fn exclusive_zone(mut self, zone: i32) -> Self { self.exclusive_zone = Some(zone); self }
 }
 
 impl<T: 'static> OverlaySpec<T> {
@@ -250,6 +270,7 @@ impl<T: 'static> OverlaySpec<T> {
         ConfiguredOverlay {
             spec: self, options, on_key: None, on_created: None, poll: None, compositor: None,
             setup: None, runtime: crate::app::RuntimeConfig::default(), font_smoothing: None, macos_level: None,
+            layer: OverlayLayer::default(), exclusive_zone: None,
             animate_reveal: false, release_after: None,
         }
     }

@@ -228,7 +228,7 @@ fn build_parts<S, T: 'static>(
 ) -> (OverlayCore, TypedOverlayApp<T>, OverlayHandle<T>, bool) {
     let ConfiguredOverlay {
         spec, options, on_key, on_created, poll, compositor, setup, mut runtime, font_smoothing,
-        macos_level, animate_reveal, release_after,
+        macos_level, layer, exclusive_zone, animate_reveal, release_after,
     } = configured;
     let inherits_font_smoothing = font_smoothing.is_none();
     runtime.font_smoothing = font_smoothing.unwrap_or(app_font_smoothing);
@@ -253,6 +253,8 @@ fn build_parts<S, T: 'static>(
         at,
         spec.interactive,
         options,
+        layer,
+        exclusive_zone,
         on_created,
         macos_level,
         animate_reveal,
