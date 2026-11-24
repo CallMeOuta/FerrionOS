@@ -1,0 +1,424 @@
+diff --git a/src/compositor/display.rs b/src/compositor/display.rs
+index 7d17ba4..46f1a7b 100644
+--- a/src/compositor/display.rs
++++ b/src/compositor/display.rs
+@@ -1,7 +1,7 @@
+ use drm::buffer::{Buffer as _, DrmFourcc};
+ use drm::control::connector::{self, State};
+ use drm::control::dumbbuffer::{DumbBuffer, DumbMapping};
+-use drm::control::{ClipRect, Device as _, crtc, framebuffer};
++use drm::control::{ClipRect, Device as _, Mode, crtc, framebuffer};
+ use drm::{ClientCapability, Device as _, DriverCapability};
+ use drm_ffi::DRM_PLANE_TYPE_CURSOR;
+ use graphics_ipc::redox_uapi_exts::REDOX_DRM_CLIENT_CAP_HOTPLUG_EVENTS;
+@@ -28,17 +28,24 @@ impl V2DisplayMap {
+         display_handle: &DrmHandle,
+         connector: connector::Handle,
+         connector_info: connector::Info,
++        used_crtcs: &[crtc::Handle],
+     ) -> io::Result<Self> {
+-        let mode = connector_info.modes()[0];
++        let mode = *connector_info
++            .modes()
++            .first()
++            .ok_or_else(|| io::Error::other("connector has no mode"))?;
+         let (width, height) = mode.size();
+ 
+-        // FIXME do something smarter that avoids conflicts
+-        let crtc = display_handle.resource_handles().unwrap().filter_crtcs(
+-            display_handle
+-                .get_encoder(connector_info.encoders()[0])
+-                .unwrap()
+-                .possible_crtcs(),
+-        )[0];
++        let resources = display_handle.resource_handles()?;
++        let mut free_crtc = None;
++        for &encoder in connector_info.encoders() {
++            let possible = resources.filter_crtcs(display_handle.get_encoder(encoder)?.possible_crtcs());
++            free_crtc = possible.into_iter().find(|crtc| !used_crtcs.contains(crtc));
++            if free_crtc.is_some() {
++                break;
++            }
++        }
++        let crtc = free_crtc.ok_or_else(|| io::Error::other("no free CRTC for connector"))?;
+ 
+         let buffer = CpuBackedBuffer::new(
+             display_handle,
+@@ -58,40 +65,35 @@ impl V2DisplayMap {
+         })
+     }
+ 
+-    fn resize_if_necessary(&mut self, display_handle: &DrmHandle) -> io::Result<bool> {
+-        let connector_info = display_handle.get_connector(self.connector, true).unwrap();
+-
+-        let mode = connector_info.modes()[0];
++    fn resize(&mut self, display_handle: &DrmHandle, mode: Mode) -> io::Result<bool> {
+         let (width, height) = mode.size();
+-
+         if (u32::from(width), u32::from(height)) == self.buffer.buffer().size() {
+             return Ok(false);
+         }
+ 
+         let new_buffer = CpuBackedBuffer::new(
+             display_handle,
+-            (u32::from(mode.size().0), u32::from(mode.size().1)),
++            (u32::from(width), u32::from(height)),
+             DrmFourcc::Argb8888,
+             32,
+         )?;
+         let new_fb = display_handle.add_framebuffer(new_buffer.buffer(), 32, 32)?;
++        display_handle.set_crtc(self.crtc, Some(new_fb), (0, 0), &[self.connector], Some(mode))?;
+ 
+         let old_buffer = mem::replace(&mut self.buffer, new_buffer);
+-        old_buffer.destroy(display_handle)?;
+-
+         let old_fb = mem::replace(&mut self.fb, new_fb);
+-        display_handle.set_crtc(
+-            self.crtc,
+-            Some(self.fb),
+-            (0, 0),
+-            &[self.connector],
+-            Some(mode),
+-        )?;
+         let _ = display_handle.destroy_framebuffer(old_fb);
++        old_buffer.destroy(display_handle)?;
+ 
+         Ok(true)
+     }
+ 
++    fn disable(self, display_handle: &DrmHandle) -> io::Result<()> {
++        display_handle.set_crtc(self.crtc, None, (0, 0), &[], None)?;
++        let _ = display_handle.destroy_framebuffer(self.fb);
++        self.buffer.destroy(display_handle)
++    }
++
+     fn image_mut(&mut self) -> ImageRef<'_> {
+         let (width, height) = self.buffer.buffer().size();
+         let display_slice = unsafe {
+@@ -135,9 +137,11 @@ impl CursorMap {
+     }
+ }
+ 
++const MAX_DISPLAYS: usize = 16;
++
+ pub(super) struct Displays {
+     pub(super) display_handle: DrmHandle,
+-    supports_hw_cursor: bool,
++    hw_cursor: Option<(u64, u64)>,
+     pub(super) displays: Vec<Display>,
+ }
+ 
+@@ -184,38 +188,16 @@ impl Displays {
+             None
+         };
+ 
+-        let mut displays: Vec<Display> = vec![];
+-        for &connector in display_handle
+-            .resource_handles()
+-            .unwrap()
+-            .connectors()
+-            .iter()
+-        {
+-            let connector_info = display_handle.get_connector(connector, true)?;
+-            if connector_info.state() == State::Connected {
+-                let x = if let Some(last) = displays.last() {
+-                    last.screen_rect().right()
+-                } else {
+-                    0
+-                };
+-                let y = 0;
+-
+-                displays.push(Display::new(
+-                    x,
+-                    y,
+-                    &display_handle,
+-                    connector,
+-                    connector_info,
+-                    hw_cursor,
+-                )?);
+-            }
+-        }
+-
+-        Ok(Displays {
++        let mut displays = Displays {
+             display_handle,
+-            supports_hw_cursor: hw_cursor.is_some(),
+-            displays,
+-        })
++            hw_cursor,
++            displays: vec![],
++        };
++        displays.reconcile()?;
++        if displays.displays.is_empty() {
++            return Err(io::Error::other("no connected display"));
++        }
++        Ok(displays)
+     }
+ 
+     pub(super) fn event_handle(&self) -> BorrowedFd<'_> {
+@@ -223,23 +205,88 @@ impl Displays {
+     }
+ 
+     pub(super) fn handle_display_event(&mut self) -> io::Result<bool> {
+-        let mut any_resized = false;
+-        for event in self.display_handle.redox_receive_events()? {
++        let mut hotplug = false;
++        let events = match self.display_handle.redox_receive_events() {
++            Ok(events) => events,
++            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(false),
++            Err(err) => return Err(err),
++        };
++        for event in events {
+             match event {
+-                RedoxDrmEvent::RedoxConnectorHotplug(event) => {
+-                    // FIXME handle connecting and disconnecting displays
+-                    for display in &mut self.displays {
+-                        if event.connector == display.map.connector.into() {
+-                            any_resized |= display.resize_if_necessary(&mut self.display_handle);
+-                        }
+-                    }
+-                }
++                RedoxDrmEvent::RedoxConnectorHotplug(_) => hotplug = true,
+                 RedoxDrmEvent::Vblank(_)
+                 | RedoxDrmEvent::PageFlip(_)
+                 | RedoxDrmEvent::Unknown(_) => todo!(),
+             }
+         }
+-        Ok(any_resized)
++        if !hotplug {
++            return Ok(false);
++        }
++        self.reconcile()
++    }
++
++    fn reconcile(&mut self) -> io::Result<bool> {
++        let mut changed = false;
++        let connectors = self.display_handle.resource_handles()?.connectors().to_vec();
++        for connector in connectors {
++            let connector_info = self.display_handle.get_connector(connector, true)?;
++            let mode = if connector_info.state() == State::Connected {
++                connector_info.modes().first().copied()
++            } else {
++                None
++            };
++            let index = self
++                .displays
++                .iter()
++                .position(|display| display.map.connector == connector);
++            match (index, mode) {
++                (Some(index), Some(mode)) => {
++                    changed |= self.displays[index].resize_if_necessary(&self.display_handle, mode);
++                }
++                (Some(index), None) if self.displays.len() > 1 => {
++                    let display = self.displays.remove(index);
++                    if let Err(err) = display.map.disable(&self.display_handle) {
++                        error!("failed to turn off display: {err}");
++                    }
++                    changed = true;
++                }
++                (None, Some(_)) if self.displays.len() < MAX_DISPLAYS => {
++                    let used: Vec<crtc::Handle> =
++                        self.displays.iter().map(|display| display.map.crtc).collect();
++                    match Display::new(
++                        &self.display_handle,
++                        connector,
++                        connector_info,
++                        self.hw_cursor,
++                        &used,
++                    ) {
++                        Ok(display) => {
++                            self.displays.push(display);
++                            changed = true;
++                        }
++                        Err(err) => error!("failed to add display: {err}"),
++                    }
++                }
++                (None, Some(_)) => error!("more than {MAX_DISPLAYS} displays"),
++                (Some(_), None) | (None, None) => {}
++            }
++        }
++        if changed {
++            let mut x = 0;
++            for display in &mut self.displays {
++                display.x = x;
++                display.y = 0;
++                x = display.screen_rect().right();
++                log::info!(
++                    "Display at {}, {}, {}, {}",
++                    display.x,
++                    display.y,
++                    display.screen_rect().width(),
++                    display.screen_rect().height()
++                );
++            }
++        }
++        Ok(changed)
+     }
+ 
+     pub(crate) fn displays(&self) -> &[Display] {
+@@ -247,7 +294,7 @@ impl Displays {
+     }
+ 
+     pub(super) fn supports_hw_cursor(&self) -> bool {
+-        self.supports_hw_cursor
++        self.hw_cursor.is_some()
+     }
+ }
+ 
+@@ -262,26 +309,23 @@ pub struct Display {
+ 
+ impl Display {
+     fn new(
+-        x: i32,
+-        y: i32,
+         display_handle: &DrmHandle,
+         connector: connector::Handle,
+         connector_info: connector::Info,
+         hw_cursor: Option<(u64, u64)>,
++        used_crtcs: &[crtc::Handle],
+     ) -> io::Result<Self> {
+-        let map = V2DisplayMap::new(display_handle, connector, connector_info)?;
+-        let (width, height) = map.buffer.buffer().size();
++        let map = V2DisplayMap::new(display_handle, connector, connector_info, used_crtcs)?;
++        let (_, height) = map.buffer.buffer().size();
+         let cursor_map = hw_cursor
+             .map(|(width, height)| CursorMap::new(&display_handle, width as u32, height as u32))
+             .transpose()?;
+         let scale = Self::calculate_scale(height as u32);
+         let factored_scale = Self::calculate_factored(height as u32);
+ 
+-        log::info!("Display at {}, {}, {}, {}", x, y, width, height);
+-
+         Ok(Self {
+-            x,
+-            y,
++            x: 0,
++            y: 0,
+             scale,
+             factored_scale,
+             map,
+@@ -332,12 +376,13 @@ impl Display {
+         self.rect(&rect.edge(thickness, 0, RectEdge::Right), color);
+     }
+ 
+-    pub(super) fn resize_if_necessary(&mut self, display_handle: &DrmHandle) -> bool {
+-        match self.map.resize_if_necessary(display_handle) {
++    pub(super) fn resize_if_necessary(&mut self, display_handle: &DrmHandle, mode: Mode) -> bool {
++        match self.map.resize(display_handle, mode) {
+             Ok(resized) => {
+                 if resized {
+                     let (_, height) = self.map.buffer.buffer().size();
+                     self.scale = Self::calculate_scale(height);
++                    self.factored_scale = Self::calculate_factored(height);
+                 }
+                 resized
+             }
+diff --git a/src/compositor/mod.rs b/src/compositor/mod.rs
+index 140baf8..0325175 100644
+--- a/src/compositor/mod.rs
++++ b/src/compositor/mod.rs
+@@ -87,6 +87,14 @@ impl Compositor {
+         self.displays()[0].screen_rect()
+     }
+ 
++    pub fn desktop_rect(&self) -> Rect {
++        self.displays()
++            .iter()
++            .map(|display| display.screen_rect())
++            .reduce(|desktop, rect| desktop.container(&rect))
++            .unwrap_or_else(|| self.screen_rect())
++    }
++
+     /// Return the first display scale rectangle
+     pub fn scale(&self) -> u32 {
+         self.scale
+@@ -130,25 +138,43 @@ impl Compositor {
+     }
+ 
+     pub fn handle_display_event(&mut self) -> bool {
+-        //TODO: should screens be moved after a resize?
+-        let any_resized = match self.displays.handle_display_event() {
+-            Ok(any_resized) => any_resized,
++        let changed = match self.displays.handle_display_event() {
++            Ok(changed) => changed,
+             Err(err) => {
+                 error!("failed to handle display events: {}", err);
+                 return false;
+             }
+         };
+ 
+-        if any_resized {
++        if changed {
+             let mut max_scale = 1;
+             let mut max_factored_scale = 160;
+             for display in self.displays.displays.iter() {
+                 max_scale = cmp::max(max_scale, display.scale());
+                 max_factored_scale = cmp::max(max_factored_scale, display.factored_scale());
+             }
++            self.scale = max_scale;
++            self.factored_scale = max_factored_scale;
++
++            if let Some(cursor_display) = self.cursor_display.take()
++                && let Some(display) = self.displays.displays.get_mut(cursor_display)
++                && let Err(err) = display.disable_cursor(&self.displays.display_handle)
++            {
++                error!("failed to disable cursor: {err}");
++            }
++
++            let rects: Vec<Rect> = self
++                .displays
++                .displays
++                .iter()
++                .map(|display| display.screen_rect())
++                .collect();
++            for rect in rects {
++                self.schedule(rect);
++            }
+         }
+ 
+-        any_resized
++        changed
+     }
+ 
+     pub fn schedule(&mut self, request: Rect) {
+diff --git a/src/scheme.rs b/src/scheme.rs
+index c167a0e..dc9bef5 100644
+--- a/src/scheme.rs
++++ b/src/scheme.rs
+@@ -894,8 +894,9 @@ impl OrbitalScheme {
+                 if window.restore.is_some() || window.zorder == WindowZOrder::Back {
+                     return; // either background, maximized or full screen
+                 }
+-                let display_width = self.compositor.screen_rect().iwidth();
+-                let display_height = self.compositor.screen_rect().iheight();
++                let desktop = self.compositor.desktop_rect();
++                let display_width = desktop.right();
++                let display_height = desktop.bottom();
+                 Self::update_window(&mut self.compositor, window, |_compositor, window| {
+                     // Align location to grid
+                     window.x -= window.x % GRID_SIZE;
+@@ -1637,11 +1638,24 @@ impl OrbitalScheme {
+             height: self.compositor.screen_rect().height() as u32,
+         }
+         .to_event();
++        let primary = self.compositor.screen_rect();
+         for (_window_id, window) in self.windows.iter_mut() {
+             window.event(screen_event);
+             if let Some((_, position)) = window.restore.take() {
+                 Self::tile_window(&mut self.compositor, window, position);
+             }
++            let visible = self
++                .compositor
++                .displays()
++                .iter()
++                .any(|display| !display.screen_rect().intersection(&window.rect()).is_empty());
++            if !visible && window.zorder != WindowZOrder::Back {
++                Self::update_window(&mut self.compositor, window, |_compositor, window| {
++                    window.x = primary.left();
++                    window.y = primary.top() + window.title_rect().iheight();
++                    window.event(MoveEvent { x: window.x, y: window.y }.to_event());
++                });
++            }
+         }
+ 
+         if old_scale != self.compositor.factored_scale() {

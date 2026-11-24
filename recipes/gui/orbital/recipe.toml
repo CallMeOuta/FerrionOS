@@ -1,5 +1,7 @@
 [source]
 git = "https://gitlab.redox-os.org/redox-os/orbital.git"
+rev = "56620bba7dfd2652bd6b4e97909faecfcde2e27d"
+patches = ["ferrion-display-heads.patch"]
 
 [build]
 template = "cargo"
