@@ -1,0 +1,11 @@
+--- a/gdk/wayland/gdkseat-wayland.c
++++ b/gdk/wayland/gdkseat-wayland.c
+@@ -51,6 +51,8 @@
+ #include <dev/evdev/input.h>
+ #elif defined(HAVE_LINUX_INPUT_H)
+ #include <linux/input.h>
++#elif defined(__redox__)
++#include <linux/input-event-codes.h>
+ #endif
+ 
+ #define WL_POINTER_HAS_FRAME 5
