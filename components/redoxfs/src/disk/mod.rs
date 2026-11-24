@@ -23,6 +23,8 @@ mod memory;
 #[cfg(all(feature = "std", target_os = "redox"))]
 pub mod ring;
 #[cfg(feature = "std")]
+pub mod ring_op;
+#[cfg(feature = "std")]
 mod sparse;
 
 /// A disk

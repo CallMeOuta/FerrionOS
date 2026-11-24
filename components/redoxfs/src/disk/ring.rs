@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::os::fd::IntoRawFd;
 use std::ptr::NonNull;
 
 use libredox::{Fd, flag};
 use redox_buffer_pool::{AllocationStrategy, NoHandle};
-use redox_rings::op::{DiskOpCqe, DiskOpKind, DiskOpSqe};
-use redox_rings::raw::RingPushError;
+use redox_rings::op::{DiskOpCqe, DiskOpKind, DiskOpSqe, RING_MAX_CQ_ENTRIES, RING_MAX_SQ_ENTRIES};
+use redox_rings::raw::{RingPopError, RingPushError};
 use redox_rings::sync::{BlockingConsumer, BlockingProducer, FutexWaitResult, WaitNotify};
 use syscall::CallFlags;
 use syscall::EIO;
@@ -15,9 +14,15 @@ use syscall::error::{Error, Result};
 use zerocopy::IntoBytes;
 
 use super::Disk;
+use super::ring_op::{
+    RingCompletion, RingOp, RingOpState, RingOps, RingPopOutcome, RingPushOutcome, RingSubmission,
+    execute_ring_op,
+};
 use crate::{BLOCK_SIZE, DiskFile};
 
 const POOL_SIZE: u32 = 4 * 1024 * 1024; // 4 MiB pool
+const _: () = assert!(super::ring_op::RING_MAX_SQ_ENTRIES == RING_MAX_SQ_ENTRIES);
+const _: () = assert!(super::ring_op::RING_MAX_CQ_ENTRIES == RING_MAX_CQ_ENTRIES);
 
 type BufferPool = redox_buffer_pool::BufferPool<'static, u32, NoHandle, ()>;
 type BufferSlice<'pool> = redox_buffer_pool::BufferSlice<'pool, u32, NoHandle, ()>;
@@ -49,12 +54,80 @@ impl WaitNotify for Pipe {
     }
 }
 
+struct DiskRingOps<'a> {
+    allocator: &'a BufferPool,
+    sq: &'a mut BlockingProducer<DiskOpSqe>,
+    cq: &'a mut BlockingConsumer<DiskOpCqe>,
+    pipe: &'a Pipe,
+}
+
+impl<'a> RingOps<'a> for DiskRingOps<'a> {
+    type Buffer = BufferSlice<'a>;
+
+    fn allocate(&mut self, len: u32) -> Option<Self::Buffer> {
+        self.allocator
+            .acquire_borrowed_slice(len, 1, AllocationStrategy::Optimal)
+    }
+
+    fn buffer_offset(buf: &Self::Buffer) -> u32 {
+        buf.offset()
+    }
+
+    fn release(&mut self, buf: Self::Buffer) {
+        drop(buf);
+    }
+
+    fn quarantine(&mut self, buf: Self::Buffer) {
+        core::mem::forget(buf);
+    }
+
+    fn push_sqe(&mut self, sqe: RingSubmission) -> RingPushOutcome {
+        let opcode = match sqe.op {
+            RingOp::Read => DiskOpKind::Read as u8,
+            RingOp::Write => DiskOpKind::Write as u8,
+        };
+        let raw = DiskOpSqe {
+            opcode,
+            block: sqe.block,
+            buf_offset: sqe.buf_offset,
+            buf_len: sqe.buf_len,
+            user_data: sqe.user_data,
+            file_idx: 0,
+            pad: [0; 3],
+        };
+        match self.sq.inner.push_back(raw) {
+            Ok(_) => RingPushOutcome::Pushed,
+            Err(RingPushError::Full(_)) => RingPushOutcome::Full,
+            Err(RingPushError::Broken(_)) => RingPushOutcome::Broken,
+        }
+    }
+
+    fn notify_if_waiting(&mut self) {
+        if self.sq.inner.header.is_wait_head() {
+            self.pipe.notify_on_tail();
+        }
+    }
+
+    fn pop_cqe(&mut self) -> RingPopOutcome {
+        match self.cq.pop(None) {
+            Ok(cqe) => RingPopOutcome::Completion(RingCompletion {
+                user_data: cqe.user_data,
+                count: cqe.count,
+                status: cqe.status,
+            }),
+            Err(RingPopError::Empty) => RingPopOutcome::Empty,
+            Err(RingPopError::Broken) => RingPopOutcome::Broken,
+        }
+    }
+}
+
 pub struct DiskRing {
     sq: BlockingProducer<DiskOpSqe>,
     cq: BlockingConsumer<DiskOpCqe>,
     shm_base: *mut u8,
+    pool_size: usize,
     allocator: BufferPool,
-    next_id: u64,
+    op_state: RingOpState,
     sectors_per_block: u64,
     disk_size: u64,
     #[allow(unused, reason = "closed on drop")]
@@ -95,6 +168,10 @@ impl DiskRing {
             &[RingCallVerb::Setup as u64],
         )?;
 
+        let op_state =
+            RingOpState::new(params.nr_sq_entries, params.nr_cq_entries, params.pool_size)?;
+        let pool_size = params.pool_size as usize;
+
         let fixed_rtbl_req = [ring_fd.raw(), disk_fd.raw()];
         libredox::call::call_wo(
             fixed_rtbl_req.as_slice(),
@@ -107,7 +184,7 @@ impl DiskRing {
         let shm_ptr = unsafe {
             mmap(MmapArgs {
                 addr: std::ptr::null_mut(),
-                length: POOL_SIZE as usize,
+                length: pool_size,
                 prot: flag::PROT_READ | flag::PROT_WRITE,
                 flags: flag::MAP_SHARED,
                 fd: ring_fd.raw(),
@@ -157,8 +234,9 @@ impl DiskRing {
             ring_fd,
             disk_fd,
             shm_base: shm_ptr,
+            pool_size,
             allocator,
-            next_id: 0,
+            op_state,
             sectors_per_block,
             disk_size,
             pipe: Pipe(pipe),
@@ -167,7 +245,7 @@ impl DiskRing {
 
     fn disk_op<'a, B, I, P, C>(
         &'a mut self,
-        opcode: DiskOpKind,
+        op: RingOp,
         batch: B,
         prepare: P,
         complete: C,
@@ -178,152 +256,20 @@ impl DiskRing {
         P: Fn(&I, &mut BufferSlice<'a>),
         C: Fn(&mut I, &BufferSlice<'a>),
     {
-        let mut total_processed = 0;
-        let mut first_err: Option<Error> = None;
-        let mut pending: HashMap<u64, (I, usize, BufferSlice<'a>)> = HashMap::new();
-        let mut notified = true;
-        const MAX_INFLIGHT_DRAIN: usize = 1024;
-
-        let process_cqe = |cqe: DiskOpCqe,
-                           pending: &mut HashMap<u64, (I, usize, BufferSlice<'a>)>,
-                           total_processed: &mut usize,
-                           first_err: &mut Option<Error>| {
-            if let Some((mut item, expected_len, buf)) = pending.remove(&cqe.user_data) {
-                if cqe.status != 0 {
-                    if first_err.is_none() {
-                        *first_err = Some(Error::new(cqe.status as i32));
-                    }
-                } else if cqe.count as usize != expected_len {
-                    if first_err.is_none() {
-                        *first_err = Some(Error::new(EIO));
-                    }
-                } else {
-                    complete(&mut item, &buf);
-                    *total_processed += cqe.count as usize;
-                }
-            }
+        let mut ops = DiskRingOps {
+            allocator: &self.allocator,
+            sq: &mut self.sq,
+            cq: &mut self.cq,
+            pipe: &self.pipe,
         };
-
-        let notify_on_tail = |notified: &mut bool, cq: &mut BlockingProducer<DiskOpSqe>| {
-            if cq.inner.header.is_wait_head() {
-                self.pipe.notify_on_tail();
-            }
-
-            *notified = true;
-        };
-
-        for (lba, chunk) in batch {
-            if first_err.is_some() {
-                break;
-            }
-            let len = chunk.as_ref().len();
-            let req_len = match u32::try_from(len) {
-                Ok(req_len) => req_len,
-                Err(_) => {
-                    first_err = Some(Error::new(ENOMEM));
-                    break;
-                }
-            };
-
-            let mut buf = loop {
-                if let Some(buf) = self.allocator.acquire_borrowed_slice(
-                    req_len,
-                    1,
-                    AllocationStrategy::Optimal,
-                ) {
-                    break buf;
-                }
-                if !notified {
-                    notify_on_tail(&mut notified, &mut self.sq);
-                }
-                match self.cq.pop(None) {
-                    Ok(cqe) => {
-                        process_cqe(cqe, &mut pending, &mut total_processed, &mut first_err);
-                    }
-                    Err(_) => return Err(Error::new(EIO)),
-                }
-            };
-
-            if first_err.is_some() {
-                break;
-            }
-
-            prepare(&chunk, &mut buf);
-
-            let new_id = self.next_id;
-            self.next_id += 1;
-            let sqe = DiskOpSqe {
-                opcode: opcode as u8,
-                block: lba,
-                buf_offset: buf.offset(),
-                buf_len: req_len,
-                user_data: new_id,
-                file_idx: 0,
-                pad: [0; 3],
-            };
-
-            pending.insert(new_id, (chunk, len, buf));
-
-            loop {
-                match self.sq.inner.push_back(sqe.clone()) {
-                    Ok(_) => break,
-                    Err(RingPushError::Full(_)) => {
-                        if !notified {
-                            notify_on_tail(&mut notified, &mut self.sq);
-                        }
-                        match self.cq.pop(None) {
-                            Ok(cqe) => {
-                                process_cqe(
-                                    cqe,
-                                    &mut pending,
-                                    &mut total_processed,
-                                    &mut first_err,
-                                );
-                            }
-                            Err(_) => return Err(Error::new(EIO)),
-                        }
-                    }
-                    Err(RingPushError::Broken(_)) => {
-                        pending.remove(&new_id);
-                        return Err(Error::new(EIO));
-                    }
-                }
-            }
-
-            notified = false;
-        }
-
-        if !notified {
-            notify_on_tail(&mut notified, &mut self.sq);
-        }
-
-        let mut drained = 0usize;
-        while !pending.is_empty() {
-            if drained >= MAX_INFLIGHT_DRAIN {
-                return Err(Error::new(EIO));
-            }
-            drained += 1;
-            match self.cq.pop(None) {
-                Ok(cqe) => {
-                    process_cqe(cqe, &mut pending, &mut total_processed, &mut first_err);
-                }
-                Err(_) => return Err(Error::new(EIO)),
-            }
-        }
-        assert!(pending.is_empty());
-
-        if let Some(err) = first_err {
-            return Err(err);
-        }
-
-        Ok(total_processed)
+        execute_ring_op(&mut self.op_state, &mut ops, op, batch, prepare, complete)
     }
 }
 
 impl Disk for DiskRing {
     unsafe fn read_at(&mut self, block: u64, buffer: &mut [u8]) -> Result<usize> {
         self.disk_op(
-            DiskOpKind::Read,
+            RingOp::Read,
             core::iter::once((block * self.sectors_per_block, buffer)),
             |_buf, _cmd_buf| {},
             |buf, cmd_buf| buf.copy_from_slice(cmd_buf),
@@ -337,7 +283,7 @@ impl Disk for DiskRing {
     unsafe fn write_at_batched(&mut self, batch: &[(u64, &[u8])]) -> Result<usize> {
         let sectors_per_block = self.sectors_per_block;
         self.disk_op(
-            DiskOpKind::Write,
+            RingOp::Write,
             batch
                 .iter()
                 .map(|(block, buf)| (*block * sectors_per_block, *buf)),
@@ -359,7 +305,7 @@ impl Disk for DiskRing {
 impl Drop for DiskRing {
     fn drop(&mut self) {
         unsafe {
-            let _ = libredox::call::munmap(self.shm_base.cast(), POOL_SIZE as usize);
+            let _ = libredox::call::munmap(self.shm_base.cast(), self.pool_size);
         }
     }
 }

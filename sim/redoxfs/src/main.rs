@@ -6,6 +6,7 @@ mod keyroll;
 mod maps;
 mod model;
 mod op;
+mod ring;
 mod rng;
 
 use std::cell::RefCell;
@@ -556,6 +557,11 @@ fn main() {
                 index += 2;
             }
             let failed = run_keyroll(first, seeds, ops, threads);
+            std::process::exit(if failed == 0 { 0 } else { 1 });
+        }
+        "ringdrain" => {
+            let seeds: u64 = args.get(1).and_then(|arg| arg.parse().ok()).unwrap_or(200);
+            let failed = ring::run_ringdrain(seeds);
             std::process::exit(if failed == 0 { 0 } else { 1 });
         }
         _ => usage(),

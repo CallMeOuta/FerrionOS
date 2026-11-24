@@ -13,6 +13,10 @@ if [ "${1:-}" = keyroll ]; then
     shift
     exec target/release/redoxfs-sim keyroll "$@"
 fi
+if [ "${1:-}" = ringdrain ]; then
+    shift
+    exec target/release/redoxfs-sim ringdrain "$@"
+fi
 seeds=${1:?usage: run.sh SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount], or run.sh replay FILE}
 ops=${2:?usage: run.sh SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount], or run.sh replay FILE}
 shift 2
