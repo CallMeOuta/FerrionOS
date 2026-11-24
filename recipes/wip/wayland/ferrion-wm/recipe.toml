@@ -24,7 +24,10 @@ fi
 git -C ferrion-vendor/smithay checkout --force 65aa86fa5236e41775c313408102a5d5c2d1e2ca
 patch --directory=ferrion-vendor/smithay --strip=1 < "../smithay-platform.patch"
 mkdir -p ferrion-vendor/backend
-cp -a "../../../../core/ferrion-wm-backend/crate/." ferrion-vendor/backend/
+cp -a "${COOKBOOK_ROOT}/recipes/core/ferrion-wm-backend/crate/." ferrion-vendor/backend/
+sed -i -E 's|path = "([.][.]/)+components/base/|path = "'"${COOKBOOK_ROOT}"'/components/base/|g' ferrion-vendor/backend/Cargo.toml
+grep -q 'path = "'"${COOKBOOK_ROOT}"'/components/base/graphics-ipc"' ferrion-vendor/backend/Cargo.toml
+grep -q 'path = "'"${COOKBOOK_ROOT}"'/components/base/inputd"' ferrion-vendor/backend/Cargo.toml
 """
 
 [build]
@@ -39,4 +42,5 @@ mkdir -p "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm"
 cp "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm/LICENSE"
 cp "${COOKBOOK_SOURCE}/ferrion-vendor/smithay/LICENSE.txt" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm/smithay-MIT.txt"
 cp "${COOKBOOK_SOURCE}/ferrion-vendor/backend/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm/backend-MIT.txt"
+cp "${COOKBOOK_ROOT}/components/base/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/ferrion-wm/base-MIT.txt"
 """
