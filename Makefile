@@ -25,7 +25,7 @@ rebuild:
 	rm -rf $(BUILD)/repo.tag $(BUILD)/harddrive.img $(BUILD)/redox-live.iso
 	$(MAKE) all
 
-.PHONY: hw-live-faults
+.PHONY: hw-live-faults uefi-edid-shim
 
 # Build the two forbidden-feature kernels that hw-live must refuse; never boot these artifacts.
 hw-live-faults:
@@ -40,6 +40,24 @@ else
 			BUILD="$(ROOT)/build/hw-live-faults/$$feature" \
 			KERNEL_CARGO_FEATURES="$$feature" ARCH="$(ARCH)" || exit $$?; \
 	done
+endif
+
+# Build the test-only UEFI EDID shim used by scripts/vm-test.py bootloader-edid.
+uefi-edid-shim:
+ifeq ($(PODMAN_BUILD),1)
+	$(PODMAN_RUN) make uefi-edid-shim
+else
+	@test "$(ARCH)" = x86_64
+	mkdir -p "$(ROOT)/build/uefi-edid-shim"
+	env PATH="$(PREFIX_PATH):$$PATH" CARGO_NET_OFFLINE=true \
+		CARGO_TARGET_DIR="$(ROOT)/build/uefi-edid-shim/target" \
+		cargo rustc \
+			--manifest-path="$(ROOT)/scripts/uefi-edid-shim/Cargo.toml" \
+			--release --locked --target x86_64-unknown-uefi \
+			-Z build-std=core \
+			-Z build-std-features=compiler-builtins-mem \
+			--bin uefi-edid-shim \
+			-- --emit link="$(ROOT)/build/uefi-edid-shim/uefi-edid-shim.efi"
 endif
 
 NOT_ON_PODMAN?=0

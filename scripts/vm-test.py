@@ -2894,6 +2894,13 @@ def run_display_handoff(args, out):
     return check(args, out, VM, root_shell, run_status)
 
 
+def run_bootloader_edid(args, out):
+    """Boots OVMF with UEFI EDID fixtures via uefi-edid-shim and checks vesad framebuffer size on quiet boots."""
+    from bootloader_edid import run_bootloader_edid as check
+
+    return check(args, out, ROOT)
+
+
 def test_shm_read_back(vm, args):
     """Reads through a descriptor what a shared mapping wrote, while mapped and after munmap; size must stay."""
     if not root_shell(vm, args.timeout):
@@ -9734,6 +9741,7 @@ OWN_IMAGE["pointer-latency"] = run_pointer_latency
 OWN_IMAGE["desktop-columns"] = run_desktop_columns
 OWN_IMAGE["desktop-columns-timing"] = run_desktop_columns_timing
 OWN_IMAGE["display-handoff"] = run_display_handoff
+OWN_IMAGE["bootloader-edid"] = run_bootloader_edid
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 OWN_IMAGE["x2apic-cpus"] = test_x2apic_cpus

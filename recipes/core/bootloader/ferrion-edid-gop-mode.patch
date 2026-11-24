@@ -1,0 +1,725 @@
+FerrionOS change to the upstream bootloader (MIT license, kept), applied after ferrion-hardware-live.patch, made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8:
+- decode EDID 1.4 base blocks, CTA-861 DTDs, and DisplayID 1.x/2.0 Type I and Type VII detailed timings directly in a self-contained no_std MIT module (src/edid.rs), validating each 128-byte block checksum, rejecting lengths other than 128 * (1 + n), capping extension blocks at MAX_EDID_EXTENSION_BLOCKS (8) while keeping the base block and first 8 extensions, and skipping bad extension blocks with a warning;
+- on UEFI, fall back from EFI_EDID_ACTIVE_PROTOCOL to EFI_EDID_DISCOVERED_PROTOCOL before falling back to the firmware's current GOP mode, and cap GOP mode scans at MAX_GOP_MODES (256);
+- select the GOP mode matching the preferred timing exactly, else the largest GOP mode with the panel's aspect ratio, else the largest GOP mode, logging both preferred timing/source and chosen mode/reason.
+
+diff -ruN '--exclude=*.orig' step3-bootloader-orig/src/edid.rs step3-bootloader-work/src/edid.rs
+--- a/src/edid.rs	1969-12-31 16:00:00.000000000 -0800
++++ b/src/edid.rs	2026-11-23 22:31:28.911856570 -0800
+@@ -0,0 +1,228 @@
++pub const EDID_BLOCK_SIZE: usize = 128;
++pub const MAX_EDID_EXTENSION_BLOCKS: usize = 8;
++pub const MAX_EDID_TOTAL_BLOCKS: usize = 256;
++pub const MAX_CTA_DTDS: usize = 6;
++pub const MAX_DISPLAYID_BLOCKS: usize = 32;
++pub const MAX_DISPLAYID_TIMINGS: usize = 6;
++
++const EDID_HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
++const EXT_TAG_CTA: u8 = 0x02;
++const EXT_TAG_DISPLAYID: u8 = 0x70;
++const DISPLAYID_TAG_TYPE_I: u8 = 0x03;
++const DISPLAYID_TAG_TYPE_VII: u8 = 0x22;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct Timing {
++    pub width: u32,
++    pub height: u32,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum EdidError {
++    InvalidLength,
++    BadHeader,
++    BadBaseChecksum,
++    NoTiming,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct DecodedEdid {
++    pub preferred: Timing,
++    pub extensions_truncated: bool,
++    pub bad_extension_blocks: usize,
++}
++
++fn valid_checksum(block: &[u8]) -> bool {
++    if block.len() != EDID_BLOCK_SIZE {
++        return false;
++    }
++    block
++        .iter()
++        .fold(0u8, |acc, &byte| acc.wrapping_add(byte))
++        == 0
++}
++
++fn parse_dtd(desc: &[u8]) -> Option<Timing> {
++    if desc.len() < 18 {
++        return None;
++    }
++    let pixel_clock = u16::from_le_bytes([desc[0], desc[1]]);
++    if pixel_clock == 0 {
++        return None;
++    }
++    let width = (desc[2] as u32) | (((desc[4] as u32) & 0xF0) << 4);
++    let height = (desc[5] as u32) | (((desc[7] as u32) & 0xF0) << 4);
++    if width == 0 || height == 0 {
++        return None;
++    }
++    Some(Timing { width, height })
++}
++
++fn parse_base_dtd(base: &[u8]) -> Option<Timing> {
++    assert_eq!(base.len(), EDID_BLOCK_SIZE);
++    for slot in 0..4usize {
++        let offset = 54 + slot * 18;
++        if let Some(timing) = parse_dtd(&base[offset..offset + 18]) {
++            return Some(timing);
++        }
++    }
++    None
++}
++
++fn parse_cta_extension(block: &[u8]) -> Option<Timing> {
++    assert_eq!(block.len(), EDID_BLOCK_SIZE);
++    let dtd_offset = block[2] as usize;
++    if dtd_offset < 4 || dtd_offset >= 127 {
++        return None;
++    }
++    let mut offset = dtd_offset;
++    for _ in 0..MAX_CTA_DTDS {
++        if offset + 18 > 127 {
++            break;
++        }
++        if let Some(timing) = parse_dtd(&block[offset..offset + 18]) {
++            return Some(timing);
++        }
++        offset += 18;
++    }
++    None
++}
++
++fn parse_displayid_extension(block: &[u8]) -> (Option<Timing>, Option<Timing>) {
++    assert_eq!(block.len(), EDID_BLOCK_SIZE);
++    let payload_len = block[2] as usize;
++    let section_end = 5 + payload_len;
++    if section_end > 126 {
++        return (None, None);
++    }
++    let checksum = block[1..=section_end]
++        .iter()
++        .fold(0u8, |acc, &byte| acc.wrapping_add(byte));
++    if checksum != 0 {
++        return (None, None);
++    }
++
++    let mut preferred = None;
++    let mut first_any = None;
++    let mut pos = 5usize;
++    for _ in 0..MAX_DISPLAYID_BLOCKS {
++        if pos + 3 > section_end {
++            break;
++        }
++        let tag = block[pos];
++        let len = block[pos + 2] as usize;
++        let data_start = pos + 3;
++        let data_end = data_start + len;
++        if data_end > section_end {
++            break;
++        }
++        if tag == DISPLAYID_TAG_TYPE_I || tag == DISPLAYID_TAG_TYPE_VII {
++            let count = (len / 20).min(MAX_DISPLAYID_TIMINGS);
++            for i in 0..count {
++                let d = &block[data_start + i * 20..data_start + (i + 1) * 20];
++                let flags = d[3];
++                let width = u16::from_le_bytes([d[4], d[5]]) as u32 + 1;
++                let height = u16::from_le_bytes([d[12], d[13]]) as u32 + 1;
++                let timing = Timing { width, height };
++                if first_any.is_none() {
++                    first_any = Some(timing);
++                }
++                if (flags & 0x80) != 0 && preferred.is_none() {
++                    preferred = Some(timing);
++                }
++            }
++        }
++        pos = data_end;
++    }
++    (preferred, first_any)
++}
++
++#[allow(dead_code)]
++pub fn decode_base_only(edid: &[u8]) -> Result<Timing, EdidError> {
++    if edid.len() < EDID_BLOCK_SIZE {
++        return Err(EdidError::InvalidLength);
++    }
++    let base = &edid[..EDID_BLOCK_SIZE];
++    if base[..8] != EDID_HEADER {
++        return Err(EdidError::BadHeader);
++    }
++    if !valid_checksum(base) {
++        return Err(EdidError::BadBaseChecksum);
++    }
++    parse_base_dtd(base).ok_or(EdidError::NoTiming)
++}
++
++#[allow(dead_code)]
++pub fn decode_preferred(edid: &[u8]) -> Result<DecodedEdid, EdidError> {
++    if edid.len() < EDID_BLOCK_SIZE
++        || edid.len() % EDID_BLOCK_SIZE != 0
++        || edid.len() > MAX_EDID_TOTAL_BLOCKS * EDID_BLOCK_SIZE
++    {
++        return Err(EdidError::InvalidLength);
++    }
++    let base = &edid[..EDID_BLOCK_SIZE];
++    if base[..8] != EDID_HEADER {
++        return Err(EdidError::BadHeader);
++    }
++    if !valid_checksum(base) {
++        return Err(EdidError::BadBaseChecksum);
++    }
++
++    let declared_ext = base[126] as usize;
++    let expected_len = match declared_ext
++        .checked_add(1)
++        .and_then(|blocks| blocks.checked_mul(EDID_BLOCK_SIZE))
++    {
++        Some(len) => len,
++        None => return Err(EdidError::InvalidLength),
++    };
++    if edid.len() != expected_len {
++        return Err(EdidError::InvalidLength);
++    }
++
++    let extensions_truncated = declared_ext > MAX_EDID_EXTENSION_BLOCKS;
++    let ext_to_walk = declared_ext.min(MAX_EDID_EXTENSION_BLOCKS);
++    let base_dtd = parse_base_dtd(base);
++    let mut displayid_preferred = None;
++    let mut displayid_any = None;
++    let mut cta_dtd = None;
++    let mut bad_extension_blocks = 0usize;
++
++    for ext_idx in 0..ext_to_walk {
++        let start = (1 + ext_idx) * EDID_BLOCK_SIZE;
++        let block = &edid[start..start + EDID_BLOCK_SIZE];
++        if !valid_checksum(block) {
++            bad_extension_blocks += 1;
++            continue;
++        }
++        match block[0] {
++            EXT_TAG_DISPLAYID => {
++                let (pref, any) = parse_displayid_extension(block);
++                if displayid_preferred.is_none() {
++                    displayid_preferred = pref;
++                }
++                if displayid_any.is_none() {
++                    displayid_any = any;
++                }
++            }
++            EXT_TAG_CTA => {
++                if cta_dtd.is_none() {
++                    cta_dtd = parse_cta_extension(block);
++                }
++            }
++            _ => (),
++        }
++    }
++
++    let preferred = displayid_preferred
++        .or(base_dtd)
++        .or(displayid_any)
++        .or(cta_dtd)
++        .ok_or(EdidError::NoTiming)?;
++
++    Ok(DecodedEdid {
++        preferred,
++        extensions_truncated,
++        bad_extension_blocks,
++    })
++}
+diff -ruN '--exclude=*.orig' step3-bootloader-orig/src/main.rs step3-bootloader-work/src/main.rs
+--- a/src/main.rs	2026-11-23 15:52:07.915194164 -0800
++++ b/src/main.rs	2026-11-23 22:33:54.168784381 -0800
+@@ -23,6 +23,7 @@
+ mod os;
+ 
+ mod arch;
++mod edid;
+ mod editor;
+ mod logger;
+ mod serial_16550;
+@@ -200,6 +201,46 @@
+ /// environment carries it as `BOOT_BACKGROUND`, so that the OS draws on the same color.
+ const BACKGROUND_COLOR: u32 = 0x0f0e0c;
+ 
++const MAX_VIDEO_MODES: usize = 256;
++
++fn same_aspect(width_a: u32, height_a: u32, width_b: u32, height_b: u32) -> bool {
++    width_a > 0
++        && height_a > 0
++        && width_b > 0
++        && height_b > 0
++        && u64::from(width_a) * u64::from(height_b) == u64::from(width_b) * u64::from(height_a)
++}
++
++fn choose_video_mode(
++    modes: &[(OsVideoMode, String)],
++    preferred: Option<(u32, u32)>,
++) -> (OsVideoMode, &'static str) {
++    assert!(!modes.is_empty());
++    if let Some((best_width, best_height)) = preferred {
++        if best_width > 0 && best_height > 0 {
++            for (mode, _text) in modes.iter() {
++                if mode.width == best_width && mode.height == best_height {
++                    return (*mode, "exact");
++                }
++            }
++            for (mode, _text) in modes.iter() {
++                if mode.width <= best_width
++                    && mode.height <= best_height
++                    && same_aspect(mode.width, mode.height, best_width, best_height)
++                {
++                    return (*mode, "aspect");
++                }
++            }
++            for (mode, _text) in modes.iter() {
++                if same_aspect(mode.width, mode.height, best_width, best_height) {
++                    return (*mode, "aspect");
++                }
++            }
++        }
++    }
++    (modes[0].0, "largest")
++}
++
+ fn select_mode(
+     os: &impl Os,
+     output_i: usize,
+@@ -207,7 +248,12 @@
+     edit_env: &mut bool,
+ ) -> Option<OsVideoMode> {
+     let mut modes = Vec::new();
++    let mut modes_truncated = false;
+     for mode in os.video_modes(output_i) {
++        if modes.len() >= MAX_VIDEO_MODES {
++            modes_truncated = true;
++            break;
++        }
+         let mut aspect_w = mode.width;
+         let mut aspect_h = mode.height;
+         for i in 2..cmp::min(aspect_w / 2, aspect_h / 2) {
+@@ -225,27 +271,51 @@
+             ),
+         ));
+     }
++    if modes_truncated {
++        log::warn!(
++            "Output {} reported more than {} modes; capped scan",
++            output_i,
++            MAX_VIDEO_MODES
++        );
++    }
+ 
+     if modes.is_empty() {
+         return None;
+     }
+ 
+     // Sort modes by pixel area, reversed
+-    modes.sort_by(|a, b| (b.0.width * b.0.height).cmp(&(a.0.width * a.0.height)));
++    modes.sort_by(|a, b| {
++        (u64::from(b.0.width) * u64::from(b.0.height))
++            .cmp(&(u64::from(a.0.width) * u64::from(a.0.height)))
++    });
+ 
+     // Set selected based on best resolution
+-    print!("Output {}", output_i);
+-    let mut selected = modes.first().map_or(0, |x| x.0.id);
+-    if let Some((best_width, best_height)) = os.best_resolution(output_i) {
+-        print!(", best resolution: {}x{}", best_width, best_height);
+-        for (mode, _text) in modes.iter() {
+-            if mode.width == best_width && mode.height == best_height {
+-                selected = mode.id;
+-                break;
+-            }
++    let preferred = os.best_resolution(output_i);
++    let (chosen, reason) = choose_video_mode(
++        &modes,
++        preferred.map(|(width, height, _source)| (width, height)),
++    );
++    let mut selected = chosen.id;
++    match preferred {
++        Some((best_width, best_height, source)) => {
++            println!(
++                "Output {}, preferred: {}x{} ({}), chosen: {}x{} ({})",
++                output_i,
++                best_width,
++                best_height,
++                source.label(),
++                chosen.width,
++                chosen.height,
++                reason
++            );
++        }
++        None => {
++            println!(
++                "Output {}, preferred: none, chosen: {}x{} ({})",
++                output_i, chosen.width, chosen.height, reason
++            );
+         }
+     }
+-    println!();
+ 
+     // A quiet boot takes the best mode without showing the menu
+     if QUIET.load(Ordering::Relaxed) || HARDWARE_LIVE.load(Ordering::Relaxed) {
+diff -ruN '--exclude=*.orig' step3-bootloader-orig/src/os/bios/mod.rs step3-bootloader-work/src/os/bios/mod.rs
+--- a/src/os/bios/mod.rs	2026-11-23 15:52:07.911548736 -0800
++++ b/src/os/bios/mod.rs	2026-11-23 22:33:41.416700813 -0800
+@@ -4,8 +4,9 @@
+ use spin::Mutex;
+ 
+ use crate::KernelArgs;
++use crate::edid::decode_base_only;
+ use crate::logger::LOGGER;
+-use crate::os::{Os, OsHwDesc, OsKey, OsVideoMode};
++use crate::os::{Os, OsHwDesc, OsKey, OsVideoMode, ResolutionSource};
+ 
+ use self::disk::DiskBios;
+ use self::memory_map::memory_map;
+@@ -171,7 +172,7 @@
+         //TODO: check result
+     }
+ 
+-    fn best_resolution(&self, _output_i: usize) -> Option<(u32, u32)> {
++    fn best_resolution(&self, _output_i: usize) -> Option<(u32, u32, ResolutionSource)> {
+         let mut data = ThunkData::new();
+         data.eax = 0x4F15;
+         data.ebx = 0x01;
+@@ -184,11 +185,13 @@
+ 
+         if data.eax == 0x4F {
+             let edid = unsafe { slice::from_raw_parts(VBE_EDID_ADDR as *const u8, 128) };
+-
+-            Some((
+-                (edid[0x38] as u32) | (((edid[0x3A] as u32) & 0xF0) << 4),
+-                (edid[0x3B] as u32) | (((edid[0x3D] as u32) & 0xF0) << 4),
+-            ))
++            match decode_base_only(edid) {
++                Ok(timing) => Some((timing.width, timing.height, ResolutionSource::VbeEdid)),
++                Err(err) => {
++                    log::warn!("Invalid VBE EDID: {:?}", err);
++                    None
++                }
++            }
+         } else {
+             log::warn!("Failed to get VBE EDID: 0x{:X}", { data.eax });
+             None
+diff -ruN '--exclude=*.orig' step3-bootloader-orig/src/os/mod.rs step3-bootloader-work/src/os/mod.rs
+--- a/src/os/mod.rs	2026-11-23 15:52:07.913823500 -0800
++++ b/src/os/mod.rs	2026-11-23 22:31:37.118907464 -0800
+@@ -82,6 +82,25 @@
+     pub base: u64,
+ }
+ 
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum ResolutionSource {
++    EdidActive,
++    EdidDiscovered,
++    Firmware,
++    VbeEdid,
++}
++
++impl ResolutionSource {
++    pub fn label(self) -> &'static str {
++        match self {
++            ResolutionSource::EdidActive => "edid-active",
++            ResolutionSource::EdidDiscovered => "edid-discovered",
++            ResolutionSource::Firmware => "firmware",
++            ResolutionSource::VbeEdid => "vbe-edid",
++        }
++    }
++}
++
+ pub trait Os {
+     type D: Disk;
+     type V: Iterator<Item = OsVideoMode>;
+@@ -106,7 +125,7 @@
+     fn video_outputs(&self) -> usize;
+     fn video_modes(&self, output_i: usize) -> Self::V;
+     fn set_video_mode(&self, output_i: usize, mode: &mut OsVideoMode);
+-    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32)>;
++    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32, ResolutionSource)>;
+ 
+     fn get_key(&self) -> OsKey;
+ 
+diff -ruN '--exclude=*.orig' step3-bootloader-orig/src/os/uefi/display.rs step3-bootloader-work/src/os/uefi/display.rs
+--- a/src/os/uefi/display.rs	2026-11-23 15:52:07.300739713 -0800
++++ b/src/os/uefi/display.rs	2026-11-23 22:31:45.202957789 -0800
+@@ -21,6 +21,13 @@
+     [0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86],
+ );
+ 
++const EDID_DISCOVERED_PROTOCOL_GUID: Guid = Guid(
++    0x1c0c34f6,
++    0xd380,
++    0x41fa,
++    [0xa0, 0x49, 0x8a, 0xd0, 0x6c, 0x1a, 0x66, 0xaa],
++);
++
+ #[allow(non_snake_case)]
+ #[repr(C)]
+ pub struct EdidActiveProtocol {
+@@ -39,3 +46,15 @@
+         EdidActive(inner)
+     }
+ }
++
++pub struct EdidDiscovered(pub &'static mut EdidActiveProtocol);
++
++impl Protocol<EdidActiveProtocol> for EdidDiscovered {
++    fn guid() -> Guid {
++        EDID_DISCOVERED_PROTOCOL_GUID
++    }
++
++    fn new(inner: &'static mut EdidActiveProtocol) -> Self {
++        EdidDiscovered(inner)
++    }
++}
+diff -ruN '--exclude=*.orig' step3-bootloader-orig/src/os/uefi/mod.rs step3-bootloader-work/src/os/uefi/mod.rs
+--- a/src/os/uefi/mod.rs	2026-11-23 15:52:07.914149309 -0800
++++ b/src/os/uefi/mod.rs	2026-11-23 22:33:27.352609082 -0800
+@@ -11,12 +11,15 @@
+     text::TextInputKey,
+ };
+ 
+-use crate::os::{Os, OsHwDesc, OsKey, OsVideoMode};
++use crate::edid::{
++    EDID_BLOCK_SIZE, MAX_EDID_EXTENSION_BLOCKS, MAX_EDID_TOTAL_BLOCKS, decode_preferred,
++};
++use crate::os::{Os, OsHwDesc, OsKey, OsVideoMode, ResolutionSource};
+ 
+ use self::{
+     device::{device_path_to_string, disk_device_priority},
+     disk::DiskOrFileEfi,
+-    display::{EdidActive, Output},
++    display::{EdidActive, EdidActiveProtocol, EdidDiscovered, Output},
+     video_mode::VideoModeIter,
+ };
+ 
+@@ -95,13 +98,13 @@
+ 
+ pub struct OsEfi {
+     st: &'static SystemTable,
+-    outputs: RefCell<Vec<(Output, Option<EdidActive>)>>,
++    outputs: RefCell<Vec<(Output, Option<EdidActive>, Option<EdidDiscovered>)>>,
+ }
+ 
+ impl OsEfi {
+     pub fn new() -> Self {
+         let st = std::system_table();
+-        let mut outputs = Vec::<(Output, Option<EdidActive>)>::new();
++        let mut outputs = Vec::<(Output, Option<EdidActive>, Option<EdidDiscovered>)>::new();
+         {
+             let guid = Output::guid();
+             let mut handles = Vec::with_capacity(256);
+@@ -143,20 +146,30 @@
+                                     }
+                                 }
+ 
+-                                outputs.push((
+-                                    output,
+-                                    match EdidActive::handle_protocol(handle) {
+-                                        Ok(efi_edid) => Some(efi_edid),
+-                                        Err(err) => {
+-                                            log::warn!(
+-                                                "Failed to get EFI EDID from handle {:?}: {:?}",
+-                                                handle,
+-                                                err
+-                                            );
+-                                            None
+-                                        }
+-                                    },
+-                                ));
++                                let edid_active = match EdidActive::handle_protocol(handle) {
++                                    Ok(efi_edid) => Some(efi_edid),
++                                    Err(err) => {
++                                        log::debug!(
++                                            "Failed to get EFI EDID active from handle {:?}: {:?}",
++                                            handle,
++                                            err
++                                        );
++                                        None
++                                    }
++                                };
++                                let edid_discovered = match EdidDiscovered::handle_protocol(handle)
++                                {
++                                    Ok(efi_edid) => Some(efi_edid),
++                                    Err(err) => {
++                                        log::debug!(
++                                            "Failed to get EFI EDID discovered from handle {:?}: {:?}",
++                                            handle,
++                                            err
++                                        );
++                                        None
++                                    }
++                                };
++                                outputs.push((output, edid_active, edid_discovered));
+                             }
+                             Err(err) => {
+                                 log::warn!(
+@@ -295,7 +308,7 @@
+     fn set_video_mode(&self, output_i: usize, mode: &mut OsVideoMode) {
+         //TODO: return error?
+         let mut outputs = self.outputs.borrow_mut();
+-        let (output, _efi_edid_opt) = &mut outputs[output_i];
++        let (output, _efi_edid_active, _efi_edid_discovered) = &mut outputs[output_i];
+         status_to_result((output.0.SetMode)(output.0, mode.id)).unwrap();
+ 
+         // Update with actual mode information
+@@ -304,21 +317,18 @@
+         mode.base = output.0.Mode.FrameBufferBase as u64;
+     }
+ 
+-    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32)> {
++    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32, ResolutionSource)> {
+         let mut outputs = self.outputs.borrow_mut();
+-        let (output, efi_edid_opt) = outputs.get_mut(output_i)?;
++        let (output, edid_active_opt, edid_discovered_opt) = outputs.get_mut(output_i)?;
+ 
+-        if let Some(efi_edid) = efi_edid_opt {
+-            let edid =
+-                unsafe { slice::from_raw_parts(efi_edid.0.Edid, efi_edid.0.SizeOfEdid as usize) };
+-
+-            if edid.len() > 0x3D {
+-                return Some((
+-                    (edid[0x38] as u32) | (((edid[0x3A] as u32) & 0xF0) << 4),
+-                    (edid[0x3B] as u32) | (((edid[0x3D] as u32) & 0xF0) << 4),
+-                ));
+-            } else {
+-                log::warn!("EFI EDID too small: {}", edid.len());
++        if let Some(efi_edid) = edid_active_opt.as_ref() {
++            if let Some((w, h)) = decode_efi_edid(output_i, "active", efi_edid.0) {
++                return Some((w, h, ResolutionSource::EdidActive));
++            }
++        }
++        if let Some(efi_edid) = edid_discovered_opt.as_ref() {
++            if let Some((w, h)) = decode_efi_edid(output_i, "discovered", efi_edid.0) {
++                return Some((w, h, ResolutionSource::EdidDiscovered));
+             }
+         }
+ 
+@@ -326,6 +336,7 @@
+         Some((
+             output.0.Mode.Info.HorizontalResolution,
+             output.0.Mode.Info.VerticalResolution,
++            ResolutionSource::Firmware,
+         ))
+     }
+ 
+@@ -412,6 +423,54 @@
+     }
+ }
+ 
++fn decode_efi_edid(output_i: usize, kind: &str, proto: &EdidActiveProtocol) -> Option<(u32, u32)> {
++    let size = proto.SizeOfEdid as usize;
++    if proto.Edid.is_null() || size == 0 {
++        return None;
++    }
++    if size > MAX_EDID_TOTAL_BLOCKS * EDID_BLOCK_SIZE {
++        log::warn!(
++            "Output {} EFI EDID ({}) too large: {} bytes",
++            output_i,
++            kind,
++            size
++        );
++        return None;
++    }
++    let edid = unsafe { slice::from_raw_parts(proto.Edid, size) };
++    match decode_preferred(edid) {
++        Ok(decoded) => {
++            if decoded.extensions_truncated {
++                log::warn!(
++                    "Output {} EFI EDID ({}) exceeded {} extensions; decoded base and first {}",
++                    output_i,
++                    kind,
++                    MAX_EDID_EXTENSION_BLOCKS,
++                    MAX_EDID_EXTENSION_BLOCKS
++                );
++            }
++            if decoded.bad_extension_blocks > 0 {
++                log::warn!(
++                    "Output {} EFI EDID ({}) skipped {} extension block(s) with bad checksum",
++                    output_i,
++                    kind,
++                    decoded.bad_extension_blocks
++                );
++            }
++            Some((decoded.preferred.width, decoded.preferred.height))
++        }
++        Err(err) => {
++            log::warn!(
++                "Output {} EFI EDID ({}) rejected: {:?}",
++                output_i,
++                kind,
++                err
++            );
++            None
++        }
++    }
++}
++
+ fn status_to_result(status: Status) -> Result<usize> {
+     match status {
+         Status(ok) if status.is_success() => Ok(ok),
+diff -ruN '--exclude=*.orig' step3-bootloader-orig/src/os/uefi/video_mode.rs step3-bootloader-work/src/os/uefi/video_mode.rs
+--- a/src/os/uefi/video_mode.rs	2026-11-23 15:52:07.300739713 -0800
++++ b/src/os/uefi/video_mode.rs	2026-11-23 22:31:53.460009387 -0800
+@@ -1,18 +1,40 @@
+ use core::ptr;
+-use log::error;
++use log::{error, warn};
+ use uefi::status::Status;
+ 
+ use crate::os::OsVideoMode;
+ use crate::os::uefi::display::Output;
+ 
++pub const MAX_GOP_MODES: u32 = 256;
++
+ pub struct VideoModeIter {
+     output_opt: Option<Output>,
+     i: u32,
++    max_mode: u32,
+ }
+ 
+ impl VideoModeIter {
+     pub fn new(output_opt: Option<Output>) -> Self {
+-        Self { output_opt, i: 0 }
++        let max_mode = match output_opt.as_ref() {
++            Some(output) => {
++                let reported = output.0.Mode.MaxMode;
++                if reported > MAX_GOP_MODES {
++                    warn!(
++                        "GOP reported {} modes, capping scan at {}",
++                        reported, MAX_GOP_MODES
++                    );
++                    MAX_GOP_MODES
++                } else {
++                    reported
++                }
++            }
++            None => 0,
++        };
++        Self {
++            output_opt,
++            i: 0,
++            max_mode,
++        }
+     }
+ }
+ 
+@@ -20,7 +42,7 @@
+     type Item = OsVideoMode;
+     fn next(&mut self) -> Option<Self::Item> {
+         if let Some(ref mut output) = self.output_opt {
+-            while self.i < output.0.Mode.MaxMode {
++            while self.i < self.max_mode {
+                 let id = self.i;
+                 self.i += 1;
+ 
