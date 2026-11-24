@@ -10,6 +10,19 @@ ROOT = Path(__file__).resolve().parent.parent
 FFMPEG_RECIPE = ROOT / "recipes" / "libs" / "ffmpeg" / "recipe.toml"
 DAV1D_RECIPE = ROOT / "recipes" / "libs" / "dav1d" / "recipe.toml"
 OLD_DAV1D_RECIPE = ROOT / "recipes" / "wip" / "codecs" / "dav1d" / "recipe.toml"
+LIBASS_RECIPE = ROOT / "recipes" / "libs" / "libass" / "recipe.toml"
+OLD_LIBASS_RECIPE = ROOT / "recipes" / "wip" / "libs" / "other" / "libass" / "recipe.toml"
+LIBPLACEBO_RECIPE = ROOT / "recipes" / "libs" / "libplacebo" / "recipe.toml"
+MPV_RECIPE = ROOT / "recipes" / "video" / "mpv" / "recipe.toml"
+OLD_MPV_RECIPE = ROOT / "recipes" / "wip" / "players" / "mpv" / "recipe.toml"
+
+COMMIT_REV_RE = re.compile(r"^[0-9a-f]{40}$")
+FORBIDDEN_MPV_DEPS = frozenset({
+    "ffmpeg6",
+    "liborbital",
+    "sdl1",
+    "sdl2",
+})
 
 MAX_ARRAY_ITEMS = 256
 MAX_CONFIG_DEPTH = 32
@@ -177,6 +190,65 @@ def check_dav1d_recipe():
     return errors
 
 
+def check_libass_recipe():
+    errors = []
+    if OLD_LIBASS_RECIPE.exists():
+        errors.append("recipes/wip/libs/other/libass/recipe.toml: duplicate wip libass recipe still exists")
+    if not LIBASS_RECIPE.is_file():
+        return errors + ["recipes/libs/libass/recipe.toml: missing recipe"]
+    data = tomllib.loads(LIBASS_RECIPE.read_text(encoding="utf-8"))
+    source = data.get("source", {})
+    if "tar" not in source or not source.get("blake3"):
+        errors.append("recipes/libs/libass/recipe.toml: tar source must be pinned by blake3")
+    return errors
+
+
+def check_libplacebo_recipe():
+    errors = []
+    if not LIBPLACEBO_RECIPE.is_file():
+        return ["recipes/libs/libplacebo/recipe.toml: missing recipe"]
+    data = tomllib.loads(LIBPLACEBO_RECIPE.read_text(encoding="utf-8"))
+    source = data.get("source", {})
+    rev = source.get("rev", "")
+    if "git" not in source or not isinstance(rev, str) or not COMMIT_REV_RE.match(rev):
+        errors.append("recipes/libs/libplacebo/recipe.toml: git source must be pinned by 40-hex commit rev")
+    script = data.get("build", {}).get("script", "")
+    if "-Dauto_features=disabled" not in script:
+        errors.append("recipes/libs/libplacebo/recipe.toml: missing -Dauto_features=disabled")
+    return errors
+
+
+def check_mpv_recipe():
+    errors = []
+    if OLD_MPV_RECIPE.exists():
+        errors.append("recipes/wip/players/mpv/recipe.toml: duplicate wip mpv recipe still exists")
+    if not MPV_RECIPE.is_file():
+        return errors + ["recipes/video/mpv/recipe.toml: missing recipe"]
+    data = tomllib.loads(MPV_RECIPE.read_text(encoding="utf-8"))
+    source = data.get("source", {})
+    rev = source.get("rev", "")
+    if "git" not in source or not isinstance(rev, str) or not COMMIT_REV_RE.match(rev):
+        errors.append("recipes/video/mpv/recipe.toml: git source must be pinned by 40-hex commit rev")
+    build = data.get("build", {})
+    deps = set(build.get("dependencies", [])) | set(build.get("dev-dependencies", []))
+    for dep in sorted(deps & FORBIDDEN_MPV_DEPS):
+        errors.append(f"recipes/video/mpv/recipe.toml: forbidden dependency {dep}")
+    if "ffmpeg" not in deps:
+        errors.append("recipes/video/mpv/recipe.toml: missing dependency ffmpeg")
+    script = build.get("script", "")
+    if "-Dgpl=false" not in script:
+        errors.append("recipes/video/mpv/recipe.toml: missing -Dgpl=false")
+    if "-Dgpl=true" in script:
+        errors.append("recipes/video/mpv/recipe.toml: forbidden -Dgpl=true")
+    if "-Dauto_features=disabled" not in script:
+        errors.append("recipes/video/mpv/recipe.toml: missing -Dauto_features=disabled")
+    if "LICENSE.LGPL" not in script:
+        errors.append("recipes/video/mpv/recipe.toml: must install LICENSE.LGPL")
+    if "LICENSE.GPL" in script:
+        errors.append("recipes/video/mpv/recipe.toml: must not install LICENSE.GPL")
+    return errors
+
+
 def is_unfetched_recipe_source(path):
     try:
         parts = path.resolve().relative_to(ROOT).parts
@@ -238,6 +310,9 @@ def main():
     errors = []
     errors.extend(check_ffmpeg_recipe())
     errors.extend(check_dav1d_recipe())
+    errors.extend(check_libass_recipe())
+    errors.extend(check_libplacebo_recipe())
+    errors.extend(check_mpv_recipe())
     errors.extend(check_config_conflicts())
     for line in errors:
         print(line)

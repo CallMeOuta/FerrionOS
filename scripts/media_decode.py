@@ -609,3 +609,245 @@ def run_media_decode(vm, args, helpers):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def generate_mpv_clips(clips_dir, ref_dir):
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    ref_dir.mkdir(parents=True, exist_ok=True)
+
+    video_specs = [
+        {
+            "name": "av1_8bit.mkv",
+            "encode": ["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1",
+                       "-c:v", "libsvtav1", "-pix_fmt", "yuv420p", "-preset", "10"],
+            "vcodec": "libdav1d",
+            "pix_fmt": "yuv420p",
+        },
+        {
+            "name": "av1_10bit.mp4",
+            "encode": ["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1",
+                       "-c:v", "libsvtav1", "-pix_fmt", "yuv420p10le", "-preset", "10"],
+            "vcodec": "libdav1d",
+            "pix_fmt": "yuv420p10le",
+        },
+        {
+            "name": "vp9.webm",
+            "encode": ["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1",
+                       "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", "-b:v", "200k"],
+            "vcodec": "vp9",
+            "pix_fmt": "yuv420p",
+        },
+        {
+            "name": "mpeg1_mp2.mpg",
+            "encode": ["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=1",
+                       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1",
+                       "-ac", "2", "-c:v", "mpeg1video", "-pix_fmt", "yuv420p", "-b:v", "400k",
+                       "-c:a", "mp2", "-b:a", "192k"],
+            "vcodec": "mpeg1video",
+            "pix_fmt": "yuv420p",
+        },
+    ]
+
+    audio_specs = [
+        {
+            "name": "opus.ogg",
+            "encode": ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+                       "-ac", "2", "-c:a", "libopus", "-b:a", "128k"],
+        },
+    ]
+
+    hashes = {}
+    ref_frames = {}
+    for spec in video_specs + audio_specs:
+        clip_path = clips_dir / spec["name"]
+        run_host_ffmpeg([*spec["encode"], str(clip_path)])
+        hashes[spec["name"]] = sha256_file(clip_path)
+
+    for spec in video_specs:
+        clip_path = clips_dir / spec["name"]
+        md5_out = run_host_ffmpeg(
+            ["-c:v", spec["vcodec"], "-i", str(clip_path), "-map", "0:v:0",
+             "-pix_fmt", spec["pix_fmt"], "-f", "framemd5", "-"],
+            capture_stdout=True,
+        ).decode("utf-8", errors="replace")
+        (ref_dir / f"{spec['name']}.framemd5").write_text(md5_out, encoding="utf-8")
+        ref_frames[spec["name"]] = len(framemd5_lines(md5_out))
+
+    return video_specs, audio_specs, hashes, ref_frames
+
+
+def parse_mpv_log(text):
+    frametime_count = len(re.findall(r"\[cplayer\]\s+frametime=", text))
+    eof = "Exiting... (End of file)" in text
+    drop_match = re.search(r"Dropped:\s*(\d+)", text)
+    dropped = int(drop_match.group(1)) if drop_match else 0
+    vo_null = "VO: [null]" in text
+    ao_null = "AO: [null]" in text
+    return {
+        "frametime_count": frametime_count,
+        "eof": eof,
+        "dropped": dropped,
+        "vo_null": vo_null,
+        "ao_null": ao_null,
+    }
+
+
+def run_mpv_headless(vm, args, helpers):
+    Blocked = helpers["Blocked"]
+    root_shell = helpers["root_shell"]
+    run_status = helpers["run_status"]
+
+    if not shutil.which("ffmpeg"):
+        raise Blocked("host lacks ffmpeg")
+
+    clips_dir = vm.out / "clips"
+    ref_dir = vm.out / "host-ref"
+    guest_dir = vm.out / "guest-out"
+
+    video_specs, audio_specs, clip_hashes, ref_frames = generate_mpv_clips(clips_dir, ref_dir)
+    record = {
+        "clip_sha256": clip_hashes,
+        "ref_frames": ref_frames,
+        "video": {},
+        "audio": {},
+    }
+
+    server = start_clip_server(clips_dir, guest_dir)
+    port = server.server_address[1]
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, f"root serial login failed; see {vm.out}"
+
+        code, net_text = run_status(
+            vm,
+            'bash -c \'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); '
+            'while [[ -z "$server" || "$server" == 9.9.9.9 ]] && (( SECONDS < deadline )); do '
+            'sleep 0.1; server=$(cat /etc/net/dns); done; '
+            '[[ -n "$server" && "$server" != 9.9.9.9 ]]\'',
+            timeout=70,
+        )
+        if code != 0:
+            return False, f"DHCP did not finish: {net_text.strip()}; see {vm.out}"
+
+        code, _ = run_status(vm, "bash -c 'command -v mpv'", timeout=30)
+        if code != 0:
+            record["failure"] = "mpv not installed"
+            (vm.out / "mpv-headless.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            return False, f"mpv is not installed in guest; see {vm.out}"
+
+        base = f"http://10.0.2.2:{port}"
+        curl_post = "curl --http1.0 -H Expect: -fsS --max-time 30 --retry 2 --data-binary"
+        curl_get = "curl --http1.0 -fsS --max-time 30 --retry 2"
+
+        code, ver_out = run_status(
+            vm,
+            "bash -c '"
+            "mkdir -p /tmp/media && "
+            "test -s /usr/share/licenses/mpv/LICENSE.LGPL && "
+            "test -s /usr/share/licenses/mpv/Copyright && "
+            "test ! -e /usr/share/licenses/mpv/LICENSE.GPL && "
+            "test -s /usr/share/licenses/libplacebo/LICENSE && "
+            "test -s /usr/share/licenses/libass/COPYING && "
+            "mpv --version > /tmp/media/mpv-version.txt 2>&1 && "
+            f"{curl_post} @/tmp/media/mpv-version.txt {base}/mpv-version.txt"
+            "'",
+            timeout=60,
+        )
+        if code != 0:
+            return False, f"mpv version or license check failed (rc={code}): {ver_out.strip()[-300:]}; see {vm.out}"
+
+        record["version"] = (guest_dir / "mpv-version.txt").read_text(encoding="utf-8", errors="replace").splitlines()[0]
+
+        problems = []
+        for name, expected_hash in clip_hashes.items():
+            code, dl_out = run_status(
+                vm,
+                f"bash -c '{curl_get} {base}/{name} -o /tmp/media/{name} && "
+                f"got=$(sha256sum /tmp/media/{name} | cut -d\" \" -f1) && "
+                f"test \"$got\" = \"{expected_hash}\"'",
+                timeout=90,
+            )
+            if code is None:
+                return False, f"timeout downloading {name}; see {vm.out}"
+            if code != 0:
+                problems.append(f"download or sha256 failed for {name}: {dl_out.strip()}")
+
+        if problems:
+            record["problems"] = problems
+            (vm.out / "mpv-headless.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            return False, "; ".join(problems) + f"; see {vm.out}"
+
+        for spec in video_specs:
+            name = spec["name"]
+            log_name = f"{name}.mpv.log"
+            code, cmd_out = run_status(
+                vm,
+                f"bash -c 'rc=0; mpv --no-config --vo=null --ao=null --untimed --framedrop=no "
+                f"--vd={spec['vcodec']} --msg-level=all=info,cplayer=trace /tmp/media/{name} "
+                f"> /tmp/media/{log_name} 2>&1 || rc=$?; "
+                f"{curl_post} @/tmp/media/{log_name} {base}/{log_name} || true; exit $rc'",
+                timeout=120,
+            )
+            if code is None:
+                return False, f"timeout running mpv on {name}; see {vm.out}"
+            log_path = guest_dir / log_name
+            log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+            if code != 0:
+                tail = (log_text or cmd_out).strip()[-400:]
+                problems.append(f"mpv failed on {name} (rc={code}): {tail}")
+                continue
+            parsed = parse_mpv_log(log_text)
+            expected = ref_frames[name]
+            ok = (
+                parsed["eof"]
+                and parsed["vo_null"]
+                and parsed["dropped"] == 0
+                and parsed["frametime_count"] > 0
+                and parsed["frametime_count"] == expected
+            )
+            parsed["expected_frames"] = expected
+            parsed["ok"] = ok
+            record["video"][name] = parsed
+            if not ok:
+                problems.append(
+                    f"mpv check failed for {name}: frames={parsed['frametime_count']}/{expected} "
+                    f"eof={parsed['eof']} vo_null={parsed['vo_null']} dropped={parsed['dropped']}"
+                )
+
+        for spec in audio_specs:
+            name = spec["name"]
+            log_name = f"{name}.mpv.log"
+            code, cmd_out = run_status(
+                vm,
+                f"bash -c 'rc=0; mpv --no-config --vo=null --ao=null --untimed "
+                f"--msg-level=all=info,cplayer=trace /tmp/media/{name} "
+                f"> /tmp/media/{log_name} 2>&1 || rc=$?; "
+                f"{curl_post} @/tmp/media/{log_name} {base}/{log_name} || true; exit $rc'",
+                timeout=120,
+            )
+            if code is None:
+                return False, f"timeout running mpv on {name}; see {vm.out}"
+            log_path = guest_dir / log_name
+            log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+            if code != 0:
+                tail = (log_text or cmd_out).strip()[-400:]
+                problems.append(f"mpv failed on {name} (rc={code}): {tail}")
+                continue
+            parsed = parse_mpv_log(log_text)
+            ok = parsed["eof"] and parsed["ao_null"]
+            parsed["ok"] = ok
+            record["audio"][name] = parsed
+            if not ok:
+                problems.append(f"mpv audio check failed for {name}: eof={parsed['eof']} ao_null={parsed['ao_null']}")
+
+        record["problems"] = problems
+        (vm.out / "mpv-headless.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        if problems:
+            return False, "; ".join(problems) + f"; see {vm.out}"
+        return True, (
+            f"{len(video_specs)} video clips exact frame count + EOF, "
+            f"{len(audio_specs)} audio clip EOF via mpv --vo=null --ao=null; see {vm.out}"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()

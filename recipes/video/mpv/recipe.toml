@@ -1,0 +1,39 @@
+[package]
+description = "Media player and library"
+
+[source]
+git = "https://github.com/mpv-player/mpv.git"
+rev = "b0841e8c4d156b8403dc1876c4cbd9011eb583f3"
+patches = [
+    "ferrion-j1-decl.patch",
+    "ferrion-accept-fallback.patch",
+    "ferrion-printf-precision.patch",
+]
+
+[build]
+template = "custom"
+dependencies = [
+    "ffmpeg",
+    "libass",
+    "libiconv",
+    "libplacebo",
+    "zlib",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_meson \
+    -Dgpl=false \
+    -Dauto_features=disabled \
+    -Dgl=disabled \
+    -Dlua=disabled \
+    -Dbuild-date=false \
+    -Dcplayer=true \
+    -Dlibmpv=true \
+    -Diconv=enabled \
+    -Dzlib=enabled \
+    -Dmanpage-build=disabled
+
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE.LGPL" "${COOKBOOK_STAGE}/usr/share/licenses/mpv/LICENSE.LGPL"
+install -Dm644 "${COOKBOOK_SOURCE}/Copyright" "${COOKBOOK_STAGE}/usr/share/licenses/mpv/Copyright"
+"""

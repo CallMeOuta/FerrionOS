@@ -9734,6 +9734,23 @@ def test_desktop_deny(vm, args):
 
 
 TESTS["desktop-deny"] = test_desktop_deny
+
+
+def test_mpv_headless(vm, args):
+    """M2a: check guest mpv headless (--vo=null --ao=null) exact frame counts, EOF, LGPL/licenses across video and audio clips."""
+    import media_decode
+    return media_decode.run_mpv_headless(
+        vm,
+        args,
+        {
+            "Blocked": Blocked,
+            "root_shell": root_shell,
+            "run_status": run_status,
+        },
+    )
+
+
+TESTS["mpv-headless"] = test_mpv_headless
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 def run_session_login_check(args, out):
     """Logs in as `user` on VT 3, verifies user-owned ferrion-wm on screen, 0600 session.log, QMP software pointer motion on VGA, Mod+T child uid/stdio/env/fd isolation, and VT 3 text login recovery past a lingering Mod+L sleep child (use --config wm-session)."""
