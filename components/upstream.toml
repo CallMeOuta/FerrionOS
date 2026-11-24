@@ -1,0 +1,58 @@
+[kernel]
+url = "https://gitlab.redox-os.org/redox-os/kernel.git"
+rev = "e7f1d4231d0f4b55fbef229d9cd9459302c101f4"
+
+[kernel.licenses]
+"LICENSE" = "9f6f8fa58b09a2f787ca904671df2f07a53e440f8a5198f9ac469074e7ab7dcf"
+"syscall/LICENSE" = "efcfee7981ff72431fffb06925cad00a23dce079ed4354f61030ad5abdb78829"
+
+[relibc]
+url = "https://gitlab.redox-os.org/redox-os/relibc.git"
+rev = "74b5e7e315043a21b599f271d5692727aa54f64d"
+
+[relibc.licenses]
+"LICENSE" = "1bc13112bee203de03bb45dfebc20e5338a20349a5935c16b7222c87fd0c7609"
+"openlibm/LICENSE.md" = "b1843fbf5b03f519a5f0a44fce751bdd1022ae7148614923f9d6293e17a18b17"
+"dlmalloc-rs/LICENSE-MIT" = "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+"dlmalloc-rs/LICENSE-APACHE" = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+
+[relibc.submodules.openlibm]
+url = "https://gitlab.redox-os.org/redox-os/openlibm.git"
+rev = "f5ed774593458e116e69731a3ffa59e2a6408d4e"
+
+[relibc.submodules.dlmalloc-rs]
+url = "https://gitlab.redox-os.org/redox-os/dlmalloc-rs.git"
+rev = "40c10f6182cb1d2a78b29f85492936dfbeded02e"
+
+[base]
+url = "https://gitlab.redox-os.org/redox-os/base.git"
+rev = "20f7573b4dc011ea5267189185edc0b2f12bab0f"
+
+[base.licenses]
+"LICENSE" = "cb46b697c3fd9d27d7bfe1b1ad48f8a58a284984504c6eb215ae2164538df7cb"
+"vendor/smoltcp/LICENSE-0BSD.txt" = "beb2cad88fab8447f7975564e21f9506e733e14c344836f146fa02e811216694"
+
+[base.split]
+repository = "https://github.com/CallMeOuta/ferrion-hardware.git"
+moved = "drivers"
+kept = ["drivers/graphics/graphics-ipc", "drivers/inputd"]
+dropped = ["drivers/net/ixgbed"]
+
+[base.split.renamed]
+"drivers/graphics/graphics-ipc" = "graphics-ipc"
+"drivers/inputd" = "inputd"
+
+[base.split.subjects]
+"ferrion-gpu-syncobj.patch" = "Serve sync objects, timelines and sync files on render handles"
+
+[base.archives.smoltcp]
+path = "vendor/smoltcp"
+url = "https://static.crates.io/crates/smoltcp/smoltcp-0.14.0.crate"
+sha256 = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
+
+[redoxfs]
+url = "https://gitlab.redox-os.org/redox-os/redoxfs.git"
+rev = "5ba45a6887374ab425326656a276bb3b62eba7dc"
+
+[redoxfs.licenses]
+"LICENSE" = "93feb465f692bf21fe310c2d7d2e906982950222897304ddddbcdab873cd11b8"

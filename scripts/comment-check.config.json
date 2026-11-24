@@ -1,7 +1,10 @@
 {
   "skip": [
     "^scripts/virtgpu-layout/linux/",
-    "^recipes/.*/source/"
+    "^recipes/.*/source/",
+    "^components/relibc/openlibm/",
+    "^components/relibc/dlmalloc-rs/",
+    "^components/base/vendor/"
   ],
   "required_patterns": [
     {

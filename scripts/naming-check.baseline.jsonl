@@ -1,0 +1,226 @@
+{"path": "components/base/.gitlab/issue_templates/Issue_template.md", "line": 20, "class": "fail", "text": "<!-- If you are using a pre-built release of Redox, please specify the release version below. -->"}
+{"path": "components/base/.gitlab/issue_templates/Issue_template.md", "line": 21, "class": "fail", "text": "- Redox OS Release:"}
+{"path": "components/base/.gitlab/issue_templates/Issue_template.md", "line": 24, "class": "fail", "text": "<!-- If you have built Redox OS yourself, please provide the following information: -->"}
+{"path": "components/base/.gitlab/issue_templates/Issue_template.md", "line": 92, "class": "fail", "text": "<!-- You also can preview your report before submitting it. Thanks for contributing to Redox! -->"}
+{"path": "components/base/Cargo.toml", "line": 32, "class": "fail", "text": "# Low-level Redox OS crates should be kept in sync using workspace dependencies"}
+{"path": "components/base/README.md", "line": 9, "class": "fail", "text": "- daemon : Redox daemon library"}
+{"path": "components/base/README.md", "line": 32, "class": "fail", "text": "To learn how to do development with these system components inside the Redox build system you need to read the [Build System](https://doc.redox-os.org/book/build-system-reference.html) and [Coding and Building](https://doc.redox-os.org/book/coding-and-building.html) pages."}
+{"path": "components/base/README.md", "line": 36, "class": "fail", "text": "It is recommended to build this system component via the Redox build system, you can learn how to do it on the [Building Redox](https://doc.redox-os.org/book/podman-build.html) page."}
+{"path": "components/base/check.sh", "line": 11, "class": "fail", "text": "echo \"  Wrapper for redoxer to run checks or tests on Redox OS targets.\""}
+{"path": "components/base/check.sh", "line": 16, "class": "fail", "text": "echo \"  --all-target        Run the command on all supported Redox architectures\""}
+{"path": "components/base/check.sh", "line": 92, "class": "fail", "text": "echo \"Running $CMD_ACTION for all supported Redox targets...\""}
+{"path": "components/base/daemon/Cargo.toml", "line": 3, "class": "fail", "text": "description = \"Redox daemon library\""}
+{"path": "components/base/getty/src/main.rs", "line": 297, "class": "fail", "text": "// FIXME enable this once redox supports controlling ttys"}
+{"path": "components/base/graphics-ipc/src/redox_uapi_exts.rs", "line": 1, "class": "fail", "text": "//! All types and constants in this module are Redox OS specific uapi extensions."}
+{"path": "components/base/graphics-ipc/src/redox_uapi_exts.rs", "line": 2, "class": "fail", "text": "//! They should not be used outside of Redox OS specific programs."}
+{"path": "components/base/ramfs/src/scheme.rs", "line": 284, "class": "fail", "text": "// Unlike on Linux, which allows directories to be opened without O_DIRECTORY, Redox has no"}
+{"path": "components/base/selftests/virtio-fsd/README.md", "line": 87, "class": "fail", "text": "On a booted Redox with the `virtio-fsd-selftest` package installed (add `virtio-fsd-selftest = {}` to the `[packages]` of the config you build):"}
+{"path": "components/base/selftests/virtio-fsd/README.md", "line": 95, "class": "fail", "text": "2. Start Redox with that directory shared. The tag is the part before `=`, and a bare directory gets the tag `host`:"}
+{"path": "components/base/selftests/virtio-fsd/src/config.rs", "line": 21, "class": "fail", "text": "about = \"Guest tests for /scheme/virtio-fs.<SHARE_TAG> and Redox VFS schemes\","}
+{"path": "components/base/selftests/virtio-fsd/src/fsutil.rs", "line": 1, "class": "fail", "text": "// Redox open flags sit in the upper 16 bits; mode is the low 16 when packed for openat."}
+{"path": "components/base/selftests/virtio-fsd/src/fsutil.rs", "line": 31, "class": "fail", "text": "// Redox EWOULDBLOCK is 41; Linux aliases it to EAGAIN (11)."}
+{"path": "components/base/selftests/virtio-fsd/src/tests/fcntl.rs", "line": 156, "class": "fail", "text": "// Zero-byte write on a regular file is a no-op; Redox returns Ok."}
+{"path": "components/base/selftests/virtio-fsd/src/tests/meta.rs", "line": 93, "class": "fail", "text": "\"cp -p xattrs: uutils/xattr has no Redox support\".into(),"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 1, "class": "fail", "text": "# Porting the core Redox kernel to arm AArch64: An outline"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 7, "class": "fail", "text": "* Capturing thinking on the work needed for a core Redox kernel port"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 11, "class": "fail", "text": "Core Redox kernel means everything needed to get to a non-graphical console-only multi-user shell."}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 31, "class": "fail", "text": "| [Linux kernel boot protocol for AArch64](https://www.kernel.org/doc/Documentation/arm64/booting.txt) | The linked document describes assumptions made from the bootloader which are field tested and worthwhile to have for Redox an AArch64. <br/> The intent is to consider most of the document except anything tied to the Linux kernel itself.  |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 32, "class": "fail", "text": "| [Flattened Device Tree](https://elinux.org/Device_Tree_Reference)                                    | FDT binary blobs supplied by the bootloader shall provide the Redox kernel with misc platform \\{memory, interrupt, devicemem} maps. Qemu's virt machine platform synthetically creates an FDT blob at a specific address which is very handy. |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 41, "class": "fail", "text": "| [u-boot](https://www.denx.de/wiki/U-Boot)                                           | u-boot will handle early console access, media access for fetching redox kernel images from non-volatile storage/misc disk subsystems/off the network. <br /> u-boot supports loading EFI applications. If EFI support to AArch64 Redox is added in the future that should essentially work out of the box. <br /> u-boot will load redox and FDT binary blobs into RAM and jump to the redox kernel.                                                       |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 42, "class": "fail", "text": "| Redox early-init stub                                                               | For AArch64, the redox kernel will contain an A64 assembly stub that will setup the MMU from scratch. This is akin to the [x86_64 redox bootloader](https://github.com/redox-os/bootloader/blob/master/x86_64/startup-x86_64.asm). <br /> This stub sets up identity maps for MMU initialization, maps the kernel image itself as well as the device memory for the UART console. At present this stub shall be a part of the kernel itself for simplicity. |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 43, "class": "fail", "text": "| Redox kstart entry                                                                  | The early init stub hands off here. kstart will then re-init the MMU more comprehensively.                                                                                                                                                                                                                                                                                                                                                                  |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 47, "class": "fail", "text": "The following devices shall be supported. All necessary information specific to these devices will be provided to the redox kernel by the platform specific FDT binary blob."}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 59, "class": "fail", "text": "| Redox AArch64 toolchain              | Create an usable redox AArch64 toolchain specification                                                                                                                                                                                                                                                  | Done         | Using this JSON spec in isolated tests produces valid AArch64 soft float code |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 60, "class": "fail", "text": "| Stubbed kernel image                 | Stub out AArch64 kernel support using the existing x86_64 arch code as a template <br /> Modify redox kernel build glue and work iteratively to get a linkable (non-functional) image                                                                                                                   | Not done yet |                                                                               |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 61, "class": "fail", "text": "| Boot flow                            | Create a self hosted u-boot -> redox kernel workflow <br /> Should obtain the stubbed image from a local TFTP server, load it into RAM and jump to it                                                                                                                                                   | Not done yet |                                                                               |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 63, "class": "fail", "text": "| Verify Redox entry                   | Verify that control reaches the redox kernel from u-boot                                                                                                                                                                                                                                                | Not done yet |                                                                               |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 64, "class": "fail", "text": "| AArch64 early init stub              | Add support for raw asm code for early AArch64 init in the redox kernel <br /> Verify that this code is located appropriately in the link map and that control reaches this code from u-boot                                                                                                            | Not done yet |                                                                               |"}
+{"path": "components/kernel/ARM-AARCH64-PORT-OUTLINE.md", "line": 69, "class": "fail", "text": "| Basic Redox MMU support              | Get Redox to create a final set of mappings for everything <br /> Verify that this works as expected                                                                                                                                                                                                    | Not done yet |                                                                               |"}
+{"path": "components/kernel/README.md", "line": 3, "class": "fail", "text": "Redox OS Microkernel"}
+{"path": "components/kernel/README.md", "line": 25, "class": "fail", "text": "Running [QEMU](https://www.qemu.org) with the `-s` flag will set up QEMU to listen on port `1234` for a GDB client to connect to it. To debug the redox kernel run."}
+{"path": "components/kernel/README.md", "line": 68, "class": "fail", "text": "To learn how to do development with this system component inside the Redox build system you need to read the [Build System](https://doc.redox-os.org/book/build-system-reference.html) and [Coding and Building](https://doc.redox-os.org/book/coding-and-building.html) pages."}
+{"path": "components/kernel/README.md", "line": 72, "class": "fail", "text": "To build this system component you need to download the Redox build system, you can learn how to do it on the [Building Redox](https://doc.redox-os.org/book/podman-build.html) page."}
+{"path": "components/kernel/README.md", "line": 74, "class": "fail", "text": "This is necessary because they only work with cross-compilation to a Redox virtual machine, but you can do some testing from Linux."}
+{"path": "components/kernel/linkers/aarch64.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
+{"path": "components/kernel/linkers/i586.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
+{"path": "components/kernel/linkers/riscv64.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
+{"path": "components/kernel/linkers/x86_64.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
+{"path": "components/kernel/rmm/README.md", "line": 1, "class": "fail", "text": "# Redox Memory Management"}
+{"path": "components/kernel/src/arch/aarch64/device/psci.rs", "line": 248, "class": "fail", "text": "// assembler rejects the mnemonic when the Redox target does"}
+{"path": "components/kernel/src/main.rs", "line": 1, "class": "fail", "text": "//! # The Redox OS Kernel, version 2"}
+{"path": "components/kernel/src/main.rs", "line": 3, "class": "fail", "text": "//! The Redox OS Kernel is a microkernel that supports `x86_64` systems and"}
+{"path": "components/kernel/src/scheme/mod.rs", "line": 2, "class": "fail", "text": "//! A scheme is a primitive for handling filesystem syscalls in Redox."}
+{"path": "components/kernel/src/scheme/sys/uname.rs", "line": 6, "class": "fail", "text": "\"Redox\\n{}\\n{}\\n{}\\n\","}
+{"path": "components/kernel/src/scheme/user.rs", "line": 1087, "class": "fail", "text": "// Redox's schemes currently rely on doesn't allow one-way messages, there's no current"}
+{"path": "components/kernel/syscall/Cargo.toml", "line": 11, "class": "fail", "text": "description = \"A Rust library to access raw Redox system calls\""}
+{"path": "components/kernel/syscall/src/arch/x86.rs", "line": 145, "class": "fail", "text": "// TODO: Some of these don't get set by Redox yet. Should they?"}
+{"path": "components/kernel/syscall/src/call.rs", "line": 202, "class": "fail", "text": "// align_of::<usize>() is >= 4 on all architectures supported by Redox, whereas the kernel"}
+{"path": "components/redoxfs/.gitlab-ci.yml", "line": 14, "class": "fail", "text": "build:redox:"}
+{"path": "components/redoxfs/.gitlab-ci.yml", "line": 25, "class": "fail", "text": "test:redox:"}
+{"path": "components/redoxfs/.gitlab-ci.yml", "line": 28, "class": "fail", "text": "- build:redox"}
+{"path": "components/redoxfs/Cargo.toml", "line": 3, "class": "fail", "text": "description = \"The Redox Filesystem\""}
+{"path": "components/redoxfs/README.md", "line": 3, "class": "fail", "text": "This is the default filesystem of Redox OS inspired by [ZFS](https://docs.freebsd.org/en/books/handbook/zfs/) and adapted to a microkernel architecture."}
+{"path": "components/redoxfs/README.md", "line": 9, "class": "fail", "text": "- Compatible with Redox and Linux (FUSE)"}
+{"path": "components/redoxfs/README.md", "line": 17, "class": "fail", "text": "- Disk encryption fully supported by the Redox bootloader, letting it load the kernel off an encrypted partition."}
+{"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 114, "class": "fail", "text": "/// Creates the disk for backing the Redoxfs."}
+{"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 120, "class": "fail", "text": "/// Creates an empty Redoxfs."}
+{"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 121, "class": "fail", "text": "fn create_redoxfs(disk: DiskSparse, reserved_size: u64) -> bool {"}
+{"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 135, "class": "fail", "text": "/// Mounts an existing Redoxfs, runs the callback and performs the unmount."}
+{"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 136, "class": "fail", "text": "fn with_redoxfs_mount<F>(temp_path: &Path, disk: DiskSparse, cleanup: bool, callback: F)"}
+{"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 310, "class": "fail", "text": "if !create_redoxfs(disk, test_case.reserved_size) {"}
+{"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 322, "class": "fail", "text": "with_redoxfs_mount(temp_dir.path(), disk, mount_seq.cleanup, move |fs_path| {"}
+{"path": "components/redoxfs/src/bin/mount.rs", "line": 31, "class": "fail", "text": "//set up a signal handler on redox, this implements unmounting. I have no idea what sa_flags is"}
+{"path": "components/redoxfs/src/clone.rs", "line": 28, "class": "fail", "text": "//TODO: this slows down the clone, but Redox has issues without this (Linux is fine)"}
+{"path": "components/redoxfs/src/mount/fuse.rs", "line": 42, "class": "fail", "text": "// while building the Redox OS kernel. This means that we need to write on"}
+{"path": "components/redoxfs/src/mount/mod.rs", "line": 20, "class": "fail", "text": "mod redox;"}
+{"path": "components/redoxfs/src/mount/mod.rs", "line": 23, "class": "fail", "text": "pub use self::redox::mount;"}
+{"path": "components/redoxfs/src/mount/redox/mod.rs", "line": 83, "class": "fail", "text": "// TODO: Redoxfs does not yet support asynchronous file IO. It might still make"}
+{"path": "components/redoxfs/src/tests.rs", "line": 13, "class": "fail", "text": "fn with_redoxfs<T, F>(callback: F) -> T"}
+{"path": "components/redoxfs/src/tests.rs", "line": 36, "class": "fail", "text": "with_redoxfs(|mut fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 69, "class": "fail", "text": "with_redoxfs(|mut fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 110, "class": "fail", "text": "with_redoxfs(|mut fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 195, "class": "fail", "text": "with_redoxfs(|fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 307, "class": "fail", "text": "with_redoxfs(|fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 420, "class": "fail", "text": "with_redoxfs(|fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 450, "class": "fail", "text": "with_redoxfs(|mut fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 596, "class": "fail", "text": "with_redoxfs(|fs| {"}
+{"path": "components/redoxfs/src/tests.rs", "line": 825, "class": "fail", "text": "with_redoxfs(|fs| {"}
+{"path": "components/redoxfs/tests/tests.rs", "line": 16, "class": "fail", "text": "fn with_redoxfs<T, F>(callback: F) -> T"}
+{"path": "components/redoxfs/tests/tests.rs", "line": 43, "class": "fail", "text": "let res = with_redoxfs(move |fs| {"}
+{"path": "components/redoxfs/tests/tests.rs", "line": 44, "class": "fail", "text": "// At redox, we mount on /scheme/ path, no need an empty dir"}
+{"path": "components/redoxfs/tests/tests.rs", "line": 53, "class": "fail", "text": "\"CARGO_BIN_EXE_redoxfs\","}
+{"path": "components/relibc/README.md", "line": 1, "class": "fail", "text": "# Redox C Library (relibc)"}
+{"path": "components/relibc/README.md", "line": 9, "class": "fail", "text": "The motivation for this project is twofold: Reduce issues that the Redox developers were having with [newlib](https://sourceware.org/newlib/), and create a more stable and safe alternative to C standard libraries written in C. It is mainly designed to be used under Redox, as an alternative to newlib, but it also supports Linux via the [sc](https://crates.io/crates/sc) crate."}
+{"path": "components/relibc/README.md", "line": 11, "class": "fail", "text": "Currently Redox and Linux are supported."}
+{"path": "components/relibc/README.md", "line": 15, "class": "fail", "text": "`redox-rt` is a runtime library that provides much of the code that enables POSIX on Redox, like `fork`, `exec`, signal handling, etc."}
+{"path": "components/relibc/README.md", "line": 30, "class": "fail", "text": "- `src/platform/redox` - Redox-specific code"}
+{"path": "components/relibc/README.md", "line": 46, "class": "fail", "text": "To build relibc out of the Redox build system, do the following steps:"}
+{"path": "components/relibc/README.md", "line": 96, "class": "fail", "text": "## Build relibc inside the Redox build system"}
+{"path": "components/relibc/README.md", "line": 98, "class": "fail", "text": "Inside of your Redox build system, run:"}
+{"path": "components/relibc/README.md", "line": 113, "class": "fail", "text": "Note: Do not edit `relibc` inside `prefix` folder! Do your work on `relibc` folder directly inside your Redox build system instead."}
+{"path": "components/relibc/README.md", "line": 120, "class": "fail", "text": "+ `./check.sh --test` - Run all tests in x86_64 Redox using Redoxer"}
+{"path": "components/relibc/README.md", "line": 126, "class": "fail", "text": "- Will run statically linked test in Linux, dynamically linked in Redox"}
+{"path": "components/relibc/README.md", "line": 131, "class": "fail", "text": "- Redoxer is needed to run tests for Redox without `--host`. You can install it using `cargo install redoxer`"}
+{"path": "components/relibc/README.md", "line": 164, "class": "fail", "text": "- Redox OS"}
+{"path": "components/relibc/check.sh", "line": 11, "class": "fail", "text": "echo \"  Wrapper for Makefile / Cargo to run checks or tests on Redox OS targets.\""}
+{"path": "components/relibc/check.sh", "line": 19, "class": "fail", "text": "echo \"  --all-target        Run the command on all supported Redox architectures\""}
+{"path": "components/relibc/check.sh", "line": 162, "class": "fail", "text": "echo \"Running $CMD_ACTION for all supported Redox targets...\""}
+{"path": "components/relibc/redox-ioctl/Cargo.toml", "line": 7, "class": "fail", "text": "description = \"Ioctl definitions and (de)serialization for Redox\""}
+{"path": "components/relibc/redox-rt/Cargo.toml", "line": 7, "class": "fail", "text": "description = \"Libc-independent runtime for Redox\""}
+{"path": "components/relibc/redox-rt/src/arch/aarch64.rs", "line": 77, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
+{"path": "components/relibc/redox-rt/src/arch/i686.rs", "line": 67, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
+{"path": "components/relibc/redox-rt/src/arch/riscv64.rs", "line": 53, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
+{"path": "components/relibc/redox-rt/src/arch/x86_64.rs", "line": 93, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
+{"path": "components/relibc/redox-rt/src/lib.rs", "line": 74, "class": "fail", "text": "/// OS and architecture specific code to activate TLS - Redox aarch64"}
+{"path": "components/relibc/redox-rt/src/lib.rs", "line": 88, "class": "fail", "text": "/// OS and architecture specific code to activate TLS - Redox x86"}
+{"path": "components/relibc/redox-rt/src/lib.rs", "line": 108, "class": "fail", "text": "/// OS and architecture specific code to activate TLS - Redox x86_64"}
+{"path": "components/relibc/redox-rt/src/lib.rs", "line": 128, "class": "fail", "text": "/// OS and architecture specific code to activate TLS - Redox riscv64"}
+{"path": "components/relibc/src/header/_paths/redox.rs", "line": 1, "class": "fail", "text": "//! Redox specific constants for paths.h."}
+{"path": "components/relibc/src/header/_paths/redox.rs", "line": 3, "class": "fail", "text": "// NOTE: Cross check that new entries correspond to files on Redox before adding."}
+{"path": "components/relibc/src/header/_template/mod.rs", "line": 1, "class": "fail", "text": "//! template implementation for Redox, following http://pubs.opengroup.org/onlinepubs/7908799/xsh/template.h.html"}
+{"path": "components/relibc/src/header/arch_x64_user/mod.rs", "line": 1, "class": "fail", "text": "//! A part of the ptrace compatibility for Redox OS"}
+{"path": "components/relibc/src/header/bits_open-flags/redox.rs", "line": 42, "class": "fail", "text": "/// Non-POSIX, Redox OS specific."}
+{"path": "components/relibc/src/header/dl-tls/mod.rs", "line": 1, "class": "fail", "text": "//! dl-tls implementation for Redox"}
+{"path": "components/relibc/src/header/pthread/attr.rs", "line": 30, "class": "fail", "text": "// Redox uses a round-robin scheduler"}
+{"path": "components/relibc/src/header/pthread/mod.rs", "line": 177, "class": "fail", "text": "// Redox and Linux threads are 1:1, not M:N."}
+{"path": "components/relibc/src/header/pthread/mod.rs", "line": 280, "class": "fail", "text": "#[expect(unused_variables, reason = \"Redox and Linux threads are 1:1, not M:N.\")]"}
+{"path": "components/relibc/src/header/pwd/mod.rs", "line": 26, "class": "fail", "text": "mod redox;"}
+{"path": "components/relibc/src/header/pwd/mod.rs", "line": 31, "class": "fail", "text": "use self::redox as sys;"}
+{"path": "components/relibc/src/header/sgtty/mod.rs", "line": 1, "class": "fail", "text": "//! sgtty implementation that won't work on redox because no ioctl"}
+{"path": "components/relibc/src/header/signal/constants.rs", "line": 1, "class": "fail", "text": "// These constants have the same values on Redox and Linux."}
+{"path": "components/relibc/src/header/signal/constants.rs", "line": 135, "class": "fail", "text": "// Redox note: should include both SigStack size, and some extra room for the libc handler"}
+{"path": "components/relibc/src/header/signal/linux.rs", "line": 52, "class": "fail", "text": "// Below SA_* constants cannot share the same values as Redox for implementation reasons."}
+{"path": "components/relibc/src/header/signal/mod.rs", "line": 314, "class": "fail", "text": "// On Linux and Redox, pthread_sigmask and sigprocmask are equivalent"}
+{"path": "components/relibc/src/header/signal/mod.rs", "line": 648, "class": "fail", "text": "// 32 and 33 (same as NPTL reserves), whereas this on Redox is 33 and 34 (TODO: could this be"}
+{"path": "components/relibc/src/header/signal/mod.rs", "line": 649, "class": "fail", "text": "// changed to 32 and 33 for Redox too, since there's currently no support for \"sigqueue\" targeting"}
+{"path": "components/relibc/src/header/signal/mod.rs", "line": 836, "class": "fail", "text": "// POSIX leaves behavior unspecified if this is NULL, but on both Linux and Redox, NULL is used"}
+{"path": "components/relibc/src/header/stdlib/mod.rs", "line": 1036, "class": "fail", "text": "// Linux and Redox use different resource names for PTS's."}
+{"path": "components/relibc/src/header/sys_epoll/mod.rs", "line": 116, "class": "fail", "text": "// systems) on redox. The `Default` trait is here so we don't need to"}
+{"path": "components/relibc/src/header/sys_eventfd/mod.rs", "line": 1, "class": "fail", "text": "//! Native counter descriptors. On Redox, fdobjd owns the counter and readiness."}
+{"path": "components/relibc/src/header/sys_ioctl/constants.rs", "line": 1, "class": "fail", "text": "// These constants have the same values on both redox and linux."}
+{"path": "components/relibc/src/header/sys_ioctl/constants.rs", "line": 2, "class": "fail", "text": "// TODO add more from linux as and when redox supports them."}
+{"path": "components/relibc/src/header/sys_ioctl/mod.rs", "line": 39, "class": "fail", "text": "unsafe { self::redox::ioctl_inner(fd, request, out) }.or_minus_one_errno()"}
+{"path": "components/relibc/src/header/sys_ioctl/mod.rs", "line": 49, "class": "fail", "text": "pub use self::redox::*;"}
+{"path": "components/relibc/src/header/sys_ioctl/mod.rs", "line": 52, "class": "fail", "text": "pub mod redox;"}
+{"path": "components/relibc/src/header/sys_syslog/logger.rs", "line": 103, "class": "fail", "text": "// TODO: Log error to /dev/console & Redox equivalent"}
+{"path": "components/relibc/src/header/sys_syslog/redox.rs", "line": 5, "class": "fail", "text": "/// Write logs to Redox's log scheme."}
+{"path": "components/relibc/src/header/sys_time/mod.rs", "line": 110, "class": "fail", "text": "// TODO setitimer is unimplemented on Redox"}
+{"path": "components/relibc/src/header/sys_timerfd/mod.rs", "line": 1, "class": "fail", "text": "//! Native timer descriptors, with timer state and readiness owned by fdobjd on Redox."}
+{"path": "components/relibc/src/header/sys_timerfd/mod.rs", "line": 11, "class": "fail", "text": "/// Redox currently rejects this flag with EINVAL: clock-set notifications are unavailable."}
+{"path": "components/relibc/src/header/termios/constants.rs", "line": 1, "class": "fail", "text": "// These constants have values shared between Redox and Linux."}
+{"path": "components/relibc/src/header/termios/mod.rs", "line": 175, "class": "fail", "text": "// used to suppress unused_variables lint, remove when redox implemented"}
+{"path": "components/relibc/src/header/termios/mod.rs", "line": 199, "class": "fail", "text": "// used to suppress unused_variables lint, remove when redox implemented"}
+{"path": "components/relibc/src/header/termios/mod.rs", "line": 215, "class": "fail", "text": "// TODO redox impl"}
+{"path": "components/relibc/src/header/termios/mod.rs", "line": 222, "class": "fail", "text": "// used to suppress unused_variables lint, remove when redox implemented"}
+{"path": "components/relibc/src/header/termios/mod.rs", "line": 240, "class": "fail", "text": "// TODO redox impl"}
+{"path": "components/relibc/src/header/termios/mod.rs", "line": 247, "class": "fail", "text": "// used to suppress unused_variables lint, remove when redox implemented"}
+{"path": "components/relibc/src/header/unistd/mod.rs", "line": 539, "class": "fail", "text": "// TODO: Have getrlimit working in Redox"}
+{"path": "components/relibc/src/header/unistd/mod.rs", "line": 663, "class": "fail", "text": "//TODO: Determine correct getlogin result on Redox"}
+{"path": "components/relibc/src/header/unistd/mod.rs", "line": 1349, "class": "fail", "text": "// TODO setitimer is unimplemented on Redox and obsolete"}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 2, "class": "fail", "text": "// across both linux and redox."}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 3, "class": "fail", "text": "// TODO: add more as redox starts to support them."}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 16, "class": "fail", "text": "pub const _SC_REALTIME_SIGNALS: c_int = 9; // was 191 on redox"}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 27, "class": "fail", "text": "pub const _SC_SIGQUEUE_MAX: c_int = 34; // was 190 on redox"}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 40, "class": "fail", "text": "pub const _SC_NPROCESSORS_CONF: c_int = 83; // was 57 on redox"}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 41, "class": "fail", "text": "pub const _SC_NPROCESSORS_ONLN: c_int = 84; // was 58 on redox"}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 42, "class": "fail", "text": "pub const _SC_PHYS_PAGES: c_int = 85; // was 59 on redox"}
+{"path": "components/relibc/src/header/unistd/sysconf/constants.rs", "line": 43, "class": "fail", "text": "pub const _SC_AVPHYS_PAGES: c_int = 86; // was 60 on redox"}
+{"path": "components/relibc/src/ld_so/dso.rs", "line": 791, "class": "fail", "text": "//TODO: Make it possible to not specify PROT_EXEC on Redox"}
+{"path": "components/relibc/src/ld_so/start.rs", "line": 358, "class": "fail", "text": "// to use it. on redox, we treat it the same."}
+{"path": "components/relibc/src/ld_so/tcb.rs", "line": 296, "class": "fail", "text": "/// OS specific code to create a new TLS and TCB - Linux and Redox"}
+{"path": "components/relibc/src/lib.rs", "line": 7, "class": "fail", "text": "//! Currently, Linux and Redox syscall backends are supported."}
+{"path": "components/relibc/src/panic.rs", "line": 33, "class": "fail", "text": "// Non-redox platforms can directly write to stderr"}
+{"path": "components/relibc/src/platform/allocator/sys.rs", "line": 13, "class": "fail", "text": "/// System setting for Redox/Linux"}
+{"path": "components/relibc/src/platform/auxv_defs.rs", "line": 29, "class": "fail", "text": "// TODO: Downgrade aux vectors to getauxval constants on Redox, and use a regular struct for"}
+{"path": "components/relibc/src/platform/linux/mod.rs", "line": 907, "class": "fail", "text": "// GETPID on Linux is 39, which does not exist on Redox"}
+{"path": "components/relibc/src/platform/logger.rs", "line": 61, "class": "fail", "text": "/// An output that will be logged to. The two major outputs for most Redox system programs are"}
+{"path": "components/relibc/src/platform/mod.rs", "line": 344, "class": "fail", "text": "// TODO: Find an auxv replacement for Redox's execv protocol"}
+{"path": "components/relibc/src/platform/mod.rs", "line": 412, "class": "fail", "text": ".expect(\"cwd_path is not valid redox path\")"}
+{"path": "components/relibc/src/platform/pal/mod.rs", "line": 192, "class": "fail", "text": "// this means the buffer came from a valid getdents64 invocation, whereas on Redox, every"}
+{"path": "components/relibc/src/platform/redox/exec.rs", "line": 495, "class": "fail", "text": "echo \"Hello from Redox\"\"#;"}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 124, "class": "fail", "text": "/// Redox syscall implementation of [`Pal`]."}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 613, "class": "fail", "text": "// Redox getdents takes an explicit (opaque) offset, so this is a no-op."}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 936, "class": "fail", "text": "#[expect(unused_variables, reason = \"Redox never swaps\")]"}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 941, "class": "fail", "text": "#[expect(unused_variables, reason = \"Redox never swaps\")]"}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 1018, "class": "fail", "text": "#[expect(unused_variables, reason = \"Redox never swaps\")]"}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 1024, "class": "fail", "text": "// Redox never swaps"}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 1943, "class": "fail", "text": "// Redox doesn't provide domainname in uname scheme"}
+{"path": "components/relibc/src/platform/redox/mod.rs", "line": 2081, "class": "fail", "text": "// YIELD on Redox is 20, which is SYS_ARCH_PRCTL on Linux"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 32, "class": "fail", "text": "let (redox, fd) = match path {"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 45, "class": "fail", "text": "let path = cwd.redox.canonicalize_as_cwd(redox_reference.into());"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 49, "class": "fail", "text": "log::trace!(\"chdir({:?}): {:?}\", redox.as_reference().as_ref(), fd);"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 54, "class": "fail", "text": "read_interscheme_link_content(None, redox.as_reference().as_ref(), false);"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 64, "class": "fail", "text": "let path = to_cwd_path(redox.as_reference().as_ref())?;"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 65, "class": "fail", "text": "*cwd_guard = Some(Cwd { path, redox, fd });"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 145, "class": "fail", "text": "pub redox: RedoxPath<'a>,"}
+{"path": "components/relibc/src/platform/redox/path.rs", "line": 160, "class": "fail", "text": "*CWD.write() = Some(Cwd { path, redox, fd });"}
+{"path": "components/relibc/src/platform/redox/ptrace.rs", "line": 3, "class": "fail", "text": "//! different to Redox. Many people agree that Linux ptrace is bad, so"}
+{"path": "components/relibc/src/platform/redox/signal.rs", "line": 94, "class": "fail", "text": "// TODO: setitimer is no longer part of POSIX and should not be implemented in Redox"}
+{"path": "components/relibc/src/platform/redox/signal.rs", "line": 96, "class": "fail", "text": "// For Redox, the timer should probably use \"/scheme/time\""}
+{"path": "components/relibc/src/platform/redox/socket.rs", "line": 124, "class": "fail", "text": "// handles platforms where it doesn't, as of writing Redox still uses a"}
+{"path": "components/relibc/src/platform/redox/socket.rs", "line": 758, "class": "fail", "text": "#[expect(unused_variables, reason = \"Redox has no need to listen\")]"}
+{"path": "components/relibc/src/start.rs", "line": 104, "class": "fail", "text": "// Since Redox and Linux are so similar, it is easy to accidentally run a binary from one on the"}
+{"path": "components/relibc/src/sync/mod.rs", "line": 69, "class": "fail", "text": "// TODO: Change when Redox's toolchain is updated. This is not about targets, but compiler"}
+{"path": "components/relibc/src/sync/pthread_mutex.rs", "line": 245, "class": "fail", "text": "// Assumes TIDs are unique between processes, which I only know is true for Redox."}
+{"path": "components/relibc/src/sync/pthread_mutex.rs", "line": 248, "class": "fail", "text": "// threads within possibly distinct processes, using the mutex. OS thread IDs on Redox are"}
+{"path": "components/relibc/tests/Makefile", "line": 146, "class": "fail", "text": "# hosted redox, no extra options needed"}
+{"path": "components/relibc/tests/Makefile.tests.mk", "line": 2, "class": "fail", "text": "# If compiling for Redox, IS_REDOX must be 1"}
+{"path": "components/relibc/tests/Makefile.tests.mk", "line": 34, "class": "fail", "text": "# Incomplete in redox, ENOSYS in linux, EACCESS in glibc"}
+{"path": "components/relibc/tests/dirent/fdopendir.c", "line": 65, "class": "fail", "text": "// FIXME: Redox requires read perms for the dir while Linux/BSD don't."}
+{"path": "components/relibc/tests/dirent/scandir.c", "line": 20, "class": "fail", "text": "// TODO: Redox does not yet provide . or .. - so filter them out"}
+{"path": "components/relibc/tests/fcntl/open.c", "line": 202, "class": "fail", "text": "// O_NOATIME (disabled since Redox doesn't have it)"}
+{"path": "components/relibc/tests/features.c", "line": 33, "class": "fail", "text": "// Those functions (and this test) works fine in both Redox itself and Linux"}
+{"path": "components/relibc/tests/libgen.c", "line": 10, "class": "fail", "text": "// TODO: Tests for Redox schemes"}
+{"path": "components/relibc/tests/netdb/netdb.c", "line": 174, "class": "fail", "text": "struct hostent* redox = gethostbyname(\"redox-os.org\");"}
+{"path": "components/relibc/tests/netdb/netdb.c", "line": 175, "class": "fail", "text": "if (redox == NULL) {"}
+{"path": "components/relibc/tests/netdb/netdb.c", "line": 223, "class": "fail", "text": "// redox have no entry"}
+{"path": "components/relibc/tests/ptrace.c", "line": 27, "class": "fail", "text": "// Test behavior on Redox when TRACEME hasn't been activated"}
+{"path": "components/relibc/tests/stdio/renameat.c", "line": 205, "class": "fail", "text": "// TODO: RENAME_EXCHANGE (Needs frename support in Redox)"}
+{"path": "components/relibc/tests/stdlib/ptsname.c", "line": 89, "class": "fail", "text": "grantpt(fd); // grantpt() is a no-op on Linux and Redox but is needed for POSIX compliance."}
+{"path": "components/relibc/tests/sys_epoll/epollet.c", "line": 1, "class": "fail", "text": "// test code found on dbus, currently hangs on redox"}
+{"path": "components/relibc/tests/sys_socket/unixpeername.c", "line": 27, "class": "fail", "text": "// TODO: in linux the sockname shown exactly like this string, not the case with redox."}
+{"path": "components/relibc/tests/sys_stat/fstatat.c", "line": 219, "class": "fail", "text": "// TODO: O_SEARCH (no Redox support)"}
+{"path": "components/relibc/tests/time/strptime.c", "line": 100, "class": "fail", "text": "const char redox[] = \"Mon Oct 31 11:19:57 2016\";"}
+{"path": "components/relibc/tests/time/strptime.c", "line": 111, "class": "fail", "text": "strptime_test(redox,"}
+{"path": "components/relibc/tests/time/time.c", "line": 39, "class": "fail", "text": "// TODO: Support clock() on Redox"}
+{"path": "components/relibc/tests/time/tzset.c", "line": 38, "class": "fail", "text": "// Default system value. Unmodifed Redox is usually UTC"}

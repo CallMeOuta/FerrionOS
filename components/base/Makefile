@@ -81,12 +81,10 @@ $(SYSROOT)/bin/redoxfs:
 
 base:
 	@mkdir -pv "$(BUILD_DIR)"
-# Build daemons
 	CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_PANIC=abort \
 		$(CARGO) build $(BUILD_FLAGS) \
 		--manifest-path "$(SRC_DIR)/Cargo.toml" \
 		$(BASE_CARGO_ARGS)
-# Build initfs daemons
 # FIXME fix whatever issue (feature unification?) causes most logs to be omitted
 # if this is merged with the above build command.
 	CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_PANIC=abort \
