@@ -1,6 +1,6 @@
 # FerrionOS
 
-This repository is FerrionOS's build system, forked from an upstream project's: makefiles (`Makefile`, `mk/`), a Rust build tool called the cookbook (`src/`), package recipes (`recipes/`) and filesystem configs (`config/`). Together they fetch, cross-compile and package the operating system's components and assemble a bootable image. The components' own code (kernel, relibc, drivers) is fetched at build time and lives in other repositories.
+This repository is FerrionOS's build system and core source trees: makefiles (`Makefile`, `mk/`), a Rust build tool called the cookbook (`src/`), the four core component trees (`components/kernel`, `components/relibc`, `components/base` without its drivers, and `components/redoxfs`), package recipes (`recipes/`) and filesystem configs (`config/`). Together they cross-compile and package the operating system's components and assemble a bootable image. FerrionOS's drivers live in `ferrion-hardware` (`github.com/CallMeOuta/ferrion-hardware`, pinned by `recipes/core/drivers/recipe.toml`, [ADR 0047](docs/adr/0047-drivers-in-ferrion-hardware.md)); other components (bootloader, installer, ports) are fetched at build time from other repositories.
 
 # Task Guides
 
@@ -8,7 +8,7 @@ Read the matching guide before starting:
 
 - Writing or changing a `recipe.toml` or its patches: [`agents/skills/recipes.md`](agents/skills/recipes.md)
 - Changing what an image contains, `config/**/*.toml`: [`agents/skills/filesystem-configs.md`](agents/skills/filesystem-configs.md)
-- Changing code inside a recipe's fetched `source/` (kernel, relibc, drivers, any package): [`agents/skills/component-sources.md`](agents/skills/component-sources.md)
+- Changing code in `components/` (kernel, relibc, base, RedoxFS), in `ferrion-hardware` drivers, or inside a fetched recipe's `source/`: [`agents/skills/component-sources.md`](agents/skills/component-sources.md)
 - Changing the cookbook, the Rust code under `src/`: [`agents/skills/cookbook.md`](agents/skills/cookbook.md)
 - Changing `Makefile`, `mk/*.mk`, the bootstrap scripts, `scripts/` or `podman/`: [`agents/skills/build-scripts.md`](agents/skills/build-scripts.md)
 - Building an image or booting one in QEMU: [`agents/skills/images-and-qemu.md`](agents/skills/images-and-qemu.md)
@@ -44,19 +44,19 @@ Single-context: `GLOSSARY.md` and `docs/adr/` at the repository root. See `docs/
 - The code in this repository is the source of truth. The book in `book/` lags behind it: where they disagree, follow the code.
 - A failure that also happens without your change is pre-existing. Report it with its log and move on.
 - Code brought in from another project keeps its license notice and names its source.
-- Code carries no comments. A decision goes into an ADR in `docs/adr/`, and a hack or an unfinished state into an issue. What stays: license and copyright notices and the source notice of brought-in code, directives a tool reads (a shebang, `shellcheck`, `noqa`), the documentation of make targets, build variables and emulator options in `Makefile` and `mk/*.mk`, and the reason for a setuid, setgid or world-write `mode`; `scripts/comment-check.config.json` lists them. `python3 scripts/comment-check.py` enforces it against `scripts/comment-check.baseline.json`, whose counts only go down: after deleting comments, lower them with `--update`. Files of code brought in byte-exact (patches, `source/`) keep theirs.
+- Code carries no comments. A decision goes into an ADR in `docs/adr/`, and a hack or an unfinished state into an issue. What stays: license and copyright notices and the source notice of brought-in code, directives a tool reads (a shebang, `shellcheck`, `noqa`), the documentation of make targets, build variables and emulator options in `Makefile` and `mk/*.mk`, and the reason for a setuid, setgid or world-write `mode`; `scripts/comment-check.config.json` lists them. `python3 scripts/comment-check.py` enforces it against `scripts/comment-check.baseline.json`, whose counts only go down: after deleting comments, lower them with `--update`. Files of code brought in byte-exact (patches, fetched `source/`) keep theirs; the four trees under `components/` keep their imported comments under the baseline (only upstream merges and pre-cutover patch ports may rebaseline them via `scripts/components-check.py --rebaseline`), while new code carries none.
 - Code FerrionOS owns follows TigerStyle ([ADR 0024](docs/adr/0024-tigerstyle.md)): every loop, queue, buffer and retry has a named upper bound with a defined error at it, invariants are asserted where they are relied on, and services allocate from bounded pools.
 - Agents write no unit tests ([ADR 0025](docs/adr/0025-tests-without-unit-tests.md)). A change is proven by a VM check in `scripts/vm-test.py`, a differential test against a reference system, or a deterministic simulation test, red before the change and green after.
 - A task names its measure and target, or the check whose red-to-green defines done, and the numbers before and after go into the commit message ([ADR 0026](docs/adr/0026-measured-targets.md)).
-- A single source of truth stays in code, and documents point at it instead of copying it: make targets in the comments of `Makefile` and `mk/*.mk`, build variables in `mk/config.mk`, emulator options in `mk/qemu.mk`, cookbook commands and `COOKBOOK_*` variables in `REPO_HELP_STR` (`src/bin/repo/main.rs`), recipe keys in `src/recipe.rs`. Update those when behavior changes.
+- A single source of truth stays in code, and documents point at it instead of copying it: make targets in the comments of `Makefile` and `mk/*.mk`, build variables in `mk/config.mk`, emulator options in `mk/qemu.mk`, cookbook commands and `COOKBOOK_*` variables in `REPO_HELP_STR` (`src/bin/repo/main.rs`), recipe keys in `src/recipe.rs`, and upstream tree revisions and license digests in `components/upstream.toml`. Update those when behavior changes.
 
 # Security
 
 FerrionOS is unhardened today. Before changing accounts, file modes, scheme lists, compiler or linker flags, a recipe's `[source]`, or a download in `mk/` or `podman/`, and before writing that FerrionOS protects against something, apply the rules below, and read `plans/security-roadmap.md` when it exists on this machine: its "FerrionOS today" table is the wording to use, and its items say where each change belongs.
 
-- Claim a protection only with evidence that shows it on a built image, such as a boot test. Without it, write "planned" and name the roadmap item.
+- Claim a protection only with evidence that shows it on a built image, such as a boot test. Without it, write "planned" and name the roadmap item (for example, signed drivers are planned under S13, [ADR 0047](docs/adr/0047-drivers-in-ferrion-hardware.md)).
 - The accounts in `config/dev-accounts.toml` (`root` with the password `password`, `user` with an empty password in group `sudo`) are dev credentials. `config/minimal.toml` and the configs that include `config/base.toml` directly include it; `config/base.toml` itself has no login accounts. An image that leaves the build machine carries its own accounts.
-- A new input arrives pinned: a git recipe has `rev`, a tar recipe has `blake3`, and a download in a makefile or script is checked against a sha256 the way `ch_download` in `mk/ch.mk` does.
+- A new input arrives pinned: a tree under `components/` is pinned by this repository's history and recorded in `components/upstream.toml`, a git recipe (including `recipes/core/drivers/recipe.toml`) has `rev`, a tar recipe has `blake3`, and a download in a makefile or script is checked against a sha256 the way `ch_download` in `mk/ch.mk` does.
 - Privilege comes from the `sudo` daemon. Files are installed without setuid or setgid bits, and a new `mode` with a setuid, setgid or world-write bit carries a comment saying why.
 - A change that widens access is named in your report with its reason: a scheme added to `/etc/login_schemes.toml` or `/etc/contain.toml`, an account or group membership, a service started at boot, a hardening flag turned off for a recipe, an option added to `PODMAN_OPTIONS`.
 - A hardening default ships with its toggle, its note and its check, as "How a hardening change ships" in the roadmap describes.
@@ -69,7 +69,7 @@ FerrionOS is unhardened today. Before changing accounts, file modes, scheme list
 - The name of the upstream project is never written in FerrionOS's text: prose, comments, messages, package descriptions, docs and links. Where the fact matters, write "upstream" ("the upstream project", "upstream's packages"). There are three exceptions:
   1. Legal notices: the copyright line in `LICENSE`, copyright and license headers in code and in `*.patch` files, and `authors` in `Cargo.toml` files.
   2. Identifiers and strings that other software matches, which would break if renamed: target triples such as `x86_64-unknown-redox`, crate, package, recipe, file and directory names (RedoxFS, relibc, `redox_syscall`, `redox.patch`), make and environment variables (`HOSTED_REDOX`), the `uname -s` value the kernel reports and code compares, `ID_LIKE` in os-release, and URLs that code or a recipe fetches. Prose may name a component by its identifier. Before renaming such a string, `rg` it across the repository, then rename every use together or keep it.
-  3. Files applied byte-exact from upstream: `*.patch` files and anything under a recipe's `source/`, which are never edited.
+  3. Files applied byte-exact from upstream: `*.patch` files, anything under a fetched recipe's `source/`, and imported upstream lines under `components/` baselined in `scripts/naming-check.baseline.jsonl`.
 - `README.md` and the book's introduction (`book/src/introduction.md`) each have one sentence saying FerrionOS began as a fork and is not affiliated with the upstream project; they are the only other places the name appears.
 
 # Architectures
@@ -85,7 +85,7 @@ FerrionOS has no X11 support except one: Xwayland inside a game session's own co
 - A cook or an image build is long and large. Start one when the task needs its result, and reach first for the cheapest check that can fail for your change: [`docs/testing.md`](docs/testing.md).
 - Run make with `CI=1 COOKBOOK_LOGS=true` in the environment. Without `CI` the cookbook draws a terminal interface that needs a terminal and waits at a prompt when a recipe fails.
 - Cook through `make`: it enters the container and puts the cross toolchain on `PATH`. Call `target/release/repo` directly only for its listing commands (`find`, `cook-list`).
-- `source/` and `target/` under a recipe, and `build/`, `prefix/`, `repo/` and `target/` at the root, are fetched or generated. The cookbook resets and deletes `source/` trees: before editing one, read [`agents/skills/component-sources.md`](agents/skills/component-sources.md).
+- `source/` and `target/` under a recipe, and `build/`, `prefix/`, `repo/` and `target/` at the root, are fetched or generated. For the four trees under `components/` (`kernel`, `relibc`, `base`, `redoxfs`), `source` is a symlink into `components/<name>` and the cookbook never fetches, patches, resets or deletes the tree. For every other recipe, the cookbook resets and deletes `source/` trees: before editing one, read [`agents/skills/component-sources.md`](agents/skills/component-sources.md).
 - `make install` and the `i.` targets extract packages into `DESTDIR`, which defaults to `/`. Pass `DESTDIR=<directory>` on any host that is not running FerrionOS.
 - The bootstrap scripts clone upstream's build system and delete themselves unless called with `-d`.
 
