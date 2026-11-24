@@ -38,6 +38,7 @@ use syscall::{
 
 const THREAD_CALL_TERMINATE_SIBLINGS: u64 = 0x4645_0001;
 const MAX_EXEC_SIBLINGS: usize = 1024;
+const MAX_NEXT_EVENT_EINTR_RETRIES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum VirtualId {
@@ -592,7 +593,22 @@ impl RawEventQueue {
     }
     pub fn next_event(&self) -> Result<Event> {
         let mut event = Event::default();
-        let read = self.0.read(&mut event)?;
+        let mut eintr_retries: usize = 0;
+        let read = loop {
+            match self.0.read(&mut event) {
+                Ok(read) => break read,
+                Err(err) if err.errno == EINTR => {
+                    if eintr_retries >= MAX_NEXT_EVENT_EINTR_RETRIES {
+                        panic!(
+                            "procmgr: event queue wait exceeded MAX_NEXT_EVENT_EINTR_RETRIES ({MAX_NEXT_EVENT_EINTR_RETRIES})"
+                        );
+                    }
+                    eintr_retries += 1;
+                    log::warn!("procmgr: event queue wait interrupted; retrying");
+                }
+                Err(err) => return Err(err),
+            }
+        };
         assert_eq!(
             read,
             size_of::<Event>(),
