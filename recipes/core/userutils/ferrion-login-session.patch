@@ -1,6 +1,6 @@
 FerrionOS change to upstream userutils (MIT license, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88 after the existing recipe patches.
 
-When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session command from root-owned /etc/login-session.toml, checks claim_unlocked_session(None) before showing /etc/issue, opens /scheme/input/consumer as root, validates its display fpath prefix and VT number, activates its VT via /scheme/input/control and closes the control handle before spawning, prepares a verified 0700 /var/run/user/<uid> runtime directory and a fresh 0600 user-owned session.log created with O_EXCL after removing any existing name for stdout/stderr, applies /etc/login_schemes.toml, scrubs INIT_NOTIFY, TTY and stray non-CLOEXEC descriptors in 3..1024, spawns the session as the user with GSETTINGS_BACKEND=keyfile and FERRION_INPUT_CONSUMER_FD inherited, closes the parent's consumer handle, waits, restores the namespace, and returns to the login VT.
+When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session command from root-owned /etc/login-session.toml, checks claim_unlocked_session(None) before showing /etc/issue, opens /scheme/input/consumer as root, validates its display fpath prefix and VT number, activates its VT via /scheme/input/control and closes the control handle before spawning, prepares a verified 0700 /var/run/user/<uid> runtime directory and a fresh 0600 user-owned session.log created with O_EXCL after removing any existing name for stdout/stderr, applies /etc/login_schemes.toml, scrubs INIT_NOTIFY, TTY and stray non-CLOEXEC descriptors in 3..1024, spawns the session as the user with GSETTINGS_BACKEND=keyfile and FERRION_INPUT_CONSUMER_FD inherited, closes the parent's consumer handle, waits, restores the namespace, cleans stale top-level entries from /var/run/user/<uid> without following symlinks, and returns to the login VT.
 
 --- a/src/bin/login.rs
 +++ b/src/bin/login.rs
@@ -22,7 +22,7 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
  use std::str;
  
  use extra::option::OptionalExt;
-@@ -33,6 +40,20 @@
+@@ -33,6 +40,21 @@
  
  const ISSUE_FILE: &'static str = "/etc/issue";
  const MOTD_FILE: &'static str = "/etc/motd";
@@ -31,6 +31,7 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
 +const INPUT_CONSUMER_FD_ENV: &str = "FERRION_INPUT_CONSUMER_FD";
 +const INPUT_CONSUMER_FPATH_PREFIX: &str = "/scheme/display";
 +const SESSION_LOG_NAME: &str = "session.log";
++const MAX_RUNTIME_CLEANUP_ENTRIES: usize = 256;
 +const SESSION_CONFIG_FILE: &str = "/etc/login-session.toml";
 +const RUNTIME_BASE_DIR: &str = "/var/run";
 +const RUNTIME_USER_DIR: &str = "/var/run/user";
@@ -43,7 +44,7 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
  
  // TODO: Move to redox_users once the definition solidifies.
  const DEFAULT_SCHEMES: [&'static str; 26] = [
-@@ -142,6 +163,345 @@
+@@ -142,6 +164,390 @@
      let _ = libredox::call::close(libredox::call::setns(before_ns_fd.into_raw()).unwrap_or_exit(1));
  }
  
@@ -279,6 +280,50 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
 +    Ok((log_out, log_err))
 +}
 +
++fn cleanup_runtime_dir(user: &User<redox_users::auth::Full>, runtime_dir: &str) {
++    let Ok(base_meta) = fs::symlink_metadata(RUNTIME_BASE_DIR) else {
++        return;
++    };
++    if !base_meta.is_dir() || base_meta.uid() != 0 || base_meta.mode() & 0o022 != 0 {
++        return;
++    }
++    let Ok(parent_meta) = fs::symlink_metadata(RUNTIME_USER_DIR) else {
++        return;
++    };
++    if !parent_meta.is_dir() || parent_meta.uid() != 0 || parent_meta.mode() & 0o022 != 0 {
++        return;
++    }
++    let Ok(dir_meta) = fs::symlink_metadata(runtime_dir) else {
++        return;
++    };
++    if !dir_meta.is_dir()
++        || dir_meta.uid() != user.uid as u32
++        || dir_meta.gid() != user.gid as u32
++        || dir_meta.mode() & 0o777 != 0o700
++    {
++        return;
++    }
++    let Ok(entries) = fs::read_dir(runtime_dir) else {
++        return;
++    };
++    for (seen, entry) in entries.enumerate() {
++        if seen >= MAX_RUNTIME_CLEANUP_ENTRIES {
++            break;
++        }
++        let Ok(entry) = entry else {
++            continue;
++        };
++        let Ok(file_type) = entry.file_type() else {
++            continue;
++        };
++        if file_type.is_dir() {
++            let _ = fs::remove_dir(entry.path());
++        } else {
++            let _ = fs::remove_file(entry.path());
++        }
++    }
++}
++
 +fn graphical_session(
 +    user: &User<redox_users::auth::Full>,
 +    cfg: &SessionConfig,
@@ -368,6 +413,7 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
 +    }
 +    let _ = libredox::call::fcntl(before_ns_fd.raw(), libredox::flag::F_SETFD as usize, 0);
 +    let _ = libredox::call::close(libredox::call::setns(before_ns_fd.into_raw()).unwrap_or_exit(1));
++    cleanup_runtime_dir(user, &runtime_dir);
 +    if let Some(vt) = login_vt {
 +        let _ = activate_vt(vt);
 +    }
@@ -389,7 +435,7 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
  pub fn main() {
      let mut stdout = io::stdout();
      let mut stderr = io::stderr();
-@@ -152,6 +512,36 @@
+@@ -152,6 +558,36 @@
      )
      .get_matches();
  
@@ -426,7 +472,7 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
      if let Ok(mut issue) = File::open(ISSUE_FILE) {
          io::copy(&mut issue, &mut stdout).r#try(&mut stderr);
          stdout.flush().r#try(&mut stderr);
-@@ -189,7 +579,7 @@
+@@ -189,7 +625,7 @@
                      if user.is_passwd_blank()
                          || userutils::unlock::claim_unlocked_session(Some(&user.user)).is_some()
                      {
@@ -435,7 +481,7 @@ When FERRION_LOGIN_SESSION=1 is set in the environment, login reads the session 
                          break;
                      }
  
-@@ -202,7 +592,7 @@
+@@ -202,7 +638,7 @@
                          stdout.flush().r#try(&mut stderr);
  
                          if user.verify_passwd(&password) {

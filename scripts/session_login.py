@@ -250,6 +250,18 @@ def run_session_login(vm, args, helpers):
             f"lingering sleep child did not outlive ferrion-wm exit (saw {record['lingering_sleep_after_recovery']})"
         )
 
+    ls_status, ls_out = run_status(vm, f"ls -A {runtime_dir}")
+    leftover = [
+        line.strip()
+        for line in ls_out.splitlines()
+        if line.strip() and not line.strip().startswith("root:")
+    ]
+    record["runtime_dir_after_logout"] = leftover
+    if ls_status != 0:
+        problems.append(f"could not inspect {runtime_dir} after logout: {ls_out!r}")
+    elif leftover:
+        problems.append(f"stale entries left in {runtime_dir} after logout: {leftover}")
+
     record["problems"] = problems
     (vm.out / "session-login.json").write_text(json.dumps(record, indent=2) + "\n")
     if problems:
