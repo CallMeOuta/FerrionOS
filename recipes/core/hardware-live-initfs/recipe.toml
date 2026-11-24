@@ -12,6 +12,7 @@ dependencies = [
   "redoxfs",
 ]
 script = """
+mkdir -p "${COOKBOOK_SYSROOT}/usr/lib/initfs/root/lib/drivers"
 "${COOKBOOK_MAKE}" -C "${COOKBOOK_SOURCE}" install-initfs \
     SRC_DIR="${COOKBOOK_SOURCE}" SYSROOT="${COOKBOOK_SYSROOT}" \
     LINKER="${GNU_TARGET}-ld" CARGO="${COOKBOOK_CARGO}" \
