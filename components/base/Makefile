@@ -12,44 +12,18 @@ SYSROOT ?= $(shell pwd)/target/$(TARGET)/sysroot
 TARGET_DIR = $(BUILD_DIR)/$(TARGET)/$(BUILD_TYPE)
 BUILD_FLAGS +=  --target-dir $(BUILD_DIR)
 
-INITFS_BINS = ipcd init logd ramfs randd udsd zerod \
-	acpid fbbootlogd hwd inputd lived \
-	pcid pcid-spawner rtcd vesad
-INITFS_DRIVERS_BINS = nvmed virtio-blkd
-BASE_BINS = fbcond getty inputd pcid pcid-spawner redoxerd audiod dhcpd ptyd netstack nbdd
-DRIVERS_BINS = e1000d ihdad ihdgd ixgbed rtl8139d rtl8168d \
-	usbctl usbhidd usbhubd usbscsid virtio-gpud virtio-netd xhcid
+INITFS_BINS = ipcd init logd ramfs randd udsd zerod inputd
+BASE_BINS = getty inputd audiod dhcpd ptyd netstack
 SELFTEST_DIRS := $(patsubst selftests/%/Cargo.toml,%,$(wildcard selftests/*/Cargo.toml))
 TEST_BINS := $(addsuffix -selftest,$(SELFTEST_DIRS))
 
-ifneq (,$(filter i586-unknown-redox i686-unknown-redox x86_64-unknown-redox,$(TARGET)))
-    INITFS_BINS += ps2d
-    INITFS_DRIVERS_BINS += ahcid ided
-    DRIVERS_BINS += ac97d sb16d vboxd
-endif
-
-# FIXME fuse-abi's layout tests require structs containing a u64 to be 8-byte
-# aligned on every target, but on 32-bit x86 they are only 4-byte aligned, so
-# the crate fails to compile there. Remove this and add virtio-fsd directly to
-# DRIVERS_BINS once fuse-abi is fixed.
-ifeq (,$(filter i586-unknown-redox i686-unknown-redox,$(TARGET)))
-    DRIVERS_BINS += virtio-fsd
-endif
-
-ifeq ($(TARGET),aarch64-unknown-redox)
-	INITFS_BINS += bcm2835-sdhcid
-endif
-
-# For testing/benchmarking only
-# BASE_BINS += drawbench
+INITFS_STAGE = $(DESTDIR)/usr/lib/initfs
 
 INITFS_CARGO_ARGS = $(foreach bin,$(INITFS_BINS),-p $(bin))
-INITFS_DRIVERS_CARGO_ARGS = $(foreach bin,$(INITFS_DRIVERS_BINS),-p $(bin))
 BASE_CARGO_ARGS = $(foreach bin,$(BASE_BINS),-p $(bin))
-DRIVERS_CARGO_ARGS = $(foreach bin,$(DRIVERS_BINS),-p $(bin))
 TEST_CARGO_ARGS = $(foreach bin,$(TEST_BINS),-p $(bin))
 
-.PHONY: all base install install-base test test-gui test-ipcd selftests test-selftests test-virtio-fs
+.PHONY: all base install install-base install-initfs test test-gui test-ipcd selftests test-selftests test-virtio-fs
 
 all: base
 install: install-base
@@ -107,18 +81,18 @@ $(SYSROOT)/bin/redoxfs:
 
 base:
 	@mkdir -pv "$(BUILD_DIR)"
-# Build daemons and drivers
+# Build daemons
 	CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_PANIC=abort \
 		$(CARGO) build $(BUILD_FLAGS) \
 		--manifest-path "$(SRC_DIR)/Cargo.toml" \
-		$(BASE_CARGO_ARGS) $(DRIVERS_CARGO_ARGS)
-# Build initfs daemons and drivers
+		$(BASE_CARGO_ARGS)
+# Build initfs daemons
 # FIXME fix whatever issue (feature unification?) causes most logs to be omitted
 # if this is merged with the above build command.
 	CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_PANIC=abort \
 		$(CARGO) build $(BUILD_FLAGS) \
 		--manifest-path "$(SRC_DIR)/Cargo.toml" \
-		$(INITFS_CARGO_ARGS) $(INITFS_DRIVERS_CARGO_ARGS)
+		$(INITFS_CARGO_ARGS)
 # Build bootstrap
 	cd "$(SRC_DIR)/bootstrap" && RUSTFLAGS= $(CARGO) rustc $(BUILD_FLAGS) \
 		-- -Ctarget-feature=+crt-static -Clinker="$(LINKER)"
@@ -131,44 +105,22 @@ selftests:
 		--manifest-path "$(SRC_DIR)/Cargo.toml" \
 		$(TEST_CARGO_ARGS)
 
-install-base: base $(SYSROOT)/bin/redoxfs
-	@mkdir -pv "$(DESTDIR)/usr/bin" "$(DESTDIR)/usr/lib/drivers"
+install-base: base
+	@mkdir -pv "$(DESTDIR)/usr/bin"
 # Distribute binaries
 	@for bin in $(BASE_BINS); do \
 		cp -v "$(TARGET_DIR)/$$bin" "$(DESTDIR)/usr/bin"; \
 	done
-	@for bin in $(DRIVERS_BINS); do \
-		cp -v "$(TARGET_DIR)/$$bin" "$(DESTDIR)/usr/lib/drivers"; \
-	done
 # Copy configurations
-	@mkdir -pv "$(DESTDIR)/usr/lib/init.d/" "$(DESTDIR)/usr/lib/pcid.d/" "$(DESTDIR)/usr/lib/xhcid.d/"
+	@mkdir -pv "$(DESTDIR)/usr/lib/init.d/"
 	@cp -v "$(SRC_DIR)/init.d"/* "$(DESTDIR)/usr/lib/init.d/"
-	@find "$(SRC_DIR)/drivers" -maxdepth 3 -type f -name 'config.toml' | while read -r conf; do \
-		driver=$$(basename "$$(dirname "$$conf")"); \
-		cp -v "$$conf" "$(DESTDIR)/usr/lib/pcid.d/$$driver.toml"; \
-	done
-	@cp -v "$(SRC_DIR)/drivers/usb/xhcid/drivers.toml" "$(DESTDIR)/usr/lib/xhcid.d/"
 
-	rm -rf "$(BUILD_DIR)/initfs"
-# Distribute initfs binaries
-	@mkdir -pv "$(BUILD_DIR)/initfs/bin" "$(BUILD_DIR)/initfs/lib/drivers"
+	@mkdir -pv "$(INITFS_STAGE)/root/bin" "$(INITFS_STAGE)/root/lib/init.d"
 	for bin in $(INITFS_BINS); do \
-		cp -v "$(TARGET_DIR)/$$bin" "$(BUILD_DIR)/initfs/bin"; \
+		cp -v "$(TARGET_DIR)/$$bin" "$(INITFS_STAGE)/root/bin"; \
 	done
-	for bin in $(INITFS_DRIVERS_BINS); do \
-		cp -v "$(TARGET_DIR)/$$bin" "$(BUILD_DIR)/initfs/lib/drivers"; \
-	done
-	cp "$(SYSROOT)/bin/redoxfs" "$(BUILD_DIR)/initfs/bin"
-# Copy initfs config files
-	@mkdir -p "$(BUILD_DIR)/initfs/lib/init.d" "$(BUILD_DIR)/initfs/lib/pcid.d"
-	cp "$(SRC_DIR)/init.initfs.d"/* "$(BUILD_DIR)/initfs/lib/init.d/"
-	cp "$(SRC_DIR)/drivers/initfs.toml" "$(BUILD_DIR)/initfs/lib/pcid.d/initfs.toml"
-# Build initfs
-	$(CARGO_HOST) run --manifest-path "$(SRC_DIR)/initfs/tools/Cargo.toml" --bin redox-initfs-ar -- \
-		"$(BUILD_DIR)/initfs" "$(TARGET_DIR)/bootstrap" -o "$(BUILD_DIR)/initfs.img"
-# Distribute initfs
-	@mkdir -pv "$(DESTDIR)/usr/lib/boot"
-	cp -v "$(BUILD_DIR)/initfs.img" "$(DESTDIR)/usr/lib/boot/initfs"
+	cp "$(SRC_DIR)/init.initfs.d"/* "$(INITFS_STAGE)/root/lib/init.d/"
+	cp -v "$(TARGET_DIR)/bootstrap" "$(INITFS_STAGE)/bootstrap"
 
 # Device file symlinks
 	@mkdir -pv "$(DESTDIR)/dev"
@@ -181,3 +133,13 @@ install-base: base $(SYSROOT)/bin/redoxfs
 	ln -sf /scheme/libc/stdin $(DESTDIR)/dev/stdin
 	ln -sf /scheme/libc/stdout $(DESTDIR)/dev/stdout
 	ln -sf /scheme/libc/stderr $(DESTDIR)/dev/stderr
+
+install-initfs: $(SYSROOT)/bin/redoxfs
+	rm -rf "$(BUILD_DIR)/initfs"
+	@mkdir -pv "$(BUILD_DIR)/initfs"
+	cp -r "$(SYSROOT)/usr/lib/initfs/root/." "$(BUILD_DIR)/initfs/"
+	cp "$(SYSROOT)/bin/redoxfs" "$(BUILD_DIR)/initfs/bin"
+	$(CARGO_HOST) run --manifest-path "$(SRC_DIR)/initfs/tools/Cargo.toml" --bin redox-initfs-ar -- \
+		"$(BUILD_DIR)/initfs" "$(SYSROOT)/usr/lib/initfs/bootstrap" -o "$(BUILD_DIR)/initfs.img"
+	@mkdir -pv "$(DESTDIR)/usr/lib/boot"
+	cp -v "$(BUILD_DIR)/initfs.img" "$(DESTDIR)/usr/lib/boot/initfs"

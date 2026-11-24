@@ -29,6 +29,7 @@ use syscall::{
 };
 
 pub mod keymap;
+mod logger;
 
 use keymap::KeymapKind;
 
@@ -727,12 +728,12 @@ fn main() {
             _ => panic!("inputd: invalid argument: {}", val),
         }
     } else {
-        common::setup_logging(
+        logger::setup_logging(
             "input",
             "inputd",
             "inputd",
-            common::output_level(),
-            common::file_level(),
+            logger::output_level(),
+            logger::file_level(),
         );
 
         daemon::SchemeDaemon::new(daemon_runner);

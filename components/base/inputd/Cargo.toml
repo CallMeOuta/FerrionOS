@@ -12,10 +12,10 @@ redox_syscall = { workspace = true, features = ["std"] }
 orbclient.workspace = true
 libredox.workspace = true
 
-common = { path = "../common" }
-daemon = { path = "../../daemon" }
+daemon = { path = "../daemon" }
+redox-log.workspace = true
 redox-scheme.workspace = true
-scheme-utils = { path = "../../scheme-utils" }
+scheme-utils = { path = "../scheme-utils" }
 
 [lints]
 workspace = true
