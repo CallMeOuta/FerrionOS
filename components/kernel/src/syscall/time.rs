@@ -40,8 +40,10 @@ pub fn nanosleep(
         let context_lock = context::current();
         let context = context_lock.upgradeable_read(token.token());
 
-        if let Some((tctl, pctl, _)) = context.sigcontrol()
-            && tctl.currently_pending_unblocked(pctl) != 0
+        if context.being_sigkilled
+            || context
+                .sigcontrol()
+                .is_some_and(|(tctl, pctl, _)| tctl.currently_pending_unblocked(pctl) != 0)
         {
             return Err(Error::new(EINTR));
         }

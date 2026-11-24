@@ -186,8 +186,10 @@ pub fn futex(
                 {
                     let mut context = context_lock.write(token.token());
 
-                    if let Some((tctl, pctl, _)) = context.sigcontrol()
-                        && tctl.currently_pending_unblocked(pctl) != 0
+                    if context.being_sigkilled
+                        || context.sigcontrol().is_some_and(|(tctl, pctl, _)| {
+                            tctl.currently_pending_unblocked(pctl) != 0
+                        })
                     {
                         return Err(Error::new(EINTR));
                     }
@@ -301,9 +303,10 @@ pub fn futex(
                 // Signal can still arrive even if already woken up, in that case we want to assume EINTR happened
                 let current_context_ref = context::current();
                 let context = current_context_ref.read(token.token());
-                if context
-                    .sigcontrol()
-                    .is_none_or(|(control, pctl, _)| control.currently_pending_unblocked(pctl) == 0)
+                if !context.being_sigkilled
+                    && context.sigcontrol().is_none_or(|(control, pctl, _)| {
+                        control.currently_pending_unblocked(pctl) == 0
+                    })
                 {
                     return Ok(0);
                 }

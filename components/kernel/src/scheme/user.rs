@@ -232,9 +232,14 @@ impl UserInner {
     ) -> Result<Response> {
         {
             let current_context = context::current();
-            current_context
-                .write(token.token())
-                .block("UserInner::call");
+            let mut context_guard = current_context.write(token.token());
+            if context_guard.being_sigkilled {
+                drop(context_guard);
+                self.states.lock(token.token()).remove(sqe.tag as usize);
+                return Err(Error::new(EINTR));
+            }
+            context_guard.block("UserInner::call");
+            drop(context_guard);
             {
                 let mut states = self.states.lock(token.token());
                 states[sqe.tag as usize] = State::Waiting {
@@ -293,8 +298,18 @@ impl UserInner {
                             context,
                             fds,
                         } => {
-                            let maybe_eintr =
-                                eintr_if_sigkill(&mut callee_responsible, &mut token.token());
+                            let current_context = context::current();
+                            let mut context_guard = current_context.write(token.token());
+                            let is_killed = context_guard.being_sigkilled;
+                            if is_killed {
+                                callee_responsible =
+                                    mem::replace(caller_responsible, PageSpan::empty());
+                            } else {
+                                context_guard
+                                    .block("UserInner::call (woken up after cancelation request)");
+                            }
+                            drop(context_guard);
+
                             *o = State::Waiting {
                                 canceling: true,
                                 callee_responsible,
@@ -302,11 +317,9 @@ impl UserInner {
                                 fds,
                             };
 
-                            maybe_eintr?;
-
-                            context::current()
-                                .write(token.token())
-                                .block("UserInner::call (woken up after cancelation request)");
+                            if is_killed {
+                                return Err(Error::new(EINTR));
+                            }
 
                             // We do not want to drop the lock before blocking
                             // as if we get preempted in between we might miss a
@@ -370,9 +383,22 @@ impl UserInner {
                             // already processed the request, we will receive
                             // the actual response next and woken up again.
                             // State will be State::Responded then.
-                            context::current()
-                                .write(token.token())
-                                .block("UserInner::call (spurious wakeup)");
+                            let mut context_guard = current_context.write(token.token());
+                            if context_guard.being_sigkilled {
+                                drop(context_guard);
+                                drop(preempt);
+                                if let State::Waiting {
+                                    callee_responsible, ..
+                                } = o
+                                {
+                                    *callee_responsible =
+                                        mem::replace(caller_responsible, PageSpan::empty());
+                                }
+                                return Err(Error::new(EINTR));
+                            }
+                            context_guard.block("UserInner::call (spurious wakeup)");
+                            drop(context_guard);
+                            drop(preempt);
                             drop(states);
                         }
 
