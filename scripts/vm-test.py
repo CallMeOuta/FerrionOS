@@ -9751,6 +9751,23 @@ def test_mpv_headless(vm, args):
 
 
 TESTS["mpv-headless"] = test_mpv_headless
+
+
+def test_mpv_sound(args, out):
+    """M2b: boots with Intel HDA recorded by QEMU's wav backend, checks mpv --ao=help lists ferrion, plays a 3 s 1499 Hz Opus clip through default ao_ferrion, and verifies frequency, stereo channels, 3.0 s +/- 50 ms duration, and continuous phase without gaps or repeated chunks."""
+    import media_decode
+    return media_decode.run_mpv_sound(
+        args,
+        out,
+        {
+            "Blocked": Blocked,
+            "audio_vm": audio_vm,
+            "root_shell": root_shell,
+            "run_status": run_status,
+        },
+    )
+
+
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 def run_session_login_check(args, out):
     """Logs in as `user` on VT 3, verifies user-owned ferrion-wm on screen, 0600 session.log, QMP software pointer motion on VGA, Mod+T child uid/stdio/env/fd isolation, and VT 3 text login recovery past a lingering Mod+L sleep child (use --config wm-session)."""
@@ -9798,6 +9815,7 @@ def run_session_login_check(args, out):
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["session-login"] = run_session_login_check
 OWN_IMAGE["hw-live"] = test_hw_live
+OWN_IMAGE["mpv-sound"] = test_mpv_sound
 OWN_IMAGE["one-password"] = test_one_password
 OWN_IMAGE["key-slot-roll"] = test_key_slot_roll
 OWN_IMAGE["wayland-client"] = run_wayland_client

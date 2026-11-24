@@ -242,6 +242,8 @@ def check_mpv_recipe():
         errors.append("recipes/video/mpv/recipe.toml: forbidden -Dgpl=true")
     if "-Dauto_features=disabled" not in script:
         errors.append("recipes/video/mpv/recipe.toml: missing -Dauto_features=disabled")
+    if "-Dferrion-audio=enabled" not in script:
+        errors.append("recipes/video/mpv/recipe.toml: missing -Dferrion-audio=enabled")
     if "LICENSE.LGPL" not in script:
         errors.append("recipes/video/mpv/recipe.toml: must install LICENSE.LGPL")
     if "LICENSE.GPL" in script:

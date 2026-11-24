@@ -851,3 +851,292 @@ def run_mpv_headless(vm, args, helpers):
     finally:
         server.shutdown()
         server.server_close()
+
+
+WAV_HEADER_BYTES = 44
+AUDIO_RATE = 44100
+AUDIO_PERIOD_FRAMES = 512
+SOUND_TONE_HZ = 1499
+SOUND_ABSENT_HZ = 997
+SOUND_DURATION_S = 3.0
+SOUND_DURATION_TOL_S = 0.050
+SOUND_TARGET_AMP = 0.25
+SOUND_AMP_TOL_DB = 0.5
+SOUND_ACTIVE_RMS = 0.05
+SOUND_EDGE_GUARD_BLOCKS = 3
+SOUND_MAX_PHASE_JUMP_RAD = 0.35
+MAX_WAV_FRAMES = AUDIO_RATE * 60
+
+
+MAX_WAV_CHUNKS = 32
+
+
+def extract_wav_pcm(recording):
+    if len(recording) < 12 or recording[:4] != b"RIFF" or recording[8:12] != b"WAVE":
+        return None
+    pos = 12
+    for _ in range(MAX_WAV_CHUNKS):
+        if pos + 8 > len(recording):
+            return None
+        cid = recording[pos:pos + 4]
+        size = struct.unpack_from("<I", recording, pos + 4)[0]
+        pos += 8
+        if cid == b"data":
+            end = len(recording) if size == 0 or size == 0xFFFFFFFF else min(len(recording), pos + size)
+            return recording[pos:end]
+        pos += size + (size & 1)
+    return None
+
+
+def analyze_mpv_wav(recording):
+    data = extract_wav_pcm(recording)
+    if not data:
+        return {"ok": False, "reason": "empty or invalid WAV recording"}
+    frame_count = len(data) // 4
+    if frame_count > MAX_WAV_FRAMES:
+        raise ValueError(f"WAV frame count {frame_count} exceeds bound {MAX_WAV_FRAMES}")
+    samples = list(struct.iter_unpack("<hh", data[:frame_count * 4]))
+
+    block_count = frame_count // AUDIO_PERIOD_FRAMES
+    block_rms = []
+    for b in range(block_count):
+        base = b * AUDIO_PERIOD_FRAMES
+        acc_l = 0.0
+        acc_r = 0.0
+        for i in range(AUDIO_PERIOD_FRAMES):
+            l, r = samples[base + i]
+            fl = l / 32767.0
+            fr = r / 32767.0
+            acc_l += fl * fl
+            acc_r += fr * fr
+        rms_l = math.sqrt(acc_l / AUDIO_PERIOD_FRAMES)
+        rms_r = math.sqrt(acc_r / AUDIO_PERIOD_FRAMES)
+        block_rms.append(min(rms_l, rms_r))
+
+    active_blocks = [i for i, r in enumerate(block_rms) if r >= SOUND_ACTIVE_RMS]
+    if not active_blocks:
+        return {"ok": False, "reason": "no active tone detected in WAV", "frames": frame_count}
+
+    first_block = active_blocks[0]
+    last_block = active_blocks[-1]
+    span_blocks = last_block - first_block + 1
+    duration_s = span_blocks * AUDIO_PERIOD_FRAMES / AUDIO_RATE
+
+    interior_start = first_block + SOUND_EDGE_GUARD_BLOCKS
+    interior_end = last_block - SOUND_EDGE_GUARD_BLOCKS
+    gap_blocks = []
+    phase_jumps = []
+    expected_step = (math.tau * SOUND_TONE_HZ * AUDIO_PERIOD_FRAMES / AUDIO_RATE) % math.tau
+    cos_b = [math.cos(math.tau * SOUND_TONE_HZ * n / AUDIO_RATE) for n in range(AUDIO_PERIOD_FRAMES)]
+    sin_b = [math.sin(math.tau * SOUND_TONE_HZ * n / AUDIO_RATE) for n in range(AUDIO_PERIOD_FRAMES)]
+
+    prev_phase = None
+    for b in range(interior_start, interior_end + 1):
+        if block_rms[b] < SOUND_ACTIVE_RMS:
+            gap_blocks.append(b)
+            prev_phase = None
+            continue
+        base = b * AUDIO_PERIOD_FRAMES
+        re_l = 0.0
+        im_l = 0.0
+        for i in range(AUDIO_PERIOD_FRAMES):
+            s = samples[base + i][0] / 32767.0
+            re_l += s * cos_b[i]
+            im_l -= s * sin_b[i]
+        phase = math.atan2(im_l, re_l)
+        if prev_phase is not None:
+            actual_step = (phase - prev_phase) % math.tau
+            diff = (actual_step - expected_step + math.pi) % math.tau - math.pi
+            if abs(diff) > SOUND_MAX_PHASE_JUMP_RAD:
+                phase_jumps.append({"block": b, "diff_rad": round(diff, 4)})
+        prev_phase = phase
+
+    peaks = {}
+    for hz in (SOUND_TONE_HZ, SOUND_ABSENT_HZ):
+        cos_w = [math.cos(math.tau * hz * n / AUDIO_RATE) for n in range(AUDIO_RATE)]
+        sin_w = [math.sin(math.tau * hz * n / AUDIO_RATE) for n in range(AUDIO_RATE)]
+        ch_peaks = []
+        for ch in (0, 1):
+            amps = []
+            start_frame = interior_start * AUDIO_PERIOD_FRAMES
+            end_frame = (interior_end + 1) * AUDIO_PERIOD_FRAMES
+            for s0 in range(start_frame, end_frame - AUDIO_RATE + 1, AUDIO_RATE // 2):
+                real = 0.0
+                imag = 0.0
+                for i in range(AUDIO_RATE):
+                    v = samples[s0 + i][ch]
+                    real += v * cos_w[i]
+                    imag += v * sin_w[i]
+                amps.append(2.0 * math.hypot(real, imag) / AUDIO_RATE / 32767.0)
+            ch_peaks.append(round(max(amps, default=0.0), 6))
+        peaks[hz] = ch_peaks
+
+    gain_error_db = [
+        round(20.0 * math.log10(v / SOUND_TARGET_AMP), 3) if v > 0 else -999.0
+        for v in peaks[SOUND_TONE_HZ]
+    ]
+    duration_ok = abs(duration_s - SOUND_DURATION_S) <= SOUND_DURATION_TOL_S
+    freq_ok = (
+        all(abs(err) <= SOUND_AMP_TOL_DB for err in gain_error_db)
+        and max(peaks[SOUND_ABSENT_HZ]) <= 0.002
+    )
+    continuity_ok = len(gap_blocks) == 0 and len(phase_jumps) == 0
+    return {
+        "frames": frame_count,
+        "duration_s": round(duration_s, 4),
+        "duration_ok": duration_ok,
+        "amplitudes": peaks,
+        "gain_error_db": gain_error_db,
+        "freq_ok": freq_ok,
+        "gap_blocks": gap_blocks[:10],
+        "phase_jumps": phase_jumps[:10],
+        "continuity_ok": continuity_ok,
+        "ok": duration_ok and freq_ok and continuity_ok,
+    }
+
+
+def run_mpv_sound(args, out, helpers):
+    Blocked = helpers["Blocked"]
+    audio_vm = helpers["audio_vm"]
+    root_shell = helpers["root_shell"]
+    run_status = helpers["run_status"]
+
+    if not shutil.which("ffmpeg"):
+        raise Blocked("host lacks ffmpeg")
+
+    out.mkdir(parents=True, exist_ok=True)
+    clips_dir = out / "clips"
+    guest_dir = out / "guest-out"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    guest_dir.mkdir(parents=True, exist_ok=True)
+
+    clip_name = "tone_1499.ogg"
+    clip_path = clips_dir / clip_name
+    run_host_ffmpeg([
+        "-f", "lavfi",
+        "-i", f"sine=frequency={SOUND_TONE_HZ}:sample_rate=48000:duration={SOUND_DURATION_S}",
+        "-af", "volume=2.0,pan=stereo|c0=c0|c1=c0",
+        "-c:a", "libopus",
+        "-b:a", "192k",
+        str(clip_path),
+    ])
+    clip_sha = sha256_file(clip_path)
+
+    wav = out / "audio.wav"
+    wav.unlink(missing_ok=True)
+    record = {
+        "clip": clip_name,
+        "clip_sha256": clip_sha,
+        "expected_hz": SOUND_TONE_HZ,
+        "absent_hz": SOUND_ABSENT_HZ,
+        "expected_duration_s": SOUND_DURATION_S,
+    }
+
+    server = start_clip_server(clips_dir, guest_dir)
+    port = server.server_address[1]
+    base = f"http://10.0.2.2:{port}"
+    curl_post = "curl --http1.0 -H Expect: -fsS --max-time 30 --retry 2 --data-binary"
+    curl_get = "curl --http1.0 -fsS --max-time 30 --retry 2"
+    problems = []
+
+    try:
+        vm = audio_vm(args, out, wav)
+        try:
+            if not root_shell(vm, args.timeout):
+                return False, f"root serial login failed; see {out}"
+
+            code, net_text = run_status(
+                vm,
+                'bash -c \'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); '
+                'while [[ -z "$server" || "$server" == 9.9.9.9 ]] && (( SECONDS < deadline )); do '
+                'sleep 0.1; server=$(cat /etc/net/dns); done; '
+                '[[ -n "$server" && "$server" != 9.9.9.9 ]]\'',
+                timeout=70,
+            )
+            if code != 0:
+                return False, f"DHCP did not finish: {net_text.strip()}; see {out}"
+
+            code, help_out = run_status(
+                vm,
+                "bash -c 'mkdir -p /tmp/media && mpv --ao=help > /tmp/media/ao-help.txt 2>&1 && "
+                f"{curl_post} @/tmp/media/ao-help.txt {base}/ao-help.txt'",
+                timeout=60,
+            )
+            if code != 0:
+                return False, f"mpv --ao=help failed (rc={code}): {help_out.strip()[-300:]}; see {out}"
+
+            ao_help = (guest_dir / "ao-help.txt").read_text(encoding="utf-8", errors="replace")
+            has_ferrion_ao = any(line.strip().startswith("ferrion") for line in ao_help.splitlines())
+            record["ao_help_lists_ferrion"] = has_ferrion_ao
+            if not has_ferrion_ao:
+                record["problems"] = ["mpv --ao=help does not list ferrion"]
+                (out / "mpv-sound.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+                return False, f"mpv --ao=help does not list ferrion; see {out}"
+
+            code, vol_out = run_status(vm, "bash -c 'echo 100 > /scheme/audio/volume'", timeout=30)
+            if code != 0:
+                return False, f"setting /scheme/audio/volume to 100 failed: {vol_out.strip()}; see {out}"
+
+            code, dl_out = run_status(
+                vm,
+                f"bash -c '{curl_get} {base}/{clip_name} -o /tmp/media/{clip_name} && "
+                f"got=$(sha256sum /tmp/media/{clip_name} | cut -d\" \" -f1) && "
+                f"test \"$got\" = \"{clip_sha}\"'",
+                timeout=90,
+            )
+            if code != 0:
+                return False, f"download or sha256 failed for {clip_name}: {dl_out.strip()}; see {out}"
+
+            code, play_out = run_status(
+                vm,
+                f"bash -c 'rc=0; mpv --no-config --vo=null --msg-level=all=v /tmp/media/{clip_name} "
+                f"> /tmp/media/mpv-sound.log 2>&1 || rc=$?; "
+                f"{curl_post} @/tmp/media/mpv-sound.log {base}/mpv-sound.log || true; sleep 0.5; exit $rc'",
+                timeout=120,
+            )
+            if code is None:
+                return False, f"timeout playing {clip_name} with mpv; see {out}"
+
+            log_path = guest_dir / "mpv-sound.log"
+            log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+            ao_ferrion = "AO: [ferrion]" in log_text
+            eof = "Exiting... (End of file)" in log_text
+            drop_match = re.search(r"Dropped:\s*(\d+)", log_text)
+            dropped = int(drop_match.group(1)) if drop_match else 0
+            clamp_match = re.search(r"clamped samples:\s*(\d+)", log_text)
+            clamped = int(clamp_match.group(1)) if clamp_match else None
+            record["mpv"] = {
+                "exit_code": code,
+                "ao_ferrion": ao_ferrion,
+                "eof": eof,
+                "dropped": dropped,
+                "clamped_samples": clamped,
+            }
+            if code != 0:
+                problems.append(f"mpv exited {code}: {(log_text or play_out).strip()[-300:]}")
+            if not ao_ferrion:
+                problems.append("mpv did not select AO: [ferrion] by default")
+            if not eof:
+                problems.append("mpv did not reach End of file")
+            if dropped != 0:
+                problems.append(f"mpv reported {dropped} dropped frames")
+        finally:
+            vm.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    wav_report = analyze_mpv_wav(wav.read_bytes()) if wav.is_file() else {"ok": False, "reason": "audio.wav missing"}
+    record["wav"] = wav_report
+    if not wav_report.get("ok"):
+        problems.append(f"WAV verification failed: {wav_report}")
+
+    record["problems"] = problems
+    (out / "mpv-sound.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    if problems:
+        return False, "; ".join(problems) + f"; see {out}"
+    return True, (
+        f"AO: [ferrion] default + EOF, {wav_report['duration_s']:.3f}s tone at {SOUND_TONE_HZ} Hz "
+        f"(gain_err={wav_report['gain_error_db']} dB, absent={wav_report['amplitudes'][SOUND_ABSENT_HZ]}, "
+        f"gaps=0, phase_jumps=0); see {out}"
+    )

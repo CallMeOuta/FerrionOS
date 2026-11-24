@@ -8,6 +8,7 @@ patches = [
     "ferrion-j1-decl.patch",
     "ferrion-accept-fallback.patch",
     "ferrion-printf-precision.patch",
+    "ferrion-ao.patch",
 ]
 
 [build]
@@ -30,6 +31,7 @@ cookbook_meson \
     -Dbuild-date=false \
     -Dcplayer=true \
     -Dlibmpv=true \
+    -Dferrion-audio=enabled \
     -Diconv=enabled \
     -Dzlib=enabled \
     -Dmanpage-build=disabled
