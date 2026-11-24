@@ -1,6 +1,6 @@
 # FerrionOS's core components move into this repository
 
-Status: accepted; migrated on 2026-11-23 (`mono/cutover` cutover range from `cookbook: Build a path source in place through a symlink` onward)
+Status: accepted; landed on 2026-11-24 (`5958f13f6..77c259efc` on `191befd3e`, 106 commits; drivers in `ferrion-hardware` `2802feb34..c222cfd8` on `20da44c`, 26 commits)
 
 ## Context
 

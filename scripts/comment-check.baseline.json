@@ -1385,7 +1385,7 @@
   "config/aarch64/redoxer.toml": 0,
   "config/acid.toml": 0,
   "config/auto-test.toml": 0,
-  "config/base.toml": 21,
+  "config/base.toml": 18,
   "config/desktop-contain.toml": 0,
   "config/desktop-minimal.toml": 0,
   "config/desktop.toml": 0,
