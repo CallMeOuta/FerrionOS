@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define AT_REDOX_PROC_FD 41UL
@@ -21,6 +23,11 @@
 #define MAX_READ_ITERS 1024
 #define MAX_PRINT_EXTRA 32
 #define PATH_BUF_SIZE 256
+#define PS_BUF_SIZE 65536
+#define PS_MAX_READS 256
+#define SIBLING_SAMPLE_COUNT 20
+#define SIBLING_MID_SAMPLE 10
+#define SIBLING_SAMPLE_NS 50000000L
 #define ERRNO_CUTOFF ((size_t)-4096)
 
 extern size_t redox_cur_thrfd_v0(void);
@@ -76,38 +83,12 @@ static void add_auxv_handle(size_t *set, size_t *count, unsigned long key)
     }
 }
 
-int main(int argc, char **argv)
+static int read_filetable(size_t thr_fd, uint64_t *fds, size_t *count_out, size_t *self_fd_out)
 {
-    const char *mode = argc > 1 ? argv[1] : "unknown";
-    const char *threads = argc > 2 ? argv[2] : "0";
-    int verbose = argc > 3 && strcmp(argv[3], "1") == 0;
-
-    size_t keep[MAX_AUXV_HANDLES];
-    size_t keep_count = 0;
-    add_auxv_handle(keep, &keep_count, AT_REDOX_PROC_FD);
-    add_auxv_handle(keep, &keep_count, AT_REDOX_THR_FD);
-    add_auxv_handle(keep, &keep_count, AT_REDOX_NS_FD);
-    add_auxv_handle(keep, &keep_count, AT_REDOX_CWD_FD);
-    add_auxv_handle(keep, &keep_count, AT_REDOX_FILETABLE_FD);
-
-    size_t thr_fd = (size_t)getauxval(AT_REDOX_THR_FD);
-    if (thr_fd == 0 || thr_fd == ~(size_t)0) {
-        thr_fd = redox_cur_thrfd_v0();
-    }
-    assert(thr_fd != 0);
-
     static const uint8_t ft_name[] = "filetable-binary";
     size_t ft_res = redox_dup_v1(thr_fd, ft_name, sizeof(ft_name) - 1);
     if (is_raw_err(ft_res)) {
-        fprintf(stderr, "exec-handles-checker: dup filetable-binary failed errno=%d\n", raw_errno(ft_res));
-        return 2;
-    }
-
-    uint64_t *fds = calloc(MAX_TABLE_FDS, sizeof(uint64_t));
-    if (!fds) {
-        (void)redox_close_v1(ft_res);
-        fprintf(stderr, "exec-handles-checker: out of memory\n");
-        return 2;
+        return -raw_errno(ft_res);
     }
 
     size_t total_bytes = 0;
@@ -127,10 +108,8 @@ int main(int argc, char **argv)
             if (err == EINTR) {
                 continue;
             }
-            fprintf(stderr, "exec-handles-checker: read filetable failed errno=%d\n", err);
-            free(fds);
             (void)redox_close_v1(ft_res);
-            return 2;
+            return -err;
         }
         if (r == 0) {
             read_ok = 1;
@@ -141,12 +120,129 @@ int main(int argc, char **argv)
 
     if (!read_ok || (total_bytes % sizeof(uint64_t)) != 0) {
         (void)redox_close_v1(ft_res);
-        fprintf(stderr, "exec-handles-checker: incomplete filetable read bytes=%zu\n", total_bytes);
+        return -EIO;
+    }
+
+    *count_out = total_bytes / sizeof(uint64_t);
+    *self_fd_out = ft_res;
+    return 0;
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+    uint64_t ua = *(const uint64_t *)a;
+    uint64_t ub = *(const uint64_t *)b;
+    return (ua > ub) - (ua < ub);
+}
+
+static size_t copy_without_fd(const uint64_t *src, size_t n, size_t skip_fd, uint64_t *dst)
+{
+    size_t out = 0;
+    for (size_t i = 0; i < n; i++) {
+        if ((size_t)src[i] == skip_fd) {
+            continue;
+        }
+        dst[out++] = src[i];
+    }
+    if (out > 1) {
+        qsort(dst, out, sizeof(uint64_t), cmp_u64);
+    }
+    return out;
+}
+
+static int read_self_nthrd(void)
+{
+    int fd = open("/scheme/proc/ps", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    char *buf = malloc(PS_BUF_SIZE);
+    if (!buf) {
+        (void)close(fd);
+        return -1;
+    }
+    size_t total = 0;
+    for (int i = 0; i < PS_MAX_READS && total + 1 < PS_BUF_SIZE; i++) {
+        ssize_t n = read(fd, buf + total, PS_BUF_SIZE - 1 - total);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(buf);
+            (void)close(fd);
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += (size_t)n;
+    }
+    (void)close(fd);
+    buf[total] = '\0';
+
+    long my_pid = (long)getpid();
+    int found = -1;
+    char *p = buf;
+    for (size_t line_no = 0; line_no < 4096 && *p != '\0'; line_no++) {
+        char *nl = strchr(p, '\n');
+        if (nl) {
+            *nl = '\0';
+        }
+        long pid = -1;
+        long pgid = 0, ppid = 0, sid = 0, ruid = 0, rgid = 0, euid = 0, egid = 0;
+        int nthrd = -1;
+        if (sscanf(p, "%ld %ld %ld %ld %ld %ld %ld %ld %d",
+                &pid, &pgid, &ppid, &sid, &ruid, &rgid, &euid, &egid, &nthrd) == 9) {
+            if (pid == my_pid) {
+                found = nthrd;
+                break;
+            }
+        }
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    free(buf);
+    return found;
+}
+
+int main(int argc, char **argv)
+{
+    const char *mode = argc > 1 ? argv[1] : "unknown";
+    const char *threads = argc > 2 ? argv[2] : "0";
+    int verbose = argc > 3 && strcmp(argv[3], "1") == 0;
+    const char *marker_path = argc > 4 ? argv[4] : NULL;
+
+    size_t keep[MAX_AUXV_HANDLES];
+    size_t keep_count = 0;
+    add_auxv_handle(keep, &keep_count, AT_REDOX_PROC_FD);
+    add_auxv_handle(keep, &keep_count, AT_REDOX_THR_FD);
+    add_auxv_handle(keep, &keep_count, AT_REDOX_NS_FD);
+    add_auxv_handle(keep, &keep_count, AT_REDOX_CWD_FD);
+    add_auxv_handle(keep, &keep_count, AT_REDOX_FILETABLE_FD);
+
+    size_t thr_fd = (size_t)getauxval(AT_REDOX_THR_FD);
+    if (thr_fd == 0 || thr_fd == ~(size_t)0) {
+        thr_fd = redox_cur_thrfd_v0();
+    }
+    assert(thr_fd != 0);
+
+    uint64_t *fds = calloc(MAX_TABLE_FDS, sizeof(uint64_t));
+    if (!fds) {
+        fprintf(stderr, "exec-handles-checker: out of memory\n");
+        return 2;
+    }
+
+    size_t fd_count = 0;
+    size_t ft_res = 0;
+    int rrc = read_filetable(thr_fd, fds, &fd_count, &ft_res);
+    if (rrc != 0) {
+        fprintf(stderr, "exec-handles-checker: read filetable failed errno=%d\n", -rrc);
         free(fds);
         return 2;
     }
 
-    size_t fd_count = total_bytes / sizeof(uint64_t);
     size_t upper_total = 0;
     size_t extra = 0;
     size_t missing_posix = 0;
@@ -206,6 +302,70 @@ int main(int argc, char **argv)
             mode, threads, keep_count, upper_total, extra, missing_posix, open_clash);
     }
 
+    int sib_rc = 0;
+    if (marker_path != NULL) {
+        int nthrd_start = read_self_nthrd();
+        struct stat st_start;
+        long long size_start = (stat(marker_path, &st_start) == 0) ? (long long)st_start.st_size : -1LL;
+
+        uint64_t *base_fds = calloc(MAX_TABLE_FDS, sizeof(uint64_t));
+        uint64_t *cur_raw = calloc(MAX_TABLE_FDS, sizeof(uint64_t));
+        uint64_t *cur_fds = calloc(MAX_TABLE_FDS, sizeof(uint64_t));
+        if (!base_fds || !cur_raw || !cur_fds) {
+            free(base_fds);
+            free(cur_raw);
+            free(cur_fds);
+            free(fds);
+            return 2;
+        }
+        size_t base_n = copy_without_fd(fds, fd_count, ft_res, base_fds);
+        int nthrd_mid = -1;
+        int ft_changed = 0;
+
+        struct timespec req;
+        req.tv_sec = 0;
+        req.tv_nsec = SIBLING_SAMPLE_NS;
+        for (int s = 1; s <= SIBLING_SAMPLE_COUNT; s++) {
+            (void)nanosleep(&req, NULL);
+            if (s == SIBLING_MID_SAMPLE) {
+                nthrd_mid = read_self_nthrd();
+            }
+            size_t cur_raw_n = 0;
+            size_t cur_ft = 0;
+            if (read_filetable(thr_fd, cur_raw, &cur_raw_n, &cur_ft) != 0) {
+                ft_changed = 1;
+            } else {
+                (void)redox_close_v1(cur_ft);
+                size_t cur_n = copy_without_fd(cur_raw, cur_raw_n, cur_ft, cur_fds);
+                if (cur_n != base_n || (cur_n > 0 && memcmp(base_fds, cur_fds, cur_n * sizeof(uint64_t)) != 0)) {
+                    ft_changed = 1;
+                }
+            }
+        }
+
+        struct stat st_end;
+        long long size_end = (stat(marker_path, &st_end) == 0) ? (long long)st_end.st_size : -1LL;
+        int grew = (size_start < 0 || size_end < 0 || size_end != size_start);
+
+        if (verbose) {
+            FILE *out = open_clash ? stderr : stdout;
+            fprintf(out, "exec-handles-checker: siblings mode=%s nthrd_start=%d nthrd_mid=%d size_start=%lld size_end=%lld ft_changed=%d\n",
+                mode, nthrd_start, nthrd_mid, size_start, size_end, ft_changed);
+        }
+
+        if (nthrd_start != 1 || nthrd_mid != 1) {
+            sib_rc = 44;
+        } else if (grew) {
+            sib_rc = 45;
+        } else if (ft_changed) {
+            sib_rc = 46;
+        }
+
+        free(base_fds);
+        free(cur_raw);
+        free(cur_fds);
+    }
+
     free(fds);
     if (extra > 0) {
         return 42;
@@ -213,5 +373,5 @@ int main(int argc, char **argv)
     if (missing_posix > 0 || open_clash > 0) {
         return 43;
     }
-    return 0;
+    return sib_rc;
 }

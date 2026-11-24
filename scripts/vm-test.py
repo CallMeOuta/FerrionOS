@@ -1171,8 +1171,15 @@ def test_fork_filetable(vm, args):
 
 
 def test_exec_handles(vm, args):
-    """Checks that an exec'd or spawned program from a single-threaded or multithreaded parent, or through ferrion-run and ferrion-scoped, holds only the runtime handles exec gives it (use --config desktop)."""
-    passes = ("fork-exec-1", "posix-spawn-1", "fork-exec-multi", "posix-spawn-multi", "direct-exec-multi")
+    """Checks that an exec'd or spawned program from a single-threaded or multithreaded parent, or through ferrion-run and ferrion-scoped, holds only the runtime handles exec gives it and that exec ends sibling threads before the new program runs (use --config desktop)."""
+    passes = (
+        "fork-exec-1",
+        "posix-spawn-1",
+        "fork-exec-multi",
+        "posix-spawn-multi",
+        "direct-exec-multi",
+        "direct-exec-active",
+    )
     probe_ok, probe_note = user_probe(vm, args, "exec-handles-probe", passes, timeout=120)
     problems = []
     if not probe_ok:
