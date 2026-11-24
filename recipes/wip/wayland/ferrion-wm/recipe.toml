@@ -15,6 +15,7 @@ patches = [
     "0003-ferrion-optional-cursor.patch",
     "0004-ferrion-scrub-input-fd.patch",
     "F2-default-deny.patch",
+    "0005-ferrion-gpu-present.patch",
 ]
 script = """
 mkdir -p ferrion-vendor

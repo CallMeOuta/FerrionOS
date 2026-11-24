@@ -1,0 +1,396 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FerrionOS contributors <contributors@ferrion.invalid>
+Date: Mon, 23 Nov 2026 17:08:00 -0800
+Subject: [PATCH] backend: Pace ferrion-wm frames with page flips and log GL renderer (GP8)
+
+Open ferrion-wm-backend with PresentPreference::PageFlip so the display
+presenter selects PAGE_FLIP when the display driver supports it and
+keeps DIRTYFB otherwise. Pace redraws on BackendEvent::FlipComplete
+returning to Pacing::Idle, deliver presentation feedback using the DRM
+flip event's CLOCK_MONOTONIC timestamp (tv_us) with Kind::HwCompletion
+only (ADR 0032), log FERRION_RENDERER and FERRION_PRESENTER at startup,
+and append mode, composite_us, sync_wait_us, copy_us, readback_us and
+present_us to FERRION_FRAME.
+---
+--- a/src/backend/ferrion.rs
++++ b/src/backend/ferrion.rs
+@@ -1,8 +1,9 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+-// Added for FerrionOS on 2026-11-21, modified 2026-11-22, to niri's backend interface.
++// Added for FerrionOS on 2026-11-21, modified 2026-11-22 and 2026-11-23, to niri's backend interface.
+ // Input adapter follows FerrionOS's MIT ferrion-wm-backend; its notices are
+ // retained in ferrion-vendor/backend/LICENSE.
+ use std::collections::{HashMap, VecDeque};
++use std::ffi::{c_char, CStr};
+ use std::io;
+ use std::mem;
+ use std::sync::{Arc, Mutex};
+@@ -12,7 +13,10 @@
+ use calloop::ping::make_ping;
+ use calloop::timer::{TimeoutAction, Timer};
+ use calloop::{LoopHandle, RegistrationToken};
+-use ferrion_wm_backend::{self as native, BackendEvent, FrameScheduler, Input};
++use ferrion_wm_backend::{
++    self as native, BackendEvent, FlipCompletion, FrameScheduler, Input, PresentMode,
++    PresentPreference,
++};
+ use niri_config::OutputName;
+ use smithay::backend::allocator::dmabuf::Dmabuf;
+ use smithay::backend::allocator::Fourcc;
+@@ -20,8 +24,9 @@
+ use smithay::backend::egl::{EGLContext, EGLDisplay};
+ use smithay::backend::input::{self as sm, InputBackend, InputTime, UnusedEvent};
+ use smithay::backend::renderer::damage::OutputDamageTracker;
+-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
++use smithay::backend::renderer::gles::{ffi as gles_ffi, GlesRenderer, GlesTexture};
+ use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Texture};
++use smithay::desktop::utils::OutputPresentationFeedback;
+ use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+ use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
+ use smithay::utils::{Rectangle, Scale, Size, Transform};
+@@ -38,6 +43,7 @@
+ 
+ const MAX_EVENTS_PER_DISPATCH: usize = 256;
+ const MAX_PENDING_INPUTS: usize = 512;
++const MAX_CONSECUTIVE_FLIP_BUSY: u32 = 8;
+ const DEFAULT_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
+ const FRAME_MARGIN: Duration = Duration::from_micros(500);
+ const DISPLAY_CHANGE_PENDING_ERR: &str = "display change pending";
+@@ -96,10 +102,23 @@
+     Reconfigured(ActiveDisplay),
+ }
+ 
++struct PendingFlip {
++    frame: u64,
++    started: Instant,
++    started_us: u64,
++    composite_us: u64,
++    sync_wait_us: u64,
++    copy_us: u64,
++    readback_us: u64,
++    inputs: Vec<u64>,
++    feedbacks: OutputPresentationFeedback,
++}
++
+ enum Pacing {
+     Idle,
+     Armed(RegistrationToken),
+     Due,
++    FlipPending(PendingFlip),
+ }
+ 
+ enum RedrawGate {
+@@ -107,6 +126,26 @@
+     Wait,
+ }
+ 
++fn present_mode_name(mode: PresentMode) -> &'static str {
++    match mode {
++        PresentMode::DirtyFb => "dirtyfb",
++        PresentMode::PageFlip => "flip",
++    }
++}
++
++fn query_gl_renderer(renderer: &mut GlesRenderer) -> String {
++    renderer
++        .with_context(|gl| unsafe {
++            let ptr = gl.GetString(gles_ffi::RENDERER) as *const c_char;
++            if ptr.is_null() {
++                String::from("unknown")
++            } else {
++                CStr::from_ptr(ptr).to_string_lossy().into_owned()
++            }
++        })
++        .unwrap_or_else(|_| String::from("unknown"))
++}
++
+ fn is_change_pending(err: &io::Error) -> bool {
+     err.kind() == io::ErrorKind::WouldBlock
+         && err.to_string() == DISPLAY_CHANGE_PENDING_ERR
+@@ -118,6 +157,16 @@
+         .is_some_and(is_change_pending)
+ }
+ 
++fn is_flip_busy(err: &io::Error) -> bool {
++    err.kind() == io::ErrorKind::WouldBlock && !is_change_pending(err)
++}
++
++fn anyhow_is_flip_busy(err: &anyhow::Error) -> bool {
++    err.chain()
++        .find_map(|cause| cause.downcast_ref::<io::Error>())
++        .is_some_and(is_flip_busy)
++}
++
+ pub struct Ferrion {
+     native: native::Backend,
+     renderer: GlesRenderer,
+@@ -130,21 +179,26 @@
+     input_epoch: u64,
+     pending_inputs: VecDeque<u64>,
+     frame: u64,
++    consecutive_flip_busy: u32,
+ }
+ 
+ impl Ferrion {
+     pub fn new(event_loop: LoopHandle<'static, State>) -> anyhow::Result<Self> {
+         let (ping, source) = make_ping()?;
+         let wakeup = ping.clone();
+-        let native = native::Backend::open_with_wakeup(move || wakeup.ping())?;
++        let native = native::Backend::open_with_presenter(
++            move || wakeup.ping(),
++            PresentPreference::PageFlip,
++        )?;
+         let input_epoch = get_monotonic_time().as_micros() as u64 - native.now_us();
+         let initial_mode = DisplayMode::from_native(&native);
+-        let renderer = unsafe {
++        let mut renderer = unsafe {
+             let display =
+                 EGLDisplay::new(EGLSurfacelessDisplay).context("surfaceless EGL display")?;
+             let context = EGLContext::new(&display).context("surfaceless EGL context")?;
+             GlesRenderer::new(context).context("GLES renderer")?
+         };
++        let gl_renderer = query_gl_renderer(&mut renderer);
+         let output = Output::new(
+             "ferrion-1".into(),
+             PhysicalProperties {
+@@ -195,6 +249,7 @@
+             input_epoch,
+             pending_inputs: VecDeque::new(),
+             frame: 0,
++            consecutive_flip_busy: 0,
+         };
+         let active = backend.apply_mode(None, initial_mode)?;
+         backend.transition_display(DisplayEvent::Reconfigured(active));
+@@ -246,6 +301,15 @@
+                             break;
+                         }
+                     }
++                    Ok(Some(BackendEvent::FlipComplete(flip))) => {
++                        let ferrion = state.backend.ferrion();
++                        if let Err(err) = ferrion.on_flip_complete(flip) {
++                            error!("page flip completion failed: {err:#}");
++                            state.niri.stop_signal.stop();
++                            drained = true;
++                            break;
++                        }
++                    }
+                     Ok(None) => {
+                         drained = true;
+                         break;
+@@ -262,6 +326,11 @@
+                 reping.ping();
+             }
+         })?;
++        info!("FERRION_RENDERER renderer=\"{}\"", gl_renderer);
++        info!(
++            "FERRION_PRESENTER mode={}",
++            present_mode_name(backend.native.present_mode())
++        );
+         info!(
+             "FERRION_READY width={} height={} vt={}",
+             initial_mode.width,
+@@ -377,7 +446,7 @@
+                 self.pacing = Pacing::Idle;
+                 RedrawGate::Render
+             }
+-            Pacing::Armed(_) => RedrawGate::Wait,
++            Pacing::Armed(_) | Pacing::FlipPending(_) => RedrawGate::Wait,
+             Pacing::Idle => {
+                 let now = self.native.now_us();
+                 let start = self.scheduler.next_start(now);
+@@ -408,7 +477,12 @@
+         if let Pacing::Armed(token) = mem::replace(&mut self.pacing, Pacing::Idle) {
+             niri.event_loop.remove(token);
+         }
++        self.consecutive_flip_busy = 0;
+         self.native.reconfigure()?;
++        info!(
++            "FERRION_PRESENTER mode={}",
++            present_mode_name(self.native.present_mode())
++        );
+         let mode = DisplayMode::from_native(&self.native);
+         let active = self.apply_mode(Some(niri), mode)?;
+         let (width, height) = self.native.dimensions();
+@@ -417,6 +491,47 @@
+         Ok(())
+     }
+ 
++    fn on_flip_complete(&mut self, flip: FlipCompletion) -> anyhow::Result<()> {
++        assert!(matches!(self.display, Display::Active(_)));
++        self.native.complete_flip()?;
++        let Pacing::FlipPending(mut pending) = mem::replace(&mut self.pacing, Pacing::Idle) else {
++            unreachable!("flip completion without pending flip");
++        };
++        self.consecutive_flip_busy = 0;
++        let present_us = flip.completed_us.saturating_sub(pending.started_us);
++        info!(
++            "FERRION_FRAME frame={} started_us={} completed_us={} mode=flip composite_us={} sync_wait_us={} copy_us={} readback_us={} present_us={}",
++            pending.frame,
++            pending.started_us,
++            flip.completed_us,
++            pending.composite_us,
++            pending.sync_wait_us,
++            pending.copy_us,
++            pending.readback_us,
++            present_us
++        );
++        for read_us in pending.inputs {
++            info!(
++                "FERRION_INPUT frame={} read_us={} presented_us={}",
++                pending.frame, read_us, flip.completed_us
++            );
++        }
++        let presentation_time = Duration::from_micros(flip.tv_us);
++        pending
++            .feedbacks
++            .presented::<_, smithay::utils::Monotonic>(
++                presentation_time,
++                self.mode
++                    .refresh_interval
++                    .map(Refresh::Fixed)
++                    .unwrap_or(Refresh::Unknown),
++                pending.frame,
++                wp_presentation_feedback::Kind::HwCompletion,
++            );
++        self.scheduler.record_render(pending.started.elapsed());
++        Ok(())
++    }
++
+     fn update_cursor(&mut self, niri: &Niri) -> anyhow::Result<bool> {
+         let mut elements = Vec::new();
+         if niri.pointer_visibility.is_visible() {
+@@ -523,7 +638,10 @@
+     }
+ 
+     pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
+-        assert!(!matches!(self.pacing, Pacing::Armed(_)));
++        assert!(!matches!(
++            self.pacing,
++            Pacing::Armed(_) | Pacing::FlipPending(_)
++        ));
+         {
+             let output_state = niri.output_state.get(output).unwrap();
+             assert!(matches!(
+@@ -537,10 +655,13 @@
+             return RenderResult::Skipped;
+         }
+         let started = Instant::now();
+-        let result = self.render_frame(niri, output);
++        let result = self.render_frame(niri, output, started);
+         match result {
+             Ok(result) => {
+-                self.scheduler.record_render(started.elapsed());
++                if !matches!(self.pacing, Pacing::FlipPending(_)) {
++                    self.scheduler.record_render(started.elapsed());
++                }
++                self.consecutive_flip_busy = 0;
+                 let output_state = niri.output_state.get_mut(output).unwrap();
+                 output_state.redraw_state = if output_state.unfinished_animations_remain {
+                     RedrawState::Queued
+@@ -557,6 +678,23 @@
+                 output_state.redraw_state = RedrawState::Queued;
+                 RenderResult::Skipped
+             }
++            Err(err) if anyhow_is_flip_busy(&err) => {
++                self.consecutive_flip_busy += 1;
++                if self.consecutive_flip_busy > MAX_CONSECUTIVE_FLIP_BUSY {
++                    let output_state = niri.output_state.get_mut(output).unwrap();
++                    output_state.redraw_state = RedrawState::Idle;
++                    error!("page flip busy limit exceeded: {err:#}");
++                    niri.stop_signal.stop();
++                    return RenderResult::Skipped;
++                }
++                warn!(
++                    "page flip busy ({}/{}), deferring frame",
++                    self.consecutive_flip_busy, MAX_CONSECUTIVE_FLIP_BUSY
++                );
++                let output_state = niri.output_state.get_mut(output).unwrap();
++                output_state.redraw_state = RedrawState::Queued;
++                RenderResult::NoDamage
++            }
+             Err(err) => {
+                 let output_state = niri.output_state.get_mut(output).unwrap();
+                 output_state.redraw_state = RedrawState::Idle;
+@@ -567,9 +705,15 @@
+         }
+     }
+ 
+-    fn render_frame(&mut self, niri: &mut Niri, output: &Output) -> anyhow::Result<RenderResult> {
++    fn render_frame(
++        &mut self,
++        niri: &mut Niri,
++        output: &Output,
++        frame_started: Instant,
++    ) -> anyhow::Result<RenderResult> {
+         assert!(matches!(self.display, Display::Active(_)));
+         let software_cursor = self.update_cursor(niri)?;
++        let composite_started = Instant::now();
+         let elements = niri.render_to_vec(
+             RenderCtx {
+                 renderer: &mut self.renderer,
+@@ -595,7 +739,17 @@
+             self.pending_inputs.clear();
+             return Ok(RenderResult::NoDamage);
+         }
++        let composite_us = composite_started
++            .elapsed()
++            .as_micros()
++            .min(u128::from(u64::MAX)) as u64;
++        let sync_started = Instant::now();
+         result.sync.wait()?;
++        let sync_wait_us = sync_started
++            .elapsed()
++            .as_micros()
++            .min(u128::from(u64::MAX)) as u64;
++        let copy_started = Instant::now();
+         let (width, height) = self.native.dimensions();
+         let mapping = self.renderer.copy_framebuffer(
+             &target,
+@@ -613,13 +767,44 @@
+         {
+             buffer[row * stride..row * stride + row_bytes].copy_from_slice(source);
+         }
++        let copy_us = copy_started
++            .elapsed()
++            .as_micros()
++            .min(u128::from(u64::MAX)) as u64;
++        let readback_us = sync_wait_us.saturating_add(copy_us);
+         let presented = self.native.present()?;
+-        let presentation_time = get_monotonic_time();
+         active.buffer_valid = true;
+         self.frame += 1;
++        if presented.pending {
++            assert_eq!(presented.mode, PresentMode::PageFlip);
++            let inputs = self.pending_inputs.drain(..).collect();
++            let feedbacks = niri.take_presentation_feedbacks(output, &result.states);
++            self.pacing = Pacing::FlipPending(PendingFlip {
++                frame: self.frame,
++                started: frame_started,
++                started_us: presented.started_us,
++                composite_us,
++                sync_wait_us,
++                copy_us,
++                readback_us,
++                inputs,
++                feedbacks,
++            });
++            return Ok(RenderResult::Submitted);
++        }
++        let presentation_time = get_monotonic_time();
++        let present_us = presented.completed_us.saturating_sub(presented.started_us);
+         info!(
+-            "FERRION_FRAME frame={} started_us={} completed_us={}",
+-            self.frame, presented.started_us, presented.completed_us
++            "FERRION_FRAME frame={} started_us={} completed_us={} mode={} composite_us={} sync_wait_us={} copy_us={} readback_us={} present_us={}",
++            self.frame,
++            presented.started_us,
++            presented.completed_us,
++            present_mode_name(presented.mode),
++            composite_us,
++            sync_wait_us,
++            copy_us,
++            readback_us,
++            present_us
+         );
+         for read_us in self.pending_inputs.drain(..) {
+             info!(
