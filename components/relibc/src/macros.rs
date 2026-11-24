@@ -40,7 +40,7 @@ macro_rules! eprintln {
     };
 }
 
-pub const ISSUE_URL: &str = "https://gitlab.redox-os.org/redox-os/relibc/-/issues/";
+pub const ISSUE_URL: &str = "https://github.com/CallMeOuta/FerrionOS/issues/";
 
 // Skippable todo!(issue, fmt)
 #[macro_export]

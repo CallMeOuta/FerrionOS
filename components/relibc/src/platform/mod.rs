@@ -409,7 +409,7 @@ pub unsafe fn init_inner(auxvs: Box<[[usize; 2]]>) {
             }),
         ) {
             self::sys::path::set_cwd_manual(cwd_path, cwd_fd)
-                .expect("cwd_path is not valid redox path")
+                .expect("cwd_path is not a valid FerrionOS path")
         }
     }
 

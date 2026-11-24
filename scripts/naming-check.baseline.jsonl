@@ -49,9 +49,6 @@
 {"path": "components/redoxfs/tests/tests.rs", "line": 43, "class": "fail", "text": "let res = with_redoxfs(move |fs| {"}
 {"path": "components/redoxfs/tests/tests.rs", "line": 44, "class": "fail", "text": "// At redox, we mount on /scheme/ path, no need an empty dir"}
 {"path": "components/redoxfs/tests/tests.rs", "line": 53, "class": "fail", "text": "\"CARGO_BIN_EXE_redoxfs\","}
-{"path": "components/relibc/check.sh", "line": 11, "class": "fail", "text": "echo \"  Wrapper for Makefile / Cargo to run checks or tests on Redox OS targets.\""}
-{"path": "components/relibc/check.sh", "line": 19, "class": "fail", "text": "echo \"  --all-target        Run the command on all supported Redox architectures\""}
-{"path": "components/relibc/check.sh", "line": 162, "class": "fail", "text": "echo \"Running $CMD_ACTION for all supported Redox targets...\""}
 {"path": "components/relibc/redox-rt/src/arch/aarch64.rs", "line": 77, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
 {"path": "components/relibc/redox-rt/src/arch/i686.rs", "line": 67, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
 {"path": "components/relibc/redox-rt/src/arch/riscv64.rs", "line": 53, "class": "fail", "text": "/// Deactive TLS, used before exec() on Redox to not trick target executable into thinking TLS"}
@@ -120,7 +117,6 @@
 {"path": "components/relibc/src/platform/linux/mod.rs", "line": 907, "class": "fail", "text": "// GETPID on Linux is 39, which does not exist on Redox"}
 {"path": "components/relibc/src/platform/logger.rs", "line": 61, "class": "fail", "text": "/// An output that will be logged to. The two major outputs for most Redox system programs are"}
 {"path": "components/relibc/src/platform/mod.rs", "line": 344, "class": "fail", "text": "// TODO: Find an auxv replacement for Redox's execv protocol"}
-{"path": "components/relibc/src/platform/mod.rs", "line": 412, "class": "fail", "text": ".expect(\"cwd_path is not valid redox path\")"}
 {"path": "components/relibc/src/platform/pal/mod.rs", "line": 192, "class": "fail", "text": "// this means the buffer came from a valid getdents64 invocation, whereas on Redox, every"}
 {"path": "components/relibc/src/platform/redox/exec.rs", "line": 495, "class": "fail", "text": "echo \"Hello from Redox\"\"#;"}
 {"path": "components/relibc/src/platform/redox/mod.rs", "line": 124, "class": "fail", "text": "/// Redox syscall implementation of [`Pal`]."}

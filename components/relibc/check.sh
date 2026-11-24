@@ -8,7 +8,7 @@ show_help() {
     echo "Usage: $(basename "$0") [OPTIONS]"
     echo ""
     echo "Description:"
-    echo "  Wrapper for Makefile / Cargo to run checks or tests on Redox OS targets."
+    echo "  Wrapper for Makefile / Cargo to run checks or tests on FerrionOS targets."
     echo ""
     echo "Options:"
     echo "  --test              Run 'make test' instead of 'make all'"
@@ -16,7 +16,7 @@ show_help() {
     echo "  --cargo             Run 'cargo check' / 'cargo test' instead"
     echo "                         (note: cargo test is currently not maintained for relibc)"
     echo "  --host              Run the command on host (linux) target"
-    echo "  --all-target        Run the command on all supported Redox architectures"
+    echo "  --all-target        Run the command on all supported FerrionOS architectures"
     echo "  --target=<target>   Override the target architecture (e.g., i586-unknown-redox; default: x86_64-unknown-redox)"
     echo "  --all-features      Run Cargo with the --all-features flag"
     echo "  --arch=<arch>       Override the target architecture using arch (e.g., i586)"
@@ -159,7 +159,7 @@ run() {
 }
 
 if [ "$CHECK_ALL_TARGETS" = true ]; then
-    echo "Running $CMD_ACTION for all supported Redox targets..."
+    echo "Running $CMD_ACTION for all supported FerrionOS targets..."
 
     has_error=false
 
