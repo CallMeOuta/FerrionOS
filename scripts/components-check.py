@@ -14,20 +14,33 @@ COMMENT_BASELINE = ROOT / "scripts" / "comment-check.baseline.json"
 NAMING_BASELINE = ROOT / "scripts" / "naming-check.baseline.jsonl"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
+INNER_ALLOW_UNSAFE = re.compile(
+    r"#!\[allow\([^]]*\b(?:clippy::)?undocumented_unsafe_blocks\b[^]]*\)\]",
+    re.DOTALL,
+)
+ALLOW_UNSAFE_TOKEN = re.compile(r"\b(?:clippy::)?undocumented_unsafe_blocks\b")
+FN_DECL = re.compile(r"\bfn\b")
+UNSAFE_BLOCK = re.compile(r"\bunsafe\s*\{")
 OWN_ADDRESS = "github.com/CallMeOuta/FerrionOS"
 USAGE = f"""Checks the source trees under components/ against {RECORD.relative_to(ROOT)} (ADRs 0027
 and 0047): every tree is recorded with its upstream repository and revision, its license files
-are present and unchanged, its recipe builds it in place and carries no patch file, and no tree
-holds a submodule link. For base, whose drivers live in ferrion-hardware: the tree has no
-drivers/ folder, the drivers recipe names ferrion-hardware by a full revision and carries no
-patch file, its lock file takes no crate of FerrionOS's from the network, and no Cargo manifest
-of this repository depends on ferrion-hardware or on upstream's base repository.
+are present and unchanged, its recipe builds it in place and carries no patch file (unless
+kind = "subset"), and no tree holds a submodule link. For kind = "subset": every include path's
+git object id matches the commit that first added the tree, nothing tracked exists under the
+tree outside include and added, and no recipe is required. For every tree beyond the four core
+components: each FerrionOS helper carrying #[allow(clippy::undocumented_unsafe_blocks)] holds
+exactly one unsafe block and matches its file's line count in components/<name>.unsafe.md. For
+base, whose drivers live in ferrion-hardware: the tree has no drivers/ folder, the drivers
+recipe names ferrion-hardware by a full revision and carries no patch file, its lock file takes
+no crate of FerrionOS's from the network, and no Cargo manifest of this repository depends on
+ferrion-hardware or on upstream's base repository.
 
 Usage: {sys.argv[0]} [--rebaseline <name>]
   --rebaseline <name>  rewrite the entries of components/<name>/ in the comment and naming
-                       baselines to the tree as it is. Only two commits may do this: one that
-                       merges an upstream revision (scripts/component-upstream.sh merge), and one
-                       that brings in a patch written before the trees moved into this repository
+                       baselines to the tree as it is (for kind = "subset", include paths only).
+                       Only two commits may do this: one that merges an upstream revision
+                       (scripts/component-upstream.sh merge), and one that imports a tree or
+                       brings in a patch written before the trees moved into this repository
 Exit code 1 when a check fails."""
 
 
@@ -38,6 +51,222 @@ def sha256(path):
 def tracked(*args):
     out = subprocess.run(["git", "ls-files", *args], cwd=ROOT, check=True, capture_output=True, text=True)
     return out.stdout.splitlines()
+
+
+def covered_by(rel_path, allowed):
+    return any(rel_path == entry or rel_path.startswith(entry + "/") for entry in allowed)
+
+
+def valid_rel_path(value):
+    if not isinstance(value, str) or not value or value.startswith("/") or value.endswith("/"):
+        return False
+    parts = value.split("/")
+    return all(part and part not in (".", "..") for part in parts)
+
+
+def check_subset(name, entry):
+    failures = []
+    include = entry.get("include")
+    if not isinstance(include, dict) or not include:
+        failures.append(f"{name}: subset entry must define a non-empty [include] table")
+        return failures
+    added = entry.get("added", [])
+    if not isinstance(added, list):
+        failures.append(f"{name}: subset added must be a list of relative paths")
+        return failures
+    for rel, oid in sorted(include.items()):
+        if not valid_rel_path(rel):
+            failures.append(f"{name}: invalid include path {rel!r}")
+        if not HEX40.fullmatch(str(oid)):
+            failures.append(f"{name}: include {rel} does not record a 40-hex git object id")
+    for rel in added:
+        if not valid_rel_path(rel):
+            failures.append(f"{name}: invalid added path {rel!r}")
+    if failures:
+        return failures
+
+    licenses = entry.get("licenses", {})
+    anchor = "LICENSE" if "LICENSE" in licenses else (sorted(licenses)[0] if licenses else "LICENSE")
+    anchor_rel = f"components/{name}/{anchor}"
+    log = subprocess.run(
+        ["git", "log", "--diff-filter=A", "--reverse", "--format=%H", "--", anchor_rel],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commits = [line.strip() for line in log.stdout.splitlines() if line.strip()]
+    if not commits:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if shallow == "true":
+            failures.append(f"{name}: history is shallow; the subset proof needs the import commit")
+        else:
+            failures.append(f"{name}: could not find import commit adding {anchor_rel}")
+        return failures
+    import_commit = commits[0]
+
+    for rel, expected_oid in sorted(include.items()):
+        rev = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{import_commit}:components/{name}/{rel}"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        actual_oid = rev.stdout.strip() if rev.returncode == 0 else ""
+        if actual_oid != expected_oid:
+            found = actual_oid or "missing"
+            failures.append(
+                f"{name}: include {rel} at import commit {import_commit[:9]} is {found}, expected {expected_oid}"
+            )
+
+    prefix = f"components/{name}/"
+    allowed = list(include.keys()) + list(added)
+    for full in sorted(set(tracked(f"components/{name}"))):
+        if not full.startswith(prefix):
+            continue
+        rel_file = full[len(prefix):]
+        if not covered_by(rel_file, allowed):
+            failures.append(f"{name}: path {rel_file} is outside include and added")
+    return failures
+
+
+def scan_ferrion_unsafe(path, rel, name):
+    failures = []
+    text = path.read_text(errors="replace")
+    if INNER_ALLOW_UNSAFE.search(text):
+        failures.append(
+            f"{name}: {rel}: inner allow of undocumented_unsafe_blocks is forbidden; allow on a single helper"
+        )
+    lines = text.splitlines()
+    count = 0
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].lstrip(" ")
+        if not stripped.startswith("#[allow("):
+            i += 1
+            continue
+        indent = len(lines[i]) - len(stripped)
+        attr_end = i
+        while "]" not in lines[attr_end] and attr_end + 1 < len(lines):
+            attr_end += 1
+        attr_text = " ".join(lines[i : attr_end + 1])
+        if not ALLOW_UNSAFE_TOKEN.search(attr_text):
+            i = attr_end + 1
+            continue
+        j = attr_end + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if not nxt:
+                j += 1
+                continue
+            if nxt.startswith("#["):
+                while "]" not in lines[j] and j + 1 < len(lines):
+                    j += 1
+                j += 1
+                continue
+            break
+        if j >= len(lines) or not FN_DECL.search(lines[j]):
+            failures.append(
+                f"{name}: {rel}:{i + 1}: undocumented_unsafe_blocks allow must sit on a helper function"
+            )
+            i = attr_end + 1
+            continue
+        k = j
+        while k < len(lines) and "{" not in lines[k]:
+            k += 1
+        if k >= len(lines):
+            failures.append(f"{name}: {rel}:{i + 1}: allowed helper has no function body")
+            i = attr_end + 1
+            continue
+        brace_idx = lines[k].index("{")
+        first_chunk = lines[k][brace_idx:]
+        if first_chunk.count("{") == first_chunk.count("}"):
+            body_text = first_chunk
+        else:
+            close_prefix = " " * indent + "}"
+            m = k + 1
+            while m < len(lines) and not lines[m].startswith(close_prefix):
+                m += 1
+            if m >= len(lines):
+                failures.append(
+                    f"{name}: {rel}:{i + 1}: could not find closing brace for allowed helper"
+                )
+                i = attr_end + 1
+                continue
+            body_text = "\n".join([first_chunk, *lines[k + 1 : m + 1]])
+        n_unsafe = len(UNSAFE_BLOCK.findall(body_text))
+        if n_unsafe != 1:
+            failures.append(
+                f"{name}: {rel}:{i + 1}: allowed helper must contain exactly one unsafe block (found {n_unsafe})"
+            )
+        count += 1
+        i = attr_end + 1
+    return count, failures
+
+
+def check_unsafe_justifications(name):
+    failures = []
+    prefix = f"components/{name}/"
+    blocks_by_file = {}
+    for full in sorted(set(tracked(f"components/{name}"))):
+        if not full.startswith(prefix) or not full.endswith(".rs"):
+            continue
+        rel = full[len(prefix):]
+        path = ROOT / full
+        if not path.is_file():
+            continue
+        count, file_failures = scan_ferrion_unsafe(path, rel, name)
+        failures.extend(file_failures)
+        if count > 0:
+            blocks_by_file[rel] = count
+
+    doc_rel = f"components/{name}.unsafe.md"
+    doc_path = ROOT / doc_rel
+    doc_tracked = bool(tracked(doc_rel))
+    doc_by_file = {}
+    if doc_path.is_file() and not doc_tracked:
+        failures.append(f"{name}: {doc_rel} exists on disk but is not tracked")
+    if doc_tracked and doc_path.is_file():
+        for lineno, raw in enumerate(doc_path.read_text(errors="replace").splitlines(), 1):
+            line = raw.strip()
+            if not line:
+                continue
+            parts = [part.strip() for part in line.split("|", 2)]
+            if len(parts) != 3 or any(not part for part in parts):
+                failures.append(f"{name}: {doc_rel}:{lineno}: expected 'path | function | invariant'")
+                continue
+            rel_path, _, _ = parts
+            if not valid_rel_path(rel_path) or ":" in rel_path or rel_path.startswith("components/"):
+                failures.append(f"{name}: {doc_rel}:{lineno}: invalid relative path {rel_path!r}")
+                continue
+            doc_by_file[rel_path] = doc_by_file.get(rel_path, 0) + 1
+    elif blocks_by_file:
+        total = sum(blocks_by_file.values())
+        failures.append(f"{name}: {doc_rel} is missing for {total} FerrionOS unsafe block(s)")
+        return failures
+
+    for rel in sorted(set(blocks_by_file) | set(doc_by_file)):
+        actual = blocks_by_file.get(rel, 0)
+        documented = doc_by_file.get(rel, 0)
+        if actual == 0:
+            failures.append(
+                f"{name}: {doc_rel} lists {documented} block(s) for {rel}, which has no FerrionOS unsafe blocks"
+            )
+        elif actual > documented:
+            failures.append(
+                f"{name}: {rel} has {actual} FerrionOS unsafe block(s), but {doc_rel} lists {documented} (missing justification)"
+            )
+        elif actual < documented:
+            failures.append(
+                f"{name}: {rel} has {actual} FerrionOS unsafe block(s), but {doc_rel} lists {documented} (stale justification)"
+            )
+    return failures
 
 
 def check():
@@ -86,15 +315,24 @@ def check():
                 rel = item.rstrip("/")
                 if tracked(f"components/{name}/{rel}"):
                     failures.append(f"components/{name}/{rel}: listed in dropped of {RECORD.relative_to(ROOT)} and must stay absent")
-        recipe_dir = ROOT / "recipes" / "core" / name
-        source = tomllib.loads((recipe_dir / "recipe.toml").read_text()).get("source", {})
-        if set(source) != {"path"} or (recipe_dir / source["path"]).resolve() != tree.resolve():
-            failures.append(f"{name}: recipes/core/{name}/recipe.toml must have [source] path = "
-                            f'"../../../components/{name}" and no other source key')
-        for patch in tracked(f"recipes/core/{name}/*.patch"):
-            failures.append(f"{patch}: a change to {name} is a commit in components/{name}, not a patch file")
-        if "split" in entry:
-            failures.extend(check_split(name, entry["split"]))
+        kind = entry.get("kind", "component")
+        if kind == "subset":
+            failures.extend(check_subset(name, entry))
+        elif kind == "component":
+            recipe_dir = ROOT / "recipes" / "core" / name
+            source = tomllib.loads((recipe_dir / "recipe.toml").read_text()).get("source", {})
+            if set(source) != {"path"} or (recipe_dir / source["path"]).resolve() != tree.resolve():
+                failures.append(f"{name}: recipes/core/{name}/recipe.toml must have [source] path = "
+                                f'"../../../components/{name}" and no other source key')
+            for patch in tracked(f"recipes/core/{name}/*.patch"):
+                failures.append(f"{patch}: a change to {name} is a commit in components/{name}, not a patch file")
+            if "split" in entry:
+                failures.extend(check_split(name, entry["split"]))
+        else:
+            failures.append(f"{name}: unknown kind {kind!r}")
+            continue
+        if kind != "component":
+            failures.extend(check_unsafe_justifications(name))
     links = subprocess.run(["git", "ls-files", "-s", "components"], cwd=ROOT, check=True, capture_output=True, text=True)
     for line in links.stdout.splitlines():
         if line.startswith("160000 "):
@@ -145,11 +383,22 @@ def check_split(name, split):
 
 
 def rebaseline(name):
+    record = tomllib.loads(RECORD.read_text())
+    entry = record[name]
     prefix = f"components/{name}/"
+    include = list(entry.get("include", {}).keys()) if entry.get("kind") == "subset" else None
+
+    def in_scope(path):
+        if not path.startswith(prefix):
+            return False
+        if include is None:
+            return True
+        return covered_by(path[len(prefix):], include)
+
     sys.path.insert(0, str(ROOT / "scripts"))
     from comment_extract import inventory, read_config
     records, _, files = inventory(str(ROOT), read_config(str(COMMENT_CONFIG)))
-    lines = {path: set() for path in files if path.startswith(prefix)}
+    lines = {path: set() for path in files if in_scope(path)}
     for rec in records:
         if rec["file"] in lines and not rec["exempt"]:
             lines[rec["file"]].update(range(rec["line"], rec["end_line"] + 1))
@@ -162,7 +411,7 @@ def rebaseline(name):
     kept = [raw for raw in NAMING_BASELINE.read_text().splitlines()
             if raw.strip() and not json.loads(raw)["path"].startswith(prefix)]
     added = [raw for raw in found.stdout.splitlines()
-             if raw.strip() and json.loads(raw)["class"] == "fail" and json.loads(raw)["path"].startswith(prefix)]
+             if raw.strip() and json.loads(raw)["class"] == "fail" and in_scope(json.loads(raw)["path"])]
     rows = sorted(kept + added, key=lambda raw: (json.loads(raw)["path"], json.loads(raw)["line"]))
     NAMING_BASELINE.write_text("".join(raw + "\n" for raw in rows))
     print(f"{name}: {len(lines)} comment baseline entries and {len(added)} naming baseline lines rewritten")

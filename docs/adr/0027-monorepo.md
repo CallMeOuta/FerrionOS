@@ -22,8 +22,26 @@ FerrionOS changed its core components (the kernel, relibc, base and RedoxFS) thr
 
 ## Where
 
-- `components/{kernel,relibc,base,redoxfs}` and `components/upstream.toml`
+- `components/{kernel,relibc,base,redoxfs}`, additional trees under `components/`, `components/upstream.toml`, and `components/<tree>.unsafe.md`
 - `recipes/core/{kernel,relibc,base,redoxfs}/recipe.toml` and `recipes/core/initfs/recipe.toml`
 - `src/cook/fetch.rs` (`fetch_link_tree`, `fetch_tree_ident`), `src/cook/fs.rs`, `src/recipe.rs`
 - `scripts/components-check.py`, `scripts/component-upstream.sh`, `scripts/base-split.py`
 - `docs/upstream.md` and [ADR 0047](0047-drivers-in-ferrion-hardware.md)
+
+## Amendment (2026-11-24): Additional trees under `components/` and the `subset` kind
+
+### Common rules for trees beyond the four core components
+
+- **Additional trees and `kind`.** Trees under `components/` beyond `kernel`, `relibc`, `base` and `redoxfs` are allowed. Each tree has an entry in `components/upstream.toml` with a `kind` field (default `"component"` for the four core trees) and is verified by `scripts/components-check.py`; an unknown `kind` fails the check.
+- **Baselines without whole-tree skips.** No tree under `components/` gets a whole-tree comment-check skip. Upstream's comments stay as imported and are recorded once in the import commit with `python3 scripts/components-check.py --rebaseline <name>` (covering brought-in comments and naming lines), and rebaselined again only at an upstream merge or a version bump. FerrionOS adds no comments of any kind (the existing repository rule), and `scripts/comment-check.py` enforces it.
+- **FerrionOS unsafe-block justifications.** FerrionOS's unsafe blocks carry a smallest-scope `#[allow(clippy::undocumented_unsafe_blocks)]` (one `unsafe {` block per allowed helper), assert their invariant where possible, and are explained one line per block in the tracked file `components/<tree>.unsafe.md` in the form `path | function | invariant`, with `path` relative to `components/<tree>/`, no commit hashes and no line numbers.
+- **Changes inside additional trees.** Trees beyond the four are upstream code with FerrionOS's commits on top. FerrionOS's changes to such a tree are commits in it, and small programs that prove those changes may sit inside it, listed in `added`.
+- **Offline check.** `scripts/components-check.py` with no options runs offline and checks format and presence: the record's fields, object ids at the import commit, tracked stray paths, license digests, and the per-file `components/<tree>.unsafe.md` counts (requiring every allowed helper to contain exactly one `unsafe {` block and failing when any file's count differs or names a file with zero FerrionOS blocks).
+
+### The `subset` kind
+
+- A `kind = "subset"` entry in `components/upstream.toml` records a curated subset of an upstream repository by its `https://` `url` and full 40-hex commit `rev`, without requiring a `recipes/core/<name>` recipe.
+- `[<name>.include]` maps each imported relative path (file or directory) to its 40-hex git object id at `rev`. `scripts/components-check.py` finds the import commit that first added the tree's anchor license file (`git log --diff-filter=A --reverse`) and verifies every `include` path's git object id at that commit against the recorded id. A shallow clone that lacks the import commit fails with `history is shallow; the subset proof needs the import commit`.
+- `added` lists relative paths of FerrionOS-added files or directories inside `components/<name>/`. The stray-path check inspects tracked files (`git ls-files`) only and fails when any tracked file under `components/<name>/` falls outside `include` and `added`; untracked local build directories such as `target/` are ignored by the stray check and excluded via `.gitignore`.
+- `[<name>.licenses]` maps each license and notice file relative to `components/<name>/` to its sha256 digest and is checked on every run.
+- `scripts/components-check.py --rebaseline <name>` for `kind = "subset"` rebaselines only paths covered by `include`, never paths in `added`, so FerrionOS's own added files remain unbaselined at zero comments.
