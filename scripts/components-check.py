@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 import hashlib
+import io
 import json
+import os
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 import tomllib
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -14,6 +20,11 @@ COMMENT_BASELINE = ROOT / "scripts" / "comment-check.baseline.json"
 NAMING_BASELINE = ROOT / "scripts" / "naming-check.baseline.jsonl"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
+MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_UNPACKED_BYTES = 256 * 1024 * 1024
+ARCHIVE_CHUNK_BYTES = 64 * 1024
+ARCHIVE_TIMEOUT_S = 60
+MAX_ARCHIVE_MEMBERS = 10_000
 INNER_ALLOW_UNSAFE = re.compile(
     r"#!\[allow\([^]]*\b(?:clippy::)?undocumented_unsafe_blocks\b[^]]*\)\]",
     re.DOTALL,
@@ -23,24 +34,34 @@ FN_DECL = re.compile(r"\bfn\b")
 UNSAFE_BLOCK = re.compile(r"\bunsafe\s*\{")
 OWN_ADDRESS = "github.com/CallMeOuta/FerrionOS"
 USAGE = f"""Checks the source trees under components/ against {RECORD.relative_to(ROOT)} (ADRs 0027
-and 0047): every tree is recorded with its upstream repository and revision, its license files
-are present and unchanged, its recipe builds it in place and carries no patch file (unless
-kind = "subset"), and no tree holds a submodule link. For kind = "subset": every include path's
-git object id matches the commit that first added the tree, nothing tracked exists under the
-tree outside include and added, and no recipe is required. For every tree beyond the four core
-components: each FerrionOS helper carrying #[allow(clippy::undocumented_unsafe_blocks)] holds
-exactly one unsafe block and matches its file's line count in components/<name>.unsafe.md. For
-base, whose drivers live in ferrion-hardware: the tree has no drivers/ folder, the drivers
-recipe names ferrion-hardware by a full revision and carries no patch file, its lock file takes
-no crate of FerrionOS's from the network, and no Cargo manifest of this repository depends on
-ferrion-hardware or on upstream's base repository.
+and 0047). The plain check stays offline: for component entries it checks the upstream repository
+and revision, license file digests, dropped paths, and in-place core recipe with no patch file;
+for kind = "subset" it checks every include path's git object id at the import commit, tracked
+stray paths outside include and added, and license digests; for kind = "archives" it checks
+format and presence only (https url, 64-hex sha256 syntax, dropped paths, per-archive license
+file presence and sha256 digests, no unrecorded subdirectories, and no rev or core recipe). No
+tree holds a submodule link. For every tree beyond the four core components: each FerrionOS
+helper carrying #[allow(clippy::undocumented_unsafe_blocks)] holds exactly one unsafe block and
+matches its file's line count in components/<name>.unsafe.md. For base, whose drivers live in
+ferrion-hardware: the tree has no drivers/ folder, the drivers recipe names ferrion-hardware by a
+full revision and carries no patch file, its lock file takes no crate of FerrionOS's from the
+network, and no Cargo manifest of this repository depends on ferrion-hardware or on upstream's
+base repository.
 
-Usage: {sys.argv[0]} [--rebaseline <name>]
+Usage: {sys.argv[0]} [--rebaseline <name> | --verify-archives [name]]
   --rebaseline <name>  rewrite the entries of components/<name>/ in the comment and naming
                        baselines to the tree as it is (for kind = "subset", include paths only).
                        Only two commits may do this: one that merges an upstream revision
-                       (scripts/component-upstream.sh merge), and one that imports a tree or
-                       brings in a patch written before the trees moved into this repository
+                       (scripts/component-upstream.sh merge), and one that imports a tree, bumps
+                       a vendored archive version, or brings in a patch written before the trees
+                       moved into this repository
+  --verify-archives [name]
+                       online check: download each recorded archive of kind = "archives" entries
+                       (or of <name>) with bounded size and timeout, verify its sha256 digest
+                       against {RECORD.relative_to(ROOT)}, unpack it into a scratch directory
+                       with bounded file count and total bytes (refusing absolute paths, ..,
+                       symlinks and hard links), and compare every file byte-for-byte against the
+                       import commit that recorded that sha256 in {RECORD.relative_to(ROOT)}
 Exit code 1 when a check fails."""
 
 
@@ -269,6 +290,71 @@ def check_unsafe_justifications(name):
     return failures
 
 
+def check_licenses(label, base, licenses):
+    failures = []
+    if not isinstance(licenses, dict) or not licenses:
+        failures.append(f"{label}: no license file is recorded")
+        return failures
+    base_resolved = base.resolve()
+    for file, digest in sorted(licenses.items()):
+        if not HEX64.fullmatch(str(digest)):
+            failures.append(f"{label}: license file {file} needs a 64-hex sha256")
+            continue
+        path = (base / file).resolve()
+        if not path.is_relative_to(base_resolved) or not path.is_file():
+            failures.append(f"{label}: license file {file} is missing")
+        elif sha256(path) != digest:
+            failures.append(f"{label}: license file {file} changed; review it and record its sha256")
+    return failures
+
+
+def check_archives_entry(name, tree, entry):
+    failures = []
+    for forbidden in ("url", "rev", "submodules", "split"):
+        if forbidden in entry:
+            failures.append(f"{name}: kind = \"archives\" entry must not set {forbidden}")
+    archives = entry.get("archives", {})
+    if not isinstance(archives, dict) or not archives:
+        failures.append(f"{name}: kind = \"archives\" requires at least one archive entry")
+        return failures
+    tree_resolved = tree.resolve()
+    seen_paths = set()
+    for archive, archive_entry in sorted(archives.items()):
+        rel = str(archive_entry.get("path", "")).strip()
+        archive_dir = (tree / rel).resolve() if rel else tree_resolved
+        if not rel or archive_dir == tree_resolved or not archive_dir.is_relative_to(tree_resolved) or not archive_dir.is_dir():
+            failures.append(f"{name}: the tree of archive {archive} is missing")
+            continue
+        if rel in seen_paths:
+            failures.append(f"{name}: duplicate archive path {rel}")
+        seen_paths.add(rel)
+        if not HEX64.fullmatch(str(archive_entry.get("sha256", ""))) or not str(archive_entry.get("url", "")).startswith("https://"):
+            failures.append(f"{name}: archive {archive} needs an https url and a sha256")
+        failures.extend(check_licenses(f"{name} archive {archive}", archive_dir, archive_entry.get("licenses", {})))
+    for child in sorted(tree.iterdir()):
+        if child.is_dir() and child.name not in seen_paths:
+            failures.append(f"{name}: components/{name}/{child.name} has no archive entry in {RECORD.relative_to(ROOT)}")
+    if "licenses" in entry:
+        failures.extend(check_licenses(name, tree, entry["licenses"]))
+    return failures
+
+
+def check_dropped(name, entry):
+    failures = []
+    dropped = entry.get("dropped", [])
+    if not isinstance(dropped, list) or any(
+        not isinstance(item, str) or not item.strip("/") or item.startswith("/") or ".." in Path(item).parts
+        for item in dropped
+    ):
+        failures.append(f"{name}: dropped must be a list of relative paths")
+    else:
+        for item in dropped:
+            rel = item.rstrip("/")
+            if tracked(f"components/{name}/{rel}"):
+                failures.append(f"components/{name}/{rel}: listed in dropped of {RECORD.relative_to(ROOT)} and must stay absent")
+    return failures
+
+
 def check():
     failures = []
     record = tomllib.loads(RECORD.read_text())
@@ -280,6 +366,12 @@ def check():
         tree = ROOT / "components" / name
         if not tree.is_dir():
             failures.append(f"{name}: components/{name} is not a directory")
+            continue
+        failures.extend(check_dropped(name, entry))
+        kind = entry.get("kind", "component")
+        if kind == "archives":
+            failures.extend(check_archives_entry(name, tree, entry))
+            failures.extend(check_unsafe_justifications(name))
             continue
         if not str(entry.get("url", "")).startswith("https://"):
             failures.append(f"{name}: url is not an https address")
@@ -304,18 +396,6 @@ def check():
                 failures.append(f"{name}: the tree of archive {archive} is missing")
             if not HEX64.fullmatch(str(archive_entry.get("sha256", ""))) or not str(archive_entry.get("url", "")).startswith("https://"):
                 failures.append(f"{name}: archive {archive} needs an https url and a sha256")
-        dropped = entry.get("dropped", [])
-        if not isinstance(dropped, list) or any(
-            not isinstance(item, str) or not item.strip("/") or item.startswith("/") or ".." in Path(item).parts
-            for item in dropped
-        ):
-            failures.append(f"{name}: dropped must be a list of relative paths")
-        else:
-            for item in dropped:
-                rel = item.rstrip("/")
-                if tracked(f"components/{name}/{rel}"):
-                    failures.append(f"components/{name}/{rel}: listed in dropped of {RECORD.relative_to(ROOT)} and must stay absent")
-        kind = entry.get("kind", "component")
         if kind == "subset":
             failures.extend(check_subset(name, entry))
         elif kind == "component":
@@ -417,6 +497,164 @@ def rebaseline(name):
     print(f"{name}: {len(lines)} comment baseline entries and {len(added)} naming baseline lines rewritten")
 
 
+def download_bounded(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "FerrionOS-components-check/1"})
+    chunks = []
+    total = 0
+    with urllib.request.urlopen(req, timeout=ARCHIVE_TIMEOUT_S) as resp:
+        while True:
+            chunk = resp.read(ARCHIVE_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_ARCHIVE_BYTES:
+                raise ValueError(f"download exceeded {MAX_ARCHIVE_BYTES} byte limit")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def unpack_archive_dir(data, dest):
+    dest_resolved = dest.resolve()
+    roots = set()
+    unpacked_bytes = 0
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
+        members = tf.getmembers()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ValueError(f"archive has {len(members)} members, exceeding limit {MAX_ARCHIVE_MEMBERS}")
+        for member in members:
+            rel = Path(member.name)
+            if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+                raise ValueError(f"unsafe archive member path {member.name!r}")
+            if member.issym() or member.islnk():
+                raise ValueError(f"refused symlink or hard link in archive: {member.name!r}")
+            roots.add(rel.parts[0])
+            target = (dest / rel).resolve()
+            if not target.is_relative_to(dest_resolved):
+                raise ValueError(f"archive member escapes scratch dir: {member.name!r}")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    raise ValueError(f"could not read archive file {member.name!r}")
+                content = extracted.read()
+                unpacked_bytes += len(content)
+                if unpacked_bytes > MAX_ARCHIVE_UNPACKED_BYTES:
+                    raise ValueError(
+                        f"unpacked archive exceeded {MAX_ARCHIVE_UNPACKED_BYTES} byte limit"
+                    )
+                target.write_bytes(content)
+            else:
+                raise ValueError(f"unsupported archive member type for {member.name!r}")
+    if len(roots) != 1:
+        raise ValueError(f"expected one top-level archive directory, found {sorted(roots)}")
+    return dest / next(iter(roots))
+
+
+def tree_files(root_dir):
+    found = {}
+    for dirpath, _dirnames, filenames in os.walk(root_dir):
+        for fname in filenames:
+            full = Path(dirpath) / fname
+            found[full.relative_to(root_dir).as_posix()] = full
+    return found
+
+
+def compare_trees(label, expected_dir, actual_dir):
+    failures = []
+    expected = tree_files(expected_dir)
+    actual = tree_files(actual_dir)
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    if missing:
+        failures.append(f"{label}: missing {len(missing)} file(s) from archive (first: {missing[0]})")
+    if extra:
+        failures.append(f"{label}: {len(extra)} extra file(s) not in archive (first: {extra[0]})")
+    for rel in sorted(set(expected) & set(actual)):
+        if expected[rel].read_bytes() != actual[rel].read_bytes():
+            failures.append(f"{label}: file differs from archive: {rel}")
+    return failures
+
+
+def find_import_commit(expected_sha):
+    out = subprocess.run(
+        ["git", "log", "-n1", "--format=%H", f"-S{expected_sha}", "--", str(RECORD.relative_to(ROOT))],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rev = out.stdout.strip()
+    return rev or None
+
+
+def verify_archives(target_name=None):
+    failures = []
+    record = tomllib.loads(RECORD.read_text())
+    if target_name is not None:
+        if target_name not in record:
+            return [f"{target_name} is not recorded in {RECORD.relative_to(ROOT)}"]
+        if record[target_name].get("kind", "component") != "archives":
+            return [f"{target_name}: --verify-archives requires kind = \"archives\""]
+        names = [target_name]
+    else:
+        names = sorted(name for name, entry in record.items() if entry.get("kind", "component") == "archives")
+        if not names:
+            return []
+    with tempfile.TemporaryDirectory(prefix="components-verify-archives-") as tmp:
+        tmp_path = Path(tmp)
+        for name in names:
+            entry = record[name]
+            archives = entry.get("archives", {})
+            if not isinstance(archives, dict) or not archives:
+                failures.append(f"{name}: no archives recorded")
+                continue
+            for archive, archive_entry in sorted(archives.items()):
+                rel = str(archive_entry.get("path", "")).strip()
+                url = str(archive_entry.get("url", "")).strip()
+                expected_sha = str(archive_entry.get("sha256", "")).strip()
+                label = f"{name} archive {archive}"
+                if not url.startswith("https://") or not HEX64.fullmatch(expected_sha) or not rel:
+                    failures.append(f"{label}: requires path, https url, and 64-hex sha256")
+                    continue
+                try:
+                    data = download_bounded(url)
+                except (urllib.error.URLError, OSError, ValueError) as err:
+                    failures.append(f"{label}: download failed: {err}")
+                    continue
+                actual_sha = hashlib.sha256(data).hexdigest()
+                if actual_sha != expected_sha:
+                    failures.append(f"{label}: sha256 mismatch: expected {expected_sha}, got {actual_sha}")
+                    continue
+                rev = find_import_commit(expected_sha)
+                if rev is None:
+                    failures.append(f"{label}: no commit in {RECORD.relative_to(ROOT)} history introduces sha256 {expected_sha}")
+                    continue
+                unpack_root = tmp_path / "unpacked" / name / archive
+                unpack_root.mkdir(parents=True, exist_ok=True)
+                try:
+                    expected_dir = unpack_archive_dir(data, unpack_root)
+                except (tarfile.TarError, OSError, ValueError) as err:
+                    failures.append(f"{label}: unpack failed: {err}")
+                    continue
+                git_out = subprocess.run(
+                    ["git", "archive", "--format=tar", rev, f"components/{name}/{rel}"],
+                    cwd=ROOT,
+                    capture_output=True,
+                )
+                if git_out.returncode != 0:
+                    failures.append(f"{label}: git archive at {rev} failed: {git_out.stderr.decode(errors='replace').strip()}")
+                    continue
+                actual_root = tmp_path / "git" / name / archive
+                actual_root.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(fileobj=io.BytesIO(git_out.stdout), mode="r:") as tf:
+                    tf.extractall(actual_root, filter="data")
+                actual_dir = actual_root / "components" / name / rel
+                failures.extend(compare_trees(f"{label} (import {rev[:9]})", expected_dir, actual_dir))
+    return failures
+
+
 def main(argv):
     if argv[:1] == ["--rebaseline"] and len(argv) == 2:
         if argv[1] not in tomllib.loads(RECORD.read_text()):
@@ -424,6 +662,15 @@ def main(argv):
             return 2
         rebaseline(argv[1])
         return 0
+    if argv[:1] == ["--verify-archives"] and len(argv) in (1, 2):
+        target = argv[1] if len(argv) == 2 else None
+        failures = verify_archives(target)
+        for failure in failures:
+            print(f"FAIL {failure}")
+        if not failures:
+            label = target if target is not None else "all kind = \"archives\" entries"
+            print(f"{label}: every archive sha256 and unpacked import tree matches.")
+        return 1 if failures else 0
     if argv:
         print(USAGE, file=sys.stderr)
         return 0 if argv[0] in ("-h", "--help") else 2
