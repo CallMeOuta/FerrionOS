@@ -1,0 +1,312 @@
+--- /dev/null
++++ b/audio/out/ao_ferrion.c
+@@ -0,0 +1,264 @@
++/*
++ * FerrionOS audio scheme output driver
++ *
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <errno.h>
++#include <fcntl.h>
++#include <inttypes.h>
++#include <math.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <unistd.h>
++
++#include "audio/format.h"
++#include "ao.h"
++#include "common/common.h"
++#include "common/msg.h"
++#include "internal.h"
++#include "osdep/threads.h"
++#include "osdep/timer.h"
++
++#define FERRION_AUDIO_PATH "/scheme/audio/stream"
++#define FERRION_AUDIO_RATE 44100
++#define FERRION_AUDIO_CHANNELS 2
++#define FERRION_AUDIO_FRAME_BYTES (FERRION_AUDIO_CHANNELS * sizeof(float))
++#define FERRION_AUDIO_PERIOD_FRAMES 512
++#define FERRION_AUDIO_BUFFER_FRAMES 2048
++#define FERRION_AUDIO_PERIOD_NS 11609977LL
++#define FERRION_AUDIO_DELAY_NS 46439909LL
++#define FERRION_AUDIO_MAX_EAGAIN 256
++#define FERRION_AUDIO_MAX_EINTR 64
++#define FERRION_AUDIO_MAX_WRITE_ITERS 512
++
++struct priv {
++    int fd;
++    mp_mutex lock;
++    mp_cond cond;
++    mp_thread thread;
++    bool thread_running;
++    bool stop;
++    bool sync_ready;
++    uint64_t clamped_samples;
++    float chunk[FERRION_AUDIO_PERIOD_FRAMES * FERRION_AUDIO_CHANNELS];
++};
++
++static bool wait_period_or_stop(struct priv *p)
++{
++    mp_mutex_lock(&p->lock);
++    if (!p->stop)
++        mp_cond_timedwait(&p->cond, &p->lock, FERRION_AUDIO_PERIOD_NS);
++    bool stopped = p->stop;
++    mp_mutex_unlock(&p->lock);
++    return stopped;
++}
++
++static bool is_stopped(struct priv *p)
++{
++    mp_mutex_lock(&p->lock);
++    bool stopped = p->stop;
++    mp_mutex_unlock(&p->lock);
++    return stopped;
++}
++
++static void clamp_chunk(struct priv *p, int frames)
++{
++    int total = frames * FERRION_AUDIO_CHANNELS;
++    for (int i = 0; i < total; i++) {
++        float s = p->chunk[i];
++        float clamped = s;
++        if (!isfinite(s)) {
++            clamped = 0.0f;
++        } else if (s > 1.0f) {
++            clamped = 1.0f;
++        } else if (s < -1.0f) {
++            clamped = -1.0f;
++        }
++        if (clamped != s || !isfinite(s)) {
++            p->chunk[i] = clamped;
++            p->clamped_samples++;
++        }
++    }
++}
++
++static int write_all_nonblock(struct ao *ao, const uint8_t *bytes, size_t total)
++{
++    struct priv *p = ao->priv;
++    size_t written = 0;
++    int eagain_count = 0;
++    int eintr_count = 0;
++
++    for (int iter = 0; iter < FERRION_AUDIO_MAX_WRITE_ITERS && written < total; iter++) {
++        if (is_stopped(p))
++            return 0;
++        ssize_t n = write(p->fd, bytes + written, total - written);
++        if (n > 0) {
++            if (((size_t)n % FERRION_AUDIO_FRAME_BYTES) != 0) {
++                MP_ERR(ao, "unaligned short write (%zd bytes) to %s\n", n, FERRION_AUDIO_PATH);
++                return -1;
++            }
++            written += (size_t)n;
++            eagain_count = 0;
++            eintr_count = 0;
++            continue;
++        }
++        if (n == 0) {
++            MP_ERR(ao, "zero-byte write to %s\n", FERRION_AUDIO_PATH);
++            return -1;
++        }
++        int err = errno;
++        if (err == EINTR) {
++            eintr_count++;
++            if (eintr_count >= FERRION_AUDIO_MAX_EINTR) {
++                MP_ERR(ao, "too many EINTR retries writing to %s\n", FERRION_AUDIO_PATH);
++                return -1;
++            }
++            continue;
++        }
++        if (err == EAGAIN || err == EWOULDBLOCK) {
++            eagain_count++;
++            if (eagain_count >= FERRION_AUDIO_MAX_EAGAIN) {
++                MP_ERR(ao, "write to %s stalled after %d EAGAIN retries\n",
++                       FERRION_AUDIO_PATH, FERRION_AUDIO_MAX_EAGAIN);
++                return -1;
++            }
++            if (wait_period_or_stop(p))
++                return 0;
++            continue;
++        }
++        MP_ERR(ao, "write to %s failed: %s\n", FERRION_AUDIO_PATH, mp_strerror(err));
++        return -1;
++    }
++    if (written < total) {
++        MP_ERR(ao, "write loop bound exceeded on %s\n", FERRION_AUDIO_PATH);
++        return -1;
++    }
++    return 1;
++}
++
++static MP_THREAD_VOID writer_thread(void *arg)
++{
++    struct ao *ao = arg;
++    struct priv *p = ao->priv;
++    mp_thread_set_name("ao/ferrion");
++
++    while (!is_stopped(p)) {
++        void *planes[1] = { p->chunk };
++        bool eof = false;
++        int64_t out_time_ns = mp_time_ns() + FERRION_AUDIO_DELAY_NS;
++        int frames = ao_read_data(ao, planes, FERRION_AUDIO_PERIOD_FRAMES,
++                                  out_time_ns, &eof, false, true);
++        if (frames <= 0) {
++            if (wait_period_or_stop(p))
++                break;
++            continue;
++        }
++        clamp_chunk(p, frames);
++        int res = write_all_nonblock(ao, (const uint8_t *)p->chunk,
++                                     (size_t)frames * FERRION_AUDIO_FRAME_BYTES);
++        if (res < 0) {
++            ao_request_reload(ao);
++            break;
++        }
++        if (res == 0)
++            break;
++    }
++
++    MP_THREAD_RETURN();
++}
++
++static void stop_writer(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    if (!p->thread_running)
++        return;
++    mp_mutex_lock(&p->lock);
++    p->stop = true;
++    mp_cond_broadcast(&p->cond);
++    mp_mutex_unlock(&p->lock);
++    mp_thread_join(p->thread);
++    p->thread_running = false;
++}
++
++static int init(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    p->fd = open(FERRION_AUDIO_PATH, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
++    if (p->fd < 0) {
++        if (!ao->probing)
++            MP_ERR(ao, "cannot open %s: %s\n", FERRION_AUDIO_PATH, mp_strerror(errno));
++        return -1;
++    }
++    ao->format = AF_FORMAT_FLOAT;
++    ao->samplerate = FERRION_AUDIO_RATE;
++    mp_chmap_from_channels(&ao->channels, FERRION_AUDIO_CHANNELS);
++    ao->device_buffer = FERRION_AUDIO_BUFFER_FRAMES;
++    mp_mutex_init(&p->lock);
++    mp_cond_init(&p->cond);
++    p->sync_ready = true;
++    p->thread_running = false;
++    p->stop = false;
++    p->clamped_samples = 0;
++    return 0;
++}
++
++static void start(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    if (p->thread_running)
++        return;
++    mp_mutex_lock(&p->lock);
++    p->stop = false;
++    mp_mutex_unlock(&p->lock);
++    if (mp_thread_create(&p->thread, writer_thread, ao) != 0) {
++        MP_ERR(ao, "cannot start ferrion audio thread\n");
++        ao_request_reload(ao);
++        return;
++    }
++    p->thread_running = true;
++}
++
++static void reset(struct ao *ao)
++{
++    stop_writer(ao);
++}
++
++static void uninit(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    stop_writer(ao);
++    MP_VERBOSE(ao, "clamped samples: %" PRIu64 "\n", p->clamped_samples);
++    if (p->fd >= 0) {
++        close(p->fd);
++        p->fd = -1;
++    }
++    if (p->sync_ready) {
++        mp_cond_destroy(&p->cond);
++        mp_mutex_destroy(&p->lock);
++        p->sync_ready = false;
++    }
++}
++
++const struct ao_driver audio_out_ferrion = {
++    .description = "FerrionOS audio scheme",
++    .name = "ferrion",
++    .init = init,
++    .uninit = uninit,
++    .reset = reset,
++    .start = start,
++    .priv_size = sizeof(struct priv),
++};
+--- a/audio/out/ao.c
++++ b/audio/out/ao.c
+@@ -55,9 +55,13 @@
+ extern const struct ao_driver audio_out_lavc;
+ extern const struct ao_driver audio_out_sdl;
+ extern const struct ao_driver audio_out_aaudio;
++extern const struct ao_driver audio_out_ferrion;
+ 
+ static const struct ao_driver * const audio_out_drivers[] = {
+ // native:
++#if HAVE_FERRION_AUDIO
++    &audio_out_ferrion,
++#endif
+ #if HAVE_AUDIOTRACK
+     &audio_out_audiotrack,
+ #endif
+--- a/meson.build
++++ b/meson.build
+@@ -923,7 +923,16 @@
+     dependencies += opensles
+     sources += files('audio/out/ao_opensles.c')
+ endif
++
++ferrion_audio = get_option('ferrion-audio').require(
++    host_machine.system() == 'redox',
++    error_message: 'FerrionOS audio is only available on FerrionOS!',
++)
++features += {'ferrion-audio': ferrion_audio.allowed()}
++if features['ferrion-audio']
++    sources += files('audio/out/ao_ferrion.c')
++endif
+ 
+ oss_opt = get_option('oss-audio').require(
+     get_option('gpl'),
+     error_message: 'the build is not GPL!',
+--- a/meson.options
++++ b/meson.options
+@@ -51,6 +51,7 @@
+ option('audiotrack', type: 'feature', value: 'auto', description: 'Android AudioTrack audio output')
+ option('aaudio', type: 'feature', value: 'auto', description: 'Android AAudio audio output')
+ option('opensles', type: 'feature', value: 'auto', description: 'OpenSL ES audio output')
++option('ferrion-audio', type: 'feature', value: 'auto', description: 'FerrionOS audio scheme output')
+ option('oss-audio', type: 'feature', value: 'auto', description: 'OSSv4 audio output')
+ option('pipewire', type: 'feature', value: 'auto', description: 'PipeWire audio output')
+ option('pulse', type: 'feature', value: 'auto', description: 'PulseAudio audio output')
