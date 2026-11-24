@@ -167,6 +167,14 @@ ALLOW_FSTOOLS=1
 endif
 endif
 
+## Fontconfig cache generator used when building images (defaults to scripts/fc-cache-container.sh when Podman is enabled)
+ifeq ($(PODMAN_BUILD),1)
+FC_CACHE?=scripts/fc-cache-container.sh
+else
+FC_CACHE?=fc-cache
+endif
+export FC_CACHE
+
 ## Userspace variables
 ifeq ($(ARCH),riscv64gc)
 	export TARGET=riscv64gc-unknown-redox

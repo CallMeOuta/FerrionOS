@@ -97,7 +97,7 @@ A freshly rebuilt baseline with the CJK package and directory-mtime patch, but w
 | Second screenshot | 1.603 s | Not reached | Not reached |
 | Third screenshot | Timed out at 600 s | Not reached | Not reached |
 
-The first match on both cache-enabled runs validates shipped directory timestamps and performs no cache rewrite. The native host's fontconfig 2.18.4 writes format 12, incompatible with the guest's format 9; the successful image uses the existing container's fontconfig 2.15.0. The installer rejects incompatible formats and accepts `FC_CACHE` to select a compatible executable. Evidence: `build/worktrees/fxstart/build/fxstart-cache9/` and `build/worktrees/fxstart/build/fxstart-ready/`.
+The first match on both cache-enabled runs validates shipped directory timestamps and performs no cache rewrite. The native host's fontconfig 2.18.4 writes format 12, incompatible with the guest's format 9; the successful image uses the existing container's fontconfig 2.15.0. The installer rejects incompatible formats; `mk/config.mk` defaults `FC_CACHE` to `scripts/fc-cache-container.sh` when `PODMAN_BUILD=1` (and `fc-cache` inside a container or on native builds) so the build container's `fc-cache` runs against the image root, and honors a user-supplied `FC_CACHE` override. Evidence: `build/worktrees/fxstart/build/fxstart-cache9/` and `build/worktrees/fxstart/build/fxstart-ready/`.
 
 Final-image checks: directory-fsync, boot and shells pass (`fxstart-final/`); headless local/HTTPS and CJK glyph/reference and regional-family checks pass (`fxstart-accepted/`). The shared shell-prompt helper fixes page-setup races under slow Nushell startup. All directories above are under `build/worktrees/fxstart/build/`.
 

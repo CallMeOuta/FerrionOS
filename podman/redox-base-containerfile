@@ -20,6 +20,7 @@ RUN apt-get update \
         expect \
         file \
         flex \
+        fontconfig \
         fuse3 \
         g++ \
         genisoimage \

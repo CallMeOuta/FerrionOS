@@ -3,6 +3,7 @@
 # Configuration variables for running make in Podman
 ## Tag the podman image $IMAGE_TAG
 IMAGE_TAG?=redox-base
+export IMAGE_TAG
 ## Working Directory in Podman
 CONTAINER_WORKDIR?=/mnt/redox
 
@@ -13,6 +14,7 @@ PODMAN_VOLUME_FLAG=:Z
 else
 PODMAN_VOLUME_FLAG=
 endif
+export PODMAN_VOLUME_FLAG
 
 # Cache layers to upstream's Docker Hub repository
 PODMAN_CACHE=

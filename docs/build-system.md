@@ -84,6 +84,6 @@ Only the combinations defined in `mk/repo.mk` exist (`cr`, `ucr`, `rp`, `crp`, `
 
 The build runs on Linux, macOS, FreeBSD and on FerrionOS itself. The `UNAME` block of `mk/config.mk` holds the per-host differences.
 
-- Linux with Podman is the default (`PODMAN_BUILD=1`). The container cooks. The host still compiles the installer and RedoxFS, mounts the image through FUSE and runs the emulator, unless `FSTOOLS_IN_PODMAN=1`.
+- Linux with Podman is the default (`PODMAN_BUILD=1`). The container cooks. The host still compiles the installer and RedoxFS, mounts the image through FUSE and runs the emulator, unless `FSTOOLS_IN_PODMAN=1`. When an image includes fontconfig, `FC_CACHE` (defined in `mk/config.mk`, defaulting to `scripts/fc-cache-container.sh` when `PODMAN_BUILD=1` and `fc-cache` inside a container or on native builds) runs the container's `fc-cache` against the mounted image root so the cache format matches the guest's fontconfig.
 - `PODMAN_BUILD=0` builds natively with the tools `native_bootstrap.sh` installs.
 - On a FerrionOS host the kernel reports `Redox` to `uname`. Make then sets `HOSTED_REDOX=1` and turns Podman off.
