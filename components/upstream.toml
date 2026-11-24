@@ -1,6 +1,7 @@
 [kernel]
 url = "https://gitlab.redox-os.org/redox-os/kernel.git"
 rev = "e7f1d4231d0f4b55fbef229d9cd9459302c101f4"
+dropped = [".gitlab-ci.yml", ".gitmodules", ".helix", "ARM-AARCH64-PORT-OUTLINE.md"]
 
 [kernel.licenses]
 "LICENSE" = "9f6f8fa58b09a2f787ca904671df2f07a53e440f8a5198f9ac469074e7ab7dcf"
@@ -9,6 +10,7 @@ rev = "e7f1d4231d0f4b55fbef229d9cd9459302c101f4"
 [relibc]
 url = "https://gitlab.redox-os.org/redox-os/relibc.git"
 rev = "74b5e7e315043a21b599f271d5692727aa54f64d"
+dropped = [".gitlab-ci.yml", ".gitmodules"]
 
 [relibc.licenses]
 "LICENSE" = "1bc13112bee203de03bb45dfebc20e5338a20349a5935c16b7222c87fd0c7609"
@@ -27,6 +29,7 @@ rev = "40c10f6182cb1d2a78b29f85492936dfbeded02e"
 [base]
 url = "https://gitlab.redox-os.org/redox-os/base.git"
 rev = "20f7573b4dc011ea5267189185edc0b2f12bab0f"
+dropped = [".gitlab-ci.yml", ".gitlab", "ptyd/.gitlab-ci.yml"]
 
 [base.licenses]
 "LICENSE" = "cb46b697c3fd9d27d7bfe1b1ad48f8a58a284984504c6eb215ae2164538df7cb"
@@ -53,6 +56,7 @@ sha256 = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
 [redoxfs]
 url = "https://gitlab.redox-os.org/redox-os/redoxfs.git"
 rev = "5ba45a6887374ab425326656a276bb3b62eba7dc"
+dropped = [".gitlab-ci.yml", ".travis.yml"]
 
 [redoxfs.licenses]
 "LICENSE" = "93feb465f692bf21fe310c2d7d2e906982950222897304ddddbcdab873cd11b8"

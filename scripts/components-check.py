@@ -75,6 +75,17 @@ def check():
                 failures.append(f"{name}: the tree of archive {archive} is missing")
             if not HEX64.fullmatch(str(archive_entry.get("sha256", ""))) or not str(archive_entry.get("url", "")).startswith("https://"):
                 failures.append(f"{name}: archive {archive} needs an https url and a sha256")
+        dropped = entry.get("dropped", [])
+        if not isinstance(dropped, list) or any(
+            not isinstance(item, str) or not item.strip("/") or item.startswith("/") or ".." in Path(item).parts
+            for item in dropped
+        ):
+            failures.append(f"{name}: dropped must be a list of relative paths")
+        else:
+            for item in dropped:
+                rel = item.rstrip("/")
+                if tracked(f"components/{name}/{rel}"):
+                    failures.append(f"components/{name}/{rel}: listed in dropped of {RECORD.relative_to(ROOT)} and must stay absent")
         recipe_dir = ROOT / "recipes" / "core" / name
         source = tomllib.loads((recipe_dir / "recipe.toml").read_text()).get("source", {})
         if set(source) != {"path"} or (recipe_dir / source["path"]).resolve() != tree.resolve():

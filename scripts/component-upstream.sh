@@ -15,6 +15,8 @@ merge  does the same merge in the index and the working tree, writes <rev> into
        components/upstream.toml and leaves the result uncommitted
 
 The record of each tree's upstream repository and revision is components/upstream.toml.
+Paths listed under a component's dropped key in that record are stripped from both
+upstream trees before merging so deleted upstream project files do not conflict or return.
 base is merged without the files [base.split] of that record sends to ferrion-hardware, and
 with its kept files at their new paths (ADR 0047); the same upstream revision is merged into
 ferrion-hardware's drivers/ by its own scripts/drivers-upstream.sh.
@@ -50,6 +52,7 @@ old=$(read_record "$name" rev)
 [ -n "$url" ] && [ -n "$old" ] || { echo "$record has no url and rev for $name" >&2; exit 1; }
 submodules=$(read_record "$name" submodules)
 moved=$(read_record "$name" split moved)
+mapfile -t dropped < <(read_record "$name" dropped | sed '/^$/d')
 
 fetch_refs() {
     git fetch --quiet --no-tags "$1" "+refs/heads/*:refs/upstream/$2/*" "+HEAD:refs/upstream/$2/HEAD"
@@ -79,6 +82,22 @@ wrap() {
         laid=$(mktemp -u)
         GIT_INDEX_FILE=$index git ls-files -s -- "$prefix" | sed "s#\t$prefix/#\t#" \
             | python3 scripts/base-split.py layout | sed "s#\t#\t$prefix/#" \
+            | GIT_INDEX_FILE=$laid git update-index --index-info
+        rm -f "$index"
+        index=$laid
+    fi
+    if [ "${#dropped[@]}" -gt 0 ]; then
+        laid=$(mktemp -u)
+        GIT_INDEX_FILE=$index git ls-files -s -- "$prefix" \
+            | python3 -c 'import sys
+prefix = sys.argv[1] + "/"
+dropped = tuple(p.rstrip("/") for p in sys.argv[2:] if p)
+for line in sys.stdin:
+    path = line.rstrip("\n").split("\t", 1)[1]
+    rel = path[len(prefix):] if path.startswith(prefix) else path
+    if any(rel == d or rel.startswith(d + "/") for d in dropped):
+        continue
+    sys.stdout.write(line)' "$prefix" "${dropped[@]}" \
             | GIT_INDEX_FILE=$laid git update-index --index-info
         rm -f "$index"
         index=$laid
