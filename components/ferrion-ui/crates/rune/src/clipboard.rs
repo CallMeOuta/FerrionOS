@@ -136,6 +136,12 @@ impl Purpose {
     /// Reads what this purpose needs from `cb` and what to send back: a paste skips an empty
     /// clipboard.
     fn answer<B: Backend>(self, cb: &mut B) -> Option<Reply> {
+        if let Some(err) = cb.unavailable_error() {
+            return match self {
+                Purpose::Paste(..) => None,
+                Purpose::Read(_) => Some(Reply { purpose: self, content: ClipboardContent::default().with_error(err) }),
+            };
+        }
         let content = match self.forms() {
             Forms::Text => cb.text().map(ClipboardContent::from),
             forms => cb.content(forms == Forms::All),
@@ -310,6 +316,7 @@ trait Backend {
     fn content(&mut self, _all: bool) -> Option<ClipboardContent> { self.text().map(ClipboardContent::from) }
     fn revision(&self) -> Option<u64>;
     fn clear(&mut self) -> Result<(), String>;
+    fn unavailable_error(&self) -> Option<&'static str> { None }
 }
 /// How often the worker checks that a held secret is still on the clipboard. Where there is no
 /// change count (Linux) it compares the text's fingerprint, so it checks less often.

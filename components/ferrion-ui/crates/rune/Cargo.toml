@@ -83,6 +83,7 @@ baseline-taffy = ["rune-taffy/baseline-taffy"]
 test-gpu-counters = ["wgpu/counters"]
 # GPU-free wgpu noop backend for Linux surface-failure and device-loss tests.
 test-gpu-noop = ["wgpu/noop"]
+x11 = ["winit/x11", "dep:x11rb", "dep:arboard_unix"]
 
 [dependencies]
 # The accessibility tree's types; the platform adapters below come with `accessibility`.
@@ -103,7 +104,7 @@ rune-text = { workspace = true }
 # Allow backend patch fixes; headless pixel equivalence guards the precompiled Metal path.
 wgpu = { workspace = true, features = ["std", "parking_lot", "wgsl"] }
 # Keep Wayland client-side frames/buttons without the title font's ab_glyph/ttf-parser.
-winit = { workspace = true, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
+winit = { workspace = true, features = ["rwh_06", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 taffy = { workspace = true, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
 parley = { workspace = true, features = ["std"] }
 bytemuck = { workspace = true }
@@ -122,13 +123,6 @@ libc = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true }
-
-[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
-
-# Pasted images on Windows and Linux; macOS reads the pasteboard's PNG or TIFF itself.
-[target.'cfg(any(target_os = "windows", all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))))'.dependencies]
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
@@ -154,6 +148,7 @@ wgpu = { workspace = true, features = ["metal"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accesskit_macos = { version = "0.27.2", optional = true }
+arboard = { version = "3.6", default-features = false }
 # Names for the interaction watchdog's stack samples (`tooling::interaction::stack`).
 rustc-demangle = "0.1"
 objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObject", "NSRange", "NSValue", "NSProcessInfo", "NSString", "NSThread", "NSURL", "NSUserDefaults", "objc2-core-foundation"] }
@@ -162,15 +157,17 @@ objc2-core-video = { workspace = true, features = ["std", "CVBase", "CVDisplayLi
 objc2-core-graphics = { workspace = true, features = ["std", "CGColorSpace"] }
 
 [target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
+arboard_unix = { package = "arboard", version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"], optional = true }
 raw-window-handle = "0.6"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-x11rb = { version = "0.13", features = ["shape", "xinput", "randr", "allow-unsafe-code", "dl-libxcb"] }
+x11rb = { version = "0.13", features = ["shape", "xinput", "randr", "allow-unsafe-code", "dl-libxcb"], optional = true }
 xkbcommon = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 # DirectComposition handover (`platform::win32::dcomp_handover`), OLE drag and drop
 # (`drag_out::windows`, `platform::win32::drop_target`), jump lists and the taskbar button's
 # progress and badge (`platform::win32::{jump_list,taskbar}`).

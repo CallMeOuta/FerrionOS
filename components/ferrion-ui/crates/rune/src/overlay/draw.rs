@@ -81,7 +81,7 @@ impl FrameHost for OverlayFrame<'_> {
                 self.core.rescale(self.app, &gpu, scale);
             }
         }
-        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        #[cfg(all(feature = "x11", unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if let Some(Live { backing: Backing::Xwayland(surface), .. }) = self.core.surface.live_mut() {
             let input = surface.dispatch();
             for input in input { self.core.surface_input(self.app, input); }
@@ -475,6 +475,7 @@ impl OverlayCore {
         {
             let closed = match self.surface.live_mut().map(|l| &mut l.backing) {
                 Some(Backing::Layer(layer)) => layer.drain(),
+                #[cfg(feature = "x11")]
                 Some(Backing::Xwayland(surface)) => {
                     surface.drain();
                     false

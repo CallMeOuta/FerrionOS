@@ -2,18 +2,22 @@
 //! data control): its own worker over arboard, beside the clipboard's, so a primary read never
 //! waits behind a clipboard read and a secret's hold never sees it. What goes on it and where a
 //! middle click pastes it is the runtime's (`runtime/input/primary_selection.rs`).
-use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
+#[cfg(feature = "x11")]
+use arboard_unix::{self as arboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
 
 use super::*;
 
+#[cfg(feature = "x11")]
 enum Request {
     Write(String),
     /// Paste it into field `target`: the answer comes back as that field's paste.
     Read { target: String, reply: mpsc::Sender<Reply>, wake: Waker },
 }
 
+#[cfg(feature = "x11")]
 static WORKER: OnceLock<mpsc::Sender<Request>> = OnceLock::new();
 
+#[cfg(feature = "x11")]
 fn worker() -> &'static mpsc::Sender<Request> {
     if cfg!(test) {
         panic!("unit test reached the OS primary selection; install a test clipboard (`rt.use_clipboard` or `Client::use_memory`)");
@@ -25,6 +29,7 @@ fn worker() -> &'static mpsc::Sender<Request> {
     })
 }
 
+#[cfg(feature = "x11")]
 fn run(requests: mpsc::Receiver<Request>) {
     let mut board: Option<arboard::Clipboard> = None;
     for request in requests {
@@ -43,10 +48,17 @@ fn run(requests: mpsc::Receiver<Request>) {
 
 impl Client {
     /// Hands the worker what the runtime asked of the primary selection.
+    #[cfg(feature = "x11")]
     pub(super) fn flush_primary(&self, rt: &mut crate::runtime::RuntimeCore) {
         if let Some(text) = rt.edit.primary.write.take() { worker().send(Request::Write(text)).ok(); }
         if let Some(target) = rt.edit.primary.paste.take() {
             worker().send(Request::Read { target, reply: self.sender.clone(), wake: self.wake.clone() }).ok();
         }
+    }
+
+    #[cfg(not(feature = "x11"))]
+    pub(super) fn flush_primary(&self, rt: &mut crate::runtime::RuntimeCore) {
+        rt.edit.primary.write.take();
+        rt.edit.primary.paste.take();
     }
 }

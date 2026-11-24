@@ -32,11 +32,12 @@ pub struct ClipboardContent {
     rtf: Option<Wiped>,
     image: Option<ClipboardImage>,
     files: Vec<PathBuf>,
+    error: Option<String>,
     pub(super) own_pills: bool,
 }
 impl PartialEq for ClipboardContent {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.html == other.html && self.rtf == other.rtf && self.image == other.image && self.files == other.files
+        self.text == other.text && self.html == other.html && self.rtf == other.rtf && self.image == other.image && self.files == other.files && self.error == other.error
     }
 }
 impl Eq for ClipboardContent {}
@@ -54,6 +55,7 @@ impl ClipboardContent {
     /// per file; Windows and Linux write the file list alone; the web skips them. Paths should
     /// be absolute.
     pub fn with_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self { self.files.extend(files); self }
+    pub(crate) fn with_error(mut self, error: impl Into<String>) -> Self { self.error = Some(error.into()); self }
     pub fn text(&self) -> &str { &self.text }
     pub fn html(&self) -> Option<&str> { self.html.as_deref().map(String::as_str) }
     pub fn rtf(&self) -> Option<&str> { self.rtf.as_deref().map(String::as_str) }
@@ -62,6 +64,7 @@ impl ClipboardContent {
     pub fn image(&self) -> Option<&ClipboardImage> { self.image.as_ref() }
     /// The files on the clipboard. Like the image, only pastes to a hook carry them.
     pub fn files(&self) -> &[PathBuf] { &self.files }
+    pub fn error(&self) -> Option<&str> { self.error.as_deref() }
     /// HTML, RTF, an image or files beside the text.
     pub fn is_rich(&self) -> bool { self.html.is_some() || self.rtf.is_some() || self.image.is_some() || !self.files.is_empty() }
     /// No text and no other form.

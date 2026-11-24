@@ -2,6 +2,12 @@
 
 use super::*;
 
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), feature = "x11"))]
+use arboard_unix as arboard;
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+const UNSUPPORTED_CLIPBOARD: &str = "clipboard not supported on this platform yet";
+
 impl Client {
     pub(super) fn read_for(&self, purpose: Purpose) {
         worker().send(Request::Read { purpose, reply: self.sender.clone(), wake: self.wake.clone() }).ok();
@@ -47,12 +53,33 @@ impl Worker {
         if completed.recv_timeout(Duration::from_millis(250)).is_ok() { handle.join().ok(); }
     }
 }
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), feature = "x11")))]
 fn worker() -> &'static mpsc::Sender<Request> {
     if cfg!(test) {
         panic!("unit test reached the OS clipboard; install a test clipboard (`rt.use_clipboard` or `Client::use_memory`)");
     }
     &WORKER.get_or_init(|| Worker::spawn(|| arboard::Clipboard::new().ok())).sender
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+struct UnsupportedClipboard;
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+impl Backend for UnsupportedClipboard {
+    fn write(&mut self, _: &ClipboardWrite) -> Result<(), String> { Err(UNSUPPORTED_CLIPBOARD.into()) }
+    fn text(&mut self) -> Option<Zeroizing<String>> { None }
+    fn content(&mut self, _: bool) -> Option<ClipboardContent> { None }
+    fn revision(&self) -> Option<u64> { None }
+    fn clear(&mut self) -> Result<(), String> { Err(UNSUPPORTED_CLIPBOARD.into()) }
+    fn unavailable_error(&self) -> Option<&'static str> { Some(UNSUPPORTED_CLIPBOARD) }
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+fn worker() -> &'static mpsc::Sender<Request> {
+    if cfg!(test) {
+        panic!("unit test reached the OS clipboard; install a test clipboard (`rt.use_clipboard` or `Client::use_memory`)");
+    }
+    &WORKER.get_or_init(|| Worker::spawn(|| Some(UnsupportedClipboard))).sender
 }
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -71,7 +98,7 @@ pub(super) fn shutdown() {
     if let Some(worker) = WORKER.get() { worker.stop(); }
 }
 
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), feature = "x11")))]
 impl Backend for arboard::Clipboard {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> { write(self, copy) }
     fn text(&mut self) -> Option<Zeroizing<String>> { self.get_text().ok().map(Zeroizing::new) }
@@ -134,7 +161,7 @@ fn run_worker<B: Backend>(recv: mpsc::Receiver<Request>, mut open: impl FnMut() 
     drop(clipboard);
 }
 
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), feature = "x11")))]
 fn write(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), String> {
     let content = &copy.content;
     if copy.clear_after.is_none() && content.is_rich() {
@@ -148,7 +175,7 @@ fn write(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), Strin
 
 /// Windows and Linux hold one of Rune's forms per write: the files, else the image, else HTML
 /// beside the text (CF_HTML, `text/html`), else the text. RTF isn't written.
-#[cfg(all(not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+#[cfg(any(target_os = "windows", all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), feature = "x11")))]
 fn write_one_form(cb: &mut arboard::Clipboard, content: &ClipboardContent) -> Result<(), String> {
     let error = |e: arboard::Error| e.to_string();
     if !content.files().is_empty() { return cb.set().file_list(content.files()).map_err(error); }
@@ -163,7 +190,7 @@ fn write_one_form(cb: &mut arboard::Clipboard, content: &ClipboardContent) -> Re
     }
 }
 
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), feature = "x11")))]
 fn write_text(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), arboard::Error> {
     let text = copy.content.text();
     if copy.clear_after.is_none() { return cb.set_text(text); }
@@ -177,7 +204,7 @@ fn write_text(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), 
     cb.set_text(text)
 }
 
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), feature = "x11")))]
 #[allow(unsafe_code)]
 fn revision() -> Option<u64> {
     #[cfg(target_os = "macos")]

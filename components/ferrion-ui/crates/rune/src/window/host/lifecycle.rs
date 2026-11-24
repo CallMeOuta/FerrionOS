@@ -160,7 +160,9 @@ impl Host {
                 None => w.window.request_user_attention(Some(winit::window::UserAttentionType::Informational)),
             }
             return;
-        } else if let Some(token) = token.as_deref()
+        }
+        #[cfg(all(feature = "x11", unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if let Some(token) = token.as_deref()
             && crate::platform::x11::activation::activate(&w.window, token)
         {
             return;

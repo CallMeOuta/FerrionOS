@@ -13,9 +13,9 @@ mod service;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "x11"))]
 mod x11;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "x11"), test))]
 mod x11_repeat;
 #[cfg(all(target_os = "linux", feature = "dbus"))]
 mod wayland;
@@ -143,7 +143,12 @@ fn linux_backend(wayland: bool, sink: Sink) -> Result<NativeBackend, ShortcutErr
             #[cfg(not(feature = "dbus"))]
             { Err(ShortcutError::Unsupported) }
         },
-        || Ok(Box::new(x11::Native::new(sink.clone())?) as NativeBackend),
+        || {
+            #[cfg(feature = "x11")]
+            { Ok(Box::new(x11::Native::new(sink.clone())?) as NativeBackend) }
+            #[cfg(not(feature = "x11"))]
+            { let _ = &sink; Err(ShortcutError::Unsupported) }
+        },
     )
 }
 
