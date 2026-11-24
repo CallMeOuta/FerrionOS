@@ -20,7 +20,7 @@ Search the whole tree before creating anything: `rg --files recipes -g recipe.to
 
 - An unknown key is ignored without an error, so a misspelled key silently does nothing. Check each key against the types.
 - `template` takes exactly the `BuildKind` names. `wip` holds stubs with `template = "go"`, which the cookbook does not implement.
-- `[source]` is one of `git`, `tar`, `same_as` (another recipe's `source/`, through a symlink) or `path`. Without a `[source]` section the cookbook fetches nothing and the script works from files in the recipe directory, as `recipes/tests/hello-redox` does.
+- `[source]` is one of `git`, `tar`, `same_as` (another recipe's `source/`, through a symlink) or `path` (a source tree in this repository, relative to the recipe's directory, linked into place as `source` and never fetched, patched, reset or deleted by the cookbook). Without a `[source]` section the cookbook fetches nothing and the script works from files in the recipe directory, as `recipes/tests/hello-redox` does.
 - A `git` source without `rev` follows the branch head and changes under you. `rev` takes a commit hash or a tag.
 - A `tar` source outside `wip` carries `blake3`; a few old recipes still lack it. Leave it out for the first fetch and copy the hash from the cookbook's line `WARNING: set blake3 for ... to ...`.
 - `patches` are applied in order with `patch --strip=1`, then `[source] script` runs inside `source/`. A patch file is a byte-exact diff against third-party code: change it by regenerating it. For a `tar` recipe, `scripts/patch-tar.sh <name>` rewrites `redox.patch` from your edits in `source/`.

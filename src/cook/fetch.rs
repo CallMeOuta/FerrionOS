@@ -175,27 +175,9 @@ pub fn fetch(recipe: &CookRecipe, check_source: bool, logger: &PtyOut) -> Result
             r
         }
         Some(SourceRecipe::Path { path }) => {
-            let path = Path::new(&path);
-            let cached = source_dir.is_dir() && modified_dir(path)? <= modified_dir(&source_dir)?;
-            if !cached {
-                log_to_pty!(
-                    logger,
-                    "[DEBUG]: {:?} is newer than {:?}",
-                    path.display(),
-                    source_dir.display()
-                );
-                copy_dir_all(path, &source_dir).map_err(wrap_io_err!(
-                    path,
-                    source_dir,
-                    "Copying source"
-                ))?;
-            }
-            FetchResult::new(
-                source_dir,
-                "local_source".to_string(),
-                "".to_string(),
-                cached,
-            )
+            let cached = fetch_link_tree(recipe_dir, &source_dir, path)?;
+            let ident = fetch_tree_ident(&recipe_dir.join(path));
+            FetchResult::new(source_dir, ident, "".to_string(), cached)
         }
         Some(SourceRecipe::Git {
             git,
@@ -612,6 +594,58 @@ fn get_patches_blake3(
             None => Vec::new(),
         },
     )
+}
+
+fn fetch_link_tree(recipe_dir: &Path, source_dir: &Path, path: &str) -> Result<bool> {
+    let tree = recipe_dir.join(path);
+    if !tree.is_dir() {
+        bail_other_err!(
+            "{:?} is not a directory, but {:?} names it as its source tree",
+            tree.display(),
+            recipe_dir.join("recipe.toml").display()
+        );
+    }
+    if source_dir.is_symlink() {
+        if fs::read_link(source_dir).is_ok_and(|target| target == Path::new(path)) {
+            return Ok(true);
+        }
+        fs::remove_file(source_dir).map_err(wrap_io_err!(source_dir, "Removing symlink"))?;
+    } else if source_dir.exists() {
+        bail_other_err!(
+            "{dir:?} is a directory, but the recipe builds {tree:?} in place.\n\
+             Move any edits you made there into the tree, then remove {dir:?}",
+            dir = source_dir.display(),
+            tree = tree.display(),
+        );
+    }
+    symlink(path, source_dir)?;
+    Ok(false)
+}
+
+fn fetch_tree_ident(tree: &Path) -> String {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(tree)
+            .args(["-c", "safe.directory=*", "--no-optional-locks"])
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .trim_end()
+                    .to_string()
+            })
+    };
+    match (
+        git(&["rev-parse", "--verify", "HEAD:./"]),
+        git(&["status", "--porcelain", "--", "."]),
+    ) {
+        (Some(tree_hash), Some(changes)) if changes.is_empty() => tree_hash,
+        (Some(tree_hash), Some(_)) => format!("{tree_hash}-dirty"),
+        _ => "local_source".to_string(),
+    }
 }
 
 pub(crate) fn fetch_make_symlink(source_dir: &PathBuf, same_as: &String) -> Result<()> {

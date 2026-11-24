@@ -18,6 +18,9 @@ pub enum SourceRecipe {
         same_as: String,
     },
     Path {
+        #[doc = "A source tree in this repository, relative to the recipe's directory. The cookbook"]
+        #[doc = "builds it in place through the recipe's `source` symlink and never fetches, patches,"]
+        #[doc = "resets or deletes it."]
         path: String,
     },
     Git {

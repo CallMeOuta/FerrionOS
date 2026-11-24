@@ -45,20 +45,6 @@ pub fn create_target_dir(recipe_dir: &Path, target: &'static str) -> Result<Path
     Ok(target_dir)
 }
 
-pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
-    fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
-
 pub fn move_dir_all_fn<'a>(
     src: impl AsRef<Path>,
     mv: &'a Box<impl Fn(PathBuf) -> Option<&'a Path>>,
@@ -166,10 +152,6 @@ fn modified_dir_inner<F: FnMut(&DirEntry) -> bool>(dir: &Path, filter: F) -> Res
         }
     }
     Ok(newest)
-}
-
-pub fn modified_dir(dir: &Path) -> Result<SystemTime> {
-    modified_dir_inner(dir, |_| true)
 }
 
 pub fn modified_dir_ignore_git(dir: &Path) -> Result<SystemTime> {
