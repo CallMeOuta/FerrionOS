@@ -8,12 +8,12 @@ show_help() {
     echo "Usage: $(basename "$0") [OPTIONS]"
     echo ""
     echo "Description:"
-    echo "  Wrapper for redoxer to run checks or tests on Redox OS targets."
+    echo "  Wrapper for redoxer to run checks or tests on FerrionOS targets."
     echo ""
     echo "Options:"
     echo "  --test              Run 'cargo test' instead of 'cargo check'"
     echo "  --clippy            Run 'cargo clippy' instead of 'cargo check'"
-    echo "  --all-target        Run the command on all supported Redox architectures"
+    echo "  --all-target        Run the command on all supported FerrionOS architectures"
     echo "  --target=<target>   Override the target architecture (e.g., i586-unknown-redox)"
     echo "  --arch=<arch>       Override the target architecture using arch (e.g., i586)"
     echo "  --help              Show this help message"
@@ -89,7 +89,7 @@ run_redoxer() {
 }
 
 if [ "$CHECK_ALL" = true ]; then
-    echo "Running $CMD_ACTION for all supported Redox targets..."
+    echo "Running $CMD_ACTION for all supported FerrionOS targets..."
 
     has_error=false
 

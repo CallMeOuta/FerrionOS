@@ -18,7 +18,7 @@ pub const CP_SRC_600_MARKER: &str = "virtio-fsd-selftest:cp-600\n";
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "virtio-fsd-selftest",
-    about = "Guest tests for /scheme/virtio-fs.<SHARE_TAG> and Redox VFS schemes",
+    about = "Guest tests for /scheme/virtio-fs.<SHARE_TAG> and FerrionOS VFS schemes",
     override_usage = "virtio-fsd-selftest <SHARE_TAG> [OPTIONS]",
     arg_required_else_help = true
 )]

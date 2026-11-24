@@ -90,7 +90,7 @@ fn skip_if_cp_unusable(err: &std::io::Error) -> Option<Outcome> {
     let s = err.to_string();
     if s.contains("xattr") || s.contains("unsupported platform") {
         return Some(Outcome::Skip(
-            "cp -p xattrs: uutils/xattr has no Redox support".into(),
+            "cp -p xattrs: uutils/xattr has no FerrionOS support".into(),
         ));
     }
     None

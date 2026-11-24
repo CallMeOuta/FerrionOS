@@ -1,15 +1,10 @@
-{"path": "components/base/check.sh", "line": 11, "class": "fail", "text": "echo \"  Wrapper for redoxer to run checks or tests on Redox OS targets.\""}
-{"path": "components/base/check.sh", "line": 16, "class": "fail", "text": "echo \"  --all-target        Run the command on all supported Redox architectures\""}
-{"path": "components/base/check.sh", "line": 92, "class": "fail", "text": "echo \"Running $CMD_ACTION for all supported Redox targets...\""}
 {"path": "components/base/getty/src/main.rs", "line": 297, "class": "fail", "text": "// FIXME enable this once redox supports controlling ttys"}
 {"path": "components/base/graphics-ipc/src/redox_uapi_exts.rs", "line": 1, "class": "fail", "text": "//! All types and constants in this module are Redox OS specific uapi extensions."}
 {"path": "components/base/graphics-ipc/src/redox_uapi_exts.rs", "line": 2, "class": "fail", "text": "//! They should not be used outside of Redox OS specific programs."}
 {"path": "components/base/ramfs/src/scheme.rs", "line": 284, "class": "fail", "text": "// Unlike on Linux, which allows directories to be opened without O_DIRECTORY, Redox has no"}
-{"path": "components/base/selftests/virtio-fsd/src/config.rs", "line": 21, "class": "fail", "text": "about = \"Guest tests for /scheme/virtio-fs.<SHARE_TAG> and Redox VFS schemes\","}
 {"path": "components/base/selftests/virtio-fsd/src/fsutil.rs", "line": 1, "class": "fail", "text": "// Redox open flags sit in the upper 16 bits; mode is the low 16 when packed for openat."}
 {"path": "components/base/selftests/virtio-fsd/src/fsutil.rs", "line": 31, "class": "fail", "text": "// Redox EWOULDBLOCK is 41; Linux aliases it to EAGAIN (11)."}
 {"path": "components/base/selftests/virtio-fsd/src/tests/fcntl.rs", "line": 156, "class": "fail", "text": "// Zero-byte write on a regular file is a no-op; Redox returns Ok."}
-{"path": "components/base/selftests/virtio-fsd/src/tests/meta.rs", "line": 93, "class": "fail", "text": "\"cp -p xattrs: uutils/xattr has no Redox support\".into(),"}
 {"path": "components/kernel/linkers/aarch64.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
 {"path": "components/kernel/linkers/i586.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
 {"path": "components/kernel/linkers/riscv64.ld", "line": 17, "class": "fail", "text": "* location. As the redox kernel is not currently relocatable,"}
