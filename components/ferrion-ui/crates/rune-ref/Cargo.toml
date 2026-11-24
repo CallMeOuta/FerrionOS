@@ -7,7 +7,7 @@ description = "Scalar CPU reference renderer for Rune's device-pixel instance st
 autotests = false
 
 [features]
-gpu = ["dep:rune", "dep:rune-fx", "dep:wgpu"]
+gpu = ["dep:rune", "dep:wgpu"]
 
 [dependencies]
 libm = { version = "=0.2.16", default-features = false, features = ["force-soft-floats"] }
@@ -16,7 +16,6 @@ half = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 rune = { workspace = true, default-features = true, optional = true }
-rune-fx = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -34,9 +33,6 @@ name = "alloc"
 
 [[test]]
 name = "differential"
-
-[[test]]
-name = "fx_blend"
 
 [[test]]
 name = "parity"

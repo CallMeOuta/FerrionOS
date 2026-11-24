@@ -11,57 +11,15 @@ members = [
     "crates/rune-text",
     "crates/rune-ref",
     "crates/rune-motion",
-    "crates/rune-i18n",
     "crates/rune-staging",
     "crates/rune-kit",
     "crates/rune-highlights",
-    "crates/rune-fx",
-    "crates/rune-light",
     "crates/procwatch",
-    "crates/rune-register",
-    "crates/rune-knobs",
-    "crates/rune-mac",
-    "crates/rune-notify",
-    "crates/rune-mermaid",
-    "crates/rune-perf",
-    "crates/rune-luau",
     "crates/rune-taffy",
     "themes/opencode",
     "examples/hello",
-    "examples/launch-floor",
-    "examples/web-hello",
-    "examples/web-showcase",
-    "examples/fetch",
-    "www/app",
-    "examples/todo",
     "examples/settings",
-    "examples/playground",
-    "examples/knobs",
-    "examples/kit-gallery",
-    "examples/background",
-    "examples/live-values",
-    "examples/shapes",
-    "examples/overlay",
-    "examples/overlay-lab",
-    "examples/lab",
-    "examples/showreel",
-    "examples/video-player",
-    "examples/video-tiles",
-    "examples/cursed-settings",
-    "examples/drag-out",
-    "examples/sketch",
-    "examples/drop-files",
-    "examples/rich-clipboard",
-    "examples/matched",
     "examples/launcher",
-    "examples/glass-card",
-    "examples/glass-panel",
-    "examples/frosted-bar",
-    "examples/odometer",
-    "examples/motion-bento",
-    "examples/motion-bento/chaos",
-    "examples/site-scenes",
-    "examples/luau-panel",
 ]
 # Default cargo check/test targets: the core framework, libraries and theme.
 # Excludes examples/*, www/app, rune-luau (C++ Luau build via cc/mlua), rune-notify/rune-mac
@@ -81,13 +39,7 @@ default-members = [
     "crates/rune-staging",
     "crates/rune-kit",
     "crates/rune-highlights",
-    "crates/rune-fx",
-    "crates/rune-light",
     "crates/procwatch",
-    "crates/rune-register",
-    "crates/rune-knobs",
-    "crates/rune-mermaid",
-    "crates/rune-perf",
     "crates/rune-taffy",
     "themes/opencode",
 ]
@@ -161,18 +113,12 @@ procwatch = { path = "crates/procwatch" }
 rune = { path = "crates/rune", default-features = false }
 rune-core = { path = "crates/rune-core" }
 rune-edit = { path = "crates/rune-edit" }
-rune-fx = { path = "crates/rune-fx" }
 rune-gpu = { path = "crates/rune-gpu", default-features = false }
 rune-highlights = { path = "crates/rune-highlights" }
 rune-image = { path = "crates/rune-image", default-features = false }
 rune-kit = { path = "crates/rune-kit", default-features = false }
-rune-knobs = { path = "crates/rune-knobs" }
-rune-light = { path = "crates/rune-light" }
-rune-luau = { path = "crates/rune-luau" }
 rune-media = { path = "crates/rune-media", default-features = false }
-rune-mermaid = { path = "crates/rune-mermaid" }
 rune-motion = { path = "crates/rune-motion" }
-rune-notify = { path = "crates/rune-notify" }
 rune-ref = { path = "crates/rune-ref" }
 rune-spell = { path = "crates/rune-spell" }
 rune-staging = { path = "crates/rune-staging" }
