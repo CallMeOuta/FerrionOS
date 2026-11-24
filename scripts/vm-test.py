@@ -58,6 +58,7 @@
 #           subscriber count where it was (x86_64 desktop)
 #   desktop-regions  compares the settled desktop with the flat first-run target's region probes
 #   desktop-gpu  compares CPU (virtio, vga) and Venus compositor frames and checks renderer and presenter telemetry
+#   wgpu-headless  runs wgpu-hello-headless on gpu=venus (default adapter and lavapipe-pinned) and compares both PNG frames
 #   wayland-client  checks DD1 pixels, keyboard, frame median and independent cursor dispatch
 #   pointer-latency checks the strict cursor maximum under 2 ms; use --repeat 10
 #   cli-tools  checks sed, awk and gzip tar creation/extraction with -C on the desktop
@@ -9003,6 +9004,193 @@ def test_vk_exact(vm, args):
     return True, f"Venus rendered exact vulkan frame with host submit trace; see {log} and {trace_log}"
 
 
+WGPU_HEADLESS_SIZE = 256
+WGPU_CLEAR_RGBA = (13, 18, 38, 255)
+WGPU_CENTER_MIN_DELTA = 20
+WGPU_CHANNEL_TOL = 4
+WGPU_DIFF_MAX_FRACTION = 0.01
+
+
+def test_wgpu_headless(vm, args):
+    """Runs wgpu-hello-headless on gpu=venus (default adapter selection, plus lavapipe-pinned) and compares both 256x256 PNG frames (use --config wgpu-headless on x86_64)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+
+    def parse_adapter(output):
+        match = re.search(
+            r"(?m)^adapter:\s*(.+)\s+\(([^,()]+),\s*([^,()]+),\s*driver\s*(.*)\)\s*$",
+            output,
+        )
+        if not match:
+            return None
+        return {
+            "name": match.group(1).strip(),
+            "device_type": match.group(2).strip(),
+            "backend": match.group(3).strip(),
+            "driver": match.group(4).strip(),
+        }
+
+    def fetch_png(remote_path, tag):
+        since = vm.mark()
+        vm.type(
+            f"bash -c 'echo WGPUPNG-\"\"{tag}-BEGIN; base64 -w 0 {remote_path} 2>/dev/null; "
+            f"echo; echo WGPUPNG-\"\"{tag}-END'\n"
+        )
+        found = vm.wait_serial(rf"WGPUPNG-{tag}-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)WGPUPNG-{tag}-END", 60, since)
+        if not found:
+            return None
+        raw = "".join(found.group(1).split())
+        if not raw:
+            return None
+        try:
+            return base64.b64decode(raw, validate=True)
+        except ValueError:
+            return None
+
+    def decode_rgba(data):
+        import io
+        try:
+            from PIL import Image
+        except ImportError as error:
+            raise Blocked(f"Pillow is required for wgpu-headless PNG comparison: {error}") from error
+
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        return img.width, img.height, img.tobytes()
+
+    guest_run(vm, "wgpuclean", "rm -f /tmp/wgpu-venus.png /tmp/wgpu-lvp.png", 30)
+    venus_status, venus_out = guest_run(vm, "wgpuvenus", "wgpu-hello-headless /tmp/wgpu-venus.png 2>&1", 120)
+    time.sleep(0.5)
+    venus_submits = len(vm.trace("virtio_gpu_cmd_ctx_submit"))
+    venus_png = fetch_png("/tmp/wgpu-venus.png", "VENUS") if venus_status == 0 else None
+    if venus_png:
+        (vm.out / "wgpu-venus.png").write_bytes(venus_png)
+
+    lvp_icd = f"/usr/share/vulkan/icd.d/lvp_icd.{args.arch}.json"
+    lvp_status, lvp_out = guest_run(
+        vm,
+        "wgpulvp",
+        f"VK_DRIVER_FILES={lvp_icd} wgpu-hello-headless /tmp/wgpu-lvp.png 2>&1",
+        120,
+    )
+    lvp_png = fetch_png("/tmp/wgpu-lvp.png", "LVP") if lvp_status == 0 else None
+    if lvp_png:
+        (vm.out / "wgpu-lvp.png").write_bytes(lvp_png)
+
+    log = vm.out / "wgpu-headless.txt"
+    log.write_text(
+        f"=== venus (exit {venus_status}) ===\n{venus_out}\n"
+        f"=== lavapipe (exit {lvp_status}) ===\n{lvp_out}\n"
+    )
+
+    venus_adapter = parse_adapter(venus_out)
+    lvp_adapter = parse_adapter(lvp_out)
+    reasons = []
+
+    if venus_status != 0:
+        reasons.append(f"venus run failed (exit {venus_status})")
+    if venus_adapter is None:
+        reasons.append("venus run printed no adapter line")
+    else:
+        combined = f"{venus_adapter['name']} {venus_adapter['driver']}".lower()
+        if venus_adapter["backend"] != "Vulkan":
+            reasons.append(f"venus backend={venus_adapter['backend']!r}, expected Vulkan")
+        if venus_adapter["device_type"] == "Cpu":
+            reasons.append("venus run selected Cpu adapter instead of Venus")
+        if "venus" not in combined or "llvmpipe" in combined:
+            reasons.append("venus run did not select Virtio-GPU Venus")
+    if venus_submits == 0:
+        reasons.append("QEMU trace has 0 virtio_gpu_cmd_ctx_submit events")
+
+    if lvp_status != 0:
+        reasons.append(f"lavapipe run failed (exit {lvp_status})")
+    if lvp_adapter is None:
+        reasons.append("lavapipe run printed no adapter line")
+    else:
+        combined_lvp = f"{lvp_adapter['name']} {lvp_adapter['driver']}".lower()
+        if lvp_adapter["backend"] != "Vulkan":
+            reasons.append(f"lavapipe backend={lvp_adapter['backend']!r}, expected Vulkan")
+        if lvp_adapter["device_type"] != "Cpu" or "llvmpipe" not in combined_lvp:
+            reasons.append("lavapipe-pinned run did not select llvmpipe Cpu adapter")
+
+    comparison = None
+    venus_center = None
+    lvp_center = None
+    if not venus_png:
+        reasons.append("missing /tmp/wgpu-venus.png")
+    if not lvp_png:
+        reasons.append("missing /tmp/wgpu-lvp.png")
+    if venus_png and lvp_png:
+        vw, vh, vbytes = decode_rgba(venus_png)
+        lw, lh, lbytes = decode_rgba(lvp_png)
+        if (vw, vh) != (WGPU_HEADLESS_SIZE, WGPU_HEADLESS_SIZE):
+            reasons.append(f"venus PNG size {vw}x{vh}, expected {WGPU_HEADLESS_SIZE}x{WGPU_HEADLESS_SIZE}")
+        if (lw, lh) != (WGPU_HEADLESS_SIZE, WGPU_HEADLESS_SIZE):
+            reasons.append(f"lavapipe PNG size {lw}x{lh}, expected {WGPU_HEADLESS_SIZE}x{WGPU_HEADLESS_SIZE}")
+        if (vw, vh) == (lw, lh) == (WGPU_HEADLESS_SIZE, WGPU_HEADLESS_SIZE):
+            center_off = (WGPU_HEADLESS_SIZE // 2 * WGPU_HEADLESS_SIZE + WGPU_HEADLESS_SIZE // 2) * 4
+            venus_center = list(vbytes[center_off:center_off + 4])
+            lvp_center = list(lbytes[center_off:center_off + 4])
+            if max(abs(venus_center[c] - WGPU_CLEAR_RGBA[c]) for c in range(3)) < WGPU_CENTER_MIN_DELTA:
+                reasons.append(f"venus center pixel {venus_center} matches background")
+            if max(abs(lvp_center[c] - WGPU_CLEAR_RGBA[c]) for c in range(3)) < WGPU_CENTER_MIN_DELTA:
+                reasons.append(f"lavapipe center pixel {lvp_center} matches background")
+            total = vw * vh
+            differing = 0
+            max_diff = 0
+            for off in range(0, len(vbytes), 4):
+                d = max(
+                    abs(vbytes[off] - lbytes[off]),
+                    abs(vbytes[off + 1] - lbytes[off + 1]),
+                    abs(vbytes[off + 2] - lbytes[off + 2]),
+                    abs(vbytes[off + 3] - lbytes[off + 3]),
+                )
+                if d > max_diff:
+                    max_diff = d
+                if d > WGPU_CHANNEL_TOL:
+                    differing += 1
+            diff_fraction = differing / total
+            comparison = {
+                "total_pixels": total,
+                "differing_pixels": differing,
+                "diff_fraction": diff_fraction,
+                "max_channel_diff": max_diff,
+                "channel_tolerance": WGPU_CHANNEL_TOL,
+                "max_diff_fraction": WGPU_DIFF_MAX_FRACTION,
+            }
+            if diff_fraction > WGPU_DIFF_MAX_FRACTION:
+                reasons.append(
+                    f"venus vs lavapipe diff {differing}/{total} ({diff_fraction:.4%}) > "
+                    f"{WGPU_DIFF_MAX_FRACTION:.2%} (max channel diff {max_diff})"
+                )
+
+    report = {
+        "venus": {
+            "exit": venus_status,
+            "adapter": venus_adapter,
+            "ctx_submit_count": venus_submits,
+            "center_rgba": venus_center,
+        },
+        "lavapipe": {
+            "exit": lvp_status,
+            "adapter": lvp_adapter,
+            "center_rgba": lvp_center,
+        },
+        "comparison": comparison,
+        "reasons": reasons,
+    }
+    (vm.out / "wgpu-headless.json").write_text(json.dumps(report, indent=2) + "\n")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return (
+        True,
+        f"venus={venus_adapter['device_type']}/{venus_adapter['backend']} submits={venus_submits} "
+        f"lavapipe={lvp_adapter['device_type']}/{lvp_adapter['backend']} "
+        f"diff={comparison['differing_pixels']}/{comparison['total_pixels']} "
+        f"max_channel_diff={comparison['max_channel_diff']} (tol={WGPU_CHANNEL_TOL}); "
+        f"see {vm.out / 'wgpu-headless.json'}",
+    )
+
+
 LOCK_PROBE_CHECKS = (
     "fcntl-conflict", "getlk-holder", "fcntl-shared", "fcntl-split-merge", "seek-cur-and-end",
     "release-on-close", "release-on-close-other-fd", "path-lookups-keep-locks", "release-on-exit", "release-on-kill",
@@ -10439,6 +10627,7 @@ TESTS["gpu-submit"] = test_gpu_submit
 TESTS["gpu-syncobj"] = test_gpu_syncobj
 TESTS["gpu-flip"] = test_gpu_flip
 TESTS["vk-exact"] = test_vk_exact
+TESTS["wgpu-headless"] = test_wgpu_headless
 TESTS["agent-scope"] = test_agent_scope
 TESTS["agent-clone"] = test_agent_clone
 TESTS["agent-scope-overhead"] = test_agent_scope_overhead
@@ -10783,7 +10972,7 @@ def main():
             elif name == "gpu-flip":
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=virtio",)
-            elif name == "vk-exact":
+            elif name in ("vk-exact", "wgpu-headless"):
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *VK_EXACT_TRACE]})

@@ -1,0 +1,8 @@
+include = ["../minimal.toml"]
+
+[general]
+filesystem_size = 1024
+
+[packages]
+bash = {}
+wgpu-hello = "source"
