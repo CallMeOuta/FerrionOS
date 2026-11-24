@@ -26,8 +26,9 @@ data = """
 mkdir -p /tmp/ferrion-wm
 chmod 700 /tmp/ferrion-wm
 export XDG_RUNTIME_DIR=/tmp/ferrion-wm
-export LIBGL_ALWAYS_SOFTWARE=1
 export RUST_LOG=ferrion_wm=info,niri=info,smithay=warn
+printf '%s\\n' "$$" > /tmp/ferrion-wm.pid
+[ "${FERRION_WM_GPU:-0}" = 1 ] || export LIBGL_ALWAYS_SOFTWARE=1
 exec ferrion-wm --config /etc/ferrion-wm/config.kdl -- /bin/bash /usr/lib/ferrion-wm-test-ready > /tmp/ferrion-wm.log 2>&1
 """
 
