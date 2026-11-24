@@ -48,9 +48,6 @@
 {"path": "components/redoxfs/.gitlab-ci.yml", "line": 25, "class": "fail", "text": "test:redox:"}
 {"path": "components/redoxfs/.gitlab-ci.yml", "line": 28, "class": "fail", "text": "- build:redox"}
 {"path": "components/redoxfs/Cargo.toml", "line": 3, "class": "fail", "text": "description = \"The Redox Filesystem\""}
-{"path": "components/redoxfs/README.md", "line": 3, "class": "fail", "text": "This is the default filesystem of Redox OS inspired by [ZFS](https://docs.freebsd.org/en/books/handbook/zfs/) and adapted to a microkernel architecture."}
-{"path": "components/redoxfs/README.md", "line": 9, "class": "fail", "text": "- Compatible with Redox and Linux (FUSE)"}
-{"path": "components/redoxfs/README.md", "line": 17, "class": "fail", "text": "- Disk encryption fully supported by the Redox bootloader, letting it load the kernel off an encrypted partition."}
 {"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 114, "class": "fail", "text": "/// Creates the disk for backing the Redoxfs."}
 {"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 120, "class": "fail", "text": "/// Creates an empty Redoxfs."}
 {"path": "components/redoxfs/fuzz/fuzz_targets/fuse_fuzz_target.rs", "line": 121, "class": "fail", "text": "fn create_redoxfs(disk: DiskSparse, reserved_size: u64) -> bool {"}
