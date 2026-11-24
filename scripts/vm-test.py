@@ -57,6 +57,7 @@
 #           200 zero-timeout polls of empty pipes leave the kernel's event
 #           subscriber count where it was (x86_64 desktop)
 #   desktop-regions  compares the settled desktop with the flat first-run target's region probes
+#   desktop-gpu  compares CPU (virtio, vga) and Venus compositor frames and checks renderer and presenter telemetry
 #   wayland-client  checks DD1 pixels, keyboard, frame median and independent cursor dispatch
 #   pointer-latency checks the strict cursor maximum under 2 ms; use --repeat 10
 #   cli-tools  checks sed, awk and gzip tar creation/extraction with -C on the desktop
@@ -3479,6 +3480,13 @@ def run_gpu_heads(args, out):
     from display_modes import run_gpu_heads as check
 
     return check(args, out, VM, test_gpu_heads)
+
+
+def run_desktop_gpu(args, out):
+    """Compares CPU (virtio, vga) and Venus compositor frames and checks renderer and presenter telemetry; use --config wm-columns."""
+    from desktop_gpu import run_desktop_gpu as check
+
+    return check(args, out, VM, root_shell, run_status)
 
 
 def test_shm_read_back(vm, args):
@@ -10570,6 +10578,7 @@ OWN_IMAGE["bootloader-edid"] = run_bootloader_edid
 OWN_IMAGE["display-modes"] = run_display_modes
 OWN_IMAGE["display-heads"] = run_display_heads
 OWN_IMAGE["gpu-heads"] = run_gpu_heads
+OWN_IMAGE["desktop-gpu"] = run_desktop_gpu
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 OWN_IMAGE["x2apic-cpus"] = test_x2apic_cpus
