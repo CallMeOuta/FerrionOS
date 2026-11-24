@@ -118,3 +118,33 @@ added = [
 "vendor/wgpu-hal/LICENSE.APACHE" = "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
 "vendor/wgpu-hal/LICENSE.MIT" = "dc0d97139e8205818c703741c7be7cb3b96888bd5917b8d6fc6133731e403c21"
 "vendor/winit/LICENSE" = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+
+[wgpu]
+kind = "archives"
+
+[wgpu.archives.wgpu]
+path = "wgpu"
+url = "https://static.crates.io/crates/wgpu/wgpu-30.0.2.crate"
+sha256 = "146fc3d654250e6207921a66c87534c621bc886c70df83dcf466c1d66813810e"
+
+[wgpu.archives.wgpu.licenses]
+"LICENSE.APACHE" = "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+"LICENSE.MIT" = "dc0d97139e8205818c703741c7be7cb3b96888bd5917b8d6fc6133731e403c21"
+
+[wgpu.archives.wgpu-core]
+path = "wgpu-core"
+url = "https://static.crates.io/crates/wgpu-core/wgpu-core-30.0.2.crate"
+sha256 = "ad661da2ee99f208c30090b585284b2ab5b8bf2358ddf2d2215592808ec62f1a"
+
+[wgpu.archives.wgpu-core.licenses]
+"LICENSE.APACHE" = "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+"LICENSE.MIT" = "dc0d97139e8205818c703741c7be7cb3b96888bd5917b8d6fc6133731e403c21"
+
+[wgpu.archives.wgpu-core-deps-windows-linux-android]
+path = "wgpu-core-deps-windows-linux-android"
+url = "https://static.crates.io/crates/wgpu-core-deps-windows-linux-android/wgpu-core-deps-windows-linux-android-30.0.2.crate"
+sha256 = "1331b08fa2362c5d454eccc4448e6e4f01eccfea569a00e310adbfc4415f2bdc"
+
+[wgpu.archives.wgpu-core-deps-windows-linux-android.licenses]
+"LICENSE.APACHE" = "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+"LICENSE.MIT" = "dc0d97139e8205818c703741c7be7cb3b96888bd5917b8d6fc6133731e403c21"
