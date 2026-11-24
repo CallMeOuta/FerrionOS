@@ -65,6 +65,7 @@ RUN apt-get update \
         python3-yaml \
         rsync \
         ruby \
+        sassc \
         scons \
         ssh \
         texinfo \
