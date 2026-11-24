@@ -2927,8 +2927,6 @@ def check_usb_tablet(vm, args, qmp, pinned):
 
 
 
-
-
 def test_wayland_client(vm, args, qmp, boot_load, *, pointer_latency=False):
     """Checks a native-VT pixman Wayland client and input while a slow client renders."""
     import statistics
@@ -3101,6 +3099,27 @@ def run_bootloader_edid(args, out):
     from bootloader_edid import run_bootloader_edid as check
 
     return check(args, out, ROOT)
+
+
+def run_display_modes(args, out):
+    """Boots the desktop at 1280x800, 1920x1080, 2560x1600 and 3840x2160; each must fill exactly that size with its taskbar on the bottom edge and follow a host resize."""
+    from display_modes import run_display_modes as check
+
+    return check(args, out, VM)
+
+
+def run_display_heads(args, out):
+    """Two virtio-gpu heads at 3840x2160 and 2560x1600: desktop on both, taskbar on the first, a window moved onto the second, the second turned off and on while running."""
+    from display_modes import run_display_heads as check
+
+    return check(args, out, VM)
+
+
+def run_gpu_heads(args, out):
+    """gpu-heads with head 1 given 1280x800 through its VNC client before boot."""
+    from display_modes import run_gpu_heads as check
+
+    return check(args, out, VM, test_gpu_heads)
 
 
 def test_shm_read_back(vm, args):
@@ -10137,6 +10156,9 @@ OWN_IMAGE["desktop-columns"] = run_desktop_columns
 OWN_IMAGE["desktop-columns-timing"] = run_desktop_columns_timing
 OWN_IMAGE["display-handoff"] = run_display_handoff
 OWN_IMAGE["bootloader-edid"] = run_bootloader_edid
+OWN_IMAGE["display-modes"] = run_display_modes
+OWN_IMAGE["display-heads"] = run_display_heads
+OWN_IMAGE["gpu-heads"] = run_gpu_heads
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 OWN_IMAGE["x2apic-cpus"] = test_x2apic_cpus
@@ -10324,7 +10346,7 @@ def main():
             captures = []
             last_capture = None
             trace_lines = 0
-            make = ("gpu=multi",) if name == "gpu-heads" else ()
+            make = ()
             run_args = args
             if name in ("gpu-context", "gpu-submit"):
                 if not any(assignment.startswith("gpu=") for assignment in args.make):

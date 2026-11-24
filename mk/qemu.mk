@@ -8,6 +8,8 @@ QEMU_GPU_HOSTMEM?=4G
 QEMU_DISPLAY?=$(if $(filter venus virtio-gl,$(gpu)),gtk$(comma)gl=on,$(if $(filter virtio-sdl,$(gpu)),sdl$(comma)show-cursor=on))
 ## EGL headless render node, such as /dev/dri/renderD128; empty lets QEMU choose.
 QEMU_RENDER_NODE?=
+## Options appended to the virtio display device of gpu=virtio and gpu=multi, such as ,xres=1920,yres=1080.
+QEMU_GPU_OPTS?=
 ## Vulkan ICD selection for Venus; defaults to the host's VK_DRIVER_FILES.
 QEMU_VK_DRIVER_FILES?=$(VK_DRIVER_FILES)
 netboot?=no
@@ -251,15 +253,15 @@ else ifeq ($(gpu),ramfb)
 	QEMUFLAGS+=-vga none -device ramfb,id=gpu0
 else ifeq ($(gpu),multi)
 	ifeq ($(VGA_SUPPORTED),yes)
-		QEMUFLAGS+=-vga none -device virtio-vga,id=gpu0,max_outputs=2
+		QEMUFLAGS+=-vga none -device virtio-vga,id=gpu0,max_outputs=2$(QEMU_GPU_OPTS)
 	else
-		QEMUFLAGS+=-vga none -device virtio-gpu,id=gpu0,max_outputs=2
+		QEMUFLAGS+=-vga none -device virtio-gpu,id=gpu0,max_outputs=2$(QEMU_GPU_OPTS)
 	endif
 else ifeq ($(gpu),virtio)
 	ifeq ($(VGA_SUPPORTED),yes)
-		QEMUFLAGS+=-vga none -device virtio-vga,id=gpu0
+		QEMUFLAGS+=-vga none -device virtio-vga,id=gpu0$(QEMU_GPU_OPTS)
 	else
-		QEMUFLAGS+=-vga none -device virtio-gpu,id=gpu0
+		QEMUFLAGS+=-vga none -device virtio-gpu,id=gpu0$(QEMU_GPU_OPTS)
 	endif
 else ifeq ($(gpu),virtio-sdl)
 	ifeq ($(VGA_SUPPORTED),yes)
