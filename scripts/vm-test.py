@@ -2733,6 +2733,201 @@ def run_pointer_latency(args, out):
     return run_wayland_client(args, out, pointer_latency=True)
 
 
+USB_TABLET_ROUNDS = 12
+USB_TABLET_PACED_MOVES = 20
+USB_TABLET_BURST_MOVES = 2000
+USB_TABLET_BURST_SPACING_S = 0.001
+USB_TABLET_IDLE_S = 15
+USB_TABLET_CHECK_S = 3
+USB_TABLET_TOLERANCE_PX = 3
+USB_TABLET_MAX_HOTSPOT_PX = 64
+USB_TABLET_ABS_MAX = 0x7FFF
+USB_TABLET_PIN_WAIT_S = 20
+USB_TABLET_CURSOR = re.compile(r"virtio_gpu_update_cursor scanout \d+, x (-?\d+), y (-?\d+)")
+
+
+def run_usb_tablet(args, out):
+    """Logs in on the desktop (gpu=virtio) with a USB tablet on QEMU's xHCI, every QEMU thread pinned to one host CPU that a busy loop shares (so the 4 vCPUs get preempted as on a busy host), and drives the tablet through QMP: 12 rounds of 20 paced moves, a click on the empty desktop, a click on the start button closed with Escape, 2,000 moves 1 ms apart, then a 15 s idle gap. Every paced move and the move after each burst and before each click must bring the guest's cursor there (QEMU's virtio_gpu_update_cursor trace) within 3 s, and the serial log must hold no lost xHCI event."""
+    run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, "virtio_gpu_update_cursor"]})
+    with tempfile.TemporaryDirectory(prefix="ferrion-usb-tablet-") as directory:
+        path = Path(directory) / "qmp.sock"
+        vm = None
+        hog = None
+        try:
+            vm = VM(run_args, out, qemu_flags=f"-device qemu-xhci -device usb-tablet -qmp unix:{path},server=on,wait=off",
+                    make=("gpu=virtio", "usb=no"))
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(args.timeout)
+                connection.connect(str(path))
+                with connection.makefile("rwb") as stream:
+                    if "QMP" not in json.loads(stream.readline()):
+                        raise RuntimeError("QEMU sent no QMP greeting")
+
+                    def qmp(command, arguments=None):
+                        stream.write(json.dumps({"execute": command, "arguments": arguments or {}}).encode() + b"\n")
+                        stream.flush()
+                        while True:
+                            reply = json.loads(stream.readline())
+                            if "error" in reply:
+                                raise RuntimeError(f"QMP {command}: {reply['error']}")
+                            if "return" in reply:
+                                return reply["return"]
+
+                    qmp("qmp_capabilities")
+                    cpu = max(os.sched_getaffinity(0))
+                    pinned = {"qemu_host_cpu": cpu, "qemu_threads_pinned": pin_qemu(vm, cpu)}
+                    hog = subprocess.Popen([sys.executable, "-c", "while True: pass"])
+                    os.sched_setaffinity(hog.pid, {cpu})
+                    return check_usb_tablet(vm, args, qmp, pinned)
+        finally:
+            if hog is not None:
+                hog.kill()
+                hog.wait()
+            if vm is not None:
+                vm.close()
+
+
+def pin_qemu(vm, cpu):
+    deadline = time.monotonic() + USB_TABLET_PIN_WAIT_S
+    while time.monotonic() < deadline:
+        pending, visited = [str(vm.proc.pid)], 0
+        while pending and visited < PROCESS_TREE_LIMIT:
+            pid = pending.pop()
+            visited += 1
+            try:
+                if Path(f"/proc/{pid}/comm").read_text().startswith("qemu-system"):
+                    threads = os.listdir(f"/proc/{pid}/task")
+                    for thread in threads:
+                        os.sched_setaffinity(int(thread), {cpu})
+                    return len(threads)
+                pending.extend(Path(f"/proc/{pid}/task/{pid}/children").read_text().split())
+            except OSError:
+                continue
+        time.sleep(0.05)
+    raise RuntimeError(f"no QEMU process within {USB_TABLET_PIN_WAIT_S}s")
+
+
+def check_usb_tablet(vm, args, qmp, pinned):
+    while vm.elapsed() < args.timeout:
+        if vm.screenshot().kind() == "login":
+            break
+        time.sleep(0.2)
+    else:
+        return False, f"no graphical login within {args.timeout}s"
+    settle(vm, 10)
+    vm.command("sendkey ret")
+    frame = settle(vm, 20, still=2.0)
+    frame.save_png(vm.out / "desktop.png")
+    width, height = frame.width, frame.height
+    desktop_at = round(vm.elapsed(), 1)
+    mice = qmp("query-mice")
+    current = [mouse["name"] for mouse in mice if mouse.get("current")]
+    if current != ["QEMU HID Tablet"]:
+        return False, f"QEMU routes the pointer to {current}, not the USB tablet; mice {mice}"
+
+    trace_file = None
+    pending = ""
+
+    def new_lines():
+        nonlocal trace_file, pending
+        if trace_file is None:
+            if not vm.trace_path.exists():
+                return []
+            trace_file = open(vm.trace_path, errors="replace")
+        pending += trace_file.read()
+        *lines, pending = pending.split("\n")
+        return lines
+
+    def send(events):
+        qmp("input-send-event", {"events": events})
+
+    def move(px, py):
+        send([{"type": "abs", "data": {"axis": "x", "value": px * USB_TABLET_ABS_MAX // (width - 1)}},
+              {"type": "abs", "data": {"axis": "y", "value": py * USB_TABLET_ABS_MAX // (height - 1)}}])
+
+    offset = None
+    counts = {"moves_sent": 0, "clicks_sent": 0, "checked": 0, "reached": 0}
+    misses = []
+
+    def checked_move(px, py, phase, round_index):
+        nonlocal offset
+        new_lines()
+        move(px, py)
+        counts["moves_sent"] += 1
+        counts["checked"] += 1
+        deadline = time.monotonic() + USB_TABLET_CHECK_S
+        while time.monotonic() < deadline:
+            for line in new_lines():
+                match = USB_TABLET_CURSOR.search(line)
+                if not match:
+                    continue
+                x, y = int(match[1]), int(match[2])
+                if offset is None:
+                    if max(abs(x - px), abs(y - py)) > USB_TABLET_MAX_HOTSPOT_PX:
+                        continue
+                    offset = (x - px, y - py)
+                if (abs(x - px - offset[0]) <= USB_TABLET_TOLERANCE_PX
+                        and abs(y - py - offset[1]) <= USB_TABLET_TOLERANCE_PX):
+                    counts["reached"] += 1
+                    return True
+            time.sleep(0.01)
+        misses.append({"round": round_index, "phase": phase, "target": [px, py],
+                       "elapsed_s": round(vm.elapsed(), 1)})
+        return False
+
+    def click(px, py, phase, round_index):
+        reached = checked_move(px, py, phase, round_index)
+        for down in (True, False):
+            send([{"type": "btn", "data": {"down": down, "button": "left"}}])
+            time.sleep(0.05)
+        counts["clicks_sent"] += 1
+        return reached
+
+    rounds_done = 0
+    try:
+        for round_index in range(USB_TABLET_ROUNDS):
+            ok = True
+            for step in range(USB_TABLET_PACED_MOVES):
+                column, row = step % 5, (step // 5 + round_index) % 4
+                ok = checked_move(width * (2 + 3 * column) // 16, height * (2 + 3 * row) // 16, "paced",
+                                  round_index) and ok
+            ok = click(width // 2, height // 3, "desktop click", round_index) and ok
+            ok = click(width * 24 // 640, height * 456 // 480, "start click", round_index) and ok
+            time.sleep(0.5)
+            vm.command("sendkey esc")
+            for step in range(USB_TABLET_BURST_MOVES):
+                span = width * 3 // 4
+                move(width // 8 + (step * 37) % span, height // 10)
+                counts["moves_sent"] += 1
+                time.sleep(USB_TABLET_BURST_SPACING_S)
+            ok = checked_move(width // 2, height * 3 // 5, "after burst", round_index) and ok
+            rounds_done = round_index + 1
+            if not ok:
+                ok = checked_move(width // 4, height // 4, "confirm", round_index)
+                if not ok:
+                    break
+            time.sleep(USB_TABLET_IDLE_S)
+    finally:
+        if trace_file is not None:
+            trace_file.close()
+    serial = vm.text()
+    lost = re.findall(r"Lost event TRB[^\n]*", serial)
+    result = {"display": [width, height], "desktop_at_s": desktop_at, "rounds": rounds_done,
+              **pinned, "host_busy_loop": True,
+              "hotspot_offset": offset, **counts, "misses": misses, "lost_events": lost,
+              "end_s": round(vm.elapsed(), 1)}
+    (vm.out / "usb-tablet.json").write_text(json.dumps(result, indent=2) + "\n")
+    summary = (f"{rounds_done}/{USB_TABLET_ROUNDS} rounds, {counts['moves_sent']} moves and "
+               f"{counts['clicks_sent']} clicks sent, {counts['reached']}/{counts['checked']} checked moves "
+               f"reached the cursor, {len(lost)} lost xHCI events")
+    if misses or lost:
+        first = misses[0] if misses else None
+        return False, f"{summary}; first miss {first}; {lost[:1]}; see {vm.out}"
+    return True, f"{summary}; see {vm.out}"
+
+
+
+
 
 def test_wayland_client(vm, args, qmp, boot_load, *, pointer_latency=False):
     """Checks a native-VT pixman Wayland client and input while a slow client renders."""
@@ -9945,6 +10140,7 @@ OWN_IMAGE["bootloader-edid"] = run_bootloader_edid
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
 OWN_IMAGE["boot-gc-generation"] = test_boot_gc_generation
 OWN_IMAGE["x2apic-cpus"] = test_x2apic_cpus
+OWN_IMAGE["usb-tablet"] = run_usb_tablet
 def test_net_basics(args, out):
     """Lab check of NW1's nine network basics items, one line per item, on the card --make net= picks."""
     import net_lab
