@@ -1,0 +1,28 @@
+[package]
+description = "Library to create and query binary XML blobs"
+
+[source]
+tar = "https://github.com/hughsie/libxmlb/releases/download/0.3.29/libxmlb-0.3.29.tar.xz"
+blake3 = "4b48d7d77ad083b520566de24e75e34aabf40fff70c94a0a4301de2e909bed1e"
+
+[build]
+template = "custom"
+dependencies = [
+    "glib",
+    "zstd",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_meson \
+    --wrap-mode=nodownload \
+    -Dauto_features=disabled \
+    -Dzstd=enabled \
+    -Dintrospection=false \
+    -Dgtkdoc=false \
+    -Dtests=false \
+    -Dstemmer=false \
+    -Dcli=false
+
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/libxmlb/LICENSE"
+"""
