@@ -52,6 +52,9 @@ enum {
     TSC_CAL_MS = 50,
     NVME_BLOCK_BYTES = 4096,
     NVME_LBA_SPAN = 256,
+    ZERO_CHECK_BYTES = 64,
+    RAND_CHECK_BYTES = 32,
+    MAX_PROBE_IO_RETRIES = 16,
     NS_PER_SEC = 1000000000LL,
     NS_PER_MS = 1000000LL,
     NS_PER_US = 1000LL
@@ -1202,10 +1205,231 @@ static int part_bpump_entry(const char *arg) {
     return run_sweep_part(SWEEP_TARGET_PROCMGR, "BPUMP", NULL, 1, 1, 0);
 }
 
+static int run_zero_dev(void) {
+    struct stat st_zero;
+    struct stat st_null;
+    if (stat("/scheme/zero", &st_zero) != 0 || stat("/scheme/null", &st_null) != 0) {
+        fprintf(stderr, "BLOCKED-WAIT-ERROR stat zero/null failed errno=%d\n", errno);
+        return 2;
+    }
+    printf("BLOCKED-WAIT-ZERO-DEV zero=%llu null=%llu\n",
+           (unsigned long long)st_zero.st_dev,
+           (unsigned long long)st_null.st_dev);
+    fflush(stdout);
+    return 0;
+}
+
+static int run_zero_read(void) {
+    int fd = open("/scheme/zero", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("BLOCKED-WAIT-ZERO-READ ok=0 bytes=0 errno=%d\n", errno);
+        fflush(stdout);
+        return 1;
+    }
+    unsigned char buf[ZERO_CHECK_BYTES];
+    memset(buf, 0xaa, sizeof(buf));
+    ssize_t n = -1;
+    int saved = 0;
+    for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+        n = read(fd, buf, sizeof(buf));
+        if (n >= 0) {
+            break;
+        }
+        saved = errno;
+        if (saved != EINTR) {
+            break;
+        }
+    }
+    (void)close(fd);
+    int all_zero = (n == ZERO_CHECK_BYTES);
+    for (int i = 0; all_zero && i < ZERO_CHECK_BYTES; i++) {
+        if (buf[i] != 0) {
+            all_zero = 0;
+        }
+    }
+    printf("BLOCKED-WAIT-ZERO-READ ok=%d bytes=%lld errno=%d\n",
+           all_zero ? 1 : 0, (long long)(n > 0 ? n : 0), saved);
+    fflush(stdout);
+    return all_zero ? 0 : 1;
+}
+
+static int run_rand_read(void) {
+    int fd = open("/scheme/rand", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("BLOCKED-WAIT-RAND-READ ok=0 bytes=0 errno=%d\n", errno);
+        fflush(stdout);
+        return 1;
+    }
+    unsigned char buf[RAND_CHECK_BYTES];
+    memset(buf, 0, sizeof(buf));
+    ssize_t n = -1;
+    int saved = 0;
+    for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+        n = read(fd, buf, sizeof(buf));
+        if (n >= 0) {
+            break;
+        }
+        saved = errno;
+        if (saved != EINTR) {
+            break;
+        }
+    }
+    (void)close(fd);
+    int any_nonzero = 0;
+    for (int i = 0; n == RAND_CHECK_BYTES && i < RAND_CHECK_BYTES; i++) {
+        if (buf[i] != 0) {
+            any_nonzero = 1;
+            break;
+        }
+    }
+    int ok = (n == RAND_CHECK_BYTES && any_nonzero);
+    printf("BLOCKED-WAIT-RAND-READ ok=%d bytes=%lld errno=%d\n",
+           ok ? 1 : 0, (long long)(n > 0 ? n : 0), saved);
+    fflush(stdout);
+    return ok ? 0 : 1;
+}
+
+static int run_disk_read(const char *disk_path) {
+    if (check_unpartitioned_disk(disk_path) != 0) {
+        printf("BLOCKED-WAIT-DISK-READ ok=0 bytes=0 errno=0\n");
+        fflush(stdout);
+        return 2;
+    }
+    int fd = open(disk_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("BLOCKED-WAIT-DISK-READ ok=0 bytes=0 errno=%d\n", errno);
+        fflush(stdout);
+        return 1;
+    }
+    unsigned char buf[NVME_BLOCK_BYTES];
+    ssize_t n = -1;
+    int saved = 0;
+    for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+        n = pread(fd, buf, sizeof(buf), 0);
+        if (n >= 0) {
+            break;
+        }
+        saved = errno;
+        if (saved != EINTR) {
+            break;
+        }
+    }
+    (void)close(fd);
+    int ok = (n == NVME_BLOCK_BYTES);
+    printf("BLOCKED-WAIT-DISK-READ ok=%d bytes=%lld errno=%d\n",
+           ok ? 1 : 0, (long long)(n > 0 ? n : 0), saved);
+    fflush(stdout);
+    return ok ? 0 : 1;
+}
+
+static int run_uds_ping(void) {
+    int sv[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        printf("BLOCKED-WAIT-UDS-PING ok=0 errno=%d\n", errno);
+        fflush(stdout);
+        return 1;
+    }
+    unsigned char tx = 0x5a;
+    unsigned char rx = 0;
+    ssize_t wn = -1;
+    ssize_t rn = -1;
+    int saved = 0;
+    for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+        wn = write(sv[1], &tx, 1);
+        if (wn >= 0) {
+            break;
+        }
+        saved = errno;
+        if (saved != EINTR) {
+            break;
+        }
+    }
+    if (wn == 1) {
+        for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+            rn = read(sv[0], &rx, 1);
+            if (rn >= 0) {
+                break;
+            }
+            saved = errno;
+            if (saved != EINTR) {
+                break;
+            }
+        }
+    }
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    int ok = (wn == 1 && rn == 1 && rx == tx);
+    printf("BLOCKED-WAIT-UDS-PING ok=%d errno=%d\n", ok ? 1 : 0, saved);
+    fflush(stdout);
+    return ok ? 0 : 1;
+}
+
+static int run_stop_cont(const char *pid_arg) {
+    char *end = NULL;
+    errno = 0;
+    long val = strtol(pid_arg, &end, 10);
+    if (errno != 0 || end == pid_arg || *end != '\0' || val <= 1 || val > 2147483647L) {
+        fprintf(stderr, "BLOCKED-WAIT-ERROR invalid pid: %s\n", pid_arg);
+        return 2;
+    }
+    pid_t pid = (pid_t)val;
+    if (kill(pid, SIGSTOP) != 0) {
+        printf("BLOCKED-WAIT-STOP-CONT pid=%ld ok=0 stage=stop errno=%d\n", val, errno);
+        fflush(stdout);
+        return 1;
+    }
+    struct timespec rem;
+    rem.tv_sec = 0;
+    rem.tv_nsec = 200000000L;
+    for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+        struct timespec req = rem;
+        if (nanosleep(&req, &rem) == 0) {
+            break;
+        }
+        if (errno != EINTR) {
+            break;
+        }
+    }
+    if (kill(pid, SIGCONT) != 0) {
+        printf("BLOCKED-WAIT-STOP-CONT pid=%ld ok=0 stage=cont errno=%d\n", val, errno);
+        fflush(stdout);
+        return 1;
+    }
+    printf("BLOCKED-WAIT-STOP-CONT pid=%ld ok=1\n", val);
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "BLOCKED-WAIT-ERROR usage: blocked-wait-probe /scheme/disk.<pci>-nvme/<unit>\n");
+        fprintf(stderr, "BLOCKED-WAIT-ERROR usage: blocked-wait-probe [--zero-dev|--zero-read|--rand-read|--uds-ping|--disk-read <path>|--stop-cont <pid>|<disk-path>]\n");
         return 2;
+    }
+    if (strcmp(argv[1], "--zero-dev") == 0) {
+        return run_zero_dev();
+    }
+    if (strcmp(argv[1], "--zero-read") == 0) {
+        return run_zero_read();
+    }
+    if (strcmp(argv[1], "--rand-read") == 0) {
+        return run_rand_read();
+    }
+    if (strcmp(argv[1], "--uds-ping") == 0) {
+        return run_uds_ping();
+    }
+    if (strcmp(argv[1], "--disk-read") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "BLOCKED-WAIT-ERROR --disk-read requires /scheme/disk.<pci>-nvme/<unit>\n");
+            return 2;
+        }
+        return run_disk_read(argv[2]);
+    }
+    if (strcmp(argv[1], "--stop-cont") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "BLOCKED-WAIT-ERROR --stop-cont requires <pid>\n");
+            return 2;
+        }
+        return run_stop_cont(argv[2]);
     }
     const char *disk_path = argv[1];
     if (check_unpartitioned_disk(disk_path) != 0) {

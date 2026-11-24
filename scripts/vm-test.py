@@ -2066,6 +2066,221 @@ def test_blocked_wait(vm, args):
     )
 
 
+DAEMON_CONTINUE_TARGETS = ("zerod", "randd")
+DAEMON_CONTINUE_IO_ERROR_RE = re.compile(
+    r"Input/output error|I/O error|\berrno=5\b|BLOCKED-WAIT-ERROR|RINGWAKE-STUCK",
+    re.I,
+)
+
+
+def find_mounted_disk_schemes(watch_text):
+    """Returns NVMe disk schemes currently held by any redoxfs process in iostat."""
+    procs = parse_watch_iostat(watch_text)
+    mounted = set()
+    for info in procs.values():
+        if info["name"].endswith("/redoxfs"):
+            for _, path in info["fds"]:
+                match = re.search(r"(disk\.pci-[0-9A-Fa-f.:_-]+-nvme)", path)
+                if match:
+                    mounted.add(match.group(1))
+    return mounted
+
+
+def find_zerod_zero_pid(watch_text, zero_dev):
+    """Finds the zerod PID serving /scheme/zero by matching its /scheme fd id to zero_dev."""
+    current_pid = None
+    is_zerod = False
+    matches = []
+    for raw in watch_text.splitlines():
+        if not raw.startswith("W:iostat "):
+            continue
+        body = raw[len("W:iostat "):]
+        hdr = re.match(r"^(\d+):\s+(.+)$", body)
+        if hdr:
+            current_pid = int(hdr.group(1))
+            is_zerod = hdr.group(2).strip().endswith("/zerod")
+            continue
+        if not is_zerod or current_pid is None:
+            continue
+        fd_match = re.match(r"^\s*\d+:\s+\d+\s+(\d+)\s+[0-9A-Fa-f]+:\s+/scheme$", body)
+        if fd_match and int(fd_match.group(1)) == zero_dev:
+            matches.append(current_pid)
+    return matches[0] if len(matches) == 1 else None
+
+
+def test_daemon_continue(vm, args):
+    """Stops and continues system services, then checks each keeps running and serving (use --config firefox)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, "no serial login"
+    login_mark = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no root password prompt"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, login_mark):
+        return False, "serial shell did not become ready"
+    vm.type("bash --norc --noprofile --noediting\n")
+    if not vm.wait_serial(r"bash-\d+\.\d+# ", 20, login_mark):
+        return False, "root bash did not start"
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo DCRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)DCRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    status, _ = run("unset MAIL MAILPATH MAILCHECK; " + GUEST_WATCH, 30)
+    if status != 0 or not guest_watch(vm, "watch-before", "context syscall iostat", 120):
+        return False, "the guest watcher did not start"
+    before_text = (vm.out / "watch-before.watch").read_text()
+    procs = parse_watch_iostat(before_text)
+
+    targets = {}
+    disk_scheme = None
+    if "zerod" in DAEMON_CONTINUE_TARGETS:
+        z_rc, z_out = run("blocked-wait-probe --zero-dev", 20)
+        z_match = re.search(r"BLOCKED-WAIT-ZERO-DEV zero=(\d+) null=(\d+)", z_out)
+        if z_rc != 0 or not z_match:
+            return False, f"failed to identify /scheme/zero device id (rc={z_rc})"
+        zero_dev = int(z_match.group(1))
+        null_dev = int(z_match.group(2))
+        if zero_dev == null_dev:
+            return False, f"unexpected matching zero/null device ids ({zero_dev})"
+        zerod_pid = find_zerod_zero_pid(before_text, zero_dev)
+        if zerod_pid is None:
+            return False, f"could not locate zerod serving /scheme/zero (dev={zero_dev})"
+        targets["zerod"] = {
+            "pid": zerod_pid,
+            "warning_re": r"zerod: blocking scheme wait interrupted; retrying",
+            "serve_cmd": "blocked-wait-probe --zero-read",
+            "serve_re": r"BLOCKED-WAIT-ZERO-READ ok=1 bytes=64\b",
+        }
+    if "randd" in DAEMON_CONTINUE_TARGETS:
+        randd_pids = [pid for pid, info in procs.items() if info["name"].endswith("/randd")]
+        if len(randd_pids) != 1:
+            return False, f"expected 1 randd process, found {randd_pids}"
+        targets["randd"] = {
+            "pid": randd_pids[0],
+            "warning_re": r"randd: blocking scheme wait interrupted; retrying",
+            "serve_cmd": "blocked-wait-probe --rand-read",
+            "serve_re": r"BLOCKED-WAIT-RAND-READ ok=1 bytes=32\b",
+        }
+    if "nvmed" in DAEMON_CONTINUE_TARGETS:
+        second_nvmed_pid, disk_scheme = find_second_nvmed(before_text)
+        if second_nvmed_pid is None or disk_scheme is None:
+            return False, "refusing to run nvmed check: could not identify a unique unmounted second NVMe driver"
+        mounted_schemes = find_mounted_disk_schemes(before_text)
+        if disk_scheme in mounted_schemes:
+            return False, f"refusing to signal nvmed pid {second_nvmed_pid}: disk scheme {disk_scheme} is held by redoxfs"
+        targets["nvmed"] = {
+            "pid": second_nvmed_pid,
+            "warning_re": r"executor: event queue wait interrupted; retrying",
+            "serve_cmd": f"blocked-wait-probe --disk-read /scheme/{disk_scheme}/1",
+            "serve_re": r"BLOCKED-WAIT-DISK-READ ok=1 bytes=4096\b",
+        }
+    if "udsd" in DAEMON_CONTINUE_TARGETS:
+        udsd_pids = [pid for pid, info in procs.items() if info["name"].endswith("/udsd")]
+        if len(udsd_pids) != 1:
+            return False, f"expected 1 udsd process, found {udsd_pids}"
+        targets["udsd"] = {
+            "pid": udsd_pids[0],
+            "warning_re": r"udsd: event queue wait interrupted; retrying",
+            "serve_cmd": "blocked-wait-probe --uds-ping",
+            "serve_re": r"BLOCKED-WAIT-UDS-PING ok=1\b",
+        }
+
+    started = time.monotonic()
+    per_daemon = {}
+    io_errors = 0
+    io_error_details = []
+    stalled = False
+    for name in DAEMON_CONTINUE_TARGETS:
+        spec = targets[name]
+        pid = spec["pid"]
+        since = vm.mark()
+        sig_rc, sig_out = run(f"blocked-wait-probe --stop-cont {pid}", 20)
+        if sig_rc is None:
+            stalled = True
+        if DAEMON_CONTINUE_IO_ERROR_RE.search(sig_out):
+            io_errors += 1
+            io_error_details.append(f"{name}:stop-cont")
+        time.sleep(0.5)
+        watch_ok = guest_watch(vm, f"watch-after-{name}", "context", 60)
+        if not watch_ok:
+            stalled = True
+        after_text = (vm.out / f"watch-after-{name}.watch").read_text() if watch_ok else ""
+        alive = bool(re.search(rf"^W:context\s+{pid}\b", after_text, re.M))
+        window_serial = vm.text(since)
+        warnings = len(re.findall(spec["warning_re"], window_serial))
+        served = False
+        serve_rc = None
+        serve_io_error = False
+        if alive:
+            serve_rc, serve_out = run(spec["serve_cmd"], 20)
+            if serve_rc is None:
+                stalled = True
+            if DAEMON_CONTINUE_IO_ERROR_RE.search(serve_out):
+                serve_io_error = True
+                io_errors += 1
+                io_error_details.append(f"{name}:serve")
+            served = serve_rc == 0 and bool(re.search(spec["serve_re"], serve_out))
+        passed = sig_rc == 0 and watch_ok and alive and warnings >= 1 and served and not serve_io_error
+        per_daemon[name] = {
+            "pid": pid,
+            "sig_rc": sig_rc,
+            "alive": alive,
+            "warnings": warnings,
+            "served": served,
+            "serve_rc": serve_rc,
+            "io_error": serve_io_error,
+            "passed": passed,
+        }
+
+    post_ls_rc, post_ls_out = run("ls / >/dev/null", 20)
+    if post_ls_rc is None:
+        stalled = True
+    post_ls_io_error = bool(DAEMON_CONTINUE_IO_ERROR_RE.search(post_ls_out))
+    if post_ls_io_error:
+        io_errors += 1
+        io_error_details.append("post_ls")
+    post_ls_ok = post_ls_rc == 0 and not post_ls_io_error
+
+    elapsed_s = round(time.monotonic() - started, 1)
+    ok = (
+        all(item["passed"] for item in per_daemon.values())
+        and post_ls_ok
+        and io_errors == 0
+        and not stalled
+    )
+    if ok:
+        outcome = "pass"
+    elif io_errors > 0:
+        outcome = "io_error"
+    elif stalled:
+        outcome = "stall"
+    else:
+        outcome = "fail"
+    results = {
+        "passed": ok,
+        "outcome": outcome,
+        "io_errors": io_errors,
+        "io_error_details": io_error_details,
+        "stalled": stalled,
+        "post_ls_rc": post_ls_rc,
+        "post_ls_ok": post_ls_ok,
+        "targets": list(DAEMON_CONTINUE_TARGETS),
+        "disk_scheme": disk_scheme,
+        "daemons": per_daemon,
+        "elapsed_s": elapsed_s,
+    }
+    (vm.out / "daemon-continue.json").write_text(json.dumps(results, indent=2) + "\n")
+    summary = ", ".join(
+        f"{name}(pid={item['pid']} alive={item['alive']} warn={item['warnings']} served={item['served']})"
+        for name, item in per_daemon.items()
+    )
+    return ok, f"outcome={outcome} io_errors={io_errors} post_ls_rc={post_ls_rc}; {summary}; {elapsed_s}s; see {vm.out}"
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -10086,6 +10301,7 @@ TESTS["exec-handles"] = test_exec_handles
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["blocked-wait"] = test_blocked_wait
+TESTS["daemon-continue"] = test_daemon_continue
 TESTS["firefox-js"] = test_firefox_js
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call

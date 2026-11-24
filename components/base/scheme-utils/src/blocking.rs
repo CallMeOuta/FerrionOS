@@ -1,11 +1,26 @@
 use std::collections::VecDeque;
 use std::ops::{ControlFlow, Deref};
+use std::path::Path;
 
 use libredox::error::Error as LError;
 use redox_scheme::scheme::{SchemeState, SchemeSync};
 use redox_scheme::{Request, RequestKind, Response, SignalBehavior, Socket};
 use syscall::Result;
 use syscall::error::{self as errno, Error};
+
+const MAX_SCHEME_READ_EINTR_RETRIES: usize = 64;
+
+fn program_name() -> String {
+    std::env::args()
+        .next()
+        .and_then(|arg| {
+            Path::new(&arg)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| String::from("scheme-utils"))
+}
 
 pub struct Blocking<S> {
     // TODO: VecDeque for both when it implements spare_capacity
@@ -35,21 +50,44 @@ impl<S: Deref<Target = Socket>> Blocking<S> {
         &mut self,
         scheme: &mut impl SchemeSync,
     ) -> Result<ControlFlow<()>> {
+        self.process_requests_inner(scheme, false)
+    }
+
+    fn process_requests_inner(
+        &mut self,
+        scheme: &mut impl SchemeSync,
+        retry_eintr: bool,
+    ) -> Result<ControlFlow<()>> {
         assert!(self.requests_read.is_empty());
         assert!(self.responses_to_write.is_empty());
 
-        match self
-            .socket
-            .read_requests(&mut self.requests_read, SignalBehavior::Interrupt)
-        {
-            Ok(()) if self.requests_read.is_empty() => {
-                unreachable!("blocking scheme read failed to read anything");
+        let mut eintr_retries: usize = 0;
+        loop {
+            match self
+                .socket
+                .read_requests(&mut self.requests_read, SignalBehavior::Interrupt)
+            {
+                Ok(()) if self.requests_read.is_empty() => {
+                    unreachable!("blocking scheme read failed to read anything");
+                }
+                Ok(()) => break,
+                Err(Error {
+                    errno: errno::EINTR,
+                }) if retry_eintr => {
+                    eintr_retries += 1;
+                    let name = program_name();
+                    eprintln!("{name}: blocking scheme wait interrupted; retrying");
+                    if eintr_retries >= MAX_SCHEME_READ_EINTR_RETRIES {
+                        panic!(
+                            "{name}: blocking scheme wait exceeded MAX_SCHEME_READ_EINTR_RETRIES ({MAX_SCHEME_READ_EINTR_RETRIES})"
+                        );
+                    }
+                }
+                Err(Error {
+                    errno: errno::EINTR | errno::EWOULDBLOCK | errno::EAGAIN,
+                }) => return Ok(ControlFlow::Break(())),
+                Err(err) => return Err(err),
             }
-            Ok(()) => {}
-            Err(Error {
-                errno: errno::EINTR | errno::EWOULDBLOCK | errno::EAGAIN,
-            }) => return Ok(ControlFlow::Break(())),
-            Err(err) => return Err(err),
         }
 
         for request in self.requests_read.drain(..) {
@@ -99,7 +137,7 @@ impl<S: Deref<Target = Socket>> Blocking<S> {
 
     pub fn process_requests_blocking(mut self, mut scheme: impl SchemeSync) -> Result<!> {
         loop {
-            match self.process_requests_nonblocking(&mut scheme)? {
+            match self.process_requests_inner(&mut scheme, true)? {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(()) => {
                     panic!("process_requests_blocking should not be used on non-blocking schemes");
