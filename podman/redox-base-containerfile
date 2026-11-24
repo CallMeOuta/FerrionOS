@@ -81,3 +81,30 @@ RUN apt-get update \
          apt-get install -y --no-install-recommends \
             syslinux-utils \
     ; fi
+
+ARG V4L_UTILS_VERSION=1.32.0
+ARG V4L_UTILS_URL=https://deb.debian.org/debian/pool/main/v/v4l-utils/v4l-utils_${V4L_UTILS_VERSION}.orig.tar.xz
+ARG V4L_UTILS_SHA256=6828828a17775526eb93fb258a9294d1d1073d633c344dd71ecd4e7a1ffb7dfc
+
+RUN set -eu \
+    && curl -fL --retry 3 --retry-delay 1 -o /tmp/v4l-utils.tar.xz.partial "${V4L_UTILS_URL}" \
+    && (echo "${V4L_UTILS_SHA256}  /tmp/v4l-utils.tar.xz.partial" | sha256sum --check --quiet - \
+        || { rm -f /tmp/v4l-utils.tar.xz.partial; echo "edid-decode: ${V4L_UTILS_URL} does not match the pinned sha256 ${V4L_UTILS_SHA256}" >&2; exit 1; }) \
+    && mv /tmp/v4l-utils.tar.xz.partial /tmp/v4l-utils.tar.xz \
+    && mkdir -p /tmp/v4l-utils-build \
+    && tar -xJf /tmp/v4l-utils.tar.xz -C /tmp/v4l-utils-build --strip-components=1 \
+    && meson setup /tmp/v4l-utils-build/build /tmp/v4l-utils-build \
+        -Dbpf=disabled \
+        -Dgconv=disabled \
+        -Djpeg=disabled \
+        -Dlibdvbv5=disabled \
+        -Dqv4l2=disabled \
+        -Dqvidcap=disabled \
+        -Dv4l2-tracer=disabled \
+        -Dv4l-plugins=false \
+        -Dv4l-wrappers=false \
+        -Ddoxygen-doc=disabled \
+    && ninja -C /tmp/v4l-utils-build/build utils/edid-decode/edid-decode \
+    && install -m 0755 /tmp/v4l-utils-build/build/utils/edid-decode/edid-decode /usr/local/bin/edid-decode \
+    && edid-decode --version \
+    && rm -rf /tmp/v4l-utils.tar.xz /tmp/v4l-utils-build
