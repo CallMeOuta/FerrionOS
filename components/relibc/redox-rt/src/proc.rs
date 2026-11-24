@@ -81,6 +81,26 @@ pub struct ExtraInfo<'a> {
 pub const AT_RANDOM_BYTES: usize = 16;
 const EXEC_RANDOM_MAX_BYTES: usize = 256;
 const EXEC_RANDOM_MAX_READS: usize = 64;
+#[cfg(feature = "proc")]
+const THREAD_CALL_TERMINATE_SIBLINGS: u64 = 0x4645_0001;
+#[cfg(feature = "proc")]
+const EXEC_SIBLINGS_MAX_RETRIES: usize = 16;
+
+#[cfg(feature = "proc")]
+fn terminate_exec_siblings(thread_fd: &FdGuardUpper) -> Result<()> {
+    for _ in 0..EXEC_SIBLINGS_MAX_RETRIES {
+        match sys_call(
+            thread_fd.as_raw_fd(),
+            CallFlags::empty(),
+            &[THREAD_CALL_TERMINATE_SIBLINGS],
+        ) {
+            Ok(_) => return Ok(()),
+            Err(Error { errno: EINTR }) => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(Error::new(EINTR))
+}
 
 pub fn exec_random_bytes(buf: &mut [u8]) -> Result<()> {
     if buf.is_empty() {
@@ -578,6 +598,18 @@ pub fn fexec_impl(
             core::intrinsics::abort();
         };
         let _siglock = crate::signal::tmp_disable_signals();
+        #[cfg(feature = "proc")]
+        {
+            let _dyn_guard = DYNAMIC_PROC_INFO.lock();
+            let fdtbl = crate::current_filetable();
+            let _fdtbl_guard = fdtbl.inner.lock();
+            let _fd_guard = fdtbl.fd.lock();
+            let _alloc_guard = ForkAllocGuard::lock();
+            let _sigact_guard = crate::signal::lock_sigactions();
+            if terminate_exec_siblings(thread_fd).is_err() {
+                fail_closed();
+            }
+        }
         let filetable_fd = filetable_fd.unwrap();
         {
             let fdtbl = crate::current_filetable();
@@ -638,8 +670,8 @@ pub fn fexec_impl(
         }
         drop(filetable_fd);
 
-        unsafe {
-            deactivate_tcb(thread_fd)?;
+        if unsafe { deactivate_tcb(thread_fd) }.is_err() {
+            fail_closed();
         }
 
         drop(crate::current_filetable().take());

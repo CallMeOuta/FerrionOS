@@ -108,6 +108,32 @@ fn cvt_uid(id: c_int) -> Result<Option<u32>> {
     Ok(Some(id.try_into().map_err(|_| Errno(EINVAL))?))
 }
 
+fn ensure_fork_alloc_hooks() {
+    fn lock_alloc() {
+        unsafe {
+            let _ = (*crate::ALLOCATOR.get()).manual_lock();
+        }
+    }
+    fn unlock_alloc_parent() {
+        unsafe {
+            (*crate::ALLOCATOR.get()).manual_unlock();
+        }
+    }
+    fn unlock_alloc_child() {
+        unsafe {
+            (*crate::ALLOCATOR.get())
+                .lock
+                .store(crate::sync::mutex::UNLOCKED, Ordering::Release);
+        }
+    }
+    static FORK_ALLOC_HOOKS: redox_rt::proc::ForkAllocHooks = redox_rt::proc::ForkAllocHooks {
+        lock: lock_alloc,
+        unlock_parent: unlock_alloc_parent,
+        unlock_child: unlock_alloc_child,
+    };
+    redox_rt::proc::set_fork_alloc_hooks(&FORK_ALLOC_HOOKS);
+}
+
 static CLONE_LOCK: RwLock<()> = RwLock::new(());
 
 const LOCK_WAIT: u64 = 1;
@@ -281,6 +307,7 @@ impl Pal for Sys {
     }
 
     unsafe fn execve(path: CStr, argv: *const *mut c_char, envp: *const *mut c_char) -> Result<()> {
+        ensure_fork_alloc_hooks();
         self::exec::execve(
             Executable::AtPath(path),
             self::exec::ArgEnv::C { argv, envp },
@@ -294,6 +321,7 @@ impl Pal for Sys {
         envp: *const *mut c_char,
     ) -> Result<()> {
         let _siglock = tmp_disable_signals();
+        ensure_fork_alloc_hooks();
         self::exec::execve(
             Executable::InFd {
                 file: File::new(fildes),
@@ -486,29 +514,7 @@ impl Pal for Sys {
     }
 
     unsafe fn fork() -> Result<pid_t> {
-        fn lock_alloc() {
-            unsafe {
-                let _ = (*crate::ALLOCATOR.get()).manual_lock();
-            }
-        }
-        fn unlock_alloc_parent() {
-            unsafe {
-                (*crate::ALLOCATOR.get()).manual_unlock();
-            }
-        }
-        fn unlock_alloc_child() {
-            unsafe {
-                (*crate::ALLOCATOR.get())
-                    .lock
-                    .store(crate::sync::mutex::UNLOCKED, Ordering::Release);
-            }
-        }
-        static FORK_ALLOC_HOOKS: redox_rt::proc::ForkAllocHooks = redox_rt::proc::ForkAllocHooks {
-            lock: lock_alloc,
-            unlock_parent: unlock_alloc_parent,
-            unlock_child: unlock_alloc_child,
-        };
-        redox_rt::proc::set_fork_alloc_hooks(&FORK_ALLOC_HOOKS);
+        ensure_fork_alloc_hooks();
 
         // TODO: Find way to avoid lock.
         let _guard = CLONE_LOCK.write();
