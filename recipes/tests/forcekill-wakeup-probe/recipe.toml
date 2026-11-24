@@ -1,0 +1,10 @@
+[package]
+description = "Checks that SIGKILL wakes threads entering futex, pipe, nanosleep, and scheme waits"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/forcekill-wakeup-probe" "${COOKBOOK_RECIPE}/forcekill-wakeup-probe.c" ${LDFLAGS} -lpthread
+"""

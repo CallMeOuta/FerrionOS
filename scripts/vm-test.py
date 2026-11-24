@@ -1422,6 +1422,60 @@ def test_exec_handles(vm, args):
     return True, "exec'd and spawned programs (1 and 9 threads, direct exec, ferrion-run, ferrion-scope, system-wide iostat) held only auxv runtime handles"
 
 
+def test_forcekill_wakeup(vm, args):
+    """Checks that SIGKILL wakes multithreaded children entering futex, pipe, nanosleep, and UNIX socket waits within a bounded deadline (use --config desktop)."""
+    if not user_bash(vm, args.timeout):
+        return False, "no user Bash prompt after login"
+
+    def run(line, timeout):
+        since = vm.mark()
+        vm.type(f"{line}; echo FKWRC-$((40+2))=$?\n")
+        found = vm.wait_serial(r"(?s)\n(.*?)FKWRC-42=(\d+)\s", timeout, since)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+
+    def capture_watch():
+        guest_watch(vm, "watch-failed-1", "context syscall", 60)
+        time.sleep(3)
+        guest_watch(vm, "watch-failed-2", "context syscall", 60)
+        guest_watch(vm, "watch-failed-iostat", "iostat", 60)
+
+    status, _ = run(GUEST_WATCH, 30)
+    if status != 0:
+        return False, f"failed to start guest watcher (status {status})"
+
+    since = vm.mark()
+    status, _ = run("(forcekill-wakeup-probe; echo fkw-end-$?) & true", 30)
+    if status != 0:
+        return False, f"failed to start forcekill-wakeup-probe (status {status})"
+
+    found = vm.wait_serial(r"(?s)\n(.*?)(fkw-end-(\d+)|KERNEL PANIC|UNHANDLED EXCEPTION)", 240, since)
+    output = found.group(1) if found else vm.text(since)
+    marker = found.group(2) if found else None
+    rc = int(found.group(3)) if (found and found.group(3) is not None) else None
+    (vm.out / "forcekill-wakeup-probe.txt").write_text(vm.text(since))
+
+    problems = []
+    expected = ("futex", "pipe", "nanosleep", "uds")
+    missing = [name for name in expected if f"forcekill-wakeup-probe: pass {name}" not in output]
+    if marker in ("KERNEL PANIC", "UNHANDLED EXCEPTION"):
+        capture_watch()
+        problems.append(f"guest hit {marker} during forcekill-wakeup")
+    elif rc != 0 or missing or "forcekill-wakeup-probe: PASS" not in output:
+        capture_watch()
+        summary = [
+            line.strip()
+            for line in output.splitlines()
+            if "forcekill-wakeup-probe: case=" in line
+            or "forcekill-wakeup-probe: hang " in line
+        ]
+        detail = "; ".join(summary[:6]) if summary else f"exit {rc}"
+        problems.append(f"probe failed ({detail})")
+
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, "SIGKILL woke and reaped multithreaded children across futex, pipe, nanosleep, and UDS waits"
+
+
 def test_nvme_queue(vm, args):
     """Runs nvme-queue-probe for 300 s (128 + (r % 64) 128 KiB records compressed to 4 KiB blocks), failing with /scheme/sys watcher dumps if no progress occurs for 20 s (use --config firefox)."""
     if not user_bash(vm, args.timeout):
@@ -10346,6 +10400,7 @@ TESTS["jit-signal"] = test_jit_signal
 TESTS["fdtable-race"] = test_fdtable_race
 TESTS["fork-filetable"] = test_fork_filetable
 TESTS["exec-handles"] = test_exec_handles
+TESTS["forcekill-wakeup"] = test_forcekill_wakeup
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["blocked-wait"] = test_blocked_wait
