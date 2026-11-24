@@ -1,0 +1,29 @@
+[package]
+description = "Linux 6.10 UAPI input-event-codes.h header (GPL-2.0-only WITH Linux-syscall-note), sourced from freedesktop.org libevdev 1.13.4"
+
+[source]
+tar = "https://www.freedesktop.org/software/libevdev/libevdev-1.13.4.tar.xz"
+blake3 = "f5b544de356cb65ff9e1c63e8eb1f53b1e421f32ac064f764a69927f57f91905"
+script = """
+head -n 1 include/linux/linux/input-event-codes.h | grep -Fxq '/* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */'
+mkdir -p ferrion-licenses
+gpl_sha256="f6b78c087c3ebdf0f3c13415070dd480a3f35d8fc76f3d02180a407c1c812f79"
+note_sha256="8e378ab93586eb55135d3bc119cce787f7324f48394777d00c34fa3d0be3303f"
+wget -O ferrion-licenses/GPL-2.0 "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/LICENSES/preferred/GPL-2.0?h=v6.10"
+echo "${gpl_sha256}  ferrion-licenses/GPL-2.0" | sha256sum --check --quiet -
+wget -O ferrion-licenses/Linux-syscall-note "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/LICENSES/exceptions/Linux-syscall-note?h=v6.10"
+echo "${note_sha256}  ferrion-licenses/Linux-syscall-note" | sha256sum --check --quiet -
+"""
+
+[build]
+template = "custom"
+script = """
+mkdir -pv "${COOKBOOK_STAGE}/usr/include/linux"
+cp -v "${COOKBOOK_SOURCE}/include/linux/linux/input-event-codes.h" "${COOKBOOK_STAGE}/usr/include/linux/input-event-codes.h"
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/licenses/linux-input-event-codes"
+printf '%s' 'GPL-2.0-only WITH Linux-syscall-note' > "${COOKBOOK_STAGE}/usr/share/licenses/linux-input-event-codes/SPDX"
+echo >> "${COOKBOOK_STAGE}/usr/share/licenses/linux-input-event-codes/SPDX"
+cp -v "${COOKBOOK_SOURCE}/ferrion-licenses/GPL-2.0" "${COOKBOOK_STAGE}/usr/share/licenses/linux-input-event-codes/GPL-2.0"
+cp -v "${COOKBOOK_SOURCE}/ferrion-licenses/Linux-syscall-note" "${COOKBOOK_STAGE}/usr/share/licenses/linux-input-event-codes/Linux-syscall-note"
+cp -v "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/linux-input-event-codes/libevdev-MIT.txt"
+"""
