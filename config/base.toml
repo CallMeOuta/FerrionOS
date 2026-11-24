@@ -9,10 +9,12 @@
 prompt = false
 
 [packages]
-# FerrionOS carries patches for these components (recipes/core/<name>/*.patch), so they
-# are always built from source: with REPO_BINARY=1 the package server would
-# otherwise supply upstream's builds without the patches.
+# base, initfs, kernel and relibc build from FerrionOS's own trees under components/;
+# drivers is fetched from ferrion-hardware at its pinned revision, and the rest carry
+# FerrionOS patches, so all of these build from source even with REPO_BINARY=1.
 base = "source"
+drivers = "source"
+initfs = "source"
 bootloader = "source"
 kernel = "source"
 fdobjd = "source"

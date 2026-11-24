@@ -1,0 +1,19 @@
+[package]
+description = "FerrionOS's boot file system: the first programs and the boot drivers"
+
+[source]
+same_as = "../base"
+
+[build]
+template = "custom"
+dependencies = [
+  "base.initfs",
+  "drivers.initfs",
+  "redoxfs",
+]
+script = """
+"${COOKBOOK_MAKE}" -C "${COOKBOOK_SOURCE}" install-initfs \
+    SRC_DIR="${COOKBOOK_SOURCE}" SYSROOT="${COOKBOOK_SYSROOT}" \
+    LINKER="${GNU_TARGET}-ld" CARGO="${COOKBOOK_CARGO}" \
+    BUILD_DIR="${COOKBOOK_BUILD}" DESTDIR="${COOKBOOK_STAGE}"
+"""

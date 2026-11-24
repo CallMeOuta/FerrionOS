@@ -1,0 +1,32 @@
+[package]
+description = "FerrionOS's drivers"
+
+[source]
+git = "https://github.com/CallMeOuta/ferrion-hardware.git"
+rev = "c222cfd8ee4d7cbdec371700b849bdec9383bd6a"
+
+[build]
+template = "custom"
+dev-dependencies = [
+  "relibc",
+  "base",
+]
+script = """
+rsync -a --delete "${COOKBOOK_SOURCE}/drivers/" "${COOKBOOK_BUILD}/drivers/"
+cp "${COOKBOOK_RECIPE}/Cargo.lock" "${COOKBOOK_BUILD}/drivers/Cargo.lock"
+"${COOKBOOK_ROOT}/scripts/drivers-lock.sh" patch "${COOKBOOK_ROOT}" > "${COOKBOOK_BUILD}/ferrion.toml"
+"${COOKBOOK_MAKE}" -C "${COOKBOOK_BUILD}/drivers" install \
+    CARGO="${COOKBOOK_CARGO}" CARGO_FLAGS="--locked --config ${COOKBOOK_BUILD}/ferrion.toml" \
+    BUILD_DIR="${COOKBOOK_BUILD}" DESTDIR="${COOKBOOK_STAGE}"
+mkdir -p "${COOKBOOK_STAGE}/usr/share/licenses/drivers"
+cp "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/drivers/GPL-2.0-only.txt"
+cp "${COOKBOOK_SOURCE}/drivers/LICENSE-MIT" "${COOKBOOK_STAGE}/usr/share/licenses/drivers/MIT.txt"
+printf 'https://github.com/CallMeOuta/ferrion-hardware at %s\\n' "${COOKBOOK_SOURCE_IDENT}" \
+    > "${COOKBOOK_STAGE}/usr/share/licenses/drivers/SOURCE"
+"""
+
+[[optional-packages]]
+name = "initfs"
+files = [
+    "usr/lib/initfs/**",
+]
