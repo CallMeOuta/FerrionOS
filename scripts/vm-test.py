@@ -9664,6 +9664,22 @@ def test_media_decode(vm, args):
 
 
 TESTS["media-decode"] = test_media_decode
+
+
+def test_desktop_deny(vm, args):
+    """Proves privileged Wayland globals are withheld at registry and wl_registry.bind (use --config wm-columns)."""
+    import desktop_deny
+    return desktop_deny.run_desktop_deny(
+        vm,
+        args,
+        {
+            "root_shell": root_shell,
+            "run_status": run_status,
+        },
+    )
+
+
+TESTS["desktop-deny"] = test_desktop_deny
 # These boot copies of their own images instead of the shared one, and are called with (args, out).
 def run_session_login_check(args, out):
     """Logs in as `user` on VT 3, verifies user-owned ferrion-wm on screen, 0600 session.log, QMP software pointer motion on VGA, Mod+T child uid/stdio/env/fd isolation, and VT 3 text login recovery past a lingering Mod+L sleep child (use --config wm-session)."""

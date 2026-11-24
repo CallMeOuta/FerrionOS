@@ -7,6 +7,7 @@ filesystem_size = 1024
 ferrion-wm = "source"
 desktop-layout-probe = "source"
 shm-reuse-probe = "source"
+wayland-deny-probe = "source"
 xkeyboard-config = {}
 bash = {}
 mesa = {}

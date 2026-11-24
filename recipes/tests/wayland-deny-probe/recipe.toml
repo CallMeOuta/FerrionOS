@@ -1,0 +1,10 @@
+[package]
+description = "Probes Wayland registry advertisements and direct wl_registry.bind enforcement on privileged globals"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -Werror -o "${COOKBOOK_STAGE}/usr/bin/wayland-deny-probe" "${COOKBOOK_RECIPE}/wayland-deny-probe.c" ${LDFLAGS}
+"""
