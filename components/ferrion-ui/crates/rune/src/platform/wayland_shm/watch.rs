@@ -130,7 +130,7 @@ struct WatchTurns {
     stopped: bool,
 }
 
-pub(super) struct ShmWatch {
+pub(crate) struct ShmWatch {
     stop: Arc<StopSignal>,
     turns: Arc<(Mutex<WatchTurns>, Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -228,7 +228,7 @@ impl watch_loop::Driver for ShmWatchDriver {
 }
 
 impl ShmWatch {
-    pub(super) fn spawn(conn: Connection, wake: Waker) -> Option<Self> {
+    pub(crate) fn spawn(conn: Connection, wake: Waker) -> Option<Self> {
         let stop = Arc::new(StopSignal::new()?);
         let turns = Arc::new((
             Mutex::new(WatchTurns {
@@ -254,7 +254,7 @@ impl ShmWatch {
         })
     }
 
-    pub(super) fn turned(&self) {
+    pub(crate) fn turned(&self) {
         let (lock, cond) = &*self.turns;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
         state.count = state.count.wrapping_add(1);

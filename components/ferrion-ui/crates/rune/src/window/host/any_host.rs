@@ -87,7 +87,12 @@ impl AnyHost for Host {
     fn terminate(&mut self) { self.in_turn(Self::terminate_in_turn) }
     fn quit_hook(&mut self) { self.in_turn(Self::quit_hook_in_turn) }
     fn vanish(&mut self) {
-        if let Some(w) = self.shown_win() { w.hide(); }
+        self.in_turn(|h| {
+            h.app.popup_cancel(&mut h.popup);
+            h.popup_blurred = false;
+            assert!(!h.popup.is_open());
+            if let Some(w) = h.shown_win() { w.hide(); }
+        });
     }
     fn cancel_menus(&mut self) { self.in_turn(Self::cancel_menus_in_turn) }
     fn reopen_hook(&mut self, event_loop: &ActiveEventLoop, has_visible_windows: bool) -> bool {
@@ -146,6 +151,7 @@ impl Host {
         self.life.finish();
         self.close_hook();
         self.app.popup_cancel(&mut self.popup);
+        assert!(!self.popup.is_open());
         self.app.file_dialog_cancel(&mut self.file_dialog);
     }
 
@@ -157,6 +163,7 @@ impl Host {
 
     fn cancel_menus_in_turn(&mut self) {
         self.app.popup_cancel(&mut self.popup);
+        assert!(!self.popup.is_open());
         self.app.file_dialog_cancel(&mut self.file_dialog);
     }
 

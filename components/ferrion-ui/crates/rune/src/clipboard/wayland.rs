@@ -46,6 +46,7 @@ const TEXT_MIMES: &[&str] = &[MIME_TEXT_UTF8, MIME_TEXT, MIME_UTF8_STRING];
 static DISPLAY_PTR: AtomicUsize = AtomicUsize::new(0);
 static OVERLAY_FOCUSED: AtomicBool = AtomicBool::new(false);
 static OVERLAY_SERIAL: AtomicU32 = AtomicU32::new(0);
+static LAST_INPUT_SERIAL: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) fn attach_display(display: NonNull<c_void>) {
     DISPLAY_PTR.store(display.as_ptr() as usize, Ordering::Release);
@@ -55,12 +56,14 @@ pub(crate) fn detach_display() {
     DISPLAY_PTR.store(0, Ordering::Release);
     OVERLAY_FOCUSED.store(false, Ordering::Release);
     OVERLAY_SERIAL.store(0, Ordering::Release);
+    LAST_INPUT_SERIAL.store(0, Ordering::Release);
 }
 
 pub(crate) fn record_overlay_focus(focused: bool, serial: u32) {
     if focused {
         OVERLAY_SERIAL.store(serial, Ordering::Release);
         OVERLAY_FOCUSED.store(true, Ordering::Release);
+        record_input_serial(serial);
     } else {
         OVERLAY_FOCUSED.store(false, Ordering::Release);
         OVERLAY_SERIAL.store(0, Ordering::Release);
@@ -71,6 +74,22 @@ pub(crate) fn record_overlay_serial(serial: u32) {
     if OVERLAY_FOCUSED.load(Ordering::Acquire) && serial != 0 {
         OVERLAY_SERIAL.store(serial, Ordering::Release);
     }
+    record_input_serial(serial);
+}
+
+pub(super) fn record_input_serial(serial: u32) {
+    if serial != 0 {
+        LAST_INPUT_SERIAL.store(serial, Ordering::Release);
+    }
+}
+
+pub(crate) fn attached_display() -> Option<NonNull<c_void>> {
+    current_display()
+}
+
+pub(crate) fn latest_input_serial() -> Option<u32> {
+    let serial = LAST_INPUT_SERIAL.load(Ordering::Acquire);
+    (serial != 0).then_some(serial)
 }
 
 fn current_display() -> Option<NonNull<c_void>> {

@@ -83,6 +83,7 @@ pub struct Args {
     pub(crate) cpu_boot: Option<PathBuf>,
     pub(crate) cpu_boot_threads: usize,
     pub(crate) borderless: bool,
+    pub(crate) snap_popup: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -249,6 +250,7 @@ impl Args {
                 "--cpu-boot" => a.cpu_boot = Some(val(&mut i).into()),
                 "--cpu-boot-threads" => a.cpu_boot_threads = (num(&val(&mut i)) as usize).max(1),
                 "--borderless" => a.borderless = true,
+                "--snap-popup" => a.snap_popup = Some(val(&mut i).into()),
                 "-h" | "--help" => {
                     eprintln!("{HELP}");
                     std::process::exit(0);
@@ -271,6 +273,7 @@ impl Args {
         #[cfg(feature = "hot")]
         if self.snap_on_patch.is_some() { return true; }
         self.snap.is_some()
+            || self.snap_popup.is_some()
             || self.tree.is_some()
             || self.html.is_some()
             || (!self.native

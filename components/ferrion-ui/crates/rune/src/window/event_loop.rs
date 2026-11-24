@@ -114,6 +114,7 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
             && let RawDisplayHandle::Wayland(d) = handle.as_raw()
         {
             crate::clipboard::wayland::attach_display(d.display);
+            crate::popup_menu::wayland::attach_display(d.display);
             crate::clipboard::warm();
         }
     }
@@ -164,6 +165,8 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     crate::tooling::interaction::flush();
     crate::render::discard_prewarm();
     crate::clipboard::shutdown(); // Also cover an event-loop error before `exiting`.
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    crate::popup_menu::wayland::detach_display();
     crate::platform::ready_signal::clear();
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     let display_error = windows.display_error.take();

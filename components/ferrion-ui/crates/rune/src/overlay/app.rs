@@ -84,6 +84,18 @@ impl dyn OverlayApp + '_ {
         self.driver(|rt, app| popup.open_core(rt, app, window, paints))
     }
 
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    pub(super) fn popup_open_layer(
+        &mut self,
+        popup: &mut crate::popup_menu::Presenter,
+        layer_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
+        scale: i32,
+        paints: bool,
+        shared_gpu: Option<Arc<crate::render::Gpu>>,
+    ) -> bool {
+        self.driver(|rt, app| popup.open_layer_core(rt, app, layer_ptr, scale, paints, shared_gpu))
+    }
+
     pub(super) fn popup_cancel(&mut self, popup: &mut crate::popup_menu::Presenter) {
         self.driver(|rt, app| popup.cancel_core(rt, app));
     }

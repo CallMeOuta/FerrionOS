@@ -420,6 +420,12 @@ fn run_headless(prep: HeadlessPrep, config: HeadlessConfig, app: &mut dyn Headle
     rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).ok();
 
     if let Some(p) = &args.strip { write_strip(p, &strip, (wp, hp), &crops_px, gap, args.cols); }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    if let Some(p) = &args.snap_popup {
+        let menu = app.rt().popup_menu().unwrap_or_else(|| die("--snap-popup: no pop-up menu is open"));
+        crate::popup_menu::wayland::menu_view::snap_popup_offscreen(&gpu, menu, dark, 0.0, scale, p)
+            .unwrap_or_else(|e| die(&format!("--snap-popup: {e}")));
+    }
     if let (Some(g), Some(p)) = (state.gate, &gate_out) {
         crate::motion_gate::evidence("", &g.rec, Some(p.display().to_string()));
         let text: String = crate::motion_gate::check(&g.rec).iter().map(|f| format!("{f}\n")).collect();

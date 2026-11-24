@@ -552,6 +552,19 @@ impl OverlayCore {
     /// overlay answers `None`, committed with its next frame. One anchored to an element waits
     /// for the frame that commits what changed since the last.
     pub(super) fn open_popup(&mut self, app: &mut dyn OverlayApp) {
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        if let Some(live) = self.surface.live()
+            && let Backing::Layer(layer) = &live.backing
+            && self.presence.shown()
+            && !self.presence.occluded()
+        {
+            let layer_ptr = layer.layer_surface_ptr();
+            let scale = live.scale.round().max(1.0) as i32;
+            if app.popup_open_layer(&mut self.popup, layer_ptr, scale, true, self.gpu.clone()) {
+                self.dirty = true;
+            }
+            return;
+        }
         let window = match self.surface.live().map(|l| &l.backing) {
             Some(Backing::Window(w)) if self.presence.shown() && !self.presence.occluded() => Some(w.clone()),
             _ => None,

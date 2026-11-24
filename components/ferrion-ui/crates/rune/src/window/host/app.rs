@@ -111,8 +111,14 @@ impl dyn WindowApp + '_ {
         self.driver(|rt, app| popup.answer_core(rt, app))
     }
 
-    pub(in crate::window) fn popup_open(&mut self, popup: &mut crate::popup_menu::Presenter, window: Option<&Arc<Window>>, paints: bool) -> bool {
-        self.driver(|rt, app| popup.open_core(rt, app, window, paints))
+    pub(in crate::window) fn popup_open(
+        &mut self,
+        popup: &mut crate::popup_menu::Presenter,
+        window: Option<&Arc<Window>>,
+        paints: bool,
+        shared_gpu: Option<Arc<crate::render::Gpu>>,
+    ) -> bool {
+        self.driver(|rt, app| popup.open_core_with_gpu(rt, app, window, paints, shared_gpu))
     }
 
     pub(in crate::window) fn popup_cancel(&mut self, popup: &mut crate::popup_menu::Presenter) {

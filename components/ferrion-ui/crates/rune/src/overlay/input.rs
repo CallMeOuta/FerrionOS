@@ -426,6 +426,7 @@ impl OverlayCore {
     /// Applies requests from other threads: updates, edge, show and hide.
     pub(super) fn sync(&mut self, app: &mut dyn OverlayApp, event_loop: &ActiveEventLoop) {
         self.clipboard_due(app);
+        crate::popup_menu::step_active();
         if app.popup_answer(&mut self.popup) {
             self.dirty = true;
             if self.frameless() { self.advance(app); }

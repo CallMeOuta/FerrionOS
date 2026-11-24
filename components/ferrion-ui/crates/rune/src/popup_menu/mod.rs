@@ -34,9 +34,17 @@ mod win32;
 use win32 as host;
 #[cfg(target_os = "windows")]
 pub(crate) use win32::{enter_menu_loop, layout, turns};
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+pub(crate) mod wayland;
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+use wayland as host;
 
 /// Platforms without native menus: nothing opens, so every request answers `None` at once.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11"))
+)))]
 mod host {
     use super::{Arc, Rc, Session, Show, Waker, Window};
     pub(super) const SUPPORTED: bool = false;
@@ -50,7 +58,21 @@ mod host {
 /// Whether this platform shows native pop-up menus (macOS and Windows). Where it doesn't,
 /// [`Tx::popup_menu`] calls back with `None` straight away, so an app can draw its own menu
 /// instead.
-pub fn popup_menu_supported() -> bool { host::SUPPORTED }
+pub fn popup_menu_supported() -> bool {
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    {
+        wayland::supported()
+    }
+    #[cfg(not(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11"))))]
+    {
+        host::SUPPORTED
+    }
+}
+
+pub(crate) fn step_active() {
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    wayland::step_active();
+}
 
 /// The event loop starts. `turn` runs its idle turn (due timers, overlays), for a platform whose
 /// menus hold the event loop in a modal loop of their own while they track.
@@ -426,7 +448,20 @@ impl Presenter {
         self.open_core(core, &mut app, window, paints)
     }
 
+    pub(crate) fn is_open(&self) -> bool { self.session.is_some() }
+
     pub(crate) fn open_core(&mut self, rt: &mut crate::runtime::RuntimeCore, app: &mut dyn crate::runtime::AppDriver, window: Option<&Arc<Window>>, paints: bool) -> bool {
+        self.open_core_with_gpu(rt, app, window, paints, None)
+    }
+
+    pub(crate) fn open_core_with_gpu(
+        &mut self,
+        rt: &mut crate::runtime::RuntimeCore,
+        app: &mut dyn crate::runtime::AppDriver,
+        window: Option<&Arc<Window>>,
+        paints: bool,
+        shared_gpu: Option<Arc<crate::render::Gpu>>,
+    ) -> bool {
         let mut redraw = false;
         loop {
             if window.is_some() && paints && rt.popup_waits_for_layout() { return true; }
@@ -436,7 +471,41 @@ impl Presenter {
                 // As dark as what the window draws, which may not be the system's appearance.
                 host::scheme(rt.backdrop_dark().unwrap_or(rt.env.system_dark));
                 let session = Rc::new(Session::default());
-                if host::show(window, show, session.clone(), self.wake.clone()) {
+                #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+                let opened = wayland::show_with_gpu(window, show, session.clone(), self.wake.clone(), shared_gpu.clone());
+                #[cfg(not(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11"))))]
+                let opened = {
+                    let _ = &shared_gpu;
+                    host::show(window, show, session.clone(), self.wake.clone())
+                };
+                if opened {
+                    self.session = Some(session);
+                    return true;
+                }
+            }
+            rt.resolve_popup(app, None).ok();
+        }
+    }
+
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    pub(crate) fn open_layer_core(
+        &mut self,
+        rt: &mut crate::runtime::RuntimeCore,
+        app: &mut dyn crate::runtime::AppDriver,
+        layer_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
+        scale: i32,
+        paints: bool,
+        shared_gpu: Option<Arc<crate::render::Gpu>>,
+    ) -> bool {
+        let mut redraw = false;
+        loop {
+            if layer_ptr.is_some() && paints && rt.popup_waits_for_layout() { return true; }
+            let Some(show) = rt.take_popup() else { return redraw };
+            redraw = true;
+            if let (Some(show), Some(layer_ptr)) = (show, layer_ptr) {
+                host::scheme(rt.backdrop_dark().unwrap_or(rt.env.system_dark));
+                let session = Rc::new(Session::default());
+                if wayland::show_on_layer(layer_ptr, scale, show, session.clone(), self.wake.clone(), shared_gpu.clone()) {
                     self.session = Some(session);
                     return true;
                 }

@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 use super::io::{PendingSend, SendBytes, format_uri_list};
 use super::{
     ClipboardWaylandError, MAX_OFFER_MIMES, MAX_PENDING_OFFERS, MAX_PENDING_SENDS, MIME_HTML,
-    MIME_KDE_SECRET, MIME_PNG, MIME_URI_LIST, TEXT_MIMES, overlay_focus_serial,
+    MIME_KDE_SECRET, MIME_PNG, MIME_URI_LIST, TEXT_MIMES, overlay_focus_serial, record_input_serial,
 };
 use crate::clipboard::ClipboardWrite;
 
@@ -242,13 +242,17 @@ impl Dispatch<WlKeyboard, ()> for State {
             wl_keyboard::Event::Enter { serial, .. } => {
                 state.seat_focused = true;
                 state.seat_serial = (serial != 0).then_some(serial);
+                record_input_serial(serial);
             }
             wl_keyboard::Event::Leave { .. } => {
                 state.seat_focused = false;
                 state.seat_serial = None;
             }
-            wl_keyboard::Event::Key { serial, .. } if state.seat_focused && serial != 0 => {
-                state.seat_serial = Some(serial);
+            wl_keyboard::Event::Key { serial, .. } => {
+                record_input_serial(serial);
+                if state.seat_focused && serial != 0 {
+                    state.seat_serial = Some(serial);
+                }
             }
             _ => {}
         }
@@ -264,11 +268,11 @@ impl Dispatch<WlPointer, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Button { serial, .. } = event
-            && state.seat_focused
-            && serial != 0
-        {
-            state.seat_serial = Some(serial);
+        if let wl_pointer::Event::Button { serial, .. } = event {
+            record_input_serial(serial);
+            if state.seat_focused && serial != 0 {
+                state.seat_serial = Some(serial);
+            }
         }
     }
 }

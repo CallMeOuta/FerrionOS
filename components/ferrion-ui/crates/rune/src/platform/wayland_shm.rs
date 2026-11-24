@@ -14,7 +14,7 @@ use crate::runtime::Waker;
 use crate::time::Instant;
 
 pub(crate) mod slots;
-mod watch;
+pub(crate) mod watch;
 pub(crate) use slots::{CpuPresentError, ShmRing, SlotAcquire};
 use watch::ShmWatch;
 

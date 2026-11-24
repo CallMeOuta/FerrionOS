@@ -1153,6 +1153,10 @@ impl LayerSurface {
             RawWindowHandle::Wayland(WaylandWindowHandle::new(surface)),
         )
     }
+
+    pub(crate) fn layer_surface_ptr(&self) -> Option<NonNull<std::ffi::c_void>> {
+        NonNull::new(self.layer.id().as_ptr().cast())
+    }
 }
 
 impl Drop for LayerSurface {

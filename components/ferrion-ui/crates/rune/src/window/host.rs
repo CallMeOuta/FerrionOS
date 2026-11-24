@@ -93,6 +93,7 @@ pub(in crate::window) struct Host {
     pub(in crate::window) shortcuts: crate::shortcuts::Guard,
     pub(in crate::window) menus: crate::native_menu::MenuGuard,
     pub(in crate::window) popup: crate::popup_menu::Presenter,
+    pub(in crate::window) popup_blurred: bool,
     pub(in crate::window) file_dialog: crate::file_dialog::Presenter,
     pub(in crate::window) app: Box<dyn WindowApp>,
     /// Before `win` and `gpu`: fields drop in order, and the trace waits for the window's last
@@ -416,6 +417,7 @@ impl Host {
             shortcuts,
             menus,
             popup,
+            popup_blurred: false,
             file_dialog,
             app,
             win: None,

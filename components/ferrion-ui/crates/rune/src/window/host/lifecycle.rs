@@ -198,9 +198,17 @@ impl Host {
         let shown = self.shown_win().is_some();
         let stale_before = self.app.rt().needs_commit();
         let clipboard = self.clipboard.receive_core(self.app.rt_mut());
+        crate::popup_menu::step_active();
         let answered = self.app.popup_answer(&mut self.popup) | self.file_dialog.answer_core(self.app.rt_mut());
+        let popup_blur = if self.popup_blurred && !self.popup.is_open() {
+            self.popup_blurred = false;
+            self.deliver_popup_blur(event_loop);
+            true
+        } else {
+            false
+        };
         let (requests, had_updates, updated) = self.app.drain_window(&self.shortcuts, &mut self.menus);
-        let changed = clipboard || answered || updated || self.app.rt().drag_ends_pending();
+        let changed = clipboard || answered || popup_blur || updated || self.app.rt().drag_ends_pending();
         // Only updates that changed nothing (`AppHandle::update_if`), or an empty startup drain
         // after `try_create` already drew the first frame, ran: no poll, no frame.
         let quiet = (had_updates || (!wake && !stale_before)) && !changed && requests.only_updates()
@@ -356,7 +364,8 @@ impl Host {
             }
             let shown = self.win.as_ref().filter(|_| self.life.shown());
             let window = shown.map(|w| &w.window);
-            if self.app.popup_open(&mut self.popup, window, paints) && let Some(w) = shown { w.request_redraw(); }
+            let shared_gpu = self.gpu.as_ref().map(|(g, _)| g.clone());
+            if self.app.popup_open(&mut self.popup, window, paints, shared_gpu) && let Some(w) = shown { w.request_redraw(); }
             if self.file_dialog.open_core(self.app.rt_mut(), window.map(|w| &**w)) && let Some(w) = shown { w.request_redraw(); }
             // A callback that ran (a menu that couldn't open) may have asked to close, quit or
             // minimize.
@@ -378,6 +387,9 @@ impl Host {
         // then the window destroyed at once, with no hide before it. The quit runs after it and
         // the process ends without dropping the window.
         let ends = std::mem::take(&mut self.ends_app) && !self.keep_running && cfg!(target_os = "windows");
+        self.app.popup_cancel(&mut self.popup);
+        self.popup_blurred = false;
+        assert!(!self.popup.is_open());
         // Off the screen first: the close looks done at once and `on_close` runs unseen.
         if !ends && let Some(w) = self.shown_win() { w.hide(); }
         crate::marks::mark("window.close.hidden");
@@ -478,6 +490,8 @@ impl Host {
         self.app.set_live_visible(false);
         self.app.rt_mut().cancel_timer_frame();
         self.app.popup_cancel(&mut self.popup);
+        self.popup_blurred = false;
+        assert!(!self.popup.is_open());
         self.app.file_dialog_cancel(&mut self.file_dialog);
         self.app.rt_mut().cancel_pointer();
         self.files = FileDrop::default();
@@ -490,6 +504,9 @@ impl Host {
     /// that releases its GPU when closed. The next `open` makes a window, a device and a surface
     /// (an app that sees `AppHandle::window_error` and the window gone can ask for one).
     pub(in crate::window) fn release(&mut self) {
+        self.app.popup_cancel(&mut self.popup);
+        self.popup_blurred = false;
+        assert!(!self.popup.is_open());
         self.win = None;
         self.native_handle.native.ready.store(false, Ordering::Release);
         self.native_handle.native.number.store(0, Ordering::Release);

@@ -204,6 +204,23 @@ impl Host {
         }
     }
 
+    pub(in crate::window) fn deliver_popup_blur(&mut self, event_loop: &ActiveEventLoop) {
+        self.a11y_window_event(&WindowEvent::Focused(false));
+        self.secure_input.window_focus(false);
+        if self.launcher() && self.win.as_ref().is_some_and(|w| !w.first_frame.notified()) {
+            return;
+        }
+        #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+        if let Some(w) = &self.win {
+            crate::file_dialog::window_focus(&w.window, false);
+        }
+        self.app.window_focus(false);
+        self.shell(event_loop);
+        if let Some(w) = self.shown_win() {
+            w.request_redraw();
+        }
+    }
+
     /// Sends the tree's changes at the end of the turn, after its frames.
     pub(in crate::window) fn a11y_turn(&mut self) {
         let Some(adapter) = self.win.as_mut().and_then(|w| w.a11y.as_mut()) else { return };
@@ -232,6 +249,21 @@ impl Host {
         // A window replaying `--window-script` takes its pointer from the script alone.
         if super::window_script::drops(self.window_script.is_some(), &event) {
             return;
+        }
+        if matches!(event, WindowEvent::Focused(false)) && self.popup.is_open() {
+            self.popup_blurred = true;
+            return;
+        }
+        if self.popup.is_open()
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
+            )
+        {
+            return;
+        }
+        if matches!(event, WindowEvent::Focused(true)) {
+            self.popup_blurred = false;
         }
         self.a11y_window_event(&event);
         // What says whether other windows cover it (`look`): the pointer reaching it shows some
