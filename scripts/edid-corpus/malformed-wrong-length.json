@@ -1,0 +1,17 @@
+{
+  "name": "malformed-wrong-length",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "Truncated 200-byte EDID (not a multiple of 128 bytes)",
+  "size_bytes": 128,
+  "sha256": "579fad17913165eeb32a07d2e2aa4597e1e81c5ae2661e8a80f8ca68db401e32",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": {
+    "kind": "invalid-length",
+    "expected_error": "InvalidLength",
+    "expected_extensions_truncated": false,
+    "expected_bad_extension_blocks": 0
+  },
+  "preferred_divergence": null,
+  "edid_decode_preferred": null,
+  "modes": []
+}

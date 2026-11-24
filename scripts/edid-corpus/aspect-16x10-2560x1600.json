@@ -1,0 +1,26 @@
+{
+  "name": "aspect-16x10-2560x1600",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "16:10 2560x1600@60Hz base DTD",
+  "size_bytes": 128,
+  "sha256": "150c1269853f5d397c146bbd055936c64434b30102c72f6339689d3c6a2aedb0",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 2560,
+    "height": 1600,
+    "refresh_mhz": 59972,
+    "preferred": true,
+    "source_block": "base-dtd"
+  },
+  "modes": [
+    {
+      "width": 2560,
+      "height": 1600,
+      "refresh_mhz": 59972,
+      "preferred": true,
+      "source_block": "base-dtd"
+    }
+  ]
+}

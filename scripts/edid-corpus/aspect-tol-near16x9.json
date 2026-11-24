@@ -1,0 +1,26 @@
+{
+  "name": "aspect-tol-near16x9",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "Near-16:9 2848x1600@60Hz (0.125% off 16:9, not exact 16:9) for OVMF aspect-approx vs fits check",
+  "size_bytes": 128,
+  "sha256": "610e3c593ba7dd41d4dc06f02532f62f46eab0246ded9db3f83ee7f6ec1ff072",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 2848,
+    "height": 1600,
+    "refresh_mhz": 60022,
+    "preferred": true,
+    "source_block": "base-dtd"
+  },
+  "modes": [
+    {
+      "width": 2848,
+      "height": 1600,
+      "refresh_mhz": 60022,
+      "preferred": true,
+      "source_block": "base-dtd"
+    }
+  ]
+}

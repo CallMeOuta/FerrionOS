@@ -1,0 +1,31 @@
+{
+  "name": "malformed-oversized-9ext",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "9 extension blocks (exceeds MAX_EDID_EXTENSION_BLOCKS=8); 9th block holds DisplayID 4K",
+  "size_bytes": 1280,
+  "sha256": "c1f13c401517b4a88106121a79ecc8f531785db5682040f84d950462f3d491f2",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": {
+    "kind": "oversized-extensions",
+    "expected_error": null,
+    "expected_extensions_truncated": true,
+    "expected_bad_extension_blocks": 0
+  },
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 1920,
+    "height": 1080,
+    "refresh_mhz": 60000,
+    "preferred": true,
+    "source_block": "base-dtd"
+  },
+  "modes": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "refresh_mhz": 60000,
+      "preferred": true,
+      "source_block": "base-dtd"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "malformed-bad-checksum",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "Base block with inverted checksum byte",
+  "size_bytes": 128,
+  "sha256": "feb8c78020f2c672248e74cc93e144786cdec52756f508bbee879865a4804605",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": {
+    "kind": "bad-base-checksum",
+    "expected_error": "BadBaseChecksum",
+    "expected_extensions_truncated": false,
+    "expected_bad_extension_blocks": 0
+  },
+  "preferred_divergence": null,
+  "edid_decode_preferred": null,
+  "modes": []
+}

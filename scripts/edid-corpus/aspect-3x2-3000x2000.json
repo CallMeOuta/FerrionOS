@@ -1,0 +1,26 @@
+{
+  "name": "aspect-3x2-3000x2000",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "3:2 3000x2000@60Hz base DTD",
+  "size_bytes": 128,
+  "sha256": "bd16c93136126e2df41c3541f55c9140ed70f7ce33d166c70e0c1627fa7fdb16",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 3000,
+    "height": 2000,
+    "refresh_mhz": 60006,
+    "preferred": true,
+    "source_block": "base-dtd"
+  },
+  "modes": [
+    {
+      "width": 3000,
+      "height": 2000,
+      "refresh_mhz": 60006,
+      "preferred": true,
+      "source_block": "base-dtd"
+    }
+  ]
+}

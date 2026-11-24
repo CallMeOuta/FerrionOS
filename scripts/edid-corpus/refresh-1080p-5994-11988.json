@@ -1,0 +1,33 @@
+{
+  "name": "refresh-1080p-5994-11988",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "1920x1080 DisplayID 2.0 Type VII at 59.940 and 119.880 Hz",
+  "size_bytes": 256,
+  "sha256": "e744cd540057a281cf016eb6b84c98467a9233e55932b904984e22548e805afd",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 1920,
+    "height": 1080,
+    "refresh_mhz": 59940,
+    "preferred": true,
+    "source_block": "displayid-type7"
+  },
+  "modes": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "refresh_mhz": 59940,
+      "preferred": true,
+      "source_block": "displayid-type7"
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "refresh_mhz": 119880,
+      "preferred": false,
+      "source_block": "displayid-type7"
+    }
+  ]
+}

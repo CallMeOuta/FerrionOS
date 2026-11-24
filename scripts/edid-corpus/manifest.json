@@ -1,0 +1,366 @@
+{
+  "schema_version": 1,
+  "license": "MIT",
+  "max_fixtures": 32,
+  "max_fixture_bytes": 2048,
+  "max_edid_extension_blocks": 8,
+  "generator": "scripts/edid_fixtures.py",
+  "oracle_version": "edid-decode 1.32.0",
+  "skip_dmt_blocks": [
+    "Established Timings I & II:",
+    "Standard Timings:",
+    "Established timings III:"
+  ],
+  "fixture_count": 27,
+  "fixtures": [
+    {
+      "name": "qemu-7680x4320",
+      "file": "qemu-7680x4320.edid",
+      "expected_file": "qemu-7680x4320.json",
+      "origin": "captured (QEMU 11.1.3 virtio-vga)",
+      "description": "QEMU 11.1.3 virtio-vga xres=7680 yres=4320 (DisplayID 1.3 Type I 75Hz + CTA VICs)",
+      "size_bytes": 384,
+      "sha256": "6667ecc44718cf83908822764640db8bdd6d0d8febe335f02c48c8378c994bb1",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "qemu-3440x1440",
+      "file": "qemu-3440x1440.edid",
+      "expected_file": "qemu-3440x1440.json",
+      "origin": "captured (QEMU 11.1.3 virtio-vga)",
+      "description": "QEMU 11.1.3 virtio-vga xres=3440 yres=1440 (base DTD 43:18 75Hz + CTA VICs)",
+      "size_bytes": 256,
+      "sha256": "bbd4a596a5276e1c6822667a744a3d5abe83d2994aeb50a1c29c68b3fac6c42c",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "qemu-5120x1440",
+      "file": "qemu-5120x1440.edid",
+      "expected_file": "qemu-5120x1440.json",
+      "origin": "captured (QEMU 11.1.3 virtio-vga)",
+      "description": "QEMU 11.1.3 virtio-vga xres=5120 yres=1440 (DisplayID 1.3 Type I 32:9 75Hz + CTA VICs)",
+      "size_bytes": 384,
+      "sha256": "d1356cfd2cf879937181d4eb567fb56ca4acde2474ef7c3b04bcb6d4b31f24e9",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "qemu-3000x2000",
+      "file": "qemu-3000x2000.edid",
+      "expected_file": "qemu-3000x2000.json",
+      "origin": "captured (QEMU 11.1.3 virtio-vga)",
+      "description": "QEMU 11.1.3 virtio-vga xres=3000 yres=2000 (base DTD 3:2 75Hz + CTA VICs)",
+      "size_bytes": 256,
+      "sha256": "c9524190ba5a3bd7a40d3d4f0e116bebf33b20f62f535219eb3abe47db0ea18b",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "qemu-2160x3840",
+      "file": "qemu-2160x3840.edid",
+      "expected_file": "qemu-2160x3840.json",
+      "origin": "captured (QEMU 11.1.3 virtio-vga)",
+      "description": "QEMU 11.1.3 virtio-vga xres=2160 yres=3840 (DisplayID 1.3 Type I portrait 75Hz + CTA VICs)",
+      "size_bytes": 384,
+      "sha256": "4c112101d17c7d69d6ab5db54dbafece8686e1e81bfc8a01a045695c26ed064b",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "qemu-2560x1440-120hz",
+      "file": "qemu-2560x1440-120hz.edid",
+      "expected_file": "qemu-2560x1440-120hz.json",
+      "origin": "captured (QEMU 11.1.3 bochs-display)",
+      "description": "QEMU 11.1.3 bochs-display xres=2560 yres=1440 refresh_rate=120000 (real 120Hz base DTD + CTA VICs)",
+      "size_bytes": 256,
+      "sha256": "591f4a550b0ccfa54339c1618dae95d4517914f561fa8f76da84f38f13debc17",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "refresh-1080p-60-120-240",
+      "file": "refresh-1080p-60-120-240.edid",
+      "expected_file": "refresh-1080p-60-120-240.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "1920x1080 base DTDs at 60, 120, and 240 Hz",
+      "size_bytes": 128,
+      "sha256": "7082f793be254634be536688f023af98b191433cb25460e2abe312751bce57c3",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "refresh-1080p-5994-11988",
+      "file": "refresh-1080p-5994-11988.edid",
+      "expected_file": "refresh-1080p-5994-11988.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "1920x1080 DisplayID 2.0 Type VII at 59.940 and 119.880 Hz",
+      "size_bytes": 256,
+      "sha256": "e744cd540057a281cf016eb6b84c98467a9233e55932b904984e22548e805afd",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "refresh-1440p-144-165",
+      "file": "refresh-1440p-144-165.edid",
+      "expected_file": "refresh-1440p-144-165.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "2560x1440 DisplayID 1.3 Type I at 144 and 165 Hz",
+      "size_bytes": 256,
+      "sha256": "2e375d575a8a9236ecc39fe509850636fa10ef46e3f1ed17c28bc473d982a915",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "refresh-4k-60-120-multi",
+      "file": "refresh-4k-60-120-multi.edid",
+      "expected_file": "refresh-4k-60-120-multi.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "3840x2160 multi-rate: 60Hz base DTD + VIC 97/118 + 120Hz DisplayID Type VII",
+      "size_bytes": 384,
+      "sha256": "1c4e1d25f7db3dd1970b7a19bb97315f9a4a695c376c10b2bd70dd81e232fe52",
+      "malformed": null,
+      "preferred_divergence": {
+        "reason": "FerrionOS prioritizes a DisplayID preferred timing over Block 0 DTD 1 so high-bandwidth native timings beat compatibility base DTDs",
+        "edid_decode_preferred": {
+          "width": 3840,
+          "height": 2160,
+          "refresh_mhz": 60000,
+          "preferred": true,
+          "source_block": "base-dtd"
+        },
+        "ferrion_preferred": {
+          "width": 3840,
+          "height": 2160,
+          "refresh_mhz": 120000,
+          "preferred": true,
+          "source_block": "displayid-type7"
+        }
+      }
+    },
+    {
+      "name": "refresh-4k-11988-displayid7",
+      "file": "refresh-4k-11988-displayid7.edid",
+      "expected_file": "refresh-4k-11988-displayid7.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "3840x2160 at 119.880 Hz via DisplayID 2.0 Type VII",
+      "size_bytes": 256,
+      "sha256": "73901254de5d227ec93dca45af82222d50a56f81863adbaba80d9c9958b0476e",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "vic-only-4k120",
+      "file": "vic-only-4k120.edid",
+      "expected_file": "vic-only-4k120.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "4K120 advertised only via CTA-861 VIC 118 (no DTD or DisplayID)",
+      "size_bytes": 256,
+      "sha256": "0257c259615f88f1922f27e912f362ecb429f5933ac6ad6785ee739ce02637b0",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "displayid7-4k120",
+      "file": "displayid7-4k120.edid",
+      "expected_file": "displayid7-4k120.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "4K120 advertised via DisplayID 2.0 Type VII",
+      "size_bytes": 256,
+      "sha256": "9608a60ad29a2917774e39124a1b080fdf5e1749c76b0bf9e3ccc2aa27a2609a",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "vic-only-8k-50-60-120",
+      "file": "vic-only-8k-50-60-120.edid",
+      "expected_file": "vic-only-8k-50-60-120.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "8K advertised only via CTA-861 VICs 199 (60Hz), 198 (50Hz), and 201 (120Hz)",
+      "size_bytes": 256,
+      "sha256": "edbb8e5ad0460a04ea23a862c6c05059ae5168da3897d68fa3ea62e0c566c976",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "displayid7-8k120",
+      "file": "displayid7-8k120.edid",
+      "expected_file": "displayid7-8k120.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "8K120 via DisplayID 2.0 Type VII (4.365 GHz pixel clock; exceeds u32 kHz*1000)",
+      "size_bytes": 256,
+      "sha256": "ee62e6b2bbbdb3f51ea9bb348dc6b687a67524e204733f38553b5fabc2410df9",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "aspect-16x10-2560x1600",
+      "file": "aspect-16x10-2560x1600.edid",
+      "expected_file": "aspect-16x10-2560x1600.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "16:10 2560x1600@60Hz base DTD",
+      "size_bytes": 128,
+      "sha256": "150c1269853f5d397c146bbd055936c64434b30102c72f6339689d3c6a2aedb0",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "aspect-3x2-3000x2000",
+      "file": "aspect-3x2-3000x2000.edid",
+      "expected_file": "aspect-3x2-3000x2000.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "3:2 3000x2000@60Hz base DTD",
+      "size_bytes": 128,
+      "sha256": "bd16c93136126e2df41c3541f55c9140ed70f7ce33d166c70e0c1627fa7fdb16",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "aspect-21x9-3440x1440-144",
+      "file": "aspect-21x9-3440x1440-144.edid",
+      "expected_file": "aspect-21x9-3440x1440-144.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "21:9 3440x1440@144Hz DisplayID Type I + 2560x1080@60 VIC 90",
+      "size_bytes": 384,
+      "sha256": "5f2b5937c5c7348cb751a8f21d99ec128d1de75b66f0e0b2905542721da60ead",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "aspect-21x9-5120x2160-vic126",
+      "file": "aspect-21x9-5120x2160-vic126.edid",
+      "expected_file": "aspect-21x9-5120x2160-vic126.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "21:9 5120x2160 via CTA VIC 126 (60Hz) and VIC 193 (120Hz)",
+      "size_bytes": 256,
+      "sha256": "1f5358ff8e994e9bb760c70e87cbe466ff67cbba1d6ce1b7dc51c94b1e8092a6",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "aspect-32x9-7680x2160",
+      "file": "aspect-32x9-7680x2160.edid",
+      "expected_file": "aspect-32x9-7680x2160.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "32:9 7680x2160@60Hz and 5120x1440@120Hz DisplayID Type I",
+      "size_bytes": 256,
+      "sha256": "141db5a69eb715fae8387263eedf8038cc2f0eaf41f667c2f86429ea441ed036",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "aspect-portrait-2160x3840",
+      "file": "aspect-portrait-2160x3840.edid",
+      "expected_file": "aspect-portrait-2160x3840.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "Native portrait 2160x3840@60Hz DisplayID Type I",
+      "size_bytes": 256,
+      "sha256": "c0514321e84a9ea2dea851cddccc77388dd5271e150f77a9b025fc077db712b8",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "panel-4k-base-1080p-dtd",
+      "file": "panel-4k-base-1080p-dtd.edid",
+      "expected_file": "panel-4k-base-1080p-dtd.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "4K panel whose base DTD is 1920x1080 and whose DisplayID preferred timing is 3840x2160",
+      "size_bytes": 256,
+      "sha256": "b1d824f5d0d0299b777ed0ecd33461a934596b2adddbdf3a9e7b97638bd999ee",
+      "malformed": null,
+      "preferred_divergence": {
+        "reason": "4K panel puts 1920x1080 in Block 0 DTD 1 for legacy compatibility and its native 3840x2160 preferred timing in DisplayID; FerrionOS chooses DisplayID preferred",
+        "edid_decode_preferred": {
+          "width": 1920,
+          "height": 1080,
+          "refresh_mhz": 60000,
+          "preferred": true,
+          "source_block": "base-dtd"
+        },
+        "ferrion_preferred": {
+          "width": 3840,
+          "height": 2160,
+          "refresh_mhz": 60000,
+          "preferred": true,
+          "source_block": "displayid-type1"
+        }
+      }
+    },
+    {
+      "name": "aspect-tol-near16x9",
+      "file": "aspect-tol-near16x9.edid",
+      "expected_file": "aspect-tol-near16x9.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "Near-16:9 2848x1600@60Hz (0.125% off 16:9, not exact 16:9) for OVMF aspect-approx vs fits check",
+      "size_bytes": 128,
+      "sha256": "610e3c593ba7dd41d4dc06f02532f62f46eab0246ded9db3f83ee7f6ec1ff072",
+      "malformed": null,
+      "preferred_divergence": null
+    },
+    {
+      "name": "malformed-bad-checksum",
+      "file": "malformed-bad-checksum.edid",
+      "expected_file": "malformed-bad-checksum.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "Base block with inverted checksum byte",
+      "size_bytes": 128,
+      "sha256": "feb8c78020f2c672248e74cc93e144786cdec52756f508bbee879865a4804605",
+      "malformed": {
+        "kind": "bad-base-checksum",
+        "expected_error": "BadBaseChecksum",
+        "expected_extensions_truncated": false,
+        "expected_bad_extension_blocks": 0
+      },
+      "preferred_divergence": null
+    },
+    {
+      "name": "malformed-wrong-length",
+      "file": "malformed-wrong-length.edid",
+      "expected_file": "malformed-wrong-length.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "Truncated 200-byte EDID (not a multiple of 128 bytes)",
+      "size_bytes": 128,
+      "sha256": "579fad17913165eeb32a07d2e2aa4597e1e81c5ae2661e8a80f8ca68db401e32",
+      "malformed": {
+        "kind": "invalid-length",
+        "expected_error": "InvalidLength",
+        "expected_extensions_truncated": false,
+        "expected_bad_extension_blocks": 0
+      },
+      "preferred_divergence": null
+    },
+    {
+      "name": "malformed-oversized-9ext",
+      "file": "malformed-oversized-9ext.edid",
+      "expected_file": "malformed-oversized-9ext.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "9 extension blocks (exceeds MAX_EDID_EXTENSION_BLOCKS=8); 9th block holds DisplayID 4K",
+      "size_bytes": 1280,
+      "sha256": "c1f13c401517b4a88106121a79ecc8f531785db5682040f84d950462f3d491f2",
+      "malformed": {
+        "kind": "oversized-extensions",
+        "expected_error": null,
+        "expected_extensions_truncated": true,
+        "expected_bad_extension_blocks": 0
+      },
+      "preferred_divergence": null
+    },
+    {
+      "name": "malformed-displayid-len-overflow",
+      "file": "malformed-displayid-len-overflow.edid",
+      "expected_file": "malformed-displayid-len-overflow.json",
+      "origin": "generated (scripts/edid_fixtures.py)",
+      "description": "DisplayID extension whose section payload length overflows past byte 126",
+      "size_bytes": 256,
+      "sha256": "1ca0da6b0e26e13d3f548bb058ee0489c1e07c419b6fbb85acbe7869a4f9ffad",
+      "malformed": {
+        "kind": "displayid-length-overflow",
+        "expected_error": null,
+        "expected_extensions_truncated": false,
+        "expected_bad_extension_blocks": 0
+      },
+      "preferred_divergence": null
+    }
+  ]
+}

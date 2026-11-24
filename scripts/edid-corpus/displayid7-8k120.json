@@ -1,0 +1,26 @@
+{
+  "name": "displayid7-8k120",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "8K120 via DisplayID 2.0 Type VII (4.365 GHz pixel clock; exceeds u32 kHz*1000)",
+  "size_bytes": 256,
+  "sha256": "ee62e6b2bbbdb3f51ea9bb348dc6b687a67524e204733f38553b5fabc2410df9",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 7680,
+    "height": 4320,
+    "refresh_mhz": 120000,
+    "preferred": true,
+    "source_block": "displayid-type7"
+  },
+  "modes": [
+    {
+      "width": 7680,
+      "height": 4320,
+      "refresh_mhz": 120000,
+      "preferred": true,
+      "source_block": "displayid-type7"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "name": "refresh-4k-60-120-multi",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "3840x2160 multi-rate: 60Hz base DTD + VIC 97/118 + 120Hz DisplayID Type VII",
+  "size_bytes": 384,
+  "sha256": "1c4e1d25f7db3dd1970b7a19bb97315f9a4a695c376c10b2bd70dd81e232fe52",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": {
+    "reason": "FerrionOS prioritizes a DisplayID preferred timing over Block 0 DTD 1 so high-bandwidth native timings beat compatibility base DTDs",
+    "edid_decode_preferred": {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 60000,
+      "preferred": true,
+      "source_block": "base-dtd"
+    },
+    "ferrion_preferred": {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 120000,
+      "preferred": true,
+      "source_block": "displayid-type7"
+    }
+  },
+  "edid_decode_preferred": {
+    "width": 3840,
+    "height": 2160,
+    "refresh_mhz": 60000,
+    "preferred": true,
+    "source_block": "base-dtd"
+  },
+  "modes": [
+    {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 60000,
+      "preferred": true,
+      "source_block": "base-dtd"
+    },
+    {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 60000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 120000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 120000,
+      "preferred": true,
+      "source_block": "displayid-type7"
+    }
+  ]
+}

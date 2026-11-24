@@ -1,0 +1,33 @@
+{
+  "name": "aspect-21x9-5120x2160-vic126",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "21:9 5120x2160 via CTA VIC 126 (60Hz) and VIC 193 (120Hz)",
+  "size_bytes": 256,
+  "sha256": "1f5358ff8e994e9bb760c70e87cbe466ff67cbba1d6ce1b7dc51c94b1e8092a6",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 5120,
+    "height": 2160,
+    "refresh_mhz": 60000,
+    "preferred": false,
+    "source_block": "cta-vic"
+  },
+  "modes": [
+    {
+      "width": 5120,
+      "height": 2160,
+      "refresh_mhz": 60000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 5120,
+      "height": 2160,
+      "refresh_mhz": 120000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    }
+  ]
+}

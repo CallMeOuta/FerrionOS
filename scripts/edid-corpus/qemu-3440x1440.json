@@ -1,0 +1,68 @@
+{
+  "name": "qemu-3440x1440",
+  "origin": "captured (QEMU 11.1.3 virtio-vga)",
+  "description": "QEMU 11.1.3 virtio-vga xres=3440 yres=1440 (base DTD 43:18 75Hz + CTA VICs)",
+  "size_bytes": 256,
+  "sha256": "bbd4a596a5276e1c6822667a744a3d5abe83d2994aeb50a1c29c68b3fac6c42c",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 3440,
+    "height": 1440,
+    "refresh_mhz": 74999,
+    "preferred": true,
+    "source_block": "base-dtd"
+  },
+  "modes": [
+    {
+      "width": 3440,
+      "height": 1440,
+      "refresh_mhz": 74999,
+      "preferred": true,
+      "source_block": "base-dtd"
+    },
+    {
+      "width": 5120,
+      "height": 2160,
+      "refresh_mhz": 50000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 4096,
+      "height": 2160,
+      "refresh_mhz": 50000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 50000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 2560,
+      "height": 1080,
+      "refresh_mhz": 50000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "refresh_mhz": 50000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 3840,
+      "height": 2160,
+      "refresh_mhz": 60000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    }
+  ]
+}

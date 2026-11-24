@@ -1,0 +1,26 @@
+{
+  "name": "aspect-portrait-2160x3840",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "Native portrait 2160x3840@60Hz DisplayID Type I",
+  "size_bytes": 256,
+  "sha256": "c0514321e84a9ea2dea851cddccc77388dd5271e150f77a9b025fc077db712b8",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 2160,
+    "height": 3840,
+    "refresh_mhz": 60007,
+    "preferred": true,
+    "source_block": "displayid-type1"
+  },
+  "modes": [
+    {
+      "width": 2160,
+      "height": 3840,
+      "refresh_mhz": 60007,
+      "preferred": true,
+      "source_block": "displayid-type1"
+    }
+  ]
+}

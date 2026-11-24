@@ -1,0 +1,33 @@
+{
+  "name": "aspect-32x9-7680x2160",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "32:9 7680x2160@60Hz and 5120x1440@120Hz DisplayID Type I",
+  "size_bytes": 256,
+  "sha256": "141db5a69eb715fae8387263eedf8038cc2f0eaf41f667c2f86429ea441ed036",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 7680,
+    "height": 2160,
+    "refresh_mhz": 60018,
+    "preferred": true,
+    "source_block": "displayid-type1"
+  },
+  "modes": [
+    {
+      "width": 7680,
+      "height": 2160,
+      "refresh_mhz": 60018,
+      "preferred": true,
+      "source_block": "displayid-type1"
+    },
+    {
+      "width": 5120,
+      "height": 1440,
+      "refresh_mhz": 120037,
+      "preferred": false,
+      "source_block": "displayid-type1"
+    }
+  ]
+}

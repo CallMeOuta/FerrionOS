@@ -1,0 +1,40 @@
+{
+  "name": "refresh-1080p-60-120-240",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "1920x1080 base DTDs at 60, 120, and 240 Hz",
+  "size_bytes": 128,
+  "sha256": "7082f793be254634be536688f023af98b191433cb25460e2abe312751bce57c3",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 1920,
+    "height": 1080,
+    "refresh_mhz": 60000,
+    "preferred": true,
+    "source_block": "base-dtd"
+  },
+  "modes": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "refresh_mhz": 60000,
+      "preferred": true,
+      "source_block": "base-dtd"
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "refresh_mhz": 120000,
+      "preferred": false,
+      "source_block": "base-dtd"
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "refresh_mhz": 240000,
+      "preferred": false,
+      "source_block": "base-dtd"
+    }
+  ]
+}

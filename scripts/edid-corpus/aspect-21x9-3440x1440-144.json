@@ -1,0 +1,33 @@
+{
+  "name": "aspect-21x9-3440x1440-144",
+  "origin": "generated (scripts/edid_fixtures.py)",
+  "description": "21:9 3440x1440@144Hz DisplayID Type I + 2560x1080@60 VIC 90",
+  "size_bytes": 384,
+  "sha256": "5f2b5937c5c7348cb751a8f21d99ec128d1de75b66f0e0b2905542721da60ead",
+  "oracle_version": "edid-decode 1.32.0",
+  "malformed": null,
+  "preferred_divergence": null,
+  "edid_decode_preferred": {
+    "width": 3440,
+    "height": 1440,
+    "refresh_mhz": 143989,
+    "preferred": true,
+    "source_block": "displayid-type1"
+  },
+  "modes": [
+    {
+      "width": 2560,
+      "height": 1080,
+      "refresh_mhz": 60000,
+      "preferred": false,
+      "source_block": "cta-vic"
+    },
+    {
+      "width": 3440,
+      "height": 1440,
+      "refresh_mhz": 143989,
+      "preferred": true,
+      "source_block": "displayid-type1"
+    }
+  ]
+}
