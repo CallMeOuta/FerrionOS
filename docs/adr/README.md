@@ -52,3 +52,4 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0047](0047-drivers-in-ferrion-hardware.md) | Drivers live in ferrion-hardware, are GPL-2.0-only, and get the hardware right only when signed |
 | [0049](0049-fork-file-table-and-grants.md) | Fork, exec and posix_spawn lock order, child file-table reconciliation, fail-closed close-on-exec, grant snapshots and bounded child cleanup |
 | [0050](0050-exec-runtime-handles.md) | Upper-table runtime handle retention, separate scan handles and fail-closed enforcement across exec and posix_spawn |
+| [0053](0053-exec-sibling-threads.md) | Ending sibling threads on exec via FerrionOS-owned procmgr thread-handle verb `0x4645_0001` |
