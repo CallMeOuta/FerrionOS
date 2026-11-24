@@ -132,6 +132,14 @@ def check_sources():
             else:
                 out.append(line("sources", subject, "fail", "tar source without blake3: any content is accepted",
                                 f"add blake3 = \"<hash>\" to [source] in {rel(path)}"))
+        elif "path" in source:
+            target = (path.parent / source["path"]).resolve()
+            if target.is_dir() and target.is_relative_to(ROOT):
+                out.append(line("sources", subject, "pass", "path source inside repository"))
+            else:
+                out.append(line("sources", subject, "fail",
+                                f"path source does not resolve to a directory inside this repository: {source['path']}",
+                                f"point [source] path in {rel(path)} at a directory under this repository"))
     return out
 
 

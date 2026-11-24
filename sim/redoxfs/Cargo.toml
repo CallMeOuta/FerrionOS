@@ -10,7 +10,7 @@ description = "Deterministic simulation test of RedoxFS for FerrionOS"
 getrandom = "0.4"
 lz4_flex = { version = "0.11", default-features = false, features = ["checked-decode"] }
 redox_syscall = "0.9.5"
-redoxfs = { path = "../../recipes/core/redoxfs/source", default-features = false, features = ["std"] }
+redoxfs = { path = "../../components/redoxfs", default-features = false, features = ["std"] }
 
 [profile.release]
 debug-assertions = true

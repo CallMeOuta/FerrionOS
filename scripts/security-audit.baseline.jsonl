@@ -39,6 +39,8 @@
 {"check": "accounts", "subject": "config/fd-primitives.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/fd-primitives.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/dev-accounts.toml)", "fix": "remove [users.user] from config/dev-accounts.toml or give it no login"}
 {"check": "accounts", "subject": "config/fd-primitives.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
+{"check": "accounts", "subject": "config/hardware-live-desktop.toml", "status": "pass", "note": "no passwordless, password-in-file or sudo accounts", "fix": ""}
+{"check": "accounts", "subject": "config/hardware-live.toml", "status": "pass", "note": "no passwordless, password-in-file or sudo accounts", "fix": ""}
 {"check": "accounts", "subject": "config/lockdown.toml", "status": "pass", "note": "no passwordless, password-in-file or sudo accounts", "fix": ""}
 {"check": "accounts", "subject": "config/login-namespace.toml: user netless", "status": "fail", "note": "password written in the config (set in config/login-namespace.toml)", "fix": "remove the password from [users.netless] in config/login-namespace.toml"}
 {"check": "accounts", "subject": "config/login-namespace.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
@@ -91,11 +93,9 @@
 {"check": "accounts", "subject": "config/wm-smoke.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/wm-smoke.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/dev-accounts.toml)", "fix": "remove [users.user] from config/dev-accounts.toml or give it no login"}
 {"check": "accounts", "subject": "config/wm-smoke.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
-{"check": "accounts", "subject": "config/x86_64/wm-session.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
-{"check": "accounts", "subject": "config/x86_64/wm-session.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/dev-accounts.toml)", "fix": "remove [users.user] from config/dev-accounts.toml or give it no login"}
-{"check": "accounts", "subject": "config/x86_64/wm-session.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
 {"check": "accounts", "subject": "config/x86_64/audio-snoop.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/x86_64/audio-snoop.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/x86_64/desktop.toml)", "fix": "remove [users.user] from config/x86_64/desktop.toml or give it no login"}
+{"check": "accounts", "subject": "config/x86_64/audio-snoop.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
 {"check": "accounts", "subject": "config/x86_64/ci.toml", "status": "pass", "note": "no passwordless, password-in-file or sudo accounts", "fix": ""}
 {"check": "accounts", "subject": "config/x86_64/desktop.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/x86_64/desktop.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/x86_64/desktop.toml)", "fix": "remove [users.user] from config/x86_64/desktop.toml or give it no login"}
@@ -118,6 +118,9 @@
 {"check": "accounts", "subject": "config/x86_64/iommu-test.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/x86_64/iommu-test.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/x86_64/desktop.toml)", "fix": "remove [users.user] from config/x86_64/desktop.toml or give it no login"}
 {"check": "accounts", "subject": "config/x86_64/iommu-test.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
+{"check": "accounts", "subject": "config/x86_64/lxhost.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
+{"check": "accounts", "subject": "config/x86_64/lxhost.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/x86_64/desktop.toml)", "fix": "remove [users.user] from config/x86_64/desktop.toml or give it no login"}
+{"check": "accounts", "subject": "config/x86_64/lxhost.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
 {"check": "accounts", "subject": "config/x86_64/mesa-cpu.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/x86_64/mesa-cpu.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/x86_64/desktop.toml)", "fix": "remove [users.user] from config/x86_64/desktop.toml or give it no login"}
 {"check": "accounts", "subject": "config/x86_64/mesa-cpu.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
@@ -127,6 +130,9 @@
 {"check": "accounts", "subject": "config/x86_64/redoxer.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
 {"check": "accounts", "subject": "config/x86_64/redoxer.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/dev-accounts.toml)", "fix": "remove [users.user] from config/dev-accounts.toml or give it no login"}
 {"check": "accounts", "subject": "config/x86_64/redoxer.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
+{"check": "accounts", "subject": "config/x86_64/wm-session.toml: user root", "status": "fail", "note": "password written in the config (set in config/dev-accounts.toml)", "fix": "remove the password from [users.root] in config/dev-accounts.toml"}
+{"check": "accounts", "subject": "config/x86_64/wm-session.toml: user user", "status": "fail", "note": "empty password, so login needs none (set in config/x86_64/desktop.toml)", "fix": "remove [users.user] from config/x86_64/desktop.toml or give it no login"}
+{"check": "accounts", "subject": "config/x86_64/wm-session.toml: sudo member user", "status": "warn", "note": "member of sudo (set in config/dev-accounts.toml)", "fix": "drop user from [groups.sudo] in config/dev-accounts.toml unless it is the owner's account"}
 {"check": "sources", "subject": "recipes/archives/bzip2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/archives/libzip", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/archives/lz4", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -134,23 +140,24 @@
 {"check": "sources", "subject": "recipes/archives/zstd", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/artwork/pop-wallpapers", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/artwork/pop-wallpapers/recipe.toml"}
 {"check": "sources", "subject": "recipes/artwork/ubuntu-wallpapers", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/core/base", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/base", "status": "pass", "note": "path source inside repository", "fix": ""}
 {"check": "sources", "subject": "recipes/core/binutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/binutils/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/bootloader", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/contain", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/contain/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/coreutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/coreutils/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/dash", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/dash/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/drivers", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/extrautils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/findutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/findutils/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/installer", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/ion", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/ion/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/kernel", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/kernel", "status": "pass", "note": "path source inside repository", "fix": ""}
 {"check": "sources", "subject": "recipes/core/netdb", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/netdb/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/netutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/netutils/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/pkgutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/pkgutils/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/profiled", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/profiled/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/redoxfs", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/core/relibc", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/redoxfs", "status": "pass", "note": "path source inside repository", "fix": ""}
+{"check": "sources", "subject": "recipes/core/relibc", "status": "pass", "note": "path source inside repository", "fix": ""}
 {"check": "sources", "subject": "recipes/core/strace", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/strace/recipe.toml"}
 {"check": "sources", "subject": "recipes/core/userutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/uutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
@@ -212,6 +219,7 @@
 {"check": "sources", "subject": "recipes/fonts/ibm-plex", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/intel-one-mono", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/noto-color-emoji", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/fonts/noto-sans-cjk", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/ttf-hack", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/graphics/procedural-wallpapers-rs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/graphics/procedural-wallpapers-rs/recipe.toml"}
 {"check": "sources", "subject": "recipes/gui/orbdata", "status": "pass", "note": "git source pinned by rev", "fix": ""}
@@ -223,8 +231,10 @@
 {"check": "sources", "subject": "recipes/icons/pop-icon-theme", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/icons/pop-icon-theme/recipe.toml"}
 {"check": "sources", "subject": "recipes/libs/atk", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/cairo", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/dav1d", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/duktape", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/expat", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/ffmpeg", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/ffmpeg6", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/freetype2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/fribidi", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -288,6 +298,7 @@
 {"check": "sources", "subject": "recipes/libs/termcap", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/unibilium", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/utf8proc", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/venus-protocol", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/zlib", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/math/orbcalculator", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/math/orbcalculator/recipe.toml"}
 {"check": "sources", "subject": "recipes/net/curl", "status": "pass", "note": "git source pinned by rev", "fix": ""}

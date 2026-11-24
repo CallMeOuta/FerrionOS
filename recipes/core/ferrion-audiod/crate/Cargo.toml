@@ -6,8 +6,8 @@ license = "MIT"
 publish = false
 
 [dependencies]
-daemon = { path = "../../base/source/daemon" }
-scheme-utils = { path = "../../base/source/scheme-utils" }
+daemon = { path = "../../../../components/base/daemon" }
+scheme-utils = { path = "../../../../components/base/scheme-utils" }
 redox_syscall = { version = "0.9.5", features = ["std"] }
 libredox = { version = "0.2.0", features = ["mkns"] }
 redox-scheme = { git = "https://gitlab.redox-os.org/redox-os/redox-scheme.git", default-features = false }

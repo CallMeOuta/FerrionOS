@@ -1,15 +1,14 @@
 [source]
-git = "https://github.com/CallMeOuta/ferrion-hardware.git"
-rev = "f0c42868077f701849cb4c845911333862e7a721"
+same_as = "../../../core/drivers"
 
 [build]
 template = "custom"
 script = """
-base_src="${COOKBOOK_ROOT}/recipes/core/base/source"
-relibc_src="${COOKBOOK_ROOT}/recipes/core/relibc/source"
-for dir in "${base_src}/drivers/graphics/driver-graphics" "${relibc_src}/redox-ioctl"; do
+base_src="${COOKBOOK_ROOT}/components/base"
+relibc_src="${COOKBOOK_ROOT}/components/relibc"
+for dir in "${COOKBOOK_SOURCE}/drivers/graphics/driver-graphics" "${relibc_src}/redox-ioctl"; do
     if [ ! -d "${dir}" ]; then
-        echo "ferrion-hardware: ${dir} is missing; fetch base and relibc first (make f.base f.relibc)" >&2
+        echo "ferrion-hardware: ${dir} is missing; fetch drivers first (make f.drivers)" >&2
         exit 1
     fi
 done

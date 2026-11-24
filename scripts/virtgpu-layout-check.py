@@ -7,7 +7,7 @@
 #   python3 scripts/virtgpu-layout-check.py [--header FILE] [--redox-ioctl DIR] [--work DIR]
 # --header        another copy of virtgpu_drm.h to compare against, with its drm.h beside it,
 #                 such as the one Mesa carries in include/drm-uapi/
-# --redox-ioctl   the crate's directory (default: recipes/core/relibc/source/redox-ioctl)
+# --redox-ioctl   the crate's directory (default: components/relibc/redox-ioctl)
 # --work          where the generated programs are built (default: build/virtgpu-layout)
 #
 # Needs a C compiler that has Linux's own uapi headers (linux/types.h, asm/ioctl.h), cargo, and
@@ -350,7 +350,7 @@ def compare(structs, constants, requests, c, r):
 def main():
     parser = argparse.ArgumentParser(description="Compare Linux's virtgpu_drm.h with redox-ioctl's virtgpu module.")
     parser.add_argument("--header", type=Path, default=HEADER_DIR / "virtgpu_drm.h")
-    parser.add_argument("--redox-ioctl", type=Path, default=ROOT / "recipes/core/relibc/source/redox-ioctl")
+    parser.add_argument("--redox-ioctl", type=Path, default=ROOT / "components/relibc/redox-ioctl")
     parser.add_argument("--work", type=Path, default=ROOT / "build/virtgpu-layout")
     args = parser.parse_args()
     header, crate, work = args.header.resolve(), args.redox_ioctl.resolve(), args.work.resolve()
