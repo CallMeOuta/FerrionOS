@@ -5,8 +5,10 @@ optional_include = ["my_hw-live-accounts.toml"]
 filesystem_size = 256
 
 [packages]
-base = "ignore"
-hardware-live-base = "source"
+drivers = "ignore"
+initfs = "ignore"
+hardware-live-drivers = "source"
+hardware-live-initfs = "source"
 installer = "ignore"
 ferrion-audiod = "ignore"
 ca-certificates = {}

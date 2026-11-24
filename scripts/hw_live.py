@@ -78,8 +78,14 @@ def safety(root, image, scratch, out):
     gate = load_gate(root)
     target = "x86_64-unknown-redox"
     build = root / "recipes/core/kernel/target" / target / "build"
-    trees = [root / "recipes/core" / name / "source" for name in ("kernel", "bootloader", "base", "installer")]
-    trees.append(root / "recipes/core/ferrion-update/crate")
+    trees = [
+        root / "components/kernel",
+        root / "components/base",
+        root / "recipes/core/drivers/source/drivers",
+        root / "recipes/core/bootloader/source",
+        root / "recipes/core/installer/source",
+        root / "recipes/core/ferrion-update/crate",
+    ]
     evidence = {"image_sha256": digest(image), "faults": []}
     with mounted_copy(root, image, scratch) as filesystem:
         kernel = filesystem / "usr/lib/boot/kernel"

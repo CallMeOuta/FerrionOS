@@ -1,0 +1,48 @@
+[package]
+description = "Storage-free first-boot drivers for FerrionOS"
+
+[source]
+same_as = "../drivers"
+
+[build]
+template = "custom"
+dev-dependencies = [
+  "relibc",
+  "base",
+]
+script = """
+if [ "${TARGET%%-*}" != x86_64 ]; then
+    echo "First-boot live images require x86_64" >&2
+    exit 1
+fi
+rsync -a --delete "${COOKBOOK_SOURCE}/drivers/" "${COOKBOOK_BUILD}/drivers/"
+cp "${COOKBOOK_ROOT}/recipes/core/drivers/Cargo.lock" "${COOKBOOK_BUILD}/drivers/Cargo.lock"
+"${COOKBOOK_ROOT}/scripts/drivers-lock.sh" patch "${COOKBOOK_ROOT}" > "${COOKBOOK_BUILD}/ferrion.toml"
+"${COOKBOOK_MAKE}" -C "${COOKBOOK_BUILD}/drivers" install \
+    CARGO="${COOKBOOK_CARGO}" CARGO_FLAGS="--locked --config ${COOKBOOK_BUILD}/ferrion.toml" \
+    BUILD_DIR="${COOKBOOK_BUILD}" DESTDIR="${COOKBOOK_STAGE}" \
+    BINS="fbcond pcid pcid-spawner redoxerd" \
+    DRIVERS="usbctl usbhidd usbhubd xhcid" \
+    INITFS_DRIVERS=""
+: > "${COOKBOOK_STAGE}/usr/lib/initfs/root/lib/pcid.d/initfs.toml"
+MAX_DRIVER_CONFIGS=128
+driver_configs=0
+for config in "${COOKBOOK_STAGE}/usr/lib/pcid.d/"*.toml; do
+    driver_configs=$((driver_configs + 1))
+    [ "$driver_configs" -le "$MAX_DRIVER_CONFIGS" ] || exit 1
+    if [ "$(basename "$config")" != xhcid.toml ]; then
+        rm "$config"
+    fi
+done
+mkdir -p "${COOKBOOK_STAGE}/usr/share/licenses/hardware-live-drivers"
+cp "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/hardware-live-drivers/GPL-2.0-only.txt"
+cp "${COOKBOOK_SOURCE}/drivers/LICENSE-MIT" "${COOKBOOK_STAGE}/usr/share/licenses/hardware-live-drivers/MIT.txt"
+printf 'https://github.com/CallMeOuta/ferrion-hardware at %s\\n' "${COOKBOOK_SOURCE_IDENT}" \
+    > "${COOKBOOK_STAGE}/usr/share/licenses/hardware-live-drivers/SOURCE"
+"""
+
+[[optional-packages]]
+name = "initfs"
+files = [
+    "usr/lib/initfs/**",
+]

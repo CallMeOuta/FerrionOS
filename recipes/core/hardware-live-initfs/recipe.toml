@@ -1,0 +1,19 @@
+[package]
+description = "Storage-free first-boot initfs for FerrionOS"
+
+[source]
+same_as = "../base"
+
+[build]
+template = "custom"
+dependencies = [
+  "base.initfs",
+  "hardware-live-drivers.initfs",
+  "redoxfs",
+]
+script = """
+"${COOKBOOK_MAKE}" -C "${COOKBOOK_SOURCE}" install-initfs \
+    SRC_DIR="${COOKBOOK_SOURCE}" SYSROOT="${COOKBOOK_SYSROOT}" \
+    LINKER="${GNU_TARGET}-ld" CARGO="${COOKBOOK_CARGO}" \
+    BUILD_DIR="${COOKBOOK_BUILD}" DESTDIR="${COOKBOOK_STAGE}"
+"""
