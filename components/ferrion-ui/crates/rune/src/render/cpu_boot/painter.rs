@@ -11,7 +11,7 @@ use super::pool::Pool;
 use super::{NeedsGpu, Report, Scene, Target, damage, raster, scroll};
 
 /// Rectangles a frame's damage is merged into at most.
-const MAX_RECTS: usize = 8;
+pub(crate) const MAX_RECTS: usize = 8;
 /// Dirty tiles per extra thread: a handful of tiles paints faster on the calling thread than it
 /// takes to wake another.
 const TILES_PER_THREAD: usize = 24;

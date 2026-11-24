@@ -16,43 +16,76 @@ pub enum GpuBackend {
     Wgpu,
     /// Rune's native Metal backend, with Rune's `metal-backend` feature; without it, wgpu.
     Metal,
+    Cpu,
 }
 
 const UNSET: u8 = 0;
 const WGPU: u8 = 1;
 const METAL: u8 = 2;
+const CPU: u8 = 3;
 
 /// What the app chose: nothing yet, `Wgpu` or `Metal`.
-#[cfg_attr(not(all(target_vendor = "apple", feature = "metal-backend")), allow(dead_code))]
 static CHOSEN: AtomicU8 = AtomicU8::new(UNSET);
+static CPU_FALLBACK: AtomicU8 = AtomicU8::new(0);
 
 /// The backend an app that chooses none draws with: the native one on macOS with the feature.
 const DEFAULT: GpuBackend = if cfg!(all(target_os = "macos", feature = "metal-backend")) { GpuBackend::Metal } else { GpuBackend::Wgpu };
 
 /// Makes GPUs from now on with `backend`, process-wide. Returns `true` when the active backend
 /// changed, so a caller with a prewarm running on the old backend can start it over.
-#[cfg_attr(not(target_vendor = "apple"), allow(unused_variables))]
 pub fn choose(backend: GpuBackend) -> bool {
     #[cfg(all(target_vendor = "apple", not(feature = "metal-backend")))]
     if backend == GpuBackend::Metal {
         eprintln!("rune: GpuBackend::Metal needs Rune's `metal-backend` feature; drawing with wgpu");
     }
-    #[cfg(all(target_vendor = "apple", feature = "metal-backend"))]
-    {
-        let before = current();
-        CHOSEN.store(match backend { GpuBackend::Wgpu => WGPU, GpuBackend::Metal => METAL }, Ordering::Relaxed);
-        return current() != before;
-    }
-    #[cfg(not(all(target_vendor = "apple", feature = "metal-backend")))]
-    false
+    let before = current();
+    let stored = match backend {
+        GpuBackend::Wgpu => WGPU,
+        GpuBackend::Metal => {
+            if cfg!(all(target_vendor = "apple", feature = "metal-backend")) {
+                METAL
+            } else {
+                WGPU
+            }
+        }
+        GpuBackend::Cpu => CPU,
+    };
+    CHOSEN.store(stored, Ordering::Relaxed);
+    current() != before
 }
 
 fn chosen() -> Option<GpuBackend> {
     match CHOSEN.load(Ordering::Relaxed) {
         WGPU => Some(GpuBackend::Wgpu),
         METAL => Some(GpuBackend::Metal),
+        CPU => Some(GpuBackend::Cpu),
         _ => None,
     }
+}
+
+pub fn is_cpu() -> bool {
+    current() == GpuBackend::Cpu
+}
+
+pub fn record_cpu_fallback(reason: &str) -> bool {
+    if CPU_FALLBACK.swap(1, Ordering::AcqRel) == 0 {
+        eprintln!("rune: falling back to CPU presenter at startup: {reason}");
+        true
+    } else {
+        false
+    }
+}
+
+pub fn cpu_fallback_active() -> bool {
+    CPU_FALLBACK.load(Ordering::Acquire) != 0
+}
+
+pub fn uses_cpu() -> bool {
+    is_cpu() || cpu_fallback_active()
+}
+
+pub fn allows_cpu_fallback() -> bool {
+    defaulted(env().as_deref(), chosen()) && rune_core::env::var("WGPU_ADAPTER_NAME").is_none()
 }
 
 fn env() -> Option<String> {
@@ -213,19 +246,18 @@ pub fn serves(device: &wgpu::Device, wanted: wgpu::Features) -> bool {
     true
 }
 
-#[cfg_attr(not(all(target_vendor = "apple", feature = "metal-backend")), allow(dead_code))]
 fn resolve(env: Option<&str>, chosen: Option<GpuBackend>) -> GpuBackend {
     match env {
         Some("metal") => GpuBackend::Metal,
         Some("wgpu") => GpuBackend::Wgpu,
+        Some("cpu") => GpuBackend::Cpu,
         _ => chosen.unwrap_or(DEFAULT),
     }
 }
 
 /// Whether the backend is the default one, which neither the environment nor the app chose.
-#[cfg_attr(not(all(target_vendor = "apple", feature = "metal-backend")), allow(dead_code))]
 fn defaulted(env: Option<&str>, chosen: Option<GpuBackend>) -> bool {
-    !matches!(env, Some("metal" | "wgpu")) && chosen.is_none()
+    !matches!(env, Some("metal" | "wgpu" | "cpu")) && chosen.is_none()
 }
 
 #[cfg(test)]

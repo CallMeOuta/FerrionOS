@@ -150,6 +150,10 @@ impl Host {
         }
         #[cfg(target_os = "windows")]
         if cpu_first { return self.open_on_cpu(event_loop, window, a11y, a11y_start, frame, cloak, focus, open_as, built); }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.wayland && crate::gpu::backend::uses_cpu() {
+            return self.open_on_wayland_cpu(event_loop, window, a11y, visible, built);
+        }
         let mut prewarmed = None;
         crate::marks::mark("gpu.begin");
         // A device that died while this window was closed draws nothing: make another.
@@ -170,7 +174,21 @@ impl Host {
                 let (gpu, surface) = if let Some(cached) = cached {
                     cached
                 } else {
-                    let (gpu, surface, renderer) = Gpu::for_surface(features, transparent, |instance| instance.create_surface(window.clone()).map_err(|e| e.to_string()))?;
+                    let made = Gpu::for_surface_typed(features, transparent, |instance| instance.create_surface(window.clone()).map_err(|e| e.to_string()));
+                    let (gpu, surface, renderer) = match made {
+                        Ok(ok) => ok,
+                        Err(error) => {
+                            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                            if self.wayland
+                                && crate::gpu::backend::allows_cpu_fallback()
+                                && let crate::render::SurfaceGpuError::NoAdapter(reason) = &error
+                            {
+                                crate::gpu::backend::record_cpu_fallback(reason);
+                                return self.open_on_wayland_cpu(event_loop, window, a11y, visible, built);
+                            }
+                            return Err(error.into_string());
+                        }
+                    };
                     prewarmed = renderer;
                     let gpu = Arc::new(gpu);
                     *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);

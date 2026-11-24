@@ -83,6 +83,7 @@ pub(crate) use warmup::park_gpu;
 pub(crate) use warmup::surface_gpu;
 
 pub use backdrop_blur::MAX_BACKDROP_BLURS;
+pub(crate) use device::SurfaceGpuError;
 pub use device::Gpu;
 pub use device::prewarm_gpu;
 pub use device::prewarm_gpu_on;

@@ -60,6 +60,9 @@ pub(super) fn live() -> Option<Arc<Gpu>> {
 /// waits `LINGER` from now. `prepare` runs on the warming thread with the new device, or the
 /// live one, so an app can make its own pipelines off the UI thread.
 pub(super) fn warm(features: wgpu::Features, prepare: Option<Box<dyn FnOnce(&wgpu::Device) + Send>>) {
+    if crate::gpu::backend::uses_cpu() {
+        return;
+    }
     if let Some(gpu) = live() {
         if let Some(prepare) = prepare {
             std::thread::Builder::new().name("rune-gpu-warm".into()).spawn(move || prepare(&gpu.device)).ok();

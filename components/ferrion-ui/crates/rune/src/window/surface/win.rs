@@ -120,7 +120,9 @@ impl Win {
     pub(in crate::window) fn waits_for_slot(&self) -> bool {
         #[cfg(target_os = "windows")]
         return self.native.slot.waiting();
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        return self.native.cpu.as_ref().is_some_and(|c| c.waiting_for_slot());
+        #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
         false
     }
 

@@ -87,13 +87,31 @@ fn shows(compositor: Option<&str>, pci: &str) -> bool {
     compositor.is_none_or(|compositor| same_pci(compositor, pci))
 }
 
+#[derive(Debug)]
+pub enum PickError {
+    NoAdapter(String),
+    NamedMissing(String),
+}
+
+impl PickError {
+    pub fn into_string(self) -> String {
+        match self {
+            PickError::NoAdapter(msg) | PickError::NamedMissing(msg) => msg,
+        }
+    }
+}
+
 /// The adapter for `surface` (or for offscreen work without one, unless it's for a surface not
 /// made yet: `presented`), by the order in the module docs.
 pub fn pick(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, presented: bool) -> Result<Pick, String> {
+    pick_typed(instance, surface, presented).map_err(PickError::into_string)
+}
+
+pub fn pick_typed(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, presented: bool) -> Result<Pick, PickError> {
     // DX12: the same order through DXGI's adapter list, and only the chosen adapter goes to wgpu.
     #[cfg(target_os = "windows")]
     if let Some(picked) = dxgi::pick(instance, surface, presented) {
-        let (pick, adapters) = picked.inspect_err(|error| log_failure(error))?;
+        let (pick, adapters) = picked.inspect_err(|error| log_failure(error)).map_err(PickError::NamedMissing)?;
         return Ok(log(pick, Some(adapters)));
     }
     let usable = |adapter: &wgpu::Adapter| surface.is_none_or(|s| adapter.is_surface_supported(s));
@@ -107,12 +125,12 @@ pub fn pick(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, pres
         let Some(adapter) = found.and_then(|index| adapters.into_iter().nth(index)) else {
             let error = format!("no GPU adapter matches WGPU_ADAPTER_NAME={name:?}");
             log_failure(&error);
-            return Err(error);
+            return Err(PickError::NamedMissing(error));
         };
         return Ok(log(Pick { adapter, reason: Reason::EnvName, compositor }, enumerated));
     }
     if let Some(power) = wgpu::PowerPreference::from_env() {
-        let adapter = request(instance, surface, power)?;
+        let adapter = request(instance, surface, power).map_err(PickError::NoAdapter)?;
         return Ok(log(Pick { adapter, reason: Reason::EnvPower, compositor }, enumerated));
     }
     if let Some(pci) = compositor.as_deref() {
@@ -134,7 +152,7 @@ pub fn pick(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, pres
             return Ok(log(Pick { adapter, reason, compositor }, enumerated));
         }
     }
-    let adapter = request(instance, surface, wgpu::PowerPreference::LowPower)?;
+    let adapter = request(instance, surface, wgpu::PowerPreference::LowPower).map_err(PickError::NoAdapter)?;
     Ok(log(Pick { adapter, reason: Reason::LowPower, compositor }, enumerated))
 }
 

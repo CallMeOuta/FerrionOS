@@ -181,6 +181,10 @@ impl Host {
             self.hand_over_if_done();
             if self.win.as_ref().is_some_and(|w| w.native.mode.cpu_draws()) { return self.draw_cpu(resizing); }
         }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.win.as_ref().is_some_and(|w| w.native.cpu.is_some()) {
+            return self.draw_wayland_cpu(resizing);
+        }
         let mut frame = WindowFrame { host: self, resizing, state: FrameState::default() };
         host_step::run(&mut frame);
     }

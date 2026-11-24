@@ -82,6 +82,7 @@ pub struct Args {
     /// `--cpu-boot-threads N` threads (6 by default).
     pub(crate) cpu_boot: Option<PathBuf>,
     pub(crate) cpu_boot_threads: usize,
+    pub(crate) borderless: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -247,6 +248,7 @@ impl Args {
                 "--chrome" => a.chrome_overlay = true,
                 "--cpu-boot" => a.cpu_boot = Some(val(&mut i).into()),
                 "--cpu-boot-threads" => a.cpu_boot_threads = (num(&val(&mut i)) as usize).max(1),
+                "--borderless" => a.borderless = true,
                 "-h" | "--help" => {
                     eprintln!("{HELP}");
                     std::process::exit(0);

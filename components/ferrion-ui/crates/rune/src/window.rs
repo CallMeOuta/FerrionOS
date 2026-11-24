@@ -37,6 +37,8 @@ pub mod spec;
 mod state;
 mod surface;
 pub(crate) mod titlebar;
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+mod wayland_cpu;
 #[cfg(target_os = "windows")]
 mod win32;
 /// `crate::warm_gpu_cache` on Windows (`win32::handover`).
@@ -53,7 +55,7 @@ pub(crate) use keys::{key_base, map_key_event, map_mods};
 pub(crate) use state::frame;
 pub(crate) use state::{Life, Minimize, MinimizeEvent, Sight};
 pub(crate) use surface::{
-    Backoff, BackoffEffect, BackoffEvent, HiddenPace, Missed, Presented, TIMER_FRAME,
+    Backoff, BackoffEffect, BackoffEvent, CPU_MAX_SURFACE_DIM, HiddenPace, Missed, Presented, TIMER_FRAME,
     acquire_checked, configure, reblend_core, rebuild_renderer_core,
     poll_timer_deadline_core, surface_config, timer_deadline_core, timer_wants_frame_core,
 };
@@ -101,7 +103,7 @@ pub(crate) enum WakeEvent {
     Place(usize, crate::windows::PlaceRequest),
     Frame(usize, crate::window::frame::FrameRequest),
     /// Windows: the window's or an overlay's swap chain can take the frame it waits for (`slot`).
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))), allow(dead_code))]
     FrameSlot(usize),
     /// The app was reopened (macOS: its Dock icon clicked; Windows: launched again while it
     /// runs, see `single_instance`); for `Windows`, not one host.

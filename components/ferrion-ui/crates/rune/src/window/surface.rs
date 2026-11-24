@@ -53,7 +53,7 @@ pub(crate) const FRAME_LATENCY: u32 = if cfg!(target_os = "windows") { 1 } else 
 /// The largest 2D surface side accepted while no GPU device is attached yet (Windows CPU boot, or
 /// between surfaces): matches D3D12 and Metal's 2D texture limit, large enough for multi-monitor
 /// desktops while rejecting wrapped negative Windows client sizes (such as `65527` for `-9`).
-pub(in crate::window) const CPU_MAX_SURFACE_DIM: u32 = 16_384;
+pub(crate) const CPU_MAX_SURFACE_DIM: u32 = 16_384;
 
 /// The largest 2D surface side the active GPU accepts, or `CPU_MAX_SURFACE_DIM` while no GPU is
 /// attached yet.

@@ -73,6 +73,7 @@ mod tests;
 #[derive(Default)]
 pub(in crate::window) struct Native {
     pub(in crate::window) activator: Option<crate::platform::activation::Activator>,
+    pub(in crate::window) cpu: Option<crate::window::wayland_cpu::WaylandCpu>,
 }
 
 #[cfg(target_os = "windows")]

@@ -305,7 +305,7 @@ impl Host {
             shared,
             chrome,
             titlebar,
-            options,
+            mut options,
             macos_window,
             native_handle,
             on_created,
@@ -329,6 +329,9 @@ impl Host {
             keeps_loop,
             open_urls,
         } = init;
+        if args.borderless {
+            options.borderless = true;
+        }
         let titlebar = titlebar.filter(|_| !options.borderless);
         // `RUNE_OPEN_INACTIVE`: a tool's launch (an accessibility probe, a capture) leaves the user's
         // focus and keyboard where they are, as `App::open_inactive` does.

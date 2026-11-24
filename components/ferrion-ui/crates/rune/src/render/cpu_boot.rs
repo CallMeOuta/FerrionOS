@@ -48,6 +48,7 @@ pub use drift::{Drift, Pixels, drift, drift_wanted, last_drift};
 pub use fill::{FillReport, attach_text, fill_masks};
 #[cfg(test)]
 pub(crate) use painter::UploadPlan;
+pub(crate) use painter::MAX_RECTS;
 pub use painter::{CpuPainter, Painted};
 
 /// One frame's draw data, borrowed from the runtime that built it.

@@ -4,6 +4,20 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use super::{Renderer, gpu_events, prewarm};
 
+#[derive(Debug)]
+pub(crate) enum SurfaceGpuError {
+    NoAdapter(String),
+    Other(String),
+}
+
+impl SurfaceGpuError {
+    pub(crate) fn into_string(self) -> String {
+        match self {
+            SurfaceGpuError::NoAdapter(msg) | SurfaceGpuError::Other(msg) => msg,
+        }
+    }
+}
+
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -48,6 +62,11 @@ impl Gpu {
         Self::try_picked(instance, surface, wanted, translucent, false)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_for_typed(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features, translucent: bool) -> Result<Gpu, SurfaceGpuError> {
+        Self::try_picked_typed(instance, surface, wanted, translucent, false)
+    }
+
     /// A device for a surface not made yet (`warm_gpu`): on the adapter a surface would get.
     #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
     pub(super) fn try_for_display(instance: wgpu::Instance, wanted: wgpu::Features) -> Result<Gpu, String> {
@@ -56,11 +75,19 @@ impl Gpu {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn try_picked(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features, translucent: bool, presented: bool) -> Result<Gpu, String> {
+        Self::try_picked_typed(instance, surface, wanted, translucent, presented).map_err(SurfaceGpuError::into_string)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_picked_typed(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features, translucent: bool, presented: bool) -> Result<Gpu, SurfaceGpuError> {
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         // D3D12 keeps one device per adapter in a process: while a removed one is still held, a
         // new device on that adapter is the removed one again.
         crate::native_surface::release_removed_device();
-        let pick = crate::gpu::pick::pick(&instance, surface, presented)?;
+        let pick = crate::gpu::pick::pick_typed(&instance, surface, presented).map_err(|err| match err {
+            crate::gpu::pick::PickError::NoAdapter(msg) => SurfaceGpuError::NoAdapter(msg),
+            crate::gpu::pick::PickError::NamedMissing(msg) => SurfaceGpuError::Other(msg),
+        })?;
         let named = pick.reason == crate::gpu::pick::Reason::EnvName;
         crate::marks::mark("gpu.adapter");
         if !crate::marks::noted("adapter") { crate::marks::note("adapter", Box::leak(pick.adapter.get_info().name.into_boxed_str())); }
@@ -75,7 +102,7 @@ impl Gpu {
                 Ok(Gpu::made(instance, adapter, device, queue, surface.is_some() || presented))
             }
             // A named adapter (`WGPU_ADAPTER_NAME`) never falls through to another GPU.
-            Err(error) if named => Err(error),
+            Err(error) if named => Err(SurfaceGpuError::Other(error)),
             // A driver that can't make a device (a broken integrated GPU on a hybrid laptop)
             // leaves the window to the next adapter that presents to its surface.
             Err(error) => {
@@ -95,7 +122,7 @@ impl Gpu {
                         return Ok(Gpu::made(instance, other, device, queue, surface.is_some() || presented));
                     }
                 }
-                Err(error)
+                Err(SurfaceGpuError::Other(error))
             }
         }
     }
@@ -163,6 +190,11 @@ impl Gpu {
 
     #[cfg(target_arch = "wasm32")]
     fn try_for(i: wgpu::Instance, s: Option<&wgpu::Surface<'_>>, w: wgpu::Features, _: bool) -> Result<Gpu, String> { Self::try_with_features(i, s, w) }
+
+    #[cfg(target_arch = "wasm32")]
+    fn try_for_typed(i: wgpu::Instance, s: Option<&wgpu::Surface<'_>>, w: wgpu::Features, _: bool) -> Result<Gpu, SurfaceGpuError> {
+        Self::try_with_features(i, s, w).map_err(SurfaceGpuError::Other)
+    }
 
     pub fn headless() -> Gpu {
         Self::new(Self::instance(), None)
@@ -303,13 +335,26 @@ impl Gpu {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn for_surface<'w>(wanted: wgpu::Features, translucent: bool,
         surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
-        Self::for_surface_from(prewarm::take(), wanted, translucent, surface)
+        Self::for_surface_typed(wanted, translucent, surface).map_err(SurfaceGpuError::into_string)
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn for_surface_typed<'w>(wanted: wgpu::Features, translucent: bool,
+        surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), SurfaceGpuError> {
+        Self::for_surface_from_typed(prewarm::take(), wanted, translucent, surface)
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) fn for_surface_from<'w>(early: Option<(Gpu, Renderer)>, wanted: wgpu::Features, translucent: bool,
         surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
-        let made = Self::surface_gpu_from(early, wanted, translucent, surface)?;
+        Self::for_surface_from_typed(early, wanted, translucent, surface).map_err(SurfaceGpuError::into_string)
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn for_surface_from_typed<'w>(early: Option<(Gpu, Renderer)>, wanted: wgpu::Features, translucent: bool,
+        surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), SurfaceGpuError> {
+        let made = Self::surface_gpu_from_typed(early, wanted, translucent, surface)?;
         if std::env::var_os("RUNE_GPU_LOG").is_some_and(|v| v != "0") {
             eprintln!("rune: a surface draws with {}", crate::gpu::backend::describe(&made.0.device));
         }
@@ -317,24 +362,33 @@ impl Gpu {
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    fn surface_gpu_from<'w>(early: Option<(Gpu, Renderer)>, wanted: wgpu::Features, translucent: bool,
-        surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
+    fn surface_gpu_from_typed<'w>(early: Option<(Gpu, Renderer)>, wanted: wgpu::Features, translucent: bool,
+        surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), SurfaceGpuError> {
         // A prewarmed native Metal GPU lacking a wanted feature, or one that died since it was
         // made, is dropped before it makes a surface.
         let Some((early, renderer)) = early.filter(|(gpu, _)| !gpu.is_lost() && crate::gpu::backend::serves(&gpu.device, wanted)) else {
             let instance = Self::instance_for(wanted);
-            let surface = surface(&instance)?;
+            let surface = match surface(&instance) {
+                Ok(surface) => surface,
+                Err(error) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty() {
+                        return Err(SurfaceGpuError::NoAdapter(error));
+                    }
+                    return Err(SurfaceGpuError::Other(error));
+                }
+            };
             gpu_events::starting();
-            return Ok((Self::try_for(instance, Some(&surface), wanted, translucent)?, surface, None));
+            return Ok((Self::try_for_typed(instance, Some(&surface), wanted, translucent)?, surface, None));
         };
-        let surface = surface(&early.instance)?;
+        let surface = surface(&early.instance).map_err(SurfaceGpuError::Other)?;
         if crate::render::translucency::serves(&early, &surface, wanted, translucent) {
             return Ok((early, surface, Some(renderer)));
         }
         let instance = early.instance.clone();
         drop((renderer, early));
         gpu_events::starting();
-        Ok((Self::try_for(instance, Some(&surface), wanted, translucent)?, surface, None))
+        Ok((Self::try_for_typed(instance, Some(&surface), wanted, translucent)?, surface, None))
     }
 }
 
@@ -353,6 +407,9 @@ impl Gpu {
 /// out with `GpuBackend::Wgpu` should call `prewarm_gpu_on(GpuBackend::Wgpu)` instead, so the
 /// thread starts on wgpu rather than on the native backend and starting over.
 pub fn prewarm_gpu() {
+    if crate::gpu::backend::uses_cpu() {
+        return;
+    }
     prewarm::start();
 }
 
@@ -362,7 +419,11 @@ pub fn prewarm_gpu() {
 /// it before the first `embed::LayerHost` (and `embed::prewarm`). Elsewhere, or without
 /// `metal-backend`, it is `prewarm_gpu`.
 pub fn prewarm_gpu_on(backend: crate::GpuBackend) {
-    choose_then_start(backend, choose_gpu_backend, prewarm::start);
+    choose_then_start(backend, choose_gpu_backend, || {
+        if !crate::gpu::backend::uses_cpu() {
+            prewarm::start();
+        }
+    });
 }
 
 /// `choose` before `start`: a thread started first would run on the old backend.

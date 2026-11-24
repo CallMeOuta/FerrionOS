@@ -60,9 +60,14 @@ impl AnyHost for Host {
         let covered_draw = win.and_then(|w| w.covered_draw.deadline());
         #[cfg(not(target_os = "windows"))]
         let covered_draw = None;
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        let cpu_stall = win.and_then(|w| w.native.cpu.as_ref().and_then(|c| c.stall_deadline()));
+        #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+        let cpu_stall = None;
         runtime.into_iter()
             .chain(handover)
             .chain(covered_draw)
+            .chain(cpu_stall)
             .chain(win.and_then(|w| w.first_frame.deadline().map(|(retry, _)| retry)))
             .chain(win.and_then(|w| w.first_frame.ready_deadline()))
             .chain(win.and_then(Win::cloak_deadline))
@@ -194,6 +199,16 @@ impl Host {
         if let Some(w) = &mut self.win && w.covered_draw.due(crate::time::now()) {
             w.covered_draw = w.covered_draw.step(CoveredDrawEvent::Due);
             w.request_redraw();
+        }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if let Some(w) = &mut self.win
+            && let Some(cpu) = &mut w.native.cpu
+        {
+            let ready = cpu.dispatch();
+            let stalled = cpu.stall_deadline().is_some_and(|at| at <= crate::time::now());
+            if ready || stalled {
+                w.request_redraw();
+            }
         }
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline() && retry <= crate::time::now() {
             if until <= crate::time::now() {

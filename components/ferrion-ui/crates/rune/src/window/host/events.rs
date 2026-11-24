@@ -171,7 +171,16 @@ impl Host {
                     w.request_redraw();
                 }
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            WakeEvent::FrameSlot(_) => {
+                if let Some(w) = &mut self.win
+                    && let Some(cpu) = &mut w.native.cpu
+                    && cpu.dispatch()
+                {
+                    w.request_redraw();
+                }
+            }
+            #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
             WakeEvent::FrameSlot(_) => {}
             #[cfg(target_os = "windows")]
             WakeEvent::GpuReady(_) => self.gpu_ready(),
