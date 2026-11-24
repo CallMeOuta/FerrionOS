@@ -9051,6 +9051,20 @@ def scope_escape(vm, tag, launcher):
     return guest_run(vm, tag, line, 600)
 
 
+ANSI_WITH_CURSOR = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[78]|\r")
+
+
+def parse_bracketed_listing(output, begin_marker, end_marker):
+    cleaned = ANSI_WITH_CURSOR.sub("", output)
+    match = re.search(
+        rf"(?ms)^{re.escape(begin_marker)}\n(.*?)^{re.escape(end_marker)}$",
+        cleaned,
+    )
+    if not match:
+        return None
+    return {line.strip() for line in match.group(1).splitlines() if line.strip()}
+
+
 def test_agent_scope(vm, args):
     """Security roadmap S12, storage scopes (product roadmap, agent items 1 and 3): as `user`, ferrion-run-probe escape tries every route out of a folder (absolute and /scheme/file paths, .., symlinks in and out, openat on a folder descriptor, chdir, listing, hard links, renames, writes and deletes outside, a rename-and-symlink race inside the session and between two sessions, an inherited descriptor, the starting folder, the caller's home, environment and ferrion-run's own sessions, and the sudo, file-scope, linux-session, pty, debug, shm, log and disk schemes). Each route must reach the secret without the launcher and be refused under `ferrion-run --files ~/scope`; so must stale-dir and stale-link, a folder and a file descriptor kept while their folder is renamed and a symlink to the secret's folder takes its name (an openat and a flinkat through them), which reach only a decoy without the launcher; as root, a disk must be readable without it and not under it. Then the session's namespace, its top folder and its fresh home and environment (AS2), an explicit read-only share, the hiding of ferrion-run's sessions inside a granted home, also against renaming a folder above them (unhide-rename), a session started by a program that leaks a handle to its own file table (foreign-filetable: without the launcher the probe can copy that table and so take every descriptor in it; under it the session must start and hold no such handle), and the list of symlinks the session left that lead outside its folder (written there, written and then moved, and one that was there before the session and that it moved to a depth where its relative target leaves the folder), printed when it ends."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -9090,9 +9104,18 @@ def test_agent_scope(vm, args):
         if jailed.get(route) != "REFUSED":
             problems.append(f"route {route} {jailed.get(route, 'not run')} under ferrion-run")
         notes.append(f"{route} without the launcher: {free.get(route, 'not run')}")
-    status, output = run("scleft", "ls -A /home/user/outside")
-    left = set(output.split())
-    if left != {"secret.txt", "victim.txt"}:
+    scleft_nonce = os.urandom(6).hex()
+    scleft_begin = f"SCLEFT-BEGIN-{scleft_nonce}-42"
+    scleft_end = f"SCLEFT-END-{scleft_nonce}-42"
+    status, output = run(
+        "scleft",
+        f"echo SCLEFT-BEGIN-{scleft_nonce}-$((40+2)); ls -1A /home/user/outside; rc=$?; "
+        f"echo SCLEFT-END-{scleft_nonce}-$((40+2)); (exit $rc)",
+    )
+    left = parse_bracketed_listing(output, scleft_begin, scleft_end) if status == 0 else None
+    if left is None:
+        problems.append(f"the outside folder listing gave no valid marker output (exit {status})")
+    elif left != {"secret.txt", "victim.txt"}:
         problems.append(f"the session changed the folder outside its scope: {sorted(left)}")
 
     probe = "ferrion-run-probe race-{} /home/user/scope {} 15"
