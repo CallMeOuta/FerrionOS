@@ -142,11 +142,7 @@ fn modified_dir_inner<F: FnMut(&DirEntry) -> bool>(dir: &Path, filter: F) -> Res
     let mut newest = modified(dir)?;
     for entry_res in WalkDir::new(dir).into_iter().filter_entry(filter) {
         let entry = entry_res?;
-        let meta = entry.metadata()?;
-        if meta.is_dir() {
-            continue;
-        }
-        let modified = modified_inner(entry.path(), meta)?;
+        let modified = modified_inner(entry.path(), entry.metadata()?)?;
         if modified > newest {
             newest = modified;
         }
