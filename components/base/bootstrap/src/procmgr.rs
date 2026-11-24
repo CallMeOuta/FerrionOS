@@ -29,12 +29,15 @@ use redox_scheme::{
 use slab::Slab;
 use syscall::schemev2::NewFdFlags;
 use syscall::{
-    CallFlags, ContextStatus, ContextVerb, CtxtStsBuf, EACCES, EAGAIN, EBADF, EBADFD, ECANCELED,
-    ECHILD, EEXIST, EINTR, EINVAL, ENOENT, ENOSYS, ENOTTY, EOPNOTSUPP, EOWNERDEAD, EPERM, ERESTART,
-    ESRCH, EWOULDBLOCK, Error, Event, EventFlags, FobtainFdFlags, MapFlags, O_ACCMODE, O_CREAT,
-    O_RDONLY, PAGE_SIZE, ProcSchemeAttrs, Result, SenderInfo, SetSighandlerData, SigProcControl,
-    Sigcontrol, sig_bit,
+    CallFlags, ContextStatus, ContextVerb, CtxtStsBuf, E2BIG, EACCES, EAGAIN, EBADF, EBADFD,
+    ECANCELED, ECHILD, EEXIST, EINTR, EINVAL, ENOENT, ENOSYS, ENOTTY, EOPNOTSUPP, EOWNERDEAD,
+    EPERM, ERESTART, ESRCH, EWOULDBLOCK, Error, Event, EventFlags, FobtainFdFlags, MapFlags,
+    O_ACCMODE, O_CREAT, O_RDONLY, PAGE_SIZE, ProcSchemeAttrs, Result, SenderInfo,
+    SetSighandlerData, SigProcControl, Sigcontrol, sig_bit,
 };
+
+const THREAD_CALL_TERMINATE_SIBLINGS: u64 = 0x4645_0001;
+const MAX_EXEC_SIBLINGS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum VirtualId {
@@ -166,10 +169,14 @@ pub fn run(write_fd: FdGuard, socket: Socket, auth: FdGuard, event: FdGuard) -> 
             scheme.thread_lookup.remove(&event.data);
             proc.threads.retain(|rc| !Rc::ptr_eq(rc, &thread_rc));
 
+            if proc.terminating_siblings.is_some() {
+                awoken.extend(proc.awaiting_threads_term.drain(..));
+            }
             if matches!(proc.status, ProcessStatus::Exiting { .. }) {
                 log::trace!("WAKING UP {}", proc.awaiting_threads_term.len(),);
                 awoken.extend(proc.awaiting_threads_term.drain(..)); // TODO(opt)
             } else if proc.threads.is_empty() {
+                proc.terminating_siblings = None;
                 let internal_id = scheme.next_internal_id;
                 scheme.next_internal_id += 1;
                 let Entry::Vacant(entry) = states.entry(VirtualId::InternalId(internal_id)) else {
@@ -281,6 +288,12 @@ fn handle_scheme<'a>(
 
                         resp
                     }
+                    PendingState::AwaitingSiblingsTermination { pid, tag, .. } => {
+                        if let Some(proc_rc) = scheme.processes.get(&pid) {
+                            proc_rc.borrow_mut().terminating_siblings = None;
+                        }
+                        Ready(Response::err(ECANCELED, tag))
+                    }
                     PendingState::Placeholder => {
                         log::warn!("State {:?} was placeholder!", req.id);
                         Pending
@@ -311,6 +324,11 @@ enum PendingState {
         op: OpCall,
     },
     AwaitingThreadsTermination(ProcessId, Option<Tag>),
+    AwaitingSiblingsTermination {
+        pid: ProcessId,
+        survivor: Weak<RefCell<Thread>>,
+        tag: Tag,
+    },
     Placeholder,
 }
 /*impl IntoTag for PendingState {
@@ -383,6 +401,7 @@ struct Process {
 
     status: ProcessStatus,
     disabled_setpgid: bool,
+    terminating_siblings: Option<Weak<RefCell<Thread>>>,
 
     awaiting_threads_term: Vec<VirtualId>,
 
@@ -653,6 +672,7 @@ impl<'a> ProcScheme<'a> {
 
                     status: ProcessStatus::PossiblyRunnable,
                     disabled_setpgid: false,
+                    terminating_siblings: None,
                     awaiting_threads_term: Vec::new(),
                     waitpid: BTreeMap::new(),
                     waitpid_waiting: VecDeque::new(),
@@ -763,6 +783,9 @@ impl<'a> ProcScheme<'a> {
         let child_pid = self.new_id();
 
         let proc_guard = self.processes.get(&parent_pid).ok_or(Error::new(EBADFD))?;
+        if proc_guard.borrow().terminating_siblings.is_some() {
+            return Err(Error::new(EAGAIN));
+        }
 
         let Process {
             pgid,
@@ -814,6 +837,7 @@ impl<'a> ProcScheme<'a> {
 
             status: ProcessStatus::PossiblyRunnable,
             disabled_setpgid: false,
+            terminating_siblings: None,
             awaiting_threads_term: Vec::new(),
 
             waitpid: BTreeMap::new(),
@@ -844,6 +868,9 @@ impl<'a> ProcScheme<'a> {
         // TODO: deduplicate code with fork
         let proc_rc = self.processes.get_mut(&pid).ok_or(Error::new(EBADFD))?;
         let mut proc = proc_rc.borrow_mut();
+        if proc.terminating_siblings.is_some() {
+            return Err(Error::new(EAGAIN));
+        }
 
         let ctxt_fd = self.auth.dup(b"new-context")?;
 
@@ -1110,6 +1137,9 @@ impl<'a> ProcScheme<'a> {
                 let Some(thr) = thr_weak.upgrade() else {
                     return Response::ready_err(EOWNERDEAD, op);
                 };
+                if metadata[0] == THREAD_CALL_TERMINATE_SIBLINGS {
+                    return self.on_terminate_siblings(&thr, caller, state, awoken, op.into_tag());
+                }
                 let Some(verb) = ThreadCall::try_from_raw(metadata[0] as usize) else {
                     return Response::ready_err(EINVAL, op);
                 };
@@ -1667,6 +1697,70 @@ impl<'a> ProcScheme<'a> {
         proc.pgid = new_pgid;
         Ok(())
     }
+    fn on_terminate_siblings(
+        &mut self,
+        thr: &Rc<RefCell<Thread>>,
+        caller: &CallerCtx,
+        state: VacantEntry<VirtualId, PendingState, DefaultHashBuilder>,
+        awoken: &mut VecDeque<VirtualId>,
+        tag: Tag,
+    ) -> Poll<Response> {
+        let pid = thr.borrow().pid;
+        if caller.pid != pid.0 {
+            return Response::ready_err(EPERM, tag);
+        }
+        let Some(proc_rc) = self.processes.get(&pid) else {
+            return Response::ready_err(EBADFD, tag);
+        };
+        let mut process_guard = proc_rc.borrow_mut();
+        let process = &mut *process_guard;
+
+        match process.status {
+            ProcessStatus::Stopped(_) | ProcessStatus::PossiblyRunnable => (),
+            ProcessStatus::Exiting { .. } => return Response::ready_err(EAGAIN, tag),
+            ProcessStatus::Exited { .. } => return Response::ready_err(ESRCH, tag),
+        }
+        if process.terminating_siblings.is_some() {
+            return Response::ready_err(EAGAIN, tag);
+        }
+        if process.threads.len() > MAX_EXEC_SIBLINGS {
+            return Response::ready_err(E2BIG, tag);
+        }
+        if !process.threads.iter().any(|t| Rc::ptr_eq(t, thr)) {
+            return Response::ready_err(ESRCH, tag);
+        }
+        if process.threads.len() == 1 {
+            return Ready(Response::new(Ok(0), tag));
+        }
+
+        process.terminating_siblings = Some(Rc::downgrade(thr));
+        for thread in &process.threads {
+            if Rc::ptr_eq(thread, thr) {
+                continue;
+            }
+            let thread = thread.borrow();
+            match thread
+                .status_hndl
+                .write(&(ContextVerb::ForceKill as usize).to_ne_bytes())
+            {
+                Ok(_) | Err(Error { errno: EOWNERDEAD }) => (),
+                Err(err) => {
+                    process.terminating_siblings = None;
+                    return Response::ready_err(err.errno, tag);
+                }
+            }
+        }
+
+        drop(process_guard);
+        self.work_on(
+            state.insert_entry(PendingState::AwaitingSiblingsTermination {
+                pid,
+                survivor: Rc::downgrade(thr),
+                tag,
+            }),
+            awoken,
+        )
+    }
     fn on_exit_start(
         &mut self,
         pid: ProcessId,
@@ -1726,6 +1820,8 @@ impl<'a> ProcScheme<'a> {
             (0, NonZeroU8::new(sig))
         };
 
+        process.terminating_siblings = None;
+        awoken.extend(process.awaiting_threads_term.drain(..));
         process.status = ProcessStatus::Exiting { status, signal };
         if !process.threads.is_empty() {
             // terminate all threads (possibly including the caller, resulting in EINTR and a
@@ -2206,6 +2302,41 @@ impl<'a> ProcScheme<'a> {
                     *state = PendingState::AwaitingThreadsTermination(current_pid, tag);
                     Pending
                 }
+            }
+            PendingState::AwaitingSiblingsTermination { pid, survivor, tag } => {
+                let Some(proc_rc) = self.processes.get(&pid) else {
+                    state_entry.remove();
+                    return Response::ready_err(ESRCH, tag);
+                };
+                let mut proc_guard = proc_rc.borrow_mut();
+                let proc = &mut *proc_guard;
+                if matches!(
+                    proc.status,
+                    ProcessStatus::Exiting { .. } | ProcessStatus::Exited { .. }
+                ) {
+                    proc.terminating_siblings = None;
+                    state_entry.remove();
+                    return Response::ready_err(ESRCH, tag);
+                }
+                let Some(survivor_rc) = survivor.upgrade() else {
+                    proc.terminating_siblings = None;
+                    state_entry.remove();
+                    return Response::ready_err(ESRCH, tag);
+                };
+                if proc.threads.len() == 1 && Rc::ptr_eq(&proc.threads[0], &survivor_rc) {
+                    proc.terminating_siblings = None;
+                    state_entry.remove();
+                    return Ready(Response::new(Ok(0), tag));
+                }
+                if !proc.threads.iter().any(|t| Rc::ptr_eq(t, &survivor_rc)) {
+                    proc.terminating_siblings = None;
+                    state_entry.remove();
+                    return Response::ready_err(ESRCH, tag);
+                }
+                proc.awaiting_threads_term.push(req_id);
+                *state_entry.get_mut() =
+                    PendingState::AwaitingSiblingsTermination { pid, survivor, tag };
+                Pending
             }
             PendingState::AwaitingStatusChange {
                 waiter,
