@@ -1,7 +1,0 @@
-[source]
-tar = "https://download.gnome.org/sources/graphene/1.10/graphene-1.10.8.tar.xz"
-[build]
-template = "meson"
-mesonflags = [
-    "-Dtests=false",
-]

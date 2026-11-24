@@ -1,0 +1,26 @@
+[package]
+description = "Thin layer of graphic data types for 2D and 3D math"
+
+[source]
+tar = "https://download.gnome.org/sources/graphene/1.10/graphene-1.10.8.tar.xz"
+blake3 = "03eb8c40d25df4875acf0922e386c0fb4720189ff3ad22346d5659aea4647c7f"
+
+[build]
+template = "custom"
+dependencies = [
+    "glib",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_meson \
+    --wrap-mode=nodownload \
+    -Dauto_features=disabled \
+    -Dgobject_types=true \
+    -Dintrospection=disabled \
+    -Dgtk_doc=false \
+    -Dtests=false \
+    -Dinstalled_tests=false
+
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE.txt" "${COOKBOOK_STAGE}/usr/share/licenses/graphene/LICENSE.txt"
+"""
