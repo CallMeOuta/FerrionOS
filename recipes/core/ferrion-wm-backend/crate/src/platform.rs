@@ -9,18 +9,23 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use drm::buffer::{Buffer as _, DrmFourcc};
-use drm::control::{ClipRect, Device as _, connector, crtc, dumbbuffer::DumbBuffer, framebuffer};
+use drm::control::{Device as _, connector, crtc, dumbbuffer::DumbBuffer};
 use drm::{ClientCapability, Device as _, DriverCapability};
 use graphics_ipc::redox_uapi_exts::REDOX_DRM_CLIENT_CAP_HOTPLUG_EVENTS;
-use graphics_ipc::{CpuBackedBuffer, DrmHandle, RedoxDrmEvent};
+use graphics_ipc::{DrmHandle, RedoxDrmEvent};
 use inputd::ControlHandle;
 
+use crate::presenter::{self, Presenter};
 use crate::vt::{Consumer, ConsumerEvent};
-use crate::{BackendEvent, CursorTiming, Input, Presentation, input::InputState};
+use crate::{
+    BackendEvent, CursorTiming, FlipCompletion, Input, PresentMode, PresentPreference,
+    Presentation, input::InputState,
+};
 
 pub struct Backend {
     input: Arc<Consumer>,
     display: Display,
+    preference: PresentPreference,
     shared: Arc<Shared>,
     receiver: mpsc::Receiver<BackendEvent>,
     stop_writer: File,
@@ -58,9 +63,7 @@ struct Shared {
 }
 
 struct Display {
-    drm: Arc<DrmHandle>,
-    framebuffer: framebuffer::Handle,
-    buffer: Option<CpuBackedBuffer>,
+    presenter: Presenter,
     dimensions: (u32, u32),
     refresh: Option<Duration>,
 }
@@ -73,15 +76,22 @@ struct Cursor {
 
 impl Backend {
     pub fn open() -> io::Result<Self> {
-        Self::open_with_wakeup(|| {})
+        Self::open_with_presenter(|| {}, PresentPreference::DirtyFb)
     }
 
     pub fn open_with_wakeup(wakeup: impl Fn() + Send + Sync + 'static) -> io::Result<Self> {
+        Self::open_with_presenter(wakeup, PresentPreference::DirtyFb)
+    }
+
+    pub fn open_with_presenter(
+        wakeup: impl Fn() + Send + Sync + 'static,
+        preference: PresentPreference,
+    ) -> io::Result<Self> {
         let epoch = Instant::now();
         let (consumer, inherited) = Consumer::open_or_inherited()?;
         let vt = consumer.vt();
         let input = Arc::new(consumer);
-        let (display, output) = Display::open(&input)?;
+        let (display, output) = Display::open(&input, preference)?;
         let (stop_reader, stop_writer) = stop_pipe()?;
         let shared = Arc::new(Shared {
             phase: Mutex::new(DisplayPhase::Active(output)),
@@ -107,6 +117,7 @@ impl Backend {
         let backend = Self {
             input,
             display,
+            preference,
             shared,
             receiver,
             stop_writer,
@@ -129,7 +140,17 @@ impl Backend {
         self.display.dimensions
     }
     pub fn stride(&self) -> u32 {
-        self.display.buffer.as_ref().unwrap().buffer().pitch()
+        self.display.presenter.stride()
+    }
+    pub fn present_mode(&self) -> PresentMode {
+        self.display.presenter.present_mode()
+    }
+    pub fn flip_in_flight(&self) -> bool {
+        self.display.presenter.flip_in_flight()
+    }
+    pub fn complete_flip(&mut self) -> io::Result<()> {
+        self.check_failure()?;
+        self.display.presenter.complete_flip()
     }
     pub fn now_us(&self) -> u64 {
         elapsed_us(self.epoch)
@@ -148,7 +169,7 @@ impl Backend {
             DisplayPhase::Active(_) | DisplayPhase::ChangeQueued(_)
         ));
         drop(phase);
-        self.display.buffer.as_mut().unwrap().shadow_buf()
+        self.display.presenter.framebuffer_mut()
     }
 
     pub fn present(&mut self) -> io::Result<Presentation> {
@@ -165,21 +186,13 @@ impl Backend {
             }
         }
         let started_us = self.now_us();
-        let (width, height) = self.display.dimensions;
-        self.display
-            .buffer
-            .as_mut()
-            .unwrap()
-            .sync_rect(0, 0, width, height);
-        let result = self.display.drm.dirty_framebuffer(
-            self.display.framebuffer,
-            &[ClipRect::new(0, 0, width as u16, height as u16)],
-        );
+        let epoch = self.epoch;
+        let result = self
+            .display
+            .presenter
+            .present(started_us, || elapsed_us(epoch));
         match result {
-            Ok(()) => Ok(Presentation {
-                started_us,
-                completed_us: self.now_us(),
-            }),
+            Ok(presentation) => Ok(presentation),
             Err(error) => {
                 let phase = self.shared.phase.lock().unwrap();
                 if matches!(*phase, DisplayPhase::Active(_)) {
@@ -287,7 +300,7 @@ impl Backend {
         self.check_failure()?;
         let mut phase = self.shared.phase.lock().unwrap();
         assert!(matches!(*phase, DisplayPhase::ChangePending));
-        let (display, replacement) = Display::open(&self.input)?;
+        let (display, replacement) = Display::open(&self.input, self.preference)?;
         self.display = display;
         *phase = DisplayPhase::Active(replacement);
         self.shared.changed.notify_one();
@@ -328,8 +341,10 @@ impl Drop for Backend {
     }
 }
 
+const MAX_DISPLAY_OPEN_ATTEMPTS: usize = 4;
+
 impl Display {
-    fn open(input: &Consumer) -> io::Result<(Self, ActiveOutput)> {
+    fn open(input: &Consumer, preference: PresentPreference) -> io::Result<(Self, ActiveOutput)> {
         let drm = Arc::new(DrmHandle::from_file(input.open_display()?)?);
         drm.set_client_capability(ClientCapability::UniversalPlanes, true)?;
         // Virtual devices use hotspots; physical devices may legitimately omit
@@ -340,37 +355,56 @@ impl Display {
             u64::from(REDOX_DRM_CLIENT_CAP_HOTPLUG_EVENTS),
             true,
         )?;
-        let resources = drm.resource_handles()?;
-        let mut fallback = None;
-        for &connector in resources.connectors() {
-            let info = drm.get_connector(connector, true)?;
-            if info.state() != connector::State::Connected {
-                continue;
-            }
-            let Some(&mode) = info.modes().first() else {
-                continue;
-            };
-            let dimensions = (u32::from(mode.size().0), u32::from(mode.size().1));
-            if dimensions.0 == 0 || dimensions.1 == 0 {
-                continue;
-            }
-            for &encoder in info.encoders() {
-                for crtc in resources.filter_crtcs(drm.get_encoder(encoder)?.possible_crtcs()) {
-                    if has_cursor(&drm, crtc)? {
-                        return Self::setup_output(drm, connector, mode, dimensions, crtc, true);
-                    }
-                    if fallback.is_none() {
-                        fallback = Some((connector, mode, dimensions, crtc));
+        for _ in 0..MAX_DISPLAY_OPEN_ATTEMPTS {
+            let resources = drm.resource_handles()?;
+            let mut fallback = None;
+            let mut chosen = None;
+            'scan: for &connector in resources.connectors() {
+                let info = drm.get_connector(connector, true)?;
+                if info.state() != connector::State::Connected {
+                    continue;
+                }
+                let Some(&mode) = info.modes().first() else {
+                    continue;
+                };
+                let dimensions = (u32::from(mode.size().0), u32::from(mode.size().1));
+                if dimensions.0 == 0 || dimensions.1 == 0 {
+                    continue;
+                }
+                for &encoder in info.encoders() {
+                    for crtc in resources.filter_crtcs(drm.get_encoder(encoder)?.possible_crtcs()) {
+                        if has_cursor(&drm, crtc)? {
+                            chosen = Some((connector, mode, dimensions, crtc, true));
+                            break 'scan;
+                        }
+                        if fallback.is_none() {
+                            fallback = Some((connector, mode, dimensions, crtc, false));
+                        }
                     }
                 }
             }
-        }
-        if let Some((connector, mode, dimensions, crtc)) = fallback {
-            return Self::setup_output(drm, connector, mode, dimensions, crtc, false);
+            let Some((connector, mode, dimensions, crtc, with_cursor)) = chosen.or(fallback) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "no connected DRM output",
+                ));
+            };
+            let (display, output, hotplug_seen) = Self::setup_output(
+                Arc::clone(&drm),
+                connector,
+                mode,
+                dimensions,
+                crtc,
+                with_cursor,
+                preference,
+            )?;
+            if !hotplug_seen {
+                return Ok((display, output));
+            }
         }
         Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no connected DRM output",
+            io::ErrorKind::WouldBlock,
+            "display changed repeatedly during startup probe",
         ))
     }
 
@@ -381,30 +415,21 @@ impl Display {
         dimensions: (u32, u32),
         crtc: crtc::Handle,
         with_cursor: bool,
-    ) -> io::Result<(Self, ActiveOutput)> {
-        let buffer = CpuBackedBuffer::new(&drm, dimensions, DrmFourcc::Argb8888, 32)?;
-        let framebuffer = match drm.add_framebuffer(buffer.buffer(), 32, 32) {
-            Ok(fb) => fb,
-            Err(error) => {
-                let _ = buffer.destroy(&drm);
-                return Err(error);
-            }
-        };
-        let mut display = Self {
-            drm: Arc::clone(&drm),
-            framebuffer,
-            buffer: Some(buffer),
+        preference: PresentPreference,
+    ) -> io::Result<(Self, ActiveOutput, bool)> {
+        let (presenter, hotplug_seen) = presenter::open_presenter(
+            Arc::clone(&drm),
+            crtc,
+            connector,
+            mode,
+            preference,
+        )?;
+        let display = Self {
+            presenter,
             dimensions,
             refresh: (mode.vrefresh() > 0)
                 .then(|| Duration::from_secs_f64(1.0 / f64::from(mode.vrefresh()))),
         };
-        display.buffer.as_mut().unwrap().shadow_buf().fill(0);
-        display
-            .buffer
-            .as_mut()
-            .unwrap()
-            .sync_rect(0, 0, dimensions.0, dimensions.1);
-        drm.set_crtc(crtc, Some(framebuffer), (0, 0), &[connector], Some(mode))?;
         let cursor = if with_cursor {
             Some(Cursor::new(Arc::clone(&drm), crtc)?)
         } else {
@@ -417,16 +442,8 @@ impl Display {
                 dimensions,
                 cursor,
             },
+            hotplug_seen,
         ))
-    }
-}
-
-impl Drop for Display {
-    fn drop(&mut self) {
-        let _ = self.drm.destroy_framebuffer(self.framebuffer);
-        if let Some(buffer) = self.buffer.take() {
-            let _ = buffer.destroy(&self.drm);
-        }
     }
 }
 
@@ -574,7 +591,21 @@ fn read_input(
         if fds[2].revents & libc::POLLIN != 0 {
             let mut changed = false;
             for event in drm.redox_receive_events()? {
-                changed |= matches!(event, RedoxDrmEvent::RedoxConnectorHotplug(_));
+                match event {
+                    RedoxDrmEvent::RedoxConnectorHotplug(_) => {
+                        changed = true;
+                    }
+                    RedoxDrmEvent::PageFlip(flip) => {
+                        let completion = FlipCompletion {
+                            crtc: u32::from(flip.crtc),
+                            completed_us: elapsed_us(epoch),
+                            sequence: flip.frame,
+                            tv_us: flip.duration.as_micros().min(u128::from(u64::MAX)) as u64,
+                        };
+                        send(&sender, shared, BackendEvent::FlipComplete(completion))?;
+                    }
+                    _ => {}
+                }
             }
             if changed {
                 if !queue_display_change(shared) {

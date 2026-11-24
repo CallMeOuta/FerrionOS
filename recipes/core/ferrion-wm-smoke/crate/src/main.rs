@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             match event {
                 BackendEvent::Input(input) => state.input(input.into_smithay()),
                 BackendEvent::CursorTiming(timing) => println!("DD1_POINTER read_us={} completed_us={} elapsed_us={} x={} y={}", timing.read_us, timing.completed_us, timing.elapsed_us(), timing.x, timing.y),
+                BackendEvent::FlipComplete(_) => {}
                 BackendEvent::DisplayChanged => {
                     drop(image);
                     backend.reconfigure()?;

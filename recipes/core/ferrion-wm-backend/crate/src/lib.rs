@@ -18,11 +18,16 @@
 mod input;
 #[cfg(target_os = "redox")]
 mod platform;
+#[cfg(target_os = "redox")]
+mod presenter;
 mod scheduler;
 #[cfg(feature = "smithay")]
 mod smithay_input;
 #[cfg(target_os = "redox")]
 mod vt;
+
+pub const SWAP_BUFFERS: usize = 2;
+pub const MAX_IN_FLIGHT_FLIPS: usize = 1;
 
 pub use input::{AxisEvent, ButtonEvent, Input, KeyEvent, MotionEvent};
 #[cfg(target_os = "redox")]
@@ -49,15 +54,38 @@ impl CursorTiming {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentMode {
+    DirtyFb,
+    PageFlip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentPreference {
+    DirtyFb,
+    PageFlip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlipCompletion {
+    pub crtc: u32,
+    pub completed_us: u64,
+    pub sequence: u32,
+    pub tv_us: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Presentation {
     pub started_us: u64,
     pub completed_us: u64,
+    pub mode: PresentMode,
+    pub pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendEvent {
     Input(Input),
     CursorTiming(CursorTiming),
+    FlipComplete(FlipCompletion),
     /// Release renderer images, call `Backend::reconfigure`, then rebind.
     DisplayChanged,
 }
@@ -71,6 +99,12 @@ impl Backend {
         ))
     }
     pub fn open_with_wakeup(_wakeup: impl Fn() + Send + Sync + 'static) -> std::io::Result<Self> {
+        Self::open()
+    }
+    pub fn open_with_presenter(
+        _wakeup: impl Fn() + Send + Sync + 'static,
+        _preference: PresentPreference,
+    ) -> std::io::Result<Self> {
         Self::open()
     }
     pub fn cursor_size(&self) -> std::io::Result<(u32, u32)> {
@@ -91,6 +125,15 @@ impl Backend {
         match *self {}
     }
     pub fn stride(&self) -> u32 {
+        match *self {}
+    }
+    pub fn present_mode(&self) -> PresentMode {
+        match *self {}
+    }
+    pub fn flip_in_flight(&self) -> bool {
+        match *self {}
+    }
+    pub fn complete_flip(&mut self) -> std::io::Result<()> {
         match *self {}
     }
     pub fn now_us(&self) -> u64 {
