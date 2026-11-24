@@ -1,5 +1,5 @@
 [package]
-description = "wgpu triangle, headless to a PNG and in a winit window, on Mesa's CPU Vulkan driver"
+description = "wgpu triangle, headless to a PNG and in a winit window, through Vulkan"
 dependencies = [
     "libvulkan",
     "mesa",

@@ -27,3 +27,8 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "way
 
 [profile.release]
 debug = false
+
+[patch.crates-io]
+wgpu = { path = "../../../../../components/wgpu/wgpu" }
+wgpu-core = { path = "../../../../../components/wgpu/wgpu-core" }
+wgpu-core-deps-windows-linux-android = { path = "../../../../../components/wgpu/wgpu-core-deps-windows-linux-android" }
