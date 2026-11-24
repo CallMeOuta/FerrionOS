@@ -1,0 +1,800 @@
+FerrionOS change to the upstream bootloader (MIT license, kept), applied after ferrion-edid-gop-mode.patch, made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8:
+- extend src/edid.rs to decode CTA-861 Video Data Block short video descriptors (progressive VICs 1-219, bounded by MAX_CTA_DATA_BLOCKS=32 and MAX_CTA_VICS=31), compute exact refresh rates in millihertz using u64 arithmetic across base/CTA DTDs, CTA VICs, and DisplayID Type I/VII timings, and return a bounded mode list (MAX_EDID_MODES=64) with warning on truncation;
+- tighten choose_video_mode in src/main.rs to exact, exact aspect <= preferred, 1%-tolerance aspect <= preferred (ASPECT_TOLERANCE_NUM=1, ASPECT_TOLERANCE_DEN=100 in u64), largest mode that fits within the panel (w <= pw and h <= ph), and largest overall only when nothing fits;
+- log the preferred timing's exact refresh rate and note that GOP sets size only.
+
+diff -ruN '--exclude=*.orig' build/r1a-bootloader-orig/src/edid.rs build/r1a-bootloader-work/src/edid.rs
+--- a/src/edid.rs	2026-11-24 00:16:47.132971979 -0800
++++ b/src/edid.rs	2026-11-24 00:20:21.510885590 -0800
+@@ -1,20 +1,195 @@
+ pub const EDID_BLOCK_SIZE: usize = 128;
+ pub const MAX_EDID_EXTENSION_BLOCKS: usize = 8;
+ pub const MAX_EDID_TOTAL_BLOCKS: usize = 256;
++pub const MAX_CTA_DATA_BLOCKS: usize = 32;
++pub const MAX_CTA_VICS: usize = 31;
+ pub const MAX_CTA_DTDS: usize = 6;
+ pub const MAX_DISPLAYID_BLOCKS: usize = 32;
+ pub const MAX_DISPLAYID_TIMINGS: usize = 6;
++pub const MAX_EDID_MODES: usize = 64;
+ 
+ const EDID_HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+ const EXT_TAG_CTA: u8 = 0x02;
+ const EXT_TAG_DISPLAYID: u8 = 0x70;
++const CTA_TAG_VIDEO: u8 = 0x02;
+ const DISPLAYID_TAG_TYPE_I: u8 = 0x03;
+ const DISPLAYID_TAG_TYPE_VII: u8 = 0x22;
+ 
++const CTA_PROGRESSIVE_VICS: &[(u8, u16, u16, u32)] = &[
++    (1, 640, 480, 59940),
++    (2, 720, 480, 59940),
++    (3, 720, 480, 59940),
++    (4, 1280, 720, 60000),
++    (8, 1440, 240, 60054),
++    (9, 1440, 240, 60054),
++    (12, 2880, 240, 60054),
++    (13, 2880, 240, 60054),
++    (14, 1440, 480, 59940),
++    (15, 1440, 480, 59940),
++    (16, 1920, 1080, 60000),
++    (17, 720, 576, 50000),
++    (18, 720, 576, 50000),
++    (19, 1280, 720, 50000),
++    (23, 1440, 288, 50080),
++    (24, 1440, 288, 50080),
++    (27, 2880, 288, 50080),
++    (28, 2880, 288, 50080),
++    (29, 1440, 576, 50000),
++    (30, 1440, 576, 50000),
++    (31, 1920, 1080, 50000),
++    (32, 1920, 1080, 24000),
++    (33, 1920, 1080, 25000),
++    (34, 1920, 1080, 30000),
++    (35, 2880, 480, 59940),
++    (36, 2880, 480, 59940),
++    (37, 2880, 576, 50000),
++    (38, 2880, 576, 50000),
++    (41, 1280, 720, 100000),
++    (42, 720, 576, 100000),
++    (43, 720, 576, 100000),
++    (47, 1280, 720, 120000),
++    (48, 720, 480, 119880),
++    (49, 720, 480, 119880),
++    (52, 720, 576, 200000),
++    (53, 720, 576, 200000),
++    (56, 720, 480, 239760),
++    (57, 720, 480, 239760),
++    (60, 1280, 720, 24000),
++    (61, 1280, 720, 25000),
++    (62, 1280, 720, 30000),
++    (63, 1920, 1080, 120000),
++    (64, 1920, 1080, 100000),
++    (65, 1280, 720, 24000),
++    (66, 1280, 720, 25000),
++    (67, 1280, 720, 30000),
++    (68, 1280, 720, 50000),
++    (69, 1280, 720, 60000),
++    (70, 1280, 720, 100000),
++    (71, 1280, 720, 120000),
++    (72, 1920, 1080, 24000),
++    (73, 1920, 1080, 25000),
++    (74, 1920, 1080, 30000),
++    (75, 1920, 1080, 50000),
++    (76, 1920, 1080, 60000),
++    (77, 1920, 1080, 100000),
++    (78, 1920, 1080, 120000),
++    (79, 1680, 720, 24000),
++    (80, 1680, 720, 25000),
++    (81, 1680, 720, 30000),
++    (82, 1680, 720, 50000),
++    (83, 1680, 720, 60000),
++    (84, 1680, 720, 100000),
++    (85, 1680, 720, 120000),
++    (86, 2560, 1080, 24000),
++    (87, 2560, 1080, 25000),
++    (88, 2560, 1080, 30000),
++    (89, 2560, 1080, 50000),
++    (90, 2560, 1080, 60000),
++    (91, 2560, 1080, 100000),
++    (92, 2560, 1080, 120000),
++    (93, 3840, 2160, 24000),
++    (94, 3840, 2160, 25000),
++    (95, 3840, 2160, 30000),
++    (96, 3840, 2160, 50000),
++    (97, 3840, 2160, 60000),
++    (98, 4096, 2160, 24000),
++    (99, 4096, 2160, 25000),
++    (100, 4096, 2160, 30000),
++    (101, 4096, 2160, 50000),
++    (102, 4096, 2160, 60000),
++    (103, 3840, 2160, 24000),
++    (104, 3840, 2160, 25000),
++    (105, 3840, 2160, 30000),
++    (106, 3840, 2160, 50000),
++    (107, 3840, 2160, 60000),
++    (108, 1280, 720, 48000),
++    (109, 1280, 720, 48000),
++    (110, 1680, 720, 48000),
++    (111, 1920, 1080, 48000),
++    (112, 1920, 1080, 48000),
++    (113, 2560, 1080, 48000),
++    (114, 3840, 2160, 48000),
++    (115, 4096, 2160, 48000),
++    (116, 3840, 2160, 48000),
++    (117, 3840, 2160, 100000),
++    (118, 3840, 2160, 120000),
++    (119, 3840, 2160, 100000),
++    (120, 3840, 2160, 120000),
++    (121, 5120, 2160, 24000),
++    (122, 5120, 2160, 25000),
++    (123, 5120, 2160, 30000),
++    (124, 5120, 2160, 48000),
++    (125, 5120, 2160, 50000),
++    (126, 5120, 2160, 60000),
++    (127, 5120, 2160, 100000),
++    (193, 5120, 2160, 120000),
++    (194, 7680, 4320, 24000),
++    (195, 7680, 4320, 25000),
++    (196, 7680, 4320, 30000),
++    (197, 7680, 4320, 48000),
++    (198, 7680, 4320, 50000),
++    (199, 7680, 4320, 60000),
++    (200, 7680, 4320, 100000),
++    (201, 7680, 4320, 120000),
++    (202, 7680, 4320, 24000),
++    (203, 7680, 4320, 25000),
++    (204, 7680, 4320, 30000),
++    (205, 7680, 4320, 48000),
++    (206, 7680, 4320, 50000),
++    (207, 7680, 4320, 60000),
++    (208, 7680, 4320, 100000),
++    (209, 7680, 4320, 120000),
++    (210, 10240, 4320, 24000),
++    (211, 10240, 4320, 25000),
++    (212, 10240, 4320, 30000),
++    (213, 10240, 4320, 48000),
++    (214, 10240, 4320, 50000),
++    (215, 10240, 4320, 60000),
++    (216, 10240, 4320, 100000),
++    (217, 10240, 4320, 120000),
++    (218, 4096, 2160, 100000),
++    (219, 4096, 2160, 120000),
++];
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum TimingSource {
++    BaseDtd,
++    CtaDtd,
++    CtaVic,
++    DisplayIdType1,
++    DisplayIdType7,
++}
++
++impl TimingSource {
++    #[allow(dead_code)]
++    pub fn label(self) -> &'static str {
++        match self {
++            TimingSource::BaseDtd => "base-dtd",
++            TimingSource::CtaDtd => "cta-dtd",
++            TimingSource::CtaVic => "cta-vic",
++            TimingSource::DisplayIdType1 => "displayid-type1",
++            TimingSource::DisplayIdType7 => "displayid-type7",
++        }
++    }
++}
++
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+-pub struct Timing {
++pub struct ModeTiming {
+     pub width: u32,
+     pub height: u32,
++    pub refresh_mhz: u32,
++    pub preferred: bool,
++    pub source: TimingSource,
++}
++
++impl ModeTiming {
++    const ZERO: Self = Self {
++        width: 0,
++        height: 0,
++        refresh_mhz: 0,
++        preferred: false,
++        source: TimingSource::BaseDtd,
++    };
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -27,68 +202,203 @@
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub struct DecodedEdid {
+-    pub preferred: Timing,
++    pub preferred: ModeTiming,
++    pub modes: [ModeTiming; MAX_EDID_MODES],
++    pub mode_count: usize,
++    pub modes_truncated: bool,
+     pub extensions_truncated: bool,
+     pub bad_extension_blocks: usize,
+ }
+ 
++struct ModeList {
++    modes: [ModeTiming; MAX_EDID_MODES],
++    count: usize,
++    truncated: bool,
++}
++
++impl ModeList {
++    fn new() -> Self {
++        Self {
++            modes: [ModeTiming::ZERO; MAX_EDID_MODES],
++            count: 0,
++            truncated: false,
++        }
++    }
++
++    fn push(&mut self, mode: ModeTiming) {
++        if self.count < MAX_EDID_MODES {
++            self.modes[self.count] = mode;
++            self.count += 1;
++        } else {
++            self.truncated = true;
++        }
++    }
++}
++
+ fn valid_checksum(block: &[u8]) -> bool {
+     if block.len() != EDID_BLOCK_SIZE {
+         return false;
+     }
+-    block
+-        .iter()
+-        .fold(0u8, |acc, &byte| acc.wrapping_add(byte))
+-        == 0
++    block.iter().fold(0u8, |acc, &byte| acc.wrapping_add(byte)) == 0
++}
++
++fn compute_refresh_mhz(pixel_clock_hz: u64, htotal: u64, vtotal: u64) -> Option<u32> {
++    if pixel_clock_hz == 0 || htotal == 0 || vtotal == 0 {
++        return None;
++    }
++    let denom = htotal.checked_mul(vtotal)?;
++    let num = pixel_clock_hz.checked_mul(1000)?.checked_add(denom / 2)?;
++    let mhz = num / denom;
++    if mhz == 0 {
++        return None;
++    }
++    u32::try_from(mhz).ok()
+ }
+ 
+-fn parse_dtd(desc: &[u8]) -> Option<Timing> {
++fn parse_dtd(desc: &[u8], preferred: bool, source: TimingSource) -> Option<ModeTiming> {
+     if desc.len() < 18 {
+         return None;
+     }
+-    let pixel_clock = u16::from_le_bytes([desc[0], desc[1]]);
+-    if pixel_clock == 0 {
++    let pixel_clock_10khz = u16::from_le_bytes([desc[0], desc[1]]);
++    if pixel_clock_10khz == 0 {
++        return None;
++    }
++    if (desc[17] & 0x80) != 0 {
+         return None;
+     }
+     let width = (desc[2] as u32) | (((desc[4] as u32) & 0xF0) << 4);
++    let hblank = (desc[3] as u32) | (((desc[4] as u32) & 0x0F) << 8);
+     let height = (desc[5] as u32) | (((desc[7] as u32) & 0xF0) << 4);
++    let vblank = (desc[6] as u32) | (((desc[7] as u32) & 0x0F) << 8);
+     if width == 0 || height == 0 {
+         return None;
+     }
+-    Some(Timing { width, height })
++    let pixel_clock_hz = u64::from(pixel_clock_10khz) * 10_000;
++    let htotal = u64::from(width) + u64::from(hblank);
++    let vtotal = u64::from(height) + u64::from(vblank);
++    let refresh_mhz = compute_refresh_mhz(pixel_clock_hz, htotal, vtotal)?;
++    Some(ModeTiming {
++        width,
++        height,
++        refresh_mhz,
++        preferred,
++        source,
++    })
++}
++
++fn lookup_cta_vic(vic: u8) -> Option<(u32, u32, u32)> {
++    let idx = CTA_PROGRESSIVE_VICS
++        .binary_search_by_key(&vic, |entry| entry.0)
++        .ok()?;
++    let (_v, w, h, refresh_mhz) = CTA_PROGRESSIVE_VICS[idx];
++    Some((u32::from(w), u32::from(h), refresh_mhz))
+ }
+ 
+-fn parse_base_dtd(base: &[u8]) -> Option<Timing> {
++fn decode_svd(svd: u8) -> Option<(u8, bool)> {
++    match svd {
++        1..=64 => Some((svd, false)),
++        129..=192 => Some((svd & 0x7F, true)),
++        65..=127 | 193..=219 => Some((svd, false)),
++        _ => None,
++    }
++}
++
++fn parse_base_dtds(base: &[u8], list: &mut ModeList) -> Option<ModeTiming> {
+     assert_eq!(base.len(), EDID_BLOCK_SIZE);
++    let mut first = None;
+     for slot in 0..4usize {
+         let offset = 54 + slot * 18;
+-        if let Some(timing) = parse_dtd(&base[offset..offset + 18]) {
+-            return Some(timing);
++        let is_preferred = first.is_none();
++        if let Some(timing) = parse_dtd(
++            &base[offset..offset + 18],
++            is_preferred,
++            TimingSource::BaseDtd,
++        ) {
++            if first.is_none() {
++                first = Some(timing);
++            }
++            list.push(timing);
+         }
+     }
+-    None
++    first
+ }
+ 
+-fn parse_cta_extension(block: &[u8]) -> Option<Timing> {
++fn parse_cta_extension(
++    block: &[u8],
++    list: &mut ModeList,
++) -> (Option<ModeTiming>, Option<ModeTiming>, Option<ModeTiming>) {
+     assert_eq!(block.len(), EDID_BLOCK_SIZE);
+     let dtd_offset = block[2] as usize;
+-    if dtd_offset < 4 || dtd_offset >= 127 {
+-        return None;
+-    }
+-    let mut offset = dtd_offset;
+-    for _ in 0..MAX_CTA_DTDS {
+-        if offset + 18 > 127 {
+-            break;
++    let mut native_vic = None;
++    let mut first_vic = None;
++    let mut first_dtd = None;
++
++    if dtd_offset > 4 && dtd_offset <= 127 {
++        let mut pos = 4usize;
++        for _ in 0..MAX_CTA_DATA_BLOCKS {
++            if pos >= dtd_offset {
++                break;
++            }
++            let header = block[pos];
++            let tag = header >> 5;
++            let len = (header & 0x1F) as usize;
++            let data_start = pos + 1;
++            let data_end = data_start + len;
++            if data_end > dtd_offset {
++                break;
++            }
++            if tag == CTA_TAG_VIDEO {
++                let count = len.min(MAX_CTA_VICS);
++                for i in 0..count {
++                    if let Some((vic, native)) = decode_svd(block[data_start + i]) {
++                        if let Some((width, height, refresh_mhz)) = lookup_cta_vic(vic) {
++                            let timing = ModeTiming {
++                                width,
++                                height,
++                                refresh_mhz,
++                                preferred: native,
++                                source: TimingSource::CtaVic,
++                            };
++                            if native && native_vic.is_none() {
++                                native_vic = Some(timing);
++                            }
++                            if first_vic.is_none() {
++                                first_vic = Some(timing);
++                            }
++                            list.push(timing);
++                        }
++                    }
++                }
++            }
++            pos = data_end;
+         }
+-        if let Some(timing) = parse_dtd(&block[offset..offset + 18]) {
+-            return Some(timing);
++    }
++
++    if dtd_offset >= 4 && dtd_offset < 127 {
++        let mut offset = dtd_offset;
++        for _ in 0..MAX_CTA_DTDS {
++            if offset + 18 > 127 {
++                break;
++            }
++            if let Some(timing) =
++                parse_dtd(&block[offset..offset + 18], false, TimingSource::CtaDtd)
++            {
++                if first_dtd.is_none() {
++                    first_dtd = Some(timing);
++                }
++                list.push(timing);
++            }
++            offset += 18;
+         }
+-        offset += 18;
+     }
+-    None
++
++    (native_vic, first_dtd, first_vic)
+ }
+ 
+-fn parse_displayid_extension(block: &[u8]) -> (Option<Timing>, Option<Timing>) {
++fn parse_displayid_extension(
++    block: &[u8],
++    list: &mut ModeList,
++) -> (Option<ModeTiming>, Option<ModeTiming>) {
+     assert_eq!(block.len(), EDID_BLOCK_SIZE);
+     let payload_len = block[2] as usize;
+     let section_end = 5 + payload_len;
+@@ -117,19 +427,50 @@
+             break;
+         }
+         if tag == DISPLAYID_TAG_TYPE_I || tag == DISPLAYID_TAG_TYPE_VII {
++            let step_hz: u64 = if tag == DISPLAYID_TAG_TYPE_I {
++                10_000
++            } else {
++                1_000
++            };
++            let source = if tag == DISPLAYID_TAG_TYPE_I {
++                TimingSource::DisplayIdType1
++            } else {
++                TimingSource::DisplayIdType7
++            };
+             let count = (len / 20).min(MAX_DISPLAYID_TIMINGS);
+             for i in 0..count {
+                 let d = &block[data_start + i * 20..data_start + (i + 1) * 20];
+                 let flags = d[3];
+-                let width = u16::from_le_bytes([d[4], d[5]]) as u32 + 1;
+-                let height = u16::from_le_bytes([d[12], d[13]]) as u32 + 1;
+-                let timing = Timing { width, height };
++                if (flags & 0x10) != 0 {
++                    continue;
++                }
++                let raw_clk = u64::from(d[0]) | (u64::from(d[1]) << 8) | (u64::from(d[2]) << 16);
++                let pixel_clock_hz = (raw_clk + 1) * step_hz;
++                let width = u32::from(u16::from_le_bytes([d[4], d[5]])) + 1;
++                let hblank = u32::from(u16::from_le_bytes([d[6], d[7]])) + 1;
++                let height = u32::from(u16::from_le_bytes([d[12], d[13]])) + 1;
++                let vblank = u32::from(u16::from_le_bytes([d[14], d[15]])) + 1;
++                let htotal = u64::from(width) + u64::from(hblank);
++                let vtotal = u64::from(height) + u64::from(vblank);
++                let refresh_mhz = match compute_refresh_mhz(pixel_clock_hz, htotal, vtotal) {
++                    Some(r) => r,
++                    None => continue,
++                };
++                let is_pref = (flags & 0x80) != 0;
++                let timing = ModeTiming {
++                    width,
++                    height,
++                    refresh_mhz,
++                    preferred: is_pref,
++                    source,
++                };
+                 if first_any.is_none() {
+                     first_any = Some(timing);
+                 }
+-                if (flags & 0x80) != 0 && preferred.is_none() {
++                if is_pref && preferred.is_none() {
+                     preferred = Some(timing);
+                 }
++                list.push(timing);
+             }
+         }
+         pos = data_end;
+@@ -138,7 +479,7 @@
+ }
+ 
+ #[allow(dead_code)]
+-pub fn decode_base_only(edid: &[u8]) -> Result<Timing, EdidError> {
++pub fn decode_base_only(edid: &[u8]) -> Result<ModeTiming, EdidError> {
+     if edid.len() < EDID_BLOCK_SIZE {
+         return Err(EdidError::InvalidLength);
+     }
+@@ -149,11 +490,12 @@
+     if !valid_checksum(base) {
+         return Err(EdidError::BadBaseChecksum);
+     }
+-    parse_base_dtd(base).ok_or(EdidError::NoTiming)
++    let mut list = ModeList::new();
++    parse_base_dtds(base, &mut list).ok_or(EdidError::NoTiming)
+ }
+ 
+ #[allow(dead_code)]
+-pub fn decode_preferred(edid: &[u8]) -> Result<DecodedEdid, EdidError> {
++pub fn decode_all(edid: &[u8]) -> Result<DecodedEdid, EdidError> {
+     if edid.len() < EDID_BLOCK_SIZE
+         || edid.len() % EDID_BLOCK_SIZE != 0
+         || edid.len() > MAX_EDID_TOTAL_BLOCKS * EDID_BLOCK_SIZE
+@@ -182,10 +524,13 @@
+ 
+     let extensions_truncated = declared_ext > MAX_EDID_EXTENSION_BLOCKS;
+     let ext_to_walk = declared_ext.min(MAX_EDID_EXTENSION_BLOCKS);
+-    let base_dtd = parse_base_dtd(base);
++    let mut list = ModeList::new();
++    let base_dtd = parse_base_dtds(base, &mut list);
+     let mut displayid_preferred = None;
+     let mut displayid_any = None;
++    let mut cta_native_vic = None;
+     let mut cta_dtd = None;
++    let mut cta_first_vic = None;
+     let mut bad_extension_blocks = 0usize;
+ 
+     for ext_idx in 0..ext_to_walk {
+@@ -197,7 +542,7 @@
+         }
+         match block[0] {
+             EXT_TAG_DISPLAYID => {
+-                let (pref, any) = parse_displayid_extension(block);
++                let (pref, any) = parse_displayid_extension(block, &mut list);
+                 if displayid_preferred.is_none() {
+                     displayid_preferred = pref;
+                 }
+@@ -206,8 +551,15 @@
+                 }
+             }
+             EXT_TAG_CTA => {
++                let (n_vic, dtd, f_vic) = parse_cta_extension(block, &mut list);
++                if cta_native_vic.is_none() {
++                    cta_native_vic = n_vic;
++                }
+                 if cta_dtd.is_none() {
+-                    cta_dtd = parse_cta_extension(block);
++                    cta_dtd = dtd;
++                }
++                if cta_first_vic.is_none() {
++                    cta_first_vic = f_vic;
+                 }
+             }
+             _ => (),
+@@ -216,13 +568,23 @@
+ 
+     let preferred = displayid_preferred
+         .or(base_dtd)
++        .or(cta_native_vic)
+         .or(displayid_any)
+         .or(cta_dtd)
++        .or(cta_first_vic)
+         .ok_or(EdidError::NoTiming)?;
+ 
+     Ok(DecodedEdid {
+         preferred,
++        modes: list.modes,
++        mode_count: list.count,
++        modes_truncated: list.truncated,
+         extensions_truncated,
+         bad_extension_blocks,
+     })
+ }
++
++#[allow(dead_code)]
++pub fn decode_preferred(edid: &[u8]) -> Result<DecodedEdid, EdidError> {
++    decode_all(edid)
++}
+diff -ruN '--exclude=*.orig' build/r1a-bootloader-orig/src/main.rs build/r1a-bootloader-work/src/main.rs
+--- a/src/main.rs	2026-11-24 00:16:47.137971918 -0800
++++ b/src/main.rs	2026-11-24 00:19:14.552431785 -0800
+@@ -202,6 +202,9 @@
+ const BACKGROUND_COLOR: u32 = 0x0f0e0c;
+ 
+ const MAX_VIDEO_MODES: usize = 256;
++const ASPECT_TOLERANCE_NUM: u64 = 1;
++const ASPECT_TOLERANCE_DEN: u64 = 100;
++const MAX_DIM_FOR_ASPECT: u32 = 65536;
+ 
+ fn same_aspect(width_a: u32, height_a: u32, width_b: u32, height_b: u32) -> bool {
+     width_a > 0
+@@ -211,6 +214,23 @@
+         && u64::from(width_a) * u64::from(height_b) == u64::from(width_b) * u64::from(height_a)
+ }
+ 
++fn approx_same_aspect(width_a: u32, height_a: u32, width_b: u32, height_b: u32) -> bool {
++    if width_a == 0
++        || height_a == 0
++        || width_b == 0
++        || height_b == 0
++        || width_a > MAX_DIM_FOR_ASPECT
++        || height_a > MAX_DIM_FOR_ASPECT
++        || width_b > MAX_DIM_FOR_ASPECT
++        || height_b > MAX_DIM_FOR_ASPECT
++    {
++        return false;
++    }
++    let lhs = u64::from(width_a) * u64::from(height_b);
++    let rhs = u64::from(width_b) * u64::from(height_a);
++    lhs.abs_diff(rhs) * ASPECT_TOLERANCE_DEN <= rhs * ASPECT_TOLERANCE_NUM
++}
++
+ fn choose_video_mode(
+     modes: &[(OsVideoMode, String)],
+     preferred: Option<(u32, u32)>,
+@@ -232,8 +252,16 @@
+                 }
+             }
+             for (mode, _text) in modes.iter() {
+-                if same_aspect(mode.width, mode.height, best_width, best_height) {
+-                    return (*mode, "aspect");
++                if mode.width <= best_width
++                    && mode.height <= best_height
++                    && approx_same_aspect(mode.width, mode.height, best_width, best_height)
++                {
++                    return (*mode, "aspect-approx");
++                }
++            }
++            for (mode, _text) in modes.iter() {
++                if mode.width <= best_width && mode.height <= best_height {
++                    return (*mode, "fits");
+                 }
+             }
+         }
+@@ -293,13 +321,27 @@
+     let preferred = os.best_resolution(output_i);
+     let (chosen, reason) = choose_video_mode(
+         &modes,
+-        preferred.map(|(width, height, _source)| (width, height)),
++        preferred.map(|(width, height, _refresh_mhz, _source)| (width, height)),
+     );
+     let mut selected = chosen.id;
+     match preferred {
+-        Some((best_width, best_height, source)) => {
++        Some((best_width, best_height, Some(refresh_mhz), source)) => {
++            println!(
++                "Output {}, preferred: {}x{}@{}.{:03}Hz ({}), chosen: {}x{} ({}; GOP sets size only)",
++                output_i,
++                best_width,
++                best_height,
++                refresh_mhz / 1000,
++                refresh_mhz % 1000,
++                source.label(),
++                chosen.width,
++                chosen.height,
++                reason
++            );
++        }
++        Some((best_width, best_height, None, source)) => {
+             println!(
+-                "Output {}, preferred: {}x{} ({}), chosen: {}x{} ({})",
++                "Output {}, preferred: {}x{} ({}), chosen: {}x{} ({}; GOP sets size only)",
+                 output_i,
+                 best_width,
+                 best_height,
+@@ -311,7 +353,7 @@
+         }
+         None => {
+             println!(
+-                "Output {}, preferred: none, chosen: {}x{} ({})",
++                "Output {}, preferred: none, chosen: {}x{} ({}; GOP sets size only)",
+                 output_i, chosen.width, chosen.height, reason
+             );
+         }
+diff -ruN '--exclude=*.orig' build/r1a-bootloader-orig/src/os/bios/mod.rs build/r1a-bootloader-work/src/os/bios/mod.rs
+--- a/src/os/bios/mod.rs	2026-11-24 00:16:47.141245745 -0800
++++ b/src/os/bios/mod.rs	2026-11-24 00:20:01.541039686 -0800
+@@ -172,7 +172,7 @@
+         //TODO: check result
+     }
+ 
+-    fn best_resolution(&self, _output_i: usize) -> Option<(u32, u32, ResolutionSource)> {
++    fn best_resolution(&self, _output_i: usize) -> Option<(u32, u32, Option<u32>, ResolutionSource)> {
+         let mut data = ThunkData::new();
+         data.eax = 0x4F15;
+         data.ebx = 0x01;
+@@ -186,7 +186,12 @@
+         if data.eax == 0x4F {
+             let edid = unsafe { slice::from_raw_parts(VBE_EDID_ADDR as *const u8, 128) };
+             match decode_base_only(edid) {
+-                Ok(timing) => Some((timing.width, timing.height, ResolutionSource::VbeEdid)),
++                Ok(timing) => Some((
++                    timing.width,
++                    timing.height,
++                    Some(timing.refresh_mhz),
++                    ResolutionSource::VbeEdid,
++                )),
+                 Err(err) => {
+                     log::warn!("Invalid VBE EDID: {:?}", err);
+                     None
+diff -ruN '--exclude=*.orig' build/r1a-bootloader-orig/src/os/mod.rs build/r1a-bootloader-work/src/os/mod.rs
+--- a/src/os/mod.rs	2026-11-24 00:16:47.142145470 -0800
++++ b/src/os/mod.rs	2026-11-24 00:19:16.609413716 -0800
+@@ -125,7 +125,7 @@
+     fn video_outputs(&self) -> usize;
+     fn video_modes(&self, output_i: usize) -> Self::V;
+     fn set_video_mode(&self, output_i: usize, mode: &mut OsVideoMode);
+-    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32, ResolutionSource)>;
++    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32, Option<u32>, ResolutionSource)>;
+ 
+     fn get_key(&self) -> OsKey;
+ 
+diff -ruN '--exclude=*.orig' build/r1a-bootloader-orig/src/os/uefi/mod.rs build/r1a-bootloader-work/src/os/uefi/mod.rs
+--- a/src/os/uefi/mod.rs	2026-11-24 00:16:47.142971857 -0800
++++ b/src/os/uefi/mod.rs	2026-11-24 00:19:23.707352017 -0800
+@@ -12,7 +12,7 @@
+ };
+ 
+ use crate::edid::{
+-    EDID_BLOCK_SIZE, MAX_EDID_EXTENSION_BLOCKS, MAX_EDID_TOTAL_BLOCKS, decode_preferred,
++    EDID_BLOCK_SIZE, MAX_EDID_EXTENSION_BLOCKS, MAX_EDID_MODES, MAX_EDID_TOTAL_BLOCKS, decode_all,
+ };
+ use crate::os::{Os, OsHwDesc, OsKey, OsVideoMode, ResolutionSource};
+ 
+@@ -317,18 +317,18 @@
+         mode.base = output.0.Mode.FrameBufferBase as u64;
+     }
+ 
+-    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32, ResolutionSource)> {
++    fn best_resolution(&self, output_i: usize) -> Option<(u32, u32, Option<u32>, ResolutionSource)> {
+         let mut outputs = self.outputs.borrow_mut();
+         let (output, edid_active_opt, edid_discovered_opt) = outputs.get_mut(output_i)?;
+ 
+         if let Some(efi_edid) = edid_active_opt.as_ref() {
+-            if let Some((w, h)) = decode_efi_edid(output_i, "active", efi_edid.0) {
+-                return Some((w, h, ResolutionSource::EdidActive));
++            if let Some((w, h, refresh_mhz)) = decode_efi_edid(output_i, "active", efi_edid.0) {
++                return Some((w, h, Some(refresh_mhz), ResolutionSource::EdidActive));
+             }
+         }
+         if let Some(efi_edid) = edid_discovered_opt.as_ref() {
+-            if let Some((w, h)) = decode_efi_edid(output_i, "discovered", efi_edid.0) {
+-                return Some((w, h, ResolutionSource::EdidDiscovered));
++            if let Some((w, h, refresh_mhz)) = decode_efi_edid(output_i, "discovered", efi_edid.0) {
++                return Some((w, h, Some(refresh_mhz), ResolutionSource::EdidDiscovered));
+             }
+         }
+ 
+@@ -336,6 +336,7 @@
+         Some((
+             output.0.Mode.Info.HorizontalResolution,
+             output.0.Mode.Info.VerticalResolution,
++            None,
+             ResolutionSource::Firmware,
+         ))
+     }
+@@ -423,7 +424,11 @@
+     }
+ }
+ 
+-fn decode_efi_edid(output_i: usize, kind: &str, proto: &EdidActiveProtocol) -> Option<(u32, u32)> {
++fn decode_efi_edid(
++    output_i: usize,
++    kind: &str,
++    proto: &EdidActiveProtocol,
++) -> Option<(u32, u32, u32)> {
+     let size = proto.SizeOfEdid as usize;
+     if proto.Edid.is_null() || size == 0 {
+         return None;
+@@ -438,7 +443,7 @@
+         return None;
+     }
+     let edid = unsafe { slice::from_raw_parts(proto.Edid, size) };
+-    match decode_preferred(edid) {
++    match decode_all(edid) {
+         Ok(decoded) => {
+             if decoded.extensions_truncated {
+                 log::warn!(
+@@ -457,7 +462,19 @@
+                     decoded.bad_extension_blocks
+                 );
+             }
+-            Some((decoded.preferred.width, decoded.preferred.height))
++            if decoded.modes_truncated {
++                log::warn!(
++                    "Output {} EFI EDID ({}) exceeded {} modes; capped decoded list",
++                    output_i,
++                    kind,
++                    MAX_EDID_MODES
++                );
++            }
++            Some((
++                decoded.preferred.width,
++                decoded.preferred.height,
++                decoded.preferred.refresh_mhz,
++            ))
+         }
+         Err(err) => {
+             log::warn!(

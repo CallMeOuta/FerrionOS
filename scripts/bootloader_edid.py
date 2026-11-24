@@ -17,7 +17,7 @@ OVMF_CANDIDATES = (
     "/usr/share/ovmf/OVMF.fd",
     "/usr/share/OVMF/OVMF_CODE.fd",
 )
-VESAD_RE = re.compile(r"vesad:\s+(\d+)x(\d+)\s+stride\s+(\d+)")
+VESAD_RE = re.compile(r"vesad:\s+(\d+)x(\d+)\s+stride\s+(\d+)[^\r\n]*\r?\n")
 BOOT_LINE_RE = re.compile(r"Output 0,\s+preferred:.*chosen:.*")
 ESP_TYPE_GUID = bytes([
     0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
@@ -236,13 +236,14 @@ def boot_case(
     boot_match = BOOT_LINE_RE.search(clean_text)
     return {
         "vesad": f"{vesad_match.group(1)}x{vesad_match.group(2)}" if vesad_match else None,
-        "vesad_line": vesad_match.group(0) if vesad_match else None,
+        "vesad_line": vesad_match.group(0).strip() if vesad_match else None,
         "boot_line": boot_match.group(0).strip() if boot_match else None,
         "quiet_boot_line": "Quiet boot: graphical debug stays off" in clean_text,
     }
 
 
-def build_cases() -> list[dict]:
+def build_cases(root: Path) -> list[dict]:
+    corpus = root / "scripts/edid-corpus"
     edid_displayid_4k = make_base_block(1920, 1080, 14850, 1) + make_displayid_block(3840, 2160, True)
     edid_base_4k = make_base_block(3840, 2160, 53325, 0)
     edid_9ext = (
@@ -290,6 +291,34 @@ def build_cases() -> list[dict]:
             "vgamem_mb": 64,
             "expected": "1280x800",
         },
+        {
+            "name": "vic-only-4k120",
+            "edid": (corpus / "vic-only-4k120.edid").read_bytes(),
+            "cfg": b"A",
+            "vgamem_mb": 64,
+            "expected": "3840x2160",
+        },
+        {
+            "name": "vic-only-8k60",
+            "edid": (corpus / "vic-only-8k-50-60-120.edid").read_bytes(),
+            "cfg": b"A",
+            "vgamem_mb": 64,
+            "expected": "3840x2160",
+        },
+        {
+            "name": "aspect-tol-near16x9",
+            "edid": (corpus / "aspect-tol-near16x9.edid").read_bytes(),
+            "cfg": b"A",
+            "vgamem_mb": 64,
+            "expected": "2560x1440",
+        },
+        {
+            "name": "qemu-3440x1440",
+            "edid": (corpus / "qemu-3440x1440.edid").read_bytes(),
+            "cfg": b"A",
+            "vgamem_mb": 64,
+            "expected": "2560x1440",
+        },
     ]
 
 
@@ -303,7 +332,7 @@ def run_bootloader_edid(args, out: Path, root: Path):
     if not image.exists():
         return False, f"missing {image}"
 
-    cases = build_cases()
+    cases = build_cases(root)
     results = []
     passed = 0
     with tempfile.TemporaryDirectory(prefix="ferrion-boot-edid-") as tmpdir:
