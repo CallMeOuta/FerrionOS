@@ -9910,6 +9910,135 @@ def frame_color_match(frame, rgb):
     return matched / total
 
 
+def test_gpu_share(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-share on gpu=venus (use --config mesa-cpu on x86_64): checks cross-process blob PRIME export/import, 1000 fence-synchronized counters with at least one fence unsignaled on arrival, read-only mapping enforcement, third-process isolation, and producer SIGKILL survival."""
+    tag = "gpu-probe-share"
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    status, output = guest_run(vm, "gsh", tag, 180)
+    _, schemes = guest_run(vm, "gshl", "ls /scheme", 30)
+    log = vm.out / "gpu-share.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    reasons = []
+    render = re.search(rf"(?m)^{tag}: render (\S+)", output)
+    counters = re.search(rf"(?m)^{tag}: counters (\d+) unsignaled (\d+)", output)
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):.*", output)
+    passed = output.count(f"{tag}: pass ")
+    if not render:
+        reasons.append("the probe found no render name")
+    elif status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed: {'; '.join(failed) or 'no result line'}")
+    if not counters or int(counters.group(1)) != 1000 or int(counters.group(2)) < 1:
+        reasons.append("did not observe 1000 counters with >=1 unsignaled fence on arrival")
+    if render and (render.group(1) not in schemes.split() or "display.virtio-gpu" not in schemes.split()):
+        reasons.append("/scheme no longer lists render and display names after probe")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, (f"{render.group(1)}: {counters.group(1)}/1000 counters, "
+                  f"{counters.group(2)} unsignaled on arrival, {passed} checks passed")
+
+
+GPU_SCANOUT_TRACE = ("virtio_gpu_cmd_set_scanout_blob", "virtio_gpu_cmd_res_flush")
+
+
+def scanout_quadrant_diff(frame, quads):
+    w, h = frame.width, frame.height
+    hw, hh = w // 2, h // 2
+    top_row = bytes(quads[0]) * hw + bytes(quads[1]) * (w - hw)
+    bot_row = bytes(quads[2]) * hw + bytes(quads[3]) * (w - hw)
+    expected = top_row * hh + bot_row * (h - hh)
+    if frame.rgb == expected:
+        return 0
+    return sum(1 for i in range(0, len(expected), 3) if frame.rgb[i:i + 3] != expected[i:i + 3])
+
+
+def test_gpu_scanout(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-scanout on gpu=venus (use --config mesa-cpu on x86_64): checks Vulkan LINEAR dma-buf export, cross-name display import, blob ADD_FB2 validation, exact zero-diff VNC pixels for ARGB8888 and XRGB8888 via SET_SCANOUT_BLOB, creator close survival, 600 flips, and mid-flip compositor close."""
+    tag = "gpu-probe-scanout"
+    argb_quads = ((0xE8, 0x30, 0x18), (0x20, 0xD4, 0x48), (0x1C, 0x54, 0xEC), (0xD8, 0x90, 0x24))
+    xrgb_quads = ((0x34, 0xC8, 0xE0), (0xE4, 0x40, 0xB8), (0xA0, 0xE0, 0x28), (0x78, 0x38, 0xD0))
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    since = vm.mark()
+    vm.type(f"bash -c '{tag} --hold; echo gsc-end-$?'\n")
+    found = vm.wait_serial(rf"(?m)(?:^{tag}: READY argb|gsc-end-(\d+))", 180, since)
+    if not found:
+        output = vm.text(since)
+        (vm.out / "gpu-scanout.txt").write_text(f"exit None\n{output}\n")
+        return False, f"probe timed out before READY argb; see {vm.out / 'gpu-scanout.txt'}"
+    argb_diff = xrgb_diff = None
+    argb_src = xrgb_src = None
+    argb_size = xrgb_size = None
+    if found.group(1) is None:
+        time.sleep(0.3)
+        argb_frame = vm.screenshot()
+        argb_src = vm.last_capture_source
+        argb_size = (argb_frame.width, argb_frame.height)
+        argb_frame.save_png(vm.out / "argb.png")
+        argb_diff = scanout_quadrant_diff(argb_frame, argb_quads)
+        xrgb_mark = vm.mark()
+        vm.type("\n")
+        found_xrgb = vm.wait_serial(rf"(?m)(?:^{tag}: READY xrgb|gsc-end-(\d+))", 60, xrgb_mark)
+        if not found_xrgb:
+            output = vm.text(since)
+            (vm.out / "gpu-scanout.txt").write_text(f"exit None\n{output}\n")
+            return False, f"probe timed out before READY xrgb; see {vm.out / 'gpu-scanout.txt'}"
+        if found_xrgb.group(1) is None:
+            time.sleep(0.3)
+            xrgb_frame = vm.screenshot()
+            xrgb_src = vm.last_capture_source
+            xrgb_size = (xrgb_frame.width, xrgb_frame.height)
+            xrgb_frame.save_png(vm.out / "xrgb.png")
+            xrgb_diff = scanout_quadrant_diff(xrgb_frame, xrgb_quads)
+            end_mark = vm.mark()
+            vm.type("\n")
+            found_end = vm.wait_serial(r"gsc-end-(\d+)", 180, end_mark)
+            status = int(found_end.group(1)) if found_end else None
+        else:
+            status = int(found_xrgb.group(1))
+    else:
+        status = int(found.group(1))
+    output = vm.text(since)
+    _, schemes = guest_run(vm, "gscl", "ls /scheme", 30)
+    time.sleep(0.3)
+    trace = [line for line in vm.trace() if "virtio_gpu" in line]
+    log = vm.out / "gpu-scanout.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    trace_log = vm.out / "gpu-scanout-trace.txt"
+    trace_log.write_text("\n".join(trace) + ("\n" if trace else ""))
+    reasons = []
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):.*", output)
+    stats = re.search(
+        rf"(?m)^{tag}: flips (\d+) events (\d+) median_us (\d+) min_us (\d+) max_us (\d+)",
+        output,
+    )
+    size_m = re.search(rf"(?m)^{tag}: size (\d+) (\d+)", output)
+    blob_scanouts = sum(1 for line in trace if "virtio_gpu_cmd_set_scanout_blob" in line)
+    if status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed: {'; '.join(failed) or 'no result line'}")
+    if not stats or int(stats.group(1)) != 600 or int(stats.group(2)) != 600:
+        reasons.append("did not observe 600 events for 600 flips")
+    if argb_diff != 0:
+        reasons.append(f"ARGB8888 differing pixels={argb_diff}")
+    if xrgb_diff != 0:
+        reasons.append(f"XRGB8888 differing pixels={xrgb_diff}")
+    if size_m:
+        want_size = (int(size_m.group(1)), int(size_m.group(2)))
+        if argb_size != want_size or xrgb_size != want_size:
+            reasons.append(f"screenshot sizes ({argb_size}, {xrgb_size}) != {want_size}")
+    if argb_src != "vnc" or xrgb_src != "vnc":
+        reasons.append(f"capture sources ({argb_src}, {xrgb_src}) != vnc")
+    if blob_scanouts < 2:
+        reasons.append(f"trace recorded only {blob_scanouts} virtio_gpu_cmd_set_scanout_blob calls")
+    if "display.virtio-gpu" not in schemes.split():
+        reasons.append("/scheme no longer lists display.virtio-gpu")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log} and {trace_log}"
+    return True, (f"ARGB8888 diff=0 XRGB8888 diff=0 ({argb_size[0]}x{argb_size[1]} vnc), "
+                  f"set_scanout_blob={blob_scanouts}, 600 flips median {stats.group(3)} us "
+                  f"(min {stats.group(4)}, max {stats.group(5)})")
+
+
 def test_gpu_flip(vm, args):
     """Logs in as root on the serial console and runs gpu-probe-flip: 600 page flips deliver 600 flip-complete events with monotonic timestamps and sequence numbers, median interval recorded, and screenshots after even (600) and odd (601) flips show the matching solid framebuffer colors via screendump (2D) or VNC (3D)."""
     tag = "gpu-probe-flip"
@@ -12133,6 +12262,8 @@ TESTS["gpu-blob"] = test_gpu_blob
 TESTS["gpu-submit"] = test_gpu_submit
 TESTS["gpu-syncobj"] = test_gpu_syncobj
 TESTS["gpu-flip"] = test_gpu_flip
+TESTS["gpu-share"] = test_gpu_share
+TESTS["gpu-scanout"] = test_gpu_scanout
 TESTS["vk-exact"] = test_vk_exact
 TESTS["wgpu-headless"] = test_wgpu_headless
 TESTS["rune-headless"] = test_rune_headless
@@ -12704,9 +12835,13 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_BLOB_TRACE]})
-            elif name == "gpu-syncobj":
+            elif name in ("gpu-syncobj", "gpu-share"):
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
+            elif name == "gpu-scanout":
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=venus",)
+                run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_SCANOUT_TRACE]})
             elif name == "gpu-flip":
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=virtio",)

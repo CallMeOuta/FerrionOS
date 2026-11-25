@@ -5,3 +5,5 @@ filesystem_size = 2048
 
 [packages]
 gpu-probe = "source"
+gpu-probe-share = "source"
+gpu-probe-scanout = "source"

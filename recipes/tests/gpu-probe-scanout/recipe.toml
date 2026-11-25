@@ -1,0 +1,14 @@
+[package]
+description = "Checks Vulkan dma-buf export, cross-name display import, blob ADD_FB2, SET_SCANOUT_BLOB pixel fidelity, 600 page flips, and lifetime survival"
+dependencies = ["mesa"]
+
+[build]
+template = "custom"
+dependencies = ["mesa", "libdrm", "libvulkan"]
+script = """
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra "${COOKBOOK_RECIPE}/main.c" \
+    ${LDFLAGS} $("${PKG_CONFIG}" --cflags --libs libdrm vulkan) -o gpu-probe-scanout
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+cp gpu-probe-scanout "${COOKBOOK_STAGE}/usr/bin/"
+"""
