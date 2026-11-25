@@ -7867,7 +7867,7 @@ def test_net_hardening(args, out):
         requested = {entry.get("requested") for entry in log["dhcp"] if entry["type"] == 3}
         if requested != {GUEST_IP}:
             problems.append(f"boot {boot}: dhcpd requested {sorted(map(str, requested))}, not only {GUEST_IP}")
-        syns = list({entry["sport"]: entry for entry in log["syn"] if entry["dst"] == "10.0.2.2:9"}.values())
+        syns = list({(entry["sport"], entry["isn"]): entry for entry in log["syn"] if entry["dst"] == "10.0.2.2:9"}.values())
         boots.append(syns)
         if len(syns) < 20:
             problems.append(f"boot {boot}: saw {len(syns)} of 20 connections")

@@ -254,14 +254,16 @@ def parse_pcap_syns_all(pcap_path, dst_ip, dst_port, sport_filter=None):
 
 def parse_pcap_syns(pcap_path, dst_ip, dst_port, exclude_sport=None):
     syns = []
-    seen_ports = set()
+    seen = set()
     for entry in parse_pcap_syns_all(pcap_path, dst_ip, dst_port):
         sport = entry["sport"]
+        isn = entry["isn"]
         if exclude_sport is not None and sport == exclude_sport:
             continue
-        if sport not in seen_ports:
-            seen_ports.add(sport)
-            syns.append({"sport": sport, "isn": entry["isn"]})
+        key = (sport, isn)
+        if key not in seen:
+            seen.add(key)
+            syns.append({"sport": sport, "isn": isn})
     return syns
 
 
