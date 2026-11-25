@@ -1397,7 +1397,6 @@ ROOT_CONTEXT_ROW_RE = re.compile(
     r"[\d.]+\s+[KMG]?B\s+[\d.]+\s+[KMG]?B\s+(\S.*?)\s*$"
 )
 
-
 @dataclass(frozen=True)
 class ContextRow:
     pid: int
@@ -2975,7 +2974,6 @@ def test_event_poll(vm, args):
         return False, f"probe exit {status}: {detail}; see {log}"
     return True, detail
 
-
 @dataclass(frozen=True)
 class Answered:
     status: int
@@ -2987,7 +2985,6 @@ class Answered:
 
     def __getitem__(self, index):
         return (self.status, self.out)[index]
-
 
 @dataclass(frozen=True)
 class NoAnswer:
@@ -12928,6 +12925,53 @@ def run_session_login_check(args, out):
 
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["session-login"] = run_session_login_check
+
+
+def run_rune_window_check(args, out):
+    """RU3 check: live Rune CPU window under user-owned ferrion-wm (O3 scan, exact settled 0-px ref check, key+click switch toggle, and GPU surface error with WAYLAND_DEBUG teardown; use --config wm-session-rune)."""
+    import rune_window
+    with tempfile.TemporaryDirectory(prefix="ferrion-rune-qmp-") as directory:
+        path = Path(directory) / "qmp.sock"
+        vm = None
+        try:
+            vm = VM(args, out, qemu_flags=f"-qmp unix:{path},server=on,wait=off")
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(args.timeout)
+                connection.connect(str(path))
+                with connection.makefile("rwb") as stream:
+                    greeting = json.loads(stream.readline())
+                    if "QMP" not in greeting:
+                        raise RuntimeError("QEMU sent no QMP greeting")
+
+                    def qmp(command, arguments=None):
+                        stream.write(json.dumps({"execute": command, "arguments": arguments or {}}).encode() + b"\n")
+                        stream.flush()
+                        while True:
+                            reply = json.loads(stream.readline())
+                            if "error" in reply:
+                                raise RuntimeError(f"QMP {command}: {reply['error']}")
+                            if "return" in reply:
+                                return reply["return"]
+
+                    qmp("qmp_capabilities")
+                    return rune_window.run_rune_window(
+                        vm,
+                        args,
+                        {
+                            "Blocked": Blocked,
+                            "root_shell": root_shell,
+                            "run_status": run_status,
+                            "sendkeys": sendkeys,
+                            "settle": settle,
+                            "qmp": qmp,
+                        },
+                    )
+        finally:
+            if vm is not None:
+                vm.close()
+
+
+OWN_IMAGE["rune-window"] = run_rune_window_check
 def test_gtk4_window(args, out):
     """Checks GTK 4 + libadwaita Wayland window (CPU Cairo), key input, AdwAboutDialog, and libappstream under ferrion-run --no-network (use --config wm-session)."""
     import gtk4_window

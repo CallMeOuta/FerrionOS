@@ -1,0 +1,10 @@
+include = ["wm-session.toml"]
+
+[general]
+filesystem_size = 1536
+
+[packages]
+bash = {}
+mesa = "source"
+ferrion-ui-headless = "source"
+wayland-deny-probe = "source"

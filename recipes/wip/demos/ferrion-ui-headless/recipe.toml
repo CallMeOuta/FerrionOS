@@ -22,7 +22,7 @@ script = """
 DYNAMIC_INIT
 COOKBOOK_SOURCE="$(realpath "${COOKBOOK_SOURCE}")"
 COOKBOOK_CARGO_FLAGS+=(--features rune/tooling)
-for app in hello settings launcher; do
+for app in hello settings launcher clipboard-demo; do
     bin_name="${app}" bin_flags="--package ${app}" bin_final_name="rune-${app}" cookbook_cargo_build
 done
 """
