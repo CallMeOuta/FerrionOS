@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parent.parent
 FFMPEG_RECIPE = ROOT / "recipes" / "libs" / "ffmpeg" / "recipe.toml"
 DAV1D_RECIPE = ROOT / "recipes" / "libs" / "dav1d" / "recipe.toml"
 OLD_DAV1D_RECIPE = ROOT / "recipes" / "wip" / "codecs" / "dav1d" / "recipe.toml"
+FDK_AAC_FREE_RECIPE = ROOT / "recipes" / "libs" / "fdk-aac-free" / "recipe.toml"
+FDK_AAC_FREE_URL_PREFIX = "https://src.fedoraproject.org/repo/pkgs/fdk-aac-free/"
 LIBASS_RECIPE = ROOT / "recipes" / "libs" / "libass" / "recipe.toml"
 OLD_LIBASS_RECIPE = ROOT / "recipes" / "wip" / "libs" / "other" / "libass" / "recipe.toml"
 LIBPLACEBO_RECIPE = ROOT / "recipes" / "libs" / "libplacebo" / "recipe.toml"
@@ -19,6 +21,7 @@ OLD_MPV_RECIPE = ROOT / "recipes" / "wip" / "players" / "mpv" / "recipe.toml"
 COMMIT_REV_RE = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_MPV_DEPS = frozenset({
     "ffmpeg6",
+    "libfdk-aac",
     "liborbital",
     "sdl1",
     "sdl2",
@@ -30,6 +33,7 @@ MAX_CONFIG_FILES = 512
 
 ALLOWED_IMAGE_DECODERS = frozenset({
     "libdav1d",
+    "libfdk_aac",
     "vp9",
     "vp8",
     "theora",
@@ -105,6 +109,7 @@ FORBIDDEN_FFMPEG_FLAGS = (
 )
 
 FORBIDDEN_FFMPEG_DEPS = frozenset({
+    "libfdk-aac",
     "liborbital",
     "mesa",
     "sdl1",
@@ -114,12 +119,14 @@ FORBIDDEN_FFMPEG_DEPS = frozenset({
 
 
 def parse_bash_array(script, name):
-    match = re.search(rf"(?m)^{re.escape(name)}=\(\s*(.*?)\s*\)", script, re.DOTALL)
-    if not match:
+    matches = list(re.finditer(rf"(?m)^\s*{re.escape(name)}\+?=\(\s*(.*?)\s*\)", script, re.DOTALL))
+    if not matches:
         return None
-    items = [tok for tok in match.group(1).split() if tok]
-    if len(items) > MAX_ARRAY_ITEMS:
-        raise ValueError(f"{name} exceeds bound {MAX_ARRAY_ITEMS}")
+    items = []
+    for match in matches:
+        items.extend(tok for tok in match.group(1).split() if tok)
+        if len(items) > MAX_ARRAY_ITEMS:
+            raise ValueError(f"{name} exceeds bound {MAX_ARRAY_ITEMS}")
     return items
 
 
@@ -138,11 +145,17 @@ def check_ffmpeg_recipe():
         errors.append(f"recipes/libs/ffmpeg/recipe.toml: forbidden dependency {dep}")
     if "dav1d" not in deps:
         errors.append("recipes/libs/ffmpeg/recipe.toml: missing dependency dav1d")
+    if "fdk-aac-free" not in deps:
+        errors.append("recipes/libs/ffmpeg/recipe.toml: missing dependency fdk-aac-free")
+    if "FFMPEG_AAC_LC" not in build.get("env-vars", []):
+        errors.append("recipes/libs/ffmpeg/recipe.toml: missing FFMPEG_AAC_LC in build.env-vars")
 
     script = build.get("script", "")
     for flag in REQUIRED_FFMPEG_FLAGS:
         if flag not in script:
             errors.append(f"recipes/libs/ffmpeg/recipe.toml: missing required flag {flag}")
+    if "--enable-libfdk-aac" not in script:
+        errors.append("recipes/libs/ffmpeg/recipe.toml: missing --enable-libfdk-aac")
     for flag in FORBIDDEN_FFMPEG_FLAGS:
         if flag in script:
             errors.append(f"recipes/libs/ffmpeg/recipe.toml: forbidden flag {flag}")
@@ -151,12 +164,14 @@ def check_ffmpeg_recipe():
     if decoders is None:
         errors.append("recipes/libs/ffmpeg/recipe.toml: missing DECODERS array")
         decoders = []
-    for m in re.finditer(r"--enable-decoder=([^\s\"']+)", script):
+    for m in re.finditer(r"--enable-decoder=([^\s\"')]+)", script):
         val = m.group(1)
         if val != "${name}":
             decoders.append(val)
     if "libdav1d" not in decoders:
         errors.append("recipes/libs/ffmpeg/recipe.toml: libdav1d missing from enabled decoders")
+    if "libfdk_aac" not in decoders:
+        errors.append("recipes/libs/ffmpeg/recipe.toml: libfdk_aac missing from enabled decoders")
     for dec in sorted(set(decoders) - ALLOWED_IMAGE_DECODERS):
         errors.append(f"recipes/libs/ffmpeg/recipe.toml: decoder outside image allow-list: {dec}")
 
@@ -164,13 +179,32 @@ def check_ffmpeg_recipe():
     if encoders is None:
         errors.append("recipes/libs/ffmpeg/recipe.toml: missing ENCODERS array")
         encoders = []
-    for m in re.finditer(r"--enable-encoder=([^\s\"']+)", script):
+    for m in re.finditer(r"--enable-encoder=([^\s\"')]+)", script):
         val = m.group(1)
         if val != "${name}":
             encoders.append(val)
     for enc in sorted(set(encoders) - ALLOWED_IMAGE_ENCODERS):
         errors.append(f"recipes/libs/ffmpeg/recipe.toml: encoder outside image allow-list: {enc}")
 
+    return errors
+
+
+def check_fdk_aac_free_recipe():
+    errors = []
+    if not FDK_AAC_FREE_RECIPE.is_file():
+        return ["recipes/libs/fdk-aac-free/recipe.toml: missing recipe"]
+    data = tomllib.loads(FDK_AAC_FREE_RECIPE.read_text(encoding="utf-8"))
+    source = data.get("source", {})
+    tar_url = source.get("tar", "")
+    if not isinstance(tar_url, str) or not tar_url.startswith(FDK_AAC_FREE_URL_PREFIX) or "/sha512/" not in tar_url:
+        errors.append("recipes/libs/fdk-aac-free/recipe.toml: tar must pin Fedora fdk-aac-free lookaside sha512 URL")
+    if not source.get("blake3"):
+        errors.append("recipes/libs/fdk-aac-free/recipe.toml: tar source must be pinned by blake3")
+    script = data.get("build", {}).get("script", "")
+    if "usr/share/licenses/fdk-aac-free/NOTICE" not in script:
+        errors.append("recipes/libs/fdk-aac-free/recipe.toml: must install NOTICE to /usr/share/licenses/fdk-aac-free/NOTICE")
+    if "usr/share/licenses/fdk-aac-free/README.fedora" not in script:
+        errors.append("recipes/libs/fdk-aac-free/recipe.toml: must install README.fedora to /usr/share/licenses/fdk-aac-free/README.fedora")
     return errors
 
 
@@ -305,6 +339,8 @@ def check_config_conflicts():
             continue
         if "ffmpeg" in packages and "ffmpeg6" in packages:
             errors.append(f"{rel}: installs both ffmpeg and ffmpeg6")
+        if "libfdk-aac" in packages:
+            errors.append(f"{rel}: installs forbidden unstripped libfdk-aac package")
     return errors
 
 
@@ -312,6 +348,7 @@ def main():
     errors = []
     errors.extend(check_ffmpeg_recipe())
     errors.extend(check_dav1d_recipe())
+    errors.extend(check_fdk_aac_free_recipe())
     errors.extend(check_libass_recipe())
     errors.extend(check_libplacebo_recipe())
     errors.extend(check_mpv_recipe())
