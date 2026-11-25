@@ -215,13 +215,12 @@ impl WaylandShm {
     ) -> Result<(), CpuPresentError> {
         self.ring
             .attach_and_damage(&self.surface, slot, rects, scale, force_full_damage)?;
-        self.state.next_frame_id = self.state.next_frame_id.wrapping_add(1).max(1);
-        let frame_id = self.state.next_frame_id;
-        if let Some((_, prev_cb)) = self.state.frame_callback.take() {
-            self.conn.backend().destroy_object(&prev_cb.id()).ok();
+        if self.state.frame_callback.is_none() {
+            self.state.next_frame_id = self.state.next_frame_id.wrapping_add(1).max(1);
+            let frame_id = self.state.next_frame_id;
+            let cb = self.surface.frame(&self.queue.handle(), frame_id);
+            self.state.frame_callback = Some((frame_id, cb));
         }
-        let cb = self.surface.frame(&self.queue.handle(), frame_id);
-        self.state.frame_callback = Some((frame_id, cb));
         self.surface.commit();
         self.queue
             .flush()
