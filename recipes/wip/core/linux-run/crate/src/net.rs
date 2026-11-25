@@ -118,9 +118,30 @@ impl Sock {
         let n = unsafe { libc::poll(&mut p, 1, 0) };
         match via {
             Via::Native => {
-                if n > 0 && p.revents & libc::POLLOUT != 0 {
-                    self.kind = Kind::Stream(Stream::Connected { peer, via });
-                    return Conn::Done;
+                if n > 0 && p.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) != 0 {
+                    let mut err: i32 = 0;
+                    let mut len = core::mem::size_of::<i32>() as libc::socklen_t;
+                    let r = unsafe {
+                        libc::getsockopt(
+                            fd,
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&mut err as *mut i32).cast(),
+                            &mut len,
+                        )
+                    };
+                    if r == 0 && err != 0 {
+                        self.kind = Kind::Stream(Stream::Failed { error: err as i64 });
+                        return Conn::Failed(err as i64);
+                    }
+                    if p.revents & libc::POLLERR != 0 {
+                        self.kind = Kind::Stream(Stream::Failed { error: ECONNREFUSED });
+                        return Conn::Failed(ECONNREFUSED);
+                    }
+                    if p.revents & libc::POLLOUT != 0 {
+                        self.kind = Kind::Stream(Stream::Connected { peer, via });
+                        return Conn::Done;
+                    }
                 }
                 if native_name(fd, true).is_none_or(|a| a == (0, 0)) {
                     self.kind = Kind::Stream(Stream::Failed { error: ECONNREFUSED });
@@ -669,6 +690,22 @@ fn connect_native(fd: i32, s: &Mutex<Sock>, to: Addr) -> i64 {
         Ok(n) => n,
         Err(e) => return -e,
     };
+    {
+        let g = s.lock().unwrap();
+        for (&(level, name), v) in &g.options {
+            if native_forwarded_option(level, name) {
+                let _ = unsafe {
+                    libc::setsockopt(
+                        n,
+                        level as i32,
+                        name as i32,
+                        v.as_ptr().cast(),
+                        v.len() as u32,
+                    )
+                };
+            }
+        }
+    }
     let sa = sockaddr_in(to);
     if unsafe { libc::connect(n, &sa as *const _ as *const libc::sockaddr, core::mem::size_of::<libc::sockaddr_in>() as u32) } != 0 {
         let e = native_errno();
@@ -684,11 +721,6 @@ fn connect_native(fd: i32, s: &Mutex<Sock>, to: Addr) -> i64 {
             unlink_path(path);
         }
         g.kind = Kind::Stream(Stream::Connecting { peer: to, via: Via::Native });
-        for name in [20u64, 21] {
-            if let Some(v) = g.options.get(&(1, name)) {
-                unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, name as i32, v.as_ptr().cast(), v.len() as u32) };
-            }
-        }
     }
     if nonblock {
         return -EINPROGRESS;
@@ -1056,6 +1088,16 @@ pub fn shutdown(fd: u64, how: u64) -> i64 {
     ret(unsafe { libc::shutdown(fd as i32, how as i32) } as isize)
 }
 
+fn native_forwarded_option(level: u64, name: u64) -> bool {
+    const SOL_SOCKET: u64 = 1;
+    const IPPROTO_TCP: u64 = 6;
+    match level {
+        SOL_SOCKET => matches!(name, 2 | 7 | 8 | 9 | 20 | 21),
+        IPPROTO_TCP => matches!(name, 1 | 4),
+        _ => false,
+    }
+}
+
 fn known_option(level: u64, name: u64) -> bool {
     const SOL_SOCKET: u64 = 1;
     const IPPROTO_IP: u64 = 0;
@@ -1079,15 +1121,25 @@ pub fn setsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
     if len < 4 {
         return -EINVAL;
     }
+    if level == 1 && (name == 20 || name == 21) && len < 16 {
+        return -EINVAL;
+    }
     let bytes = unsafe { core::slice::from_raw_parts(val as *const u8, len as usize) }.to_vec();
     let mut s = s.lock().unwrap();
-    if level == 1 && (name == 20 || name == 21) {
-        if len < 16 {
-            return -EINVAL;
-        }
-        if s.is_native() && unsafe { libc::setsockopt(fd as i32, libc::SOL_SOCKET, name as i32, bytes.as_ptr().cast(), len as u32) } != 0 {
-            return -native_errno();
-        }
+    if s.is_native()
+        && native_forwarded_option(level, name)
+        && !(s.is_dgram() && (level == 6 || name == 9))
+        && unsafe {
+            libc::setsockopt(
+                fd as i32,
+                level as i32,
+                name as i32,
+                bytes.as_ptr().cast(),
+                len as u32,
+            )
+        } != 0
+    {
+        return -native_errno();
     }
     s.options.insert((level, name), bytes);
     0
@@ -1112,6 +1164,24 @@ pub fn getsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
                     s.kind = Kind::Stream(Stream::Fresh);
                     error
                 }
+                _ if s.is_native() => {
+                    let mut err: i32 = 0;
+                    let mut optlen = core::mem::size_of::<i32>() as libc::socklen_t;
+                    if unsafe {
+                        libc::getsockopt(
+                            fd as i32,
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&mut err as *mut i32).cast(),
+                            &mut optlen,
+                        )
+                    } == 0
+                    {
+                        err as i64
+                    } else {
+                        0
+                    }
+                }
                 _ => 0,
             };
             int(e as i32)
@@ -1119,9 +1189,30 @@ pub fn getsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
         (1, 30) => int(s.is_listening() as i32),
         (1, 38) => int(if s.is_dgram() { 17 } else { 6 }),
         (1, 39) => int(AF_INET as i32),
+        _ if s.is_native()
+            && native_forwarded_option(level, name)
+            && !(s.is_dgram() && (level == 6 || name == 9)) =>
+        {
+            let mut raw = vec![0u8; if level == 1 && (name == 20 || name == 21) { 16 } else { 4 }];
+            let mut optlen = raw.len() as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    fd as i32,
+                    level as i32,
+                    name as i32,
+                    raw.as_mut_ptr().cast(),
+                    &mut optlen,
+                )
+            } != 0
+            {
+                return -native_errno();
+            }
+            raw.truncate(optlen as usize);
+            raw
+        }
         _ if known_option(level, name) => s.options.get(&(level, name)).cloned().unwrap_or_else(|| match (level, name) {
-            (1, 7) => int(16384),
-            (1, 8) => int(131072),
+            (1, 7) => int(1048576),
+            (1, 8) => int(1048576),
             (1, 20) | (1, 21) => vec![0; 16],
             (0, 2) => int(64),
             _ => int(0),
