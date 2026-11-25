@@ -152,6 +152,13 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
             TURN_QUEUED.store(false, std::sync::atomic::Ordering::Release);
         }
     }));
+    #[cfg(all(
+        feature = "fault-hooks",
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android")),
+        not(feature = "x11")
+    ))]
+    crate::drag_out::wayland::set_ignore_shutdown_for_test(args.stall_dnd_shutdown);
     let mut windows = Windows {
         factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default(),
         any_shown: false, startup_error: None,
@@ -168,7 +175,7 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     crate::clipboard::shutdown(); // Also cover an event-loop error before `exiting`.
     #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
     {
-        crate::drag_out::wayland::detach_display();
+        crate::drag_out::wayland::detach_display().ok();
         crate::popup_menu::wayland::detach_display();
     }
     crate::platform::ready_signal::clear();

@@ -85,6 +85,8 @@ pub struct Args {
     pub(crate) cpu_boot_threads: usize,
     pub(crate) borderless: bool,
     pub(crate) snap_popup: Option<PathBuf>,
+    #[cfg(feature = "fault-hooks")]
+    pub(crate) stall_dnd_shutdown: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -253,6 +255,8 @@ impl Args {
                 "--cpu-boot-threads" => a.cpu_boot_threads = (num(&val(&mut i)) as usize).max(1),
                 "--borderless" => a.borderless = true,
                 "--snap-popup" => a.snap_popup = Some(val(&mut i).into()),
+                #[cfg(feature = "fault-hooks")]
+                "--stall-dnd-shutdown" => a.stall_dnd_shutdown = true,
                 "-h" | "--help" => {
                     eprintln!("{HELP}");
                     std::process::exit(0);

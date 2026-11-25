@@ -84,6 +84,7 @@ test-gpu-counters = ["wgpu/counters"]
 # GPU-free wgpu noop backend for Linux surface-failure and device-loss tests.
 test-gpu-noop = ["wgpu/noop"]
 x11 = ["winit/x11", "dep:x11rb", "dep:arboard_unix"]
+fault-hooks = ["tooling"]
 
 [dependencies]
 # The accessibility tree's types; the platform adapters below come with `accessibility`.

@@ -40,11 +40,24 @@ use state::{DndState, MAX_REGISTERED_WINDOWS, RegisteredWindow};
 
 const CMD_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const SHUTDOWN_TIMEOUT_EXIT_CODE: i32 = 86;
 const MAX_PENDING_DONE: usize = 64;
+#[cfg(feature = "fault-hooks")]
+const MAX_STALL_FLUSH_ITERS: usize = 25000;
+#[cfg(feature = "fault-hooks")]
+const STALL_FLUSH_STEP: Duration = Duration::from_micros(100);
 
 static ATTACHED: AtomicBool = AtomicBool::new(false);
 static NEXT_DRAG_ID: AtomicU64 = AtomicU64::new(1);
 static ENGINE: Mutex<Option<WaylandDnd>> = Mutex::new(None);
+static SHUTDOWN_LOGGED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "fault-hooks")]
+static IGNORE_SHUTDOWN_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "fault-hooks")]
+pub(crate) fn set_ignore_shutdown_for_test(ignore: bool) {
+    IGNORE_SHUTDOWN_FOR_TEST.store(ignore, Ordering::Release);
+}
 
 type DoneCallback = Box<dyn FnOnce(DragOutcome)>;
 
@@ -244,7 +257,8 @@ impl Drop for DropRegistration {
 }
 
 pub(crate) fn attach_display(display: NonNull<c_void>) {
-    detach_display();
+    detach_display().ok();
+    SHUTDOWN_LOGGED.store(false, Ordering::Release);
     match WaylandDnd::connect(display) {
         Ok(engine) => {
             *ENGINE.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine);
@@ -257,11 +271,15 @@ pub(crate) fn attach_display(display: NonNull<c_void>) {
     }
 }
 
-pub(crate) fn detach_display() {
+pub(crate) fn detach_display() -> Result<(), DndWaylandError> {
     ATTACHED.store(false, Ordering::Release);
     let engine = ENGINE.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(mut engine) = engine
-        && let Err(err) = engine.shutdown()
+    let res = match engine {
+        Some(mut engine) => engine.shutdown(),
+        None => Ok(()),
+    };
+    if let Err(ref err) = res
+        && !SHUTDOWN_LOGGED.swap(true, Ordering::AcqRel)
     {
         eprintln!("rune: drag-and-drop shutdown: {err}");
     }
@@ -270,6 +288,7 @@ pub(crate) fn detach_display() {
             done(DragOutcome::Cancelled);
         }
     });
+    res
 }
 
 pub(crate) fn is_attached() -> bool {
@@ -702,7 +721,16 @@ fn handle_cmd(
     queue: &mut EventQueue<DndState>,
 ) -> bool {
     match cmd {
-        DndCmd::Shutdown => false,
+        DndCmd::Shutdown => {
+            #[cfg(feature = "fault-hooks")]
+            if IGNORE_SHUTDOWN_FOR_TEST.load(Ordering::Acquire) {
+                for _ in 0..MAX_STALL_FLUSH_ITERS {
+                    std::thread::sleep(STALL_FLUSH_STEP);
+                    conn.roundtrip().ok();
+                }
+            }
+            false
+        }
         DndCmd::CancelSurface { surface_id, reply } => {
             state.cancel_for_surface(&surface_id);
             queue.flush().ok();
