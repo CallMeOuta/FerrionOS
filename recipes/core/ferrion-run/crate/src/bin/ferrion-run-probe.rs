@@ -98,6 +98,7 @@ mod probe {
                 shm_check(outside_name, peer_name, own_name)
             }
             ["sleep", secs] => sleep_secs(secs.parse().unwrap_or(0)),
+            ["mmap-exec", path] => mmap_exec(path),
             [
                 "cap-check",
                 address,
@@ -1576,5 +1577,48 @@ mod probe {
             println!("SHM_OWN_AFTER_UNLINK ERR {err}");
         }
         0
+    }
+
+    fn mmap_exec(path: &str) -> i32 {
+        let Ok(c_path) = std::ffi::CString::new(path) else {
+            return 2;
+        };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("MMAP_EXEC OPEN_ERR {err}");
+            return 1;
+        }
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE,
+                fd,
+                0,
+            )
+        };
+        let err = if ptr == libc::MAP_FAILED {
+            Some(std::io::Error::last_os_error().raw_os_error().unwrap_or(-1))
+        } else {
+            unsafe {
+                libc::munmap(ptr, 4096);
+            }
+            None
+        };
+        unsafe {
+            libc::close(fd);
+        }
+        match err {
+            None => {
+                println!("MMAP_EXEC OK");
+                0
+            }
+            Some(code) => {
+                println!("MMAP_EXEC ERR {code}");
+                1
+            }
+        }
     }
 }

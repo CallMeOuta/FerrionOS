@@ -17,8 +17,9 @@ use libredox::flag::{F_SETFD, O_CLOEXEC, O_DIRECTORY, O_RDONLY, O_RDWR};
 use crate::sessions::{CLONE_PREFIX, PID, clone_dirs, state_root};
 use crate::{
     FOLDER_CAPABILITIES, GrantKind, LaunchPolicy, ManifestPolicy, NESTED_LIVENESS_POLL_MS, Options,
-    PASSED_VARIABLES, SYSTEM_PATHS, check_pass_fd, check_stdio, child_schemes, format_user_dirs,
-    is_valid_wayland_display, new_handles, parse_snapshot, to_close,
+    PASSED_VARIABLES, SYSTEM_DATA_PATHS, SYSTEM_EXEC_PATHS, check_pass_fd, check_stdio,
+    child_schemes, format_user_dirs, is_valid_wayland_display, new_handles, parse_snapshot,
+    to_close,
 };
 
 const SCOPE_SERVICE: &str = "/scheme/file-scope/new";
@@ -231,12 +232,14 @@ fn attach_display_socket(
         real: run_text.clone(),
         access: Access::ReadWrite,
         layer: None,
+        exec_allowed: false,
     });
     scope.grants.push(Grant {
         virt: format!("{run_text}/wayland-0"),
         real: real_socket,
         access: Access::Socket,
         layer: None,
+        exec_allowed: false,
     });
     Ok(run_text)
 }
@@ -442,6 +445,7 @@ fn prepare_manifest_session(policy: &ManifestPolicy) -> Result<Prepared, String>
             real: caller_home_text.clone(),
             access: Access::ReadWrite,
             layer: None,
+            exec_allowed: false,
         });
     }
     let uid = unsafe { libc::geteuid() };
@@ -470,17 +474,30 @@ fn prepare_manifest_session(policy: &ManifestPolicy) -> Result<Prepared, String>
                 real: real_text.clone(),
                 access: Access::ReadWrite,
                 layer: None,
+                exec_allowed: false,
             });
         }
         xdg_entries.push((xdg_var, real_text));
     }
-    for system in SYSTEM_PATHS {
+    for system in SYSTEM_EXEC_PATHS {
         if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
             scope.grants.push(Grant {
                 virt: system.into(),
                 real: system.into(),
                 access: Access::ReadOnly,
                 layer: None,
+                exec_allowed: true,
+            });
+        }
+    }
+    for system in SYSTEM_DATA_PATHS {
+        if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
+            scope.grants.push(Grant {
+                virt: system.into(),
+                real: system.into(),
+                access: Access::ReadOnly,
+                layer: None,
+                exec_allowed: false,
             });
         }
     }
@@ -489,6 +506,7 @@ fn prepare_manifest_session(policy: &ManifestPolicy) -> Result<Prepared, String>
         real: app_home_text.clone(),
         access: Access::ReadWrite,
         layer: None,
+        exec_allowed: policy.allow_exec_written,
     });
     if !scope.grants.iter().any(|g| g.virt == "/tmp") {
         scope.grants.push(Grant {
@@ -496,6 +514,7 @@ fn prepare_manifest_session(policy: &ManifestPolicy) -> Result<Prepared, String>
             real: text(&tmp)?,
             access: Access::ReadWrite,
             layer: None,
+            exec_allowed: false,
         });
     }
     let run_dir = match display_socket {
@@ -559,9 +578,10 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
     };
     let mut clones = 0;
     for (kind, real_text, mode) in validated {
-        let (access, layer) = match kind {
-            GrantKind::Files => (Access::ReadWrite, None),
-            GrantKind::ReadOnly => (Access::ReadOnly, None),
+        let (access, layer, exec_allowed) = match kind {
+            GrantKind::Files => (Access::ReadWrite, None, false),
+            GrantKind::ExecWritten => (Access::ReadWrite, None, true),
+            GrantKind::ReadOnly => (Access::ReadOnly, None, false),
             GrantKind::Clone => {
                 let clone = dir.path().join(format!("{CLONE_PREFIX}{clones}"));
                 clones += 1;
@@ -570,7 +590,7 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
                     .map_err(|e| format!("cannot set the layer's mode: {e}"))?;
                 fs::write(clone.join(LOWER), &real_text)
                     .map_err(|e| format!("cannot write {}: {e}", clone.display()))?;
-                (Access::Clone, Some(text(&clone.join(LAYER))?))
+                (Access::Clone, Some(text(&clone.join(LAYER))?), false)
             }
         };
         scope.grants.push(Grant {
@@ -578,15 +598,28 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
             real: real_text,
             access,
             layer,
+            exec_allowed,
         });
     }
-    for system in SYSTEM_PATHS {
+    for system in SYSTEM_EXEC_PATHS {
         if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
             scope.grants.push(Grant {
                 virt: system.into(),
                 real: system.into(),
                 access: Access::ReadOnly,
                 layer: None,
+                exec_allowed: true,
+            });
+        }
+    }
+    for system in SYSTEM_DATA_PATHS {
+        if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
+            scope.grants.push(Grant {
+                virt: system.into(),
+                real: system.into(),
+                access: Access::ReadOnly,
+                layer: None,
+                exec_allowed: false,
             });
         }
     }
@@ -596,6 +629,7 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
         real: home.clone(),
         access: Access::ReadWrite,
         layer: None,
+        exec_allowed: false,
     });
     if !scope.grants.iter().any(|g| g.virt == "/tmp") {
         scope.grants.push(Grant {
@@ -603,6 +637,7 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
             real: text(&tmp)?,
             access: Access::ReadWrite,
             layer: None,
+            exec_allowed: false,
         });
     }
     let run_dir = match display_socket {
@@ -709,6 +744,9 @@ fn prepare_nested_session(
 
     match policy {
         LaunchPolicy::Manifest(p) => {
+            if p.allow_exec_written {
+                return Err("wider-than-parent: code-exec-written".to_owned());
+            }
             let uid = unsafe { libc::geteuid() };
             if let Some(caller_home_raw) = std::env::var_os("HOME")
                 && let Ok(caller_home) = fs::canonicalize(&caller_home_raw)
@@ -720,6 +758,7 @@ fn prepare_nested_session(
                         real: caller_home_text.clone(),
                         access: Access::ReadWrite,
                         layer: None,
+                        exec_allowed: false,
                     });
                 }
                 for &(_cap, folder_name, xdg_var) in &p.granted_folders {
@@ -743,6 +782,7 @@ fn prepare_nested_session(
                             real: real_text.clone(),
                             access: Access::ReadWrite,
                             layer: None,
+                            exec_allowed: false,
                         });
                     }
                     xdg_entries.push((xdg_var, real_text));
@@ -755,9 +795,10 @@ fn prepare_nested_session(
                 if *kind == GrantKind::Clone {
                     return Err(format!("wider-than-parent: {} clone", path.display()));
                 }
-                let access = match kind {
-                    GrantKind::Files => Access::ReadWrite,
-                    GrantKind::ReadOnly => Access::ReadOnly,
+                let (access, exec_allowed) = match kind {
+                    GrantKind::Files => (Access::ReadWrite, false),
+                    GrantKind::ExecWritten => (Access::ReadWrite, true),
+                    GrantKind::ReadOnly => (Access::ReadOnly, false),
                     GrantKind::Clone => unreachable!(),
                 };
                 let is_link = fs::symlink_metadata(path)
@@ -768,7 +809,7 @@ fn prepare_nested_session(
                 } else {
                     match fs::canonicalize(path) {
                         Ok(real) => {
-                            if *kind == GrantKind::Files {
+                            if matches!(*kind, GrantKind::Files | GrantKind::ExecWritten) {
                                 let meta = fs::metadata(&real)
                                     .map_err(|e| format!("{}: {e}", real.display()))?;
                                 if !meta.is_dir() {
@@ -788,18 +829,31 @@ fn prepare_nested_session(
                     real: resolved,
                     access,
                     layer: None,
+                    exec_allowed,
                 });
             }
         }
     }
 
-    for system in SYSTEM_PATHS {
+    for system in SYSTEM_EXEC_PATHS {
         if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
             scope.grants.push(Grant {
                 virt: system.into(),
                 real: system.into(),
                 access: Access::ReadOnly,
                 layer: None,
+                exec_allowed: true,
+            });
+        }
+    }
+    for system in SYSTEM_DATA_PATHS {
+        if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
+            scope.grants.push(Grant {
+                virt: system.into(),
+                real: system.into(),
+                access: Access::ReadOnly,
+                layer: None,
+                exec_allowed: false,
             });
         }
     }
@@ -812,6 +866,7 @@ fn prepare_nested_session(
             real: real_socket,
             access: Access::Socket,
             layer: None,
+            exec_allowed: false,
         });
     }
     Ok(Prepared {

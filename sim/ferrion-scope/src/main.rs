@@ -386,11 +386,13 @@ fn make_scope(rng: &mut Rng, real: &Tree) -> Option<Scope> {
         } else {
             Access::ReadOnly
         };
+        let exec_allowed = rng.chance(40);
         scope.grants.push(Grant {
             virt: path.clone(),
             real: path,
             access,
             layer: None,
+            exec_allowed,
         });
     }
     if rng.chance(50) {
@@ -405,6 +407,7 @@ fn make_scope(rng: &mut Rng, real: &Tree) -> Option<Scope> {
                 real: real_dir,
                 access: Access::ReadWrite,
                 layer: None,
+                exec_allowed: false,
             });
         }
     }
@@ -440,6 +443,7 @@ fn make_scope(rng: &mut Rng, real: &Tree) -> Option<Scope> {
                 real: real_sock,
                 access: Access::Socket,
                 layer: None,
+                exec_allowed: false,
             });
         }
     }
@@ -683,11 +687,13 @@ fn check_nested_invariants(
             Access::ReadWrite if rng.chance(50) => Access::ReadOnly,
             other => other,
         };
+        let child_exec = chosen.exec_allowed && rng.chance(50);
         child_spec.grants.push(Grant {
             virt: chosen.virt.clone(),
             real: chosen.virt.clone(),
             access: child_access,
             layer: None,
+            exec_allowed: child_exec,
         });
         let mut sim = SimView {
             real,
@@ -754,6 +760,7 @@ fn check_nested_invariants(
                         };
                         covers
                             && access_leq(cg.access, ag.access)
+                            && (!cg.exec_allowed || ag.exec_allowed)
                             && !ascope
                                 .hidden
                                 .iter()
@@ -783,6 +790,7 @@ fn check_nested_invariants(
                 real: ro_grant.virt.clone(),
                 access: Access::ReadWrite,
                 layer: None,
+                exec_allowed: ro_grant.exec_allowed,
             }],
             hidden: Vec::new(),
             sub_dirs: SubDirs::default(),
@@ -796,6 +804,36 @@ fn check_nested_invariants(
             return Err(format!(
                 "nested rw widened parent ro grant {}",
                 ro_grant.virt
+            ));
+        }
+        checked += 1;
+    }
+
+    if let Some(noexec_grant) = parent_scope
+        .grants
+        .iter()
+        .find(|g| !g.exec_allowed && matches!(g.access, Access::ReadOnly | Access::ReadWrite))
+    {
+        let wider_exec = Scope {
+            grants: vec![Grant {
+                virt: noexec_grant.virt.clone(),
+                real: noexec_grant.virt.clone(),
+                access: noexec_grant.access,
+                layer: None,
+                exec_allowed: true,
+            }],
+            hidden: Vec::new(),
+            sub_dirs: SubDirs::default(),
+        };
+        let mut sim = SimView {
+            real,
+            cache,
+            violations,
+        };
+        if narrow_child_scope(parent_scope, &mut sim, &wider_exec).is_ok() {
+            return Err(format!(
+                "nested exec widened parent non-exec grant {}",
+                noexec_grant.virt
             ));
         }
         checked += 1;
@@ -826,18 +864,21 @@ fn check_nested_static_rules() -> Result<usize, String> {
                 real: "/pics".into(),
                 access: Access::ReadOnly,
                 layer: None,
+                exec_allowed: false,
             },
             Grant {
                 virt: "/tmp".into(),
                 real: "/tmp".into(),
                 access: Access::ReadWrite,
                 layer: None,
+                exec_allowed: false,
             },
             Grant {
                 virt: "/clone-src".into(),
                 real: "/clone-src".into(),
                 access: Access::Clone,
                 layer: Some("/tmp".into()),
+                exec_allowed: false,
             },
         ],
         hidden: Vec::new(),
@@ -859,6 +900,7 @@ fn check_nested_static_rules() -> Result<usize, String> {
             real: "/tmp/escape-link".into(),
             access: Access::ReadOnly,
             layer: None,
+            exec_allowed: false,
         }],
         hidden: Vec::new(),
         sub_dirs: SubDirs::default(),
@@ -878,6 +920,7 @@ fn check_nested_static_rules() -> Result<usize, String> {
             real: "/clone-src".into(),
             access: Access::ReadOnly,
             layer: None,
+            exec_allowed: false,
         }],
         hidden: Vec::new(),
         sub_dirs: SubDirs::default(),
@@ -926,12 +969,14 @@ fn check_nested_static_rules() -> Result<usize, String> {
                 real: "/pics".into(),
                 access: Access::ReadWrite,
                 layer: None,
+                exec_allowed: false,
             },
             Grant {
                 virt: "/tmp".into(),
                 real: "/tmp".into(),
                 access: Access::ReadWrite,
                 layer: None,
+                exec_allowed: false,
             },
         ],
         hidden: Vec::new(),
@@ -943,6 +988,7 @@ fn check_nested_static_rules() -> Result<usize, String> {
             real: "/pics/x".into(),
             access: Access::ReadOnly,
             layer: None,
+            exec_allowed: false,
         }],
         hidden: Vec::new(),
         sub_dirs: SubDirs::default(),
@@ -961,6 +1007,7 @@ fn check_nested_static_rules() -> Result<usize, String> {
         real: "/tmp/.ferrion-sub-1/home".into(),
         access: Access::ReadWrite,
         layer: None,
+        exec_allowed: false,
     });
     let mut swap_sessions = vec![
         ModelSession {
@@ -1007,7 +1054,124 @@ fn check_nested_static_rules() -> Result<usize, String> {
     {
         return Err("ended child paths stayed protected after child exit".into());
     }
-    Ok(11)
+
+    let mut exec_tree = Tree::new();
+    assert!(exec_tree.insert("/usr", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/usr/bin", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/var", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/var/cache", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/var/cache/fontconfig", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/app-home", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/docs", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/ro-data", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/tmp", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/run", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/run/wayland-0", Node::File));
+    assert!(exec_tree.insert("/clone-src", Node::Dir(BTreeMap::new())));
+    assert!(exec_tree.insert("/clone-layer", Node::Dir(BTreeMap::new())));
+
+    let exec_spec = concat!(
+        "grant\0ro-exec\0/usr\0/usr\n",
+        "grant\0ro\0/var/cache/fontconfig\0/var/cache/fontconfig\n",
+        "grant\0ro\0/ro-data\0/ro-data\n",
+        "grant\0rw-exec\0/app-home\0/app-home\n",
+        "grant\0rw\0/docs\0/docs\n",
+        "grant\0rw\0/tmp\0/tmp\n",
+        "grant\0clone\0/clone-src\0/clone-src\0/clone-layer\n",
+        "grant\0socket\0/run/wayland-0\0/run/wayland-0\n",
+    );
+    let parsed_exec =
+        Scope::parse(exec_spec.as_bytes()).map_err(|e| format!("exec spec parse failed: {e}"))?;
+    let roundtrip = Scope::parse(&parsed_exec.encode())
+        .map_err(|e| format!("exec spec roundtrip parse failed: {e}"))?;
+    if roundtrip != parsed_exec {
+        return Err("exec_allowed did not roundtrip through Scope::encode/parse".into());
+    }
+    if !parsed_exec.allows_exec(0, false)
+        || parsed_exec.allows_exec(0, true)
+        || parsed_exec.allows_exec(1, false)
+        || parsed_exec.allows_exec(2, false)
+        || !parsed_exec.allows_exec(3, false)
+        || parsed_exec.allows_exec(3, true)
+        || parsed_exec.allows_exec(4, false)
+        || parsed_exec.allows_exec(5, false)
+        || parsed_exec.allows_exec(6, false)
+        || parsed_exec.allows_exec(6, true)
+        || parsed_exec.allows_exec(7, false)
+        || parsed_exec.allows_exec(99, false)
+    {
+        return Err("Scope::allows_exec violated PFR2a grant exec policy".into());
+    }
+
+    let exec_cache = RefCell::new(DirCache::default());
+    let exec_violations = RefCell::new(Vec::new());
+    let exec_denied_cases = [
+        ("/var/cache/fontconfig", Access::ReadOnly, true),
+        ("/ro-data", Access::ReadOnly, true),
+        ("/docs", Access::ReadOnly, true),
+        ("/docs", Access::ReadWrite, true),
+        ("/tmp", Access::ReadWrite, true),
+        ("/usr", Access::ReadWrite, true),
+        ("/clone-src", Access::ReadOnly, true),
+    ];
+    for (path, access, exec_allowed) in exec_denied_cases {
+        let req = Scope {
+            grants: vec![Grant {
+                virt: path.into(),
+                real: path.into(),
+                access,
+                layer: None,
+                exec_allowed,
+            }],
+            hidden: Vec::new(),
+            sub_dirs: SubDirs::default(),
+        };
+        let mut sim = SimView {
+            real: &exec_tree,
+            cache: &exec_cache,
+            violations: &exec_violations,
+        };
+        if narrow_child_scope(&parsed_exec, &mut sim, &req).is_ok() {
+            return Err(format!(
+                "narrow_child_scope allowed exec escalation on {path} ({access:?})"
+            ));
+        }
+    }
+    let exec_allowed_cases = [
+        ("/usr/bin", Access::ReadOnly, true, true),
+        ("/usr/bin", Access::ReadOnly, false, false),
+        ("/app-home", Access::ReadWrite, true, true),
+        ("/app-home", Access::ReadOnly, true, true),
+        ("/app-home", Access::ReadWrite, false, false),
+        ("/var/cache/fontconfig", Access::ReadOnly, false, false),
+    ];
+    for (path, access, req_exec, want_exec) in exec_allowed_cases {
+        let req = Scope {
+            grants: vec![Grant {
+                virt: path.into(),
+                real: path.into(),
+                access,
+                layer: None,
+                exec_allowed: req_exec,
+            }],
+            hidden: Vec::new(),
+            sub_dirs: SubDirs::default(),
+        };
+        let mut sim = SimView {
+            real: &exec_tree,
+            cache: &exec_cache,
+            violations: &exec_violations,
+        };
+        let narrowed = narrow_child_scope(&parsed_exec, &mut sim, &req).map_err(|e| {
+            format!("narrow_child_scope refused valid exec request {path} ({access:?}, {req_exec}): {e:?}")
+        })?;
+        if narrowed.grants[0].exec_allowed != want_exec {
+            return Err(format!(
+                "narrow_child_scope returned wrong exec_allowed on {path}"
+            ));
+        }
+    }
+    Ok(25)
 }
 
 fn run(seed: u64, steps: usize) -> Result<usize, String> {

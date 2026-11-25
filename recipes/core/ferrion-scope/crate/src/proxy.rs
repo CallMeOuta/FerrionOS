@@ -1941,6 +1941,7 @@ impl Proxy {
                         real,
                         access: Access::ReadWrite,
                         layer: None,
+                        exec_allowed: false,
                     });
                 }
                 if !scope.hidden.contains(&base) && scope.hidden.len() < MAX_HIDDEN {
@@ -2524,6 +2525,17 @@ impl SchemeSync for Proxy {
         flags: MapFlags,
         _ctx: &CallerCtx,
     ) -> Result<usize> {
+        if flags.contains(MapFlags::PROT_EXEC) {
+            let node = self.node(id)?;
+            let is_upper = node.place() == Some(NodePlace::Upper);
+            let allowed = match node.grant {
+                Some(grant) => self.live(node.session)?.0.allows_exec(grant, is_upper),
+                None => false,
+            };
+            if !allowed {
+                return Err(err(EACCES));
+            }
+        }
         if self.maps.len() >= MAX_MAPS {
             return Err(err(EMFILE));
         }

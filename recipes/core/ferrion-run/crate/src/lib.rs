@@ -50,10 +50,9 @@ pub const SCOPED_SCHEMES: [&str; 13] = [
     "timerfd",
 ];
 
-pub const SYSTEM_PATHS: [&str; 9] = [
-    "/usr",
-    "/bin",
-    "/lib",
+pub const SYSTEM_EXEC_PATHS: [&str; 3] = ["/usr", "/bin", "/lib"];
+
+pub const SYSTEM_DATA_PATHS: [&str; 6] = [
     "/include",
     "/share",
     "/ssl",
@@ -82,8 +81,10 @@ usage: ferrion-run [OPTION ...] [--] PROGRAM [ARGUMENT ...]
 
 Starts PROGRAM in a scoped session: a namespace of its own in which the file
 system holds only what the session was given. Every path keeps its real name.
-  --files DIR        DIR, read-write.
-  --read-only PATH   PATH, a folder or a file, read-only.
+  --files DIR        DIR, read-write (non-executable).
+  --exec-written DIR DIR, read-write, marking DIR executable for execve and
+                     ld.so (widening; refused under a manifest).
+  --read-only PATH   PATH, a folder or a file, read-only (non-executable).
   --clone DIR        DIR through a copy-on-write layer: PROGRAM reads DIR, and its
                      writes and deletes land in the session's layer, never in DIR.
                      The layer outlives the session: `ferrion-run diff SESSION`
@@ -105,11 +106,17 @@ system holds only what the session was given. Every path keeps its real name.
                      layer surfaces or lock; it can see the person's idle state.
 Options may repeat; ferrion-run holds at most 32 folders and files.
 
-Besides these, every session gets read-only /usr, /bin, /lib, /include, /share,
-/ssl, /etc, /dev and /var/cache/fontconfig (when present, nothing else under
-/var), an empty home of its own (HOME) and an empty /tmp of its own,
-both in ~/.local/state/ferrion-run/SESSION, which the session itself cannot see
-otherwise. Any other path answers as missing. PROGRAM cannot rename or remove a
+Besides these, every session gets read-only /usr, /bin and /lib (executable),
+read-only /include, /share, /ssl, /etc, /dev and /var/cache/fontconfig (data
+only, when present, nothing else under /var), an empty home of its own (HOME)
+and an empty /tmp of its own, both in ~/.local/state/ferrion-run/SESSION, which
+the session itself cannot see otherwise. execve, a script's interpreter and
+ld.so refuse a program or library whose file the sandbox doesn't grant as
+executable, before exec's point of no return. This is not yet a security
+boundary; S11 and kernel F are planned to make it one. Grants without exec stay
+non-executable unless granted code-exec-written (which under a manifest covers
+only the app's own home, never shared user folders) or --exec-written DIR. Any
+other path answers as missing. PROGRAM cannot rename or remove a
 folder that holds another of its folders or ferrion-run's sessions. A symlink it
 writes or moves stays, and since programs outside a session follow it,
 ferrion-run lists each such symlink that leads outside its folder when PROGRAM
@@ -138,8 +145,10 @@ A manifest in /usr/share/ferrion/apps/<package>.toml whose exec matches the
 canonical system path of PROGRAM (/usr or /bin) replaces profiles: grants come
 from the intersection of that manifest and /var/lib/ferrion/grants/<uid>.toml
 (root-owned; missing file uses class defaults, malformed file is refused).
-Under a manifest, --files, --read-only, --clone, --pty, --display and --pass-fd
-are refused; HOME is a persistent per-app folder (~/.local/share/ferrion/apps/<id>/home);
+Under a manifest, --files, --exec-written, --read-only, --clone, --pty,
+--display and --pass-fd are refused; HOME is a persistent per-app folder
+(~/.local/share/ferrion/apps/<id>/home, executable only when code-exec-written
+is declared and granted; shared user folders stay non-executable);
 granted folders are advertised in XDG_*_DIR and $HOME/.config/user-dirs.dirs;
 display grants the compositor's Wayland socket as wayland-0 in a private
 XDG_RUNTIME_DIR; network-internet gates ip, icmp, tcp and udp (network-local
@@ -177,6 +186,7 @@ status otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GrantKind {
     Files,
+    ExecWritten,
     ReadOnly,
     Clone,
 }
@@ -288,6 +298,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                 continue;
             }
             Some("--files") => GrantKind::Files,
+            Some("--exec-written") => GrantKind::ExecWritten,
             Some("--read-only") => GrantKind::ReadOnly,
             Some("--clone") => GrantKind::Clone,
             Some("--") => match args.next() {
@@ -362,6 +373,7 @@ pub struct ManifestPolicy {
     pub allow_display: bool,
     pub granted_folders: Vec<(&'static str, &'static str, &'static str)>,
     pub allow_home: bool,
+    pub allow_exec_written: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,6 +407,7 @@ pub fn manifest_policy(
         .filter(|(cap, _, _)| effective_grant(manifest, grants, cap))
         .collect();
     let allow_home = effective_grant(manifest, grants, "files-home");
+    let allow_exec_written = effective_grant(manifest, grants, "code-exec-written");
     assert!(!effective_grant(manifest, grants, "sudo"));
     Ok(ManifestPolicy {
         id: manifest.id.clone(),
@@ -404,6 +417,7 @@ pub fn manifest_policy(
         allow_display,
         granted_folders,
         allow_home,
+        allow_exec_written,
     })
 }
 

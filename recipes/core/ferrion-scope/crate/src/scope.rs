@@ -44,6 +44,7 @@ pub struct Grant {
     pub real: String,
     pub access: Access,
     pub layer: Option<String>,
+    pub exec_allowed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -279,13 +280,18 @@ impl Scope {
                     scope.sub_dirs.run = Some(virt.to_owned());
                 }
                 ["grant", access, virt, real, ref layer @ ..] => {
-                    let access = match access {
-                        "ro" => Access::ReadOnly,
-                        "rw" => Access::ReadWrite,
-                        "clone" => Access::Clone,
-                        "socket" => Access::Socket,
+                    let (access, exec_allowed) = match access {
+                        "ro" => (Access::ReadOnly, false),
+                        "ro-exec" => (Access::ReadOnly, true),
+                        "rw" => (Access::ReadWrite, false),
+                        "rw-exec" => (Access::ReadWrite, true),
+                        "clone" => (Access::Clone, false),
+                        "socket" => (Access::Socket, false),
                         other => return Err(format!("unknown access {other:?}")),
                     };
+                    assert!(
+                        !exec_allowed || matches!(access, Access::ReadOnly | Access::ReadWrite)
+                    );
                     let layer = match (access, layer) {
                         (Access::Clone, [layer]) if is_canonical(layer) => {
                             Some((*layer).to_owned())
@@ -323,6 +329,7 @@ impl Scope {
                         real: real.to_owned(),
                         access,
                         layer,
+                        exec_allowed,
                     });
                 }
                 _ => return Err(format!("bad scope line {line:?}")),
@@ -363,12 +370,7 @@ impl Scope {
             out.push_str(&format!("sub-run\0{run}\n"));
         }
         for g in &self.grants {
-            let access = match g.access {
-                Access::ReadOnly => "ro",
-                Access::ReadWrite => "rw",
-                Access::Clone => "clone",
-                Access::Socket => "socket",
-            };
+            let access = grant_access_label(g.access, g.exec_allowed);
             out.push_str(&format!("grant\0{access}\0{}\0{}", g.virt, g.real));
             if let Some(layer) = &g.layer {
                 out.push('\0');
@@ -434,6 +436,16 @@ impl Scope {
 
     pub fn real_path(&self, grant: usize, rel: &str) -> String {
         join(&self.grants[grant].real, rel)
+    }
+
+    pub fn allows_exec(&self, grant: usize, is_upper: bool) -> bool {
+        let Some(g) = self.grants.get(grant) else {
+            return false;
+        };
+        if is_upper || matches!(g.access, Access::Clone | Access::Socket) {
+            return false;
+        }
+        g.exec_allowed
     }
 
     pub fn protects(&self, real: &str) -> bool {
@@ -591,6 +603,17 @@ pub fn access_label(access: Access) -> &'static str {
     }
 }
 
+pub fn grant_access_label(access: Access, exec_allowed: bool) -> &'static str {
+    match (access, exec_allowed) {
+        (Access::ReadOnly, false) => "ro",
+        (Access::ReadOnly, true) => "ro-exec",
+        (Access::ReadWrite, false) => "rw",
+        (Access::ReadWrite, true) => "rw-exec",
+        (Access::Clone, _) => "clone",
+        (Access::Socket, _) => "socket",
+    }
+}
+
 pub fn narrow_child_scope<V: View>(
     parent: &Scope,
     view: &mut V,
@@ -659,6 +682,12 @@ pub fn narrow_child_scope<V: View>(
             });
         }
         let pg = &parent.grants[pgi];
+        if g.exec_allowed && !pg.exec_allowed {
+            return Err(WiderError {
+                path: g.real.clone(),
+                access: grant_access_label(g.access, g.exec_allowed),
+            });
+        }
         let real = match (g.access, pg.access) {
             (Access::ReadOnly, Access::ReadOnly | Access::ReadWrite) => join(&pg.real, &rel),
             (Access::ReadWrite, Access::ReadWrite) => join(&pg.real, &rel),
@@ -666,7 +695,7 @@ pub fn narrow_child_scope<V: View>(
             _ => {
                 return Err(WiderError {
                     path: g.real.clone(),
-                    access: access_label(g.access),
+                    access: grant_access_label(g.access, g.exec_allowed),
                 });
             }
         };
@@ -675,6 +704,7 @@ pub fn narrow_child_scope<V: View>(
             real,
             access: g.access,
             layer: None,
+            exec_allowed: g.exec_allowed,
         });
     }
     assert!(narrowed.grants.len() + narrowed.sub_dirs.count() <= MAX_GRANTS);
