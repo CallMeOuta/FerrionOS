@@ -70,6 +70,13 @@ def format_foreign_qemus(entries):
 LAB_BASE_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping")
 LAB_PERF_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping", "iperf3")
 LAB_TESTS = ("net-basics", "net-perf", "net-no-lease")
+MAX_TIMEOUT_SUBS_MARGIN = 2
+
+
+def read_timeout_subscribers(vm, run_status):
+    _, text = run_status(vm, "cat /scheme/sys/stat", 20)
+    m = re.search(r"timeout_subscribers:\s*(\d+)", text)
+    return int(m.group(1)) if m else None
 
 
 def bring_up_loopback(blocked_cls):
@@ -1047,6 +1054,7 @@ def run_net_basics(args, out, ctx):
                 }
 
                 install_iperf_watchdog(vm, ctx["run_status"])
+                ts_before = read_timeout_subscribers(vm, ctx["run_status"])
                 ctx["run_status"](
                     vm,
                     "bash -c 'iperf3 -s -4 -B 127.0.0.1 -p 5202 -1 </dev/null >/tmp/nb-lo-srv.log 2>&1 & echo $! > /tmp/nb-lo.pid'; sleep 1",
@@ -1058,6 +1066,15 @@ def run_net_basics(args, out, ctx):
                     45,
                 )
                 ctx["run_status"](vm, "bash -c 'kill $(cat /tmp/nb-lo.pid) 2>/dev/null || true'", 15)
+                ts_imm = read_timeout_subscribers(vm, ctx["run_status"])
+                time.sleep(5)
+                ts_after_5s = read_timeout_subscribers(vm, ctx["run_status"])
+                ts_delta = (
+                    (ts_after_5s - ts_before)
+                    if (ts_before is not None and ts_after_5s is not None)
+                    else None
+                )
+                ts_ok = ts_delta is not None and ts_delta <= MAX_TIMEOUT_SUBS_MARGIN
                 lo_data = parse_iperf_json(lo_out)
                 lo_bps = (
                     (lo_data or {}).get("end", {}).get("sum_received", {}).get("bits_per_second")
@@ -1069,9 +1086,15 @@ def run_net_basics(args, out, ctx):
                     and lo_data is not None
                     and not lo_data.get("error")
                     and lo_mbps is not None
-                    and lo_mbps > 0.0,
+                    and lo_mbps > 0.0
+                    and ts_ok,
                     "rc": lo_rc,
                     "mb_per_s": lo_mbps,
+                    "timeout_subs_before": ts_before,
+                    "timeout_subs_imm": ts_imm,
+                    "timeout_subs_after_5s": ts_after_5s,
+                    "timeout_subs_delta": ts_delta,
+                    "timeout_subs_margin": MAX_TIMEOUT_SUBS_MARGIN,
                     "error": (lo_data or {}).get("error") if isinstance(lo_data, dict) else lo_out.strip()[-160:],
                 }
 
