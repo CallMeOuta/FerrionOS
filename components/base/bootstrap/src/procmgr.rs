@@ -536,6 +536,31 @@ enum WaitpidStatus {
     },
 }
 
+fn status_reportable(status: WaitpidStatus, flags: WaitFlags) -> bool {
+    match status {
+        WaitpidStatus::Continued => flags.contains(WaitFlags::WCONTINUED),
+        WaitpidStatus::Stopped { .. } => flags.contains(WaitFlags::WUNTRACED),
+        WaitpidStatus::Terminated { .. } => true,
+    }
+}
+
+fn record_waitpid_status(
+    parent: &mut Process,
+    child_pid: ProcessId,
+    pgid: ProcessId,
+    status: WaitpidStatus,
+    max_entries: usize,
+) {
+    parent.waitpid.insert(
+        WaitpidKey {
+            pid: Some(child_pid),
+            pgid: Some(pgid),
+        },
+        (child_pid, status),
+    );
+    assert!(parent.waitpid.len() <= max_entries);
+}
+
 #[derive(Debug)]
 enum Handle {
     Init,
@@ -1888,98 +1913,86 @@ impl<'a> ProcScheme<'a> {
         let mut proc_guard = proc_rc.borrow_mut();
         let proc = &mut *proc_guard;
 
-        let recv_nonblock = |waitpid: &mut BTreeMap<WaitpidKey, (ProcessId, WaitpidStatus)>,
-                             key: &WaitpidKey|
-         -> Option<(ProcessId, WaitpidStatus)> {
-            if let Some((pid, sts)) = waitpid.get(key).map(|(k, v)| (*k, *v)) {
-                waitpid.remove(key);
-                /*while let Some((_, new_sts)) = waitpid.remove(&WaitpidKey { pid: Some(pid), pgid: None }) {
-                    sts = new_sts;
-                }*/
-                Some((pid, sts))
-            } else {
-                None
-            }
-        };
-        let grim_reaper =
-            |w_pid: ProcessId, status: WaitpidStatus, scheme: &mut ProcScheme| match status {
-                WaitpidStatus::Continued => {
-                    if flags.contains(WaitFlags::WCONTINUED) {
-                        Ready((w_pid.0, 0xffff))
-                    } else {
-                        Pending
+        let reap_and_encode =
+            |w_pid: ProcessId, status: WaitpidStatus, scheme: &mut ProcScheme| -> (usize, i32) {
+                match status {
+                    WaitpidStatus::Continued => (w_pid.0, 0xffff),
+                    WaitpidStatus::Stopped { signal } => {
+                        (w_pid.0, 0x7f | (i32::from(signal.get()) << 8))
                     }
-                }
-                WaitpidStatus::Stopped { signal } => {
-                    if flags.contains(WaitFlags::WUNTRACED) {
-                        Ready((w_pid.0, 0x7f | (i32::from(signal.get()) << 8)))
-                    } else {
-                        Pending
+                    WaitpidStatus::Terminated { signal, status } => {
+                        scheme.reap(w_pid);
+                        (
+                            w_pid.0,
+                            i32::from(signal.map_or(0, NonZeroU8::get)) | (i32::from(status) << 8),
+                        )
                     }
-                }
-                WaitpidStatus::Terminated { signal, status } => {
-                    scheme.reap(w_pid);
-                    Ready((
-                        w_pid.0,
-                        i32::from(signal.map_or(0, NonZeroU8::get)) | (i32::from(status) << 8),
-                    ))
                 }
             };
 
-        match target {
-            WaitpidTarget::AnyChild | WaitpidTarget::AnyGroupMember => {
-                let kv = (if matches!(target, WaitpidTarget::AnyChild) {
-                    proc.waitpid.first_key_value()
-                } else {
-                    proc.waitpid.get_key_value(&WaitpidKey {
-                        pid: None,
-                        pgid: Some(proc.pgid),
+        let matched = match target {
+            WaitpidTarget::AnyChild => {
+                let bound = proc.waitpid.len();
+                proc.waitpid
+                    .iter()
+                    .take(bound)
+                    .find(|&(_, &(_, status))| status_reportable(status, flags))
+                    .map(|(&wid, &(w_pid, status))| (wid, w_pid, status))
+            }
+            WaitpidTarget::AnyGroupMember => {
+                let want_pgid = proc.pgid;
+                let bound = proc.waitpid.len();
+                proc.waitpid
+                    .iter()
+                    .take(bound)
+                    .find(|&(&wid, &(w_pid, status))| {
+                        if !status_reportable(status, flags) {
+                            return false;
+                        }
+                        let child_pgid = if w_pid != this_pid {
+                            self.processes
+                                .get(&w_pid)
+                                .map_or(wid.pgid, |p| Some(p.borrow().pgid))
+                        } else {
+                            wid.pgid
+                        };
+                        child_pgid == Some(want_pgid)
                     })
-                })
-                .map(|(k, v)| (*k, *v));
-                if let Some((wid, (w_pid, status))) = kv {
-                    let _ = proc.waitpid.remove(&wid);
-                    drop(proc_guard);
-                    grim_reaper(w_pid, status, self).map(Ok)
-                } else if flags.contains(WaitFlags::WNOHANG) {
-                    Ready(Ok((0, 0)))
-                } else {
-                    proc.waitpid_waiting.push_back(req_id);
-                    Pending
-                }
+                    .map(|(&wid, &(w_pid, status))| (wid, w_pid, status))
             }
             WaitpidTarget::SingleProc(pid) => {
                 if this_pid == pid {
                     return Ready(Err(Error::new(EINVAL)));
                 }
-                let target_proc_rc = self.processes.get(&pid).ok_or(Error::new(ECHILD))?;
-                let target_proc = target_proc_rc.borrow_mut();
-
-                if target_proc.ppid != this_pid {
-                    return Ready(Err(Error::new(ECHILD)));
-                }
+                let exited = {
+                    let target_proc_rc = self.processes.get(&pid).ok_or(Error::new(ECHILD))?;
+                    let target_proc = target_proc_rc.borrow();
+                    if target_proc.ppid != this_pid {
+                        return Ready(Err(Error::new(ECHILD)));
+                    }
+                    if let ProcessStatus::Exited { status, signal } = target_proc.status {
+                        Some((signal, status))
+                    } else {
+                        None
+                    }
+                };
                 let key = WaitpidKey {
                     pid: Some(pid),
                     pgid: None,
                 };
-                if let ProcessStatus::Exited { status, signal } = target_proc.status {
-                    let _ = recv_nonblock(&mut proc.waitpid, &key);
+                if let Some((signal, status)) = exited {
+                    let _ = proc.waitpid.remove(&key);
                     drop(proc_guard);
-                    drop(target_proc);
-                    grim_reaper(pid, WaitpidStatus::Terminated { signal, status }, self).map(Ok)
-                } else {
-                    let res = recv_nonblock(&mut proc.waitpid, &key);
-                    if let Some((w_pid, status)) = res {
-                        drop(proc_guard);
-                        drop(target_proc);
-                        grim_reaper(w_pid, status, self).map(Ok)
-                    } else if flags.contains(WaitFlags::WNOHANG) {
-                        Ready(Ok((0, 0)))
-                    } else {
-                        proc.waitpid_waiting.push_back(req_id);
-                        Pending
-                    }
+                    return Ready(Ok(reap_and_encode(
+                        pid,
+                        WaitpidStatus::Terminated { signal, status },
+                        self,
+                    )));
                 }
+                proc.waitpid
+                    .get_key_value(&key)
+                    .filter(|&(_, &(_, status))| status_reportable(status, flags))
+                    .map(|(&wid, &(w_pid, status))| (wid, w_pid, status))
             }
             WaitpidTarget::ProcGroup(pgid) => {
                 if let Some(group_rc) = self.groups.get(&pgid) {
@@ -1996,22 +2009,36 @@ impl<'a> ProcScheme<'a> {
                 } else {
                     return Ready(Err(Error::new(ECHILD)));
                 }
-
-                let key = WaitpidKey {
-                    pid: None,
-                    pgid: Some(pgid),
-                };
-                if let Some(&(w_pid, status)) = proc.waitpid.get(&key) {
-                    let _ = proc.waitpid.remove(&key);
-                    drop(proc_guard);
-                    grim_reaper(w_pid, status, self).map(Ok)
-                } else if flags.contains(WaitFlags::WNOHANG) {
-                    Ready(Ok((0, 0)))
-                } else {
-                    proc.waitpid_waiting.push_back(req_id);
-                    Pending
-                }
+                let bound = proc.waitpid.len();
+                proc.waitpid
+                    .iter()
+                    .take(bound)
+                    .find(|&(&wid, &(w_pid, status))| {
+                        if !status_reportable(status, flags) {
+                            return false;
+                        }
+                        let child_pgid = if w_pid != this_pid {
+                            self.processes
+                                .get(&w_pid)
+                                .map_or(wid.pgid, |p| Some(p.borrow().pgid))
+                        } else {
+                            wid.pgid
+                        };
+                        child_pgid == Some(pgid)
+                    })
+                    .map(|(&wid, &(w_pid, status))| (wid, w_pid, status))
             }
+        };
+
+        if let Some((wid, w_pid, status)) = matched {
+            let _ = proc.waitpid.remove(&wid);
+            drop(proc_guard);
+            Ready(Ok(reap_and_encode(w_pid, status, self)))
+        } else if flags.contains(WaitFlags::WNOHANG) {
+            Ready(Ok((0, 0)))
+        } else {
+            proc.waitpid_waiting.push_back(req_id);
+            Pending
         }
     }
     fn reap(&mut self, pid: ProcessId) {
@@ -2293,14 +2320,15 @@ impl<'a> ProcScheme<'a> {
                             }
                         }
 
+                        let max_entries = self.processes.len();
                         let mut parent = parent_rc.borrow_mut();
 
-                        parent.waitpid.insert(
-                            WaitpidKey {
-                                pid: Some(current_pid),
-                                pgid: Some(pgid),
-                            },
-                            (current_pid, WaitpidStatus::Terminated { signal, status }),
+                        record_waitpid_status(
+                            &mut parent,
+                            current_pid,
+                            pgid,
+                            WaitpidStatus::Terminated { signal, status },
+                            max_entries,
                         );
                         log::trace!("AWAKING WAITPID {:?}", parent.waitpid_waiting);
                         // TODO(opt): inefficient
@@ -2845,22 +2873,20 @@ impl<'a> ProcScheme<'a> {
                 orig_signal,
             } => {
                 {
+                    let max_entries = self.processes.len();
                     let mut parent = self
                         .processes
                         .get(&ppid)
                         .ok_or(Error::new(ESRCH))?
                         .borrow_mut();
-                    parent.waitpid.insert(
-                        WaitpidKey {
-                            pid: Some(target_pid),
-                            pgid: Some(pgid),
+                    record_waitpid_status(
+                        &mut parent,
+                        target_pid,
+                        pgid,
+                        WaitpidStatus::Stopped {
+                            signal: orig_signal,
                         },
-                        (
-                            target_pid,
-                            WaitpidStatus::Stopped {
-                                signal: orig_signal,
-                            },
-                        ),
+                        max_entries,
                     );
                     awoken.extend(parent.waitpid_waiting.drain(..));
                 }
@@ -2883,17 +2909,18 @@ impl<'a> ProcScheme<'a> {
             }
             SendResult::SucceededSigcont { ppid, pgid } => {
                 {
+                    let max_entries = self.processes.len();
                     let mut parent = self
                         .processes
                         .get(&ppid)
                         .ok_or(Error::new(ESRCH))?
                         .borrow_mut();
-                    parent.waitpid.insert(
-                        WaitpidKey {
-                            pid: Some(target_pid),
-                            pgid: Some(pgid),
-                        },
-                        (target_pid, WaitpidStatus::Continued),
+                    record_waitpid_status(
+                        &mut parent,
+                        target_pid,
+                        pgid,
+                        WaitpidStatus::Continued,
+                        max_entries,
                     );
                     awoken.extend(parent.waitpid_waiting.drain(..));
                 }
