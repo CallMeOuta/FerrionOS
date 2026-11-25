@@ -1,0 +1,10 @@
+[package]
+description = "FerrionOS network configuration and DHCPv4 lease daemon"
+
+[build]
+template = "custom"
+dev-dependencies = ["base"]
+script = """
+COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
+cookbook_cargo
+"""

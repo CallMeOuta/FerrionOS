@@ -60,6 +60,9 @@ reason = "Base system audio daemon serving the audio scheme."
 [non_app.ferrion-cli]
 reason = "Base system administration command-line tool."
 
+[non_app.ferrion-netd]
+reason = "Base network configuration and DHCPv4 lease daemon."
+
 [non_app.ferrion-run]
 reason = "Base program launcher and test probe whose v1 profile stays until PFR1."
 
