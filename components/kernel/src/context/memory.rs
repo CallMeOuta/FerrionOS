@@ -2071,15 +2071,20 @@ impl Grant {
             assert!(next_cur > cur);
             cur = next_cur;
 
-            for &(src_virt, phys, lvl, _flags) in &batch[..count] {
+            for &(src_virt, phys, lvl, old_flags) in &batch[..count] {
                 assert_eq!(lvl, 0, "no userspace pages have huge mappings");
                 src_flusher.queue(Frame::containing(phys), None, TlbShootdownActions::MOVE);
                 let src_page = Page::containing_address(src_virt);
                 let dst_page = dst_base.next_by(src_page.offset_from(self.base));
                 let dst_mapper_ref = dst_mapper.as_deref_mut().unwrap_or(&mut *src_mapper);
+                let moved_flags = flags
+                    .write(flags.has_write() && old_flags.has_write())
+                    .uncacheable(old_flags.has_flag(RmmA::ENTRY_FLAG_UNCACHEABLE))
+                    .device_memory(old_flags.has_flag(RmmA::ENTRY_FLAG_DEVICE_MEMORY))
+                    .write_combining(old_flags.has_flag(RmmA::ENTRY_FLAG_WRITE_COMBINING));
                 let flush = unsafe {
                     dst_mapper_ref
-                        .map_phys(dst_page.start_address(), phys, flags, 0)
+                        .map_phys(dst_page.start_address(), phys, moved_flags, 0)
                         .expect("TODO: OOM")
                 };
                 unsafe {
@@ -2094,6 +2099,10 @@ impl Grant {
         }
 
         self.base = dst_base;
+        self.info.flags = flags
+            .uncacheable(self.info.flags.has_flag(RmmA::ENTRY_FLAG_UNCACHEABLE))
+            .device_memory(self.info.flags.has_flag(RmmA::ENTRY_FLAG_DEVICE_MEMORY))
+            .write_combining(self.info.flags.has_flag(RmmA::ENTRY_FLAG_WRITE_COMBINING));
         Ok(self)
     }
 
