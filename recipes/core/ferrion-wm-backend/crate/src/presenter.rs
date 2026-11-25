@@ -1,15 +1,24 @@
 use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
+use std::time::Instant;
 
 use drm::buffer::{Buffer as _, DrmFourcc};
 use drm::control::{ClipRect, Device as _, Mode, PageFlipFlags, connector, crtc, framebuffer};
 use graphics_ipc::{CpuBackedBuffer, DrmHandle, RedoxDrmEvent};
 
-use crate::{MAX_IN_FLIGHT_FLIPS, PresentMode, PresentPreference, Presentation, SWAP_BUFFERS};
+use crate::{
+    FlipCompletion, MAX_IN_FLIGHT_FLIPS, PresentMode, PresentPreference, Presentation, SWAP_BUFFERS,
+};
 
 const FLIP_PROBE_TIMEOUT_MS: i32 = 2_000;
 const MAX_PROBE_POLL_ROUNDS: usize = 16;
+const DRAIN_POLL_TIMEOUT_MS: i32 = 100;
+const MAX_DRAIN_POLL_ROUNDS: usize = 16;
+
+pub(crate) struct DrainOutcome {
+    pub(crate) hotplug_seen: bool,
+}
 
 struct SwapSlot {
     framebuffer: framebuffer::Handle,
@@ -62,7 +71,6 @@ enum PresenterKind {
         slot: SwapSlot,
     },
     Flip {
-        crtc: crtc::Handle,
         slots: [SwapSlot; SWAP_BUFFERS],
         back: usize,
         in_flight: usize,
@@ -71,6 +79,7 @@ enum PresenterKind {
 
 pub(crate) struct Presenter {
     drm: Arc<DrmHandle>,
+    crtc: crtc::Handle,
     dimensions: (u32, u32),
     kind: PresenterKind,
 }
@@ -119,6 +128,7 @@ impl Presenter {
         now_us: impl FnOnce() -> u64,
     ) -> io::Result<Presentation> {
         let (width, height) = self.dimensions;
+        let crtc = self.crtc;
         match &mut self.kind {
             PresenterKind::Cpu { slot } => {
                 slot.sync_full((width, height));
@@ -134,7 +144,6 @@ impl Presenter {
                 })
             }
             PresenterKind::Flip {
-                crtc,
                 slots,
                 back,
                 in_flight,
@@ -150,7 +159,7 @@ impl Presenter {
                 let slot = &mut slots[*back];
                 slot.sync_full((width, height));
                 let fb = slot.framebuffer;
-                if let Err(error) = self.drm.page_flip(*crtc, fb, PageFlipFlags::EVENT, None) {
+                if let Err(error) = self.drm.page_flip(crtc, fb, PageFlipFlags::EVENT, None) {
                     if error.raw_os_error() == Some(libc::EBUSY) {
                         return Err(io::Error::new(io::ErrorKind::WouldBlock, "page flip busy"));
                     }
@@ -187,6 +196,116 @@ impl Presenter {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn drain_flip(
+        &mut self,
+        blocking: bool,
+        epoch: Instant,
+        mut on_other_flip: impl FnMut(FlipCompletion),
+    ) -> DrainOutcome {
+        let PresenterKind::Flip { in_flight, .. } = &mut self.kind else {
+            return DrainOutcome {
+                hotplug_seen: false,
+            };
+        };
+        assert!(*in_flight <= MAX_IN_FLIGHT_FLIPS);
+        if *in_flight == 0 {
+            return DrainOutcome {
+                hotplug_seen: false,
+            };
+        }
+        let max_rounds = if blocking { MAX_DRAIN_POLL_ROUNDS } else { 1 };
+        let timeout_ms = if blocking { DRAIN_POLL_TIMEOUT_MS } else { 0 };
+        let mut hotplug_seen = false;
+        for _ in 0..max_rounds {
+            let mut pfd = libc::pollfd {
+                fd: self.drm.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                eprintln!(
+                    "ferrion-wm-backend: drain poll failed on crtc {}: {error}",
+                    u32::from(self.crtc)
+                );
+                *in_flight = 0;
+                return DrainOutcome { hotplug_seen };
+            }
+            if ready == 0 {
+                continue;
+            }
+            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                *in_flight = 0;
+                return DrainOutcome { hotplug_seen };
+            }
+            if pfd.revents & libc::POLLIN != 0 {
+                let events = match self.drm.redox_receive_events() {
+                    Ok(events) => events,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ferrion-wm-backend: drain receive failed on crtc {}: {error}",
+                            u32::from(self.crtc)
+                        );
+                        *in_flight = 0;
+                        return DrainOutcome { hotplug_seen };
+                    }
+                };
+                for event in events {
+                    match event {
+                        RedoxDrmEvent::PageFlip(flip) => {
+                            if flip.crtc == self.crtc {
+                                *in_flight = in_flight.saturating_sub(1);
+                            } else {
+                                on_other_flip(FlipCompletion {
+                                    crtc: u32::from(flip.crtc),
+                                    completed_us: epoch
+                                        .elapsed()
+                                        .as_micros()
+                                        .min(u128::from(u64::MAX))
+                                        as u64,
+                                    sequence: flip.frame,
+                                    tv_us: flip.duration.as_micros().min(u128::from(u64::MAX))
+                                        as u64,
+                                });
+                            }
+                        }
+                        RedoxDrmEvent::RedoxConnectorHotplug(_) => {
+                            hotplug_seen = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if *in_flight == 0 {
+                    return DrainOutcome { hotplug_seen };
+                }
+            }
+        }
+        if blocking {
+            eprintln!(
+                "ferrion-wm-backend: timed out draining page flip on crtc {}",
+                u32::from(self.crtc)
+            );
+        }
+        *in_flight = 0;
+        DrainOutcome { hotplug_seen }
+    }
+
+    pub(crate) fn disable_crtc(&self) {
+        let _ = self.drm.set_crtc(self.crtc, None, (0, 0), &[], None);
     }
 }
 
@@ -227,6 +346,7 @@ pub(crate) fn open_presenter_probing(
         return Ok((
             Presenter {
                 drm,
+                crtc,
                 dimensions,
                 kind: PresenterKind::Cpu { slot: slot0 },
             },
@@ -247,6 +367,7 @@ pub(crate) fn open_presenter_probing(
             let hotplug_seen = match wait_probe_flip(&drm, crtc) {
                 Ok(hotplug) => hotplug,
                 Err(error) => {
+                    let _ = drm.set_crtc(crtc, None, (0, 0), &[], None);
                     slot1.destroy(&drm);
                     slot0.destroy(&drm);
                     return Err(error);
@@ -255,9 +376,9 @@ pub(crate) fn open_presenter_probing(
             Ok((
                 Presenter {
                     drm,
+                    crtc,
                     dimensions,
                     kind: PresenterKind::Flip {
-                        crtc,
                         slots: [slot0, slot1],
                         back: 0,
                         in_flight: 0,
@@ -277,6 +398,7 @@ pub(crate) fn open_presenter_probing(
             Ok((
                 Presenter {
                     drm,
+                    crtc,
                     dimensions,
                     kind: PresenterKind::Cpu { slot: slot0 },
                 },
@@ -285,6 +407,7 @@ pub(crate) fn open_presenter_probing(
             ))
         }
         Err(error) => {
+            let _ = drm.set_crtc(crtc, None, (0, 0), &[], None);
             slot1.destroy(&drm);
             slot0.destroy(&drm);
             Err(error)
@@ -315,6 +438,7 @@ pub(crate) fn open_presenter_with_mode(
     match chosen_mode {
         PresentMode::DirtyFb => Ok(Presenter {
             drm,
+            crtc,
             dimensions,
             kind: PresenterKind::Cpu { slot: slot0 },
         }),
@@ -329,9 +453,9 @@ pub(crate) fn open_presenter_with_mode(
             };
             Ok(Presenter {
                 drm,
+                crtc,
                 dimensions,
                 kind: PresenterKind::Flip {
-                    crtc,
                     slots: [slot0, slot1],
                     back: 1,
                     in_flight: 0,
