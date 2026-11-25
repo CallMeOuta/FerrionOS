@@ -23,7 +23,7 @@ pub(crate) fn wait_ms() -> Option<f64> {
 /// count. Read at most every few seconds. Always false where there's no load average.
 #[allow(unsafe_code)]
 pub(crate) fn overloaded() -> bool {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "redox")))]
     {
         use std::{sync::Mutex, time::{Duration, Instant}};
         static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
@@ -37,7 +37,7 @@ pub(crate) fn overloaded() -> bool {
         *cache = Some((crate::time::now(), busy));
         busy
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, not(target_os = "redox"))))]
     { false }
 }
 

@@ -81,12 +81,12 @@ fn pick_typed_text<'a>(with_all_mods: Option<&'a str>, text: Option<&'a str>) ->
 /// on a Persian layout types ZWNJ (U+200C), while `text` stays `" "` and AppKit's character sits
 /// in `text_with_all_modifiers()`.
 fn typed_text(event: &winit::event::KeyEvent) -> Option<&str> {
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "redox"))]
     let with_all_mods = {
         use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
         event.text_with_all_modifiers()
     };
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "redox")))]
     let with_all_mods = None;
     pick_typed_text(with_all_mods, event.text.as_deref())
 }
@@ -133,7 +133,7 @@ fn map_parts(windows: bool, physical: PhysicalKey, logical: &WKey, text: Option<
 /// The character `event`'s key types under the current layout with no modifiers, for
 /// `Tx::key_base`.
 pub(crate) fn key_base(event: &winit::event::KeyEvent) -> Option<char> {
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "redox"))]
     {
         use winit::keyboard::NamedKey;
         use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -143,7 +143,7 @@ pub(crate) fn key_base(event: &winit::event::KeyEvent) -> Option<char> {
             _ => None,
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "redox")))]
     { let _ = event; None }
 }
 

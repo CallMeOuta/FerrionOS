@@ -64,12 +64,16 @@ pub(crate) fn thread_cpu() -> Option<u64> {
         let ok = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
         (ok != 0).then_some(cycles)
     }
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "redox")))]
     {
         let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
         // SAFETY: `t` is a live, writable timespec and the clock needs no handle.
         let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
         (ok == 0).then(|| t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64)
+    }
+    #[cfg(target_os = "redox")]
+    {
+        None
     }
 }
 
