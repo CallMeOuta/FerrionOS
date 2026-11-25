@@ -5,14 +5,14 @@ patches = [
     "redox.patch"
 ]
 [build]
-template = "meson"
+template = "custom"
 dependencies = [
     "libffi",
     "expat",
     "libxml2",
 ]
-mesonflags = [
-    "-Ddocumentation=false",
-    "-Dtests=false",
-    "-Ddtd_validation=false",
-]
+script = """
+DYNAMIC_INIT
+cookbook_meson -Ddocumentation=false -Dtests=false -Ddtd_validation=false
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/libwayland/COPYING"
+"""
