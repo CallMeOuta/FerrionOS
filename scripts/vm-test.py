@@ -1229,6 +1229,108 @@ def test_math_bessel(vm, args):
     return True, f"{len(guest_rows)}/{len(glibc_rows)} Bessel and gamma values match host glibc"
 
 
+AUXV_GLIBC_ONLY_ALLOWLIST = {
+    15: "AT_PLATFORM: no arch platform string in auxv",
+    26: "AT_HWCAP2: no kernel hwcap2 bitmask",
+    27: "AT_RSEQ_FEATURE_SIZE: no Linux rseq syscall",
+    28: "AT_RSEQ_ALIGN: no Linux rseq syscall",
+    33: "AT_SYSINFO_EHDR: no kernel vDSO mapping",
+    51: "AT_MINSIGSTKSZ: no kernel dynamic sigframe sizing",
+}
+
+
+def _parse_auxv_output(text):
+    entries = {}
+    checks = {}
+    done = False
+    for raw in text.splitlines():
+        line = raw.rstrip("\r")
+        if line.startswith("auxv "):
+            parts = line.split()
+            if len(parts) == 4:
+                entries[int(parts[1])] = (int(parts[2], 16), parts[3])
+        elif line.startswith("check "):
+            parts = line.split()
+            if len(parts) >= 3:
+                checks[parts[1]] = (parts[2], line)
+        elif line == "auxv-probe: DONE":
+            done = True
+    return entries, checks, done
+
+
+def test_auxv(vm, args):
+    """Checks standard auxv entries and getauxval filtering for static, dynamic, and #! script binaries against process state and host glibc (use --config desktop)."""
+    src = ROOT / "recipes" / "tests" / "auxv-probe" / "auxv-probe.c"
+    glibc_results = {}
+    with tempfile.TemporaryDirectory(prefix="ferrion-auxv-ref-") as scratch:
+        ref_static = Path(scratch) / "auxv-probe-static"
+        ref_dynamic = Path(scratch) / "auxv-probe-dynamic"
+        ref_script = Path(scratch) / "auxv-probe-script"
+        subprocess.run(
+            ["gcc", "-std=gnu17", "-O2", "-Wall", "-Wextra", "-Werror", "-DAUXV_STATIC", "-static",
+             str(src), "-o", str(ref_static)],
+            check=True,
+        )
+        subprocess.run(
+            ["gcc", "-std=gnu17", "-O2", "-Wall", "-Wextra", "-Werror", "-DAUXV_DYNAMIC",
+             str(src), "-o", str(ref_dynamic)],
+            check=True,
+        )
+        ref_script.write_text(f"#!{ref_dynamic}\n")
+        ref_script.chmod(0o755)
+        for label, binary in (("static", ref_static), ("dynamic", ref_dynamic), ("script", ref_script)):
+            text = subprocess.check_output([str(binary)], text=True)
+            (vm.out / f"glibc-{label}.txt").write_text(text)
+            entries, checks, done = _parse_auxv_output(text)
+            if not done or any(status != "PASS" for status, _ in checks.values()):
+                return False, f"host glibc reference {label} failed; see {vm.out / f'glibc-{label}.txt'}"
+            glibc_results[label] = (entries, checks)
+
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+
+    prefixes = ("auxv ", "check ", "auxv-probe:")
+    failures = []
+    summaries = []
+    for label, cmd in (
+        ("static", "/usr/bin/auxv-probe-static"),
+        ("dynamic", "/usr/bin/auxv-probe-dynamic"),
+        ("script", "/usr/bin/auxv-probe-script"),
+    ):
+        since = vm.mark()
+        vm.type(f"bash -c '{cmd}; echo auxv-{label}-exit-$?'\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?)auxv-{label}-exit-(\d+)\s", 60, since)
+        raw = found.group(1) if found else vm.text(since)
+        status = int(found.group(2)) if found else None
+        guest_lines = [line.rstrip("\r") for line in raw.splitlines() if line.startswith(prefixes)]
+        guest_text = "\n".join(guest_lines) + ("\n" if guest_lines else "")
+        (vm.out / f"guest-{label}.txt").write_text(guest_text)
+        entries, checks, done = _parse_auxv_output(guest_text)
+        if status != 0 or not done:
+            failed_checks = [name for name, (st, _) in checks.items() if st != "PASS"]
+            failures.append(f"{label}: exit={status} failed_checks={failed_checks}")
+        leaked = [
+            f"{k}=missing" if k not in entries else f"{k}=0x{entries[k][0]:x}/{entries[k][1]}"
+            for k in range(32, 52)
+            if k not in entries or entries[k] != (0, "ENOENT")
+        ]
+        if leaked:
+            failures.append(f"{label}: non-ENOENT keys >=32: {', '.join(leaked[:6])}")
+        glibc_entries, _ = glibc_results[label]
+        glibc_present = {k for k, (_, err) in glibc_entries.items() if err == "0"}
+        guest_present = {k for k, (_, err) in entries.items() if err == "0"}
+        missing = sorted(k for k in (glibc_present - guest_present) if k not in AUXV_GLIBC_ONLY_ALLOWLIST)
+        if missing:
+            failures.append(f"{label}: missing glibc keys outside allow-list: {missing}")
+        summaries.append(f"{label}={len(checks)}/{len(checks)} keys={len(guest_present)}/{len(glibc_present)}")
+
+    if failures:
+        return False, f"{'; '.join(failures)}; see {vm.out}"
+    return True, f"auxv ok ({', '.join(summaries)})"
+
+
 def test_jit_signal(vm, args):
     """What SpiderMonkey's JIT asks of signals and memory: SIGSEGV and SIGILL handlers that read and change the machine context and resume, faults on PROT_NONE loads, non-executable and RW-to-RX code pages, a handler on a thread's alternate stack, and SIG_DFL after a handler (use --config firefox)."""
     passes = ("segv-store", "sigill-ud2", "segv-exec-nx", "wx-reserve", "wx-exec", "wx-store-faults",
@@ -10681,6 +10783,7 @@ TESTS["gtk-window-wayland"] = test_gtk_window_wayland
 TESTS["firefox-window"] = test_firefox_window
 TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
+TESTS["auxv"] = test_auxv
 TESTS["math-bessel"] = test_math_bessel
 TESTS["printf-precision"] = test_printf_precision
 TESTS["file-locks"] = test_file_locks

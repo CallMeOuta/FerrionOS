@@ -1,0 +1,24 @@
+[package]
+description = "Checks auxiliary vector entries and getauxval filtering against process state and glibc"
+
+[build]
+template = "custom"
+dependencies = [
+    "relibc",
+]
+script = """
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -std=gnu17 -O2 -Wall -Wextra -Werror -DAUXV_STATIC -static \
+    -isystem "${COOKBOOK_SYSROOT}/usr/include" \
+    "${COOKBOOK_RECIPE}/auxv-probe.c" -L"${COOKBOOK_SYSROOT}/lib" \
+    -o "${COOKBOOK_STAGE}/usr/bin/auxv-probe-static"
+
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=gnu17 -O2 -Wall -Wextra -Werror -DAUXV_DYNAMIC \
+    -isystem "${COOKBOOK_SYSROOT}/usr/include" \
+    "${COOKBOOK_RECIPE}/auxv-probe.c" ${LDFLAGS} \
+    -o "${COOKBOOK_STAGE}/usr/bin/auxv-probe-dynamic"
+
+printf '#!/usr/bin/auxv-probe-dynamic\n' > "${COOKBOOK_STAGE}/usr/bin/auxv-probe-script"
+chmod 0755 "${COOKBOOK_STAGE}/usr/bin/auxv-probe-script"
+"""
