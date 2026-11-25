@@ -55,3 +55,4 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0050](0050-exec-runtime-handles.md) | Upper-table runtime handle retention, separate scan handles and fail-closed enforcement across exec and posix_spawn |
 | [0053](0053-exec-sibling-threads.md) | Ending sibling threads on exec via FerrionOS-owned procmgr thread-handle verb `0x4645_0001` |
 | [0054](0054-app-manifests.md) | App manifests, undeclared means denied, and outside software through the broker |
+| [0056](0056-aslr-exec-layout.md) | Per-process ASLR in the user-space exec path (`fexec_impl`), non-overlapping layout windows and `AT_REDOX_STACK_BASE` |
