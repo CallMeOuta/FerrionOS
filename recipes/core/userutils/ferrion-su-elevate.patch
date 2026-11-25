@@ -1,0 +1,63 @@
+FerrionOS change to userutils (MIT licence, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88:
+- after the sudo daemon accepts the root password in su, hand over the caller's process handle to obtain root credentials, and enter the root namespace only when targeting root (keeping the caller's namespace for any other target), exiting with an error if any step fails.
+
+diff --git a/src/bin/su.rs b/src/bin/su.rs
+index 49c3496..740acbf 100644
+--- a/src/bin/su.rs
++++ b/src/bin/su.rs
+@@ -61,7 +61,8 @@ pub fn main() {
+         writeln!(stdout).unwrap_or_exit(1);
+         exit(spawn_shell(user).unwrap_or_exit(1));
+     } else {
+-        let file = libredox::call::open("/scheme/sudo/su", O_CLOEXEC, 0).unwrap();
++        let file =
++            libredox::Fd::new(libredox::call::open("/scheme/sudo/su", O_CLOEXEC, 0).unwrap());
+ 
+         write!(stdout, "password: ").unwrap_or_exit(1);
+         stdout.flush().unwrap_or_exit(1);
+@@ -72,8 +73,43 @@ pub fn main() {
+             .r#try(&mut stderr)
+             .unwrap_or(String::new());
+ 
+-        match libredox::call::write(file, password.as_bytes()) {
+-            Ok(_) => exit(spawn_shell(user).unwrap_or_exit(1)),
++        match file.write(password.as_bytes()) {
++            Ok(_) => {
++                unsafe extern "C" {
++                    safe fn redox_cur_procfd_v0() -> usize;
++                }
++                let procfd = match libredox::call::dup(redox_cur_procfd_v0(), &[]) {
++                    Ok(fd) => fd,
++                    Err(err) => {
++                        let _ = writeln!(stderr, "su: failed to duplicate process handle: {err}");
++                        exit(1);
++                    }
++                };
++                if let Err(err) = file.call_wo(&procfd.to_ne_bytes(), syscall::CallFlags::FD, &[]) {
++                    let _ = libredox::call::close(procfd);
++                    let _ = writeln!(stderr, "su: failed to elevate credentials: {err}");
++                    exit(1);
++                }
++                if user.uid == 0 {
++                    let ns = match file.openat("ns", O_CLOEXEC, 0) {
++                        Ok(ns) => ns,
++                        Err(err) => {
++                            let _ = writeln!(stderr, "su: failed to obtain root namespace: {err}");
++                            exit(1);
++                        }
++                    };
++                    match libredox::call::setns(ns.into_raw()) {
++                        Ok(old_ns) => {
++                            let _ = libredox::call::close(old_ns);
++                        }
++                        Err(err) => {
++                            let _ = writeln!(stderr, "su: failed to enter root namespace: {err}");
++                            exit(1);
++                        }
++                    }
++                }
++                exit(spawn_shell(user).unwrap_or_exit(1));
++            }
+             Err(err) if err.errno() == EPERM => {
+                 writeln!(stderr, "su: authentication failed").unwrap_or_exit(1);
+                 exit(1);
