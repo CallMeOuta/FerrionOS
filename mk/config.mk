@@ -179,6 +179,14 @@ FC_CACHE?=fc-cache
 endif
 export FC_CACHE
 
+## GSettings schema compiler used when building images (defaults to scripts/glib-compile-schemas-container.sh when Podman is enabled)
+ifeq ($(PODMAN_BUILD),1)
+GLIB_COMPILE_SCHEMAS?=scripts/glib-compile-schemas-container.sh
+else
+GLIB_COMPILE_SCHEMAS?=glib-compile-schemas
+endif
+export GLIB_COMPILE_SCHEMAS
+
 ## Userspace variables
 ifeq ($(ARCH),riscv64gc)
 	export TARGET=riscv64gc-unknown-redox
