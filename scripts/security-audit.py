@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Audits the tree for security findings without building anything:
 #   accounts   users with an empty or written password, and sudo members, per filesystem config
-#   sources    recipes outside recipes/wip: git without rev, tar without blake3
+#   sources    recipes outside recipes/wip: git without rev, tar without blake3, cargo without Cargo.lock
 #   downloads  build inputs fetched with no pinned hash (a fixed list that shrinks as each is pinned)
 # Prints one JSON object per line with --json, a summary otherwise. Exits 1 when a
 # `fail` line is missing from scripts/security-audit.baseline.jsonl. Run from the repository root.
@@ -15,7 +15,7 @@ import struct
 import subprocess
 import sys
 import tomllib
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +30,13 @@ CLOSURE_CONFIGS = (
     "config/x86_64/dev-parity.toml",
 )
 MAX_CLOSURE_RECIPES = 10_000
+MAX_CARGO_LOCK_DEPTH = 3
+MAX_CARGO_LOCK_ENTRIES = 2048
+MAX_CARGO_LOCK_PARENTS = 16
+CARGO_SCRIPT_RE = re.compile(
+    r"(?:\bcookbook_cargo\b|\$\{?COOKBOOK_CARGO\}?|\bcargo\s+(?:build|install|rustc)\b)"
+)
+CARGO_SKIP_DIRS = frozenset({".git", "target", "vendor"})
 GIT_REV_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 BLAKE3_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_IMAGE_ENTRIES = 200_000
@@ -126,6 +133,140 @@ def check_accounts():
 
 # sources --------------------------------------------------------------------
 
+def recipe_runs_cargo(build):
+    template = build.get("template", "")
+    if template == "cargo":
+        return True
+    if template != "custom":
+        return False
+    script = build.get("script", "")
+    if not isinstance(script, str):
+        return False
+    for raw in script.splitlines():
+        if raw.lstrip().startswith("#"):
+            continue
+        if CARGO_SCRIPT_RE.search(raw):
+            return True
+    return False
+
+
+def has_cargo_lock(manifest_dir, stop_dir):
+    cur = manifest_dir.resolve()
+    stop = stop_dir.resolve()
+    for _ in range(MAX_CARGO_LOCK_PARENTS):
+        if (cur / "Cargo.lock").is_file():
+            return True
+        if cur == stop or cur.parent == cur:
+            return False
+        cur = cur.parent
+    return False
+
+
+def find_cargo_manifests(base):
+    if not base.is_dir():
+        return []
+    queue = deque([(base, 0)])
+    visited = 0
+    manifests = []
+    while queue:
+        cur, depth = queue.popleft()
+        visited += 1
+        if visited > MAX_CARGO_LOCK_ENTRIES:
+            return None
+        if (cur / "Cargo.toml").is_file():
+            manifests.append(cur)
+            continue
+        if depth >= MAX_CARGO_LOCK_DEPTH:
+            continue
+        try:
+            entries = sorted(cur.iterdir(), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            name = entry.name
+            if name in CARGO_SKIP_DIRS or name.startswith(("stage", "sysroot")):
+                continue
+            queue.append((entry, depth + 1))
+    return manifests
+
+
+def check_cargo_lock(path, subject, source, build):
+    if not recipe_runs_cargo(build):
+        return None
+    lock_subject = f"{subject}: cargo-lock"
+    recipe_dir = path.parent
+    cpath = build.get("cargopath")
+    if not isinstance(cpath, str):
+        cpath = ""
+    if "path" in source:
+        base = (recipe_dir / source["path"]).resolve()
+        if not base.is_dir() or not base.is_relative_to(ROOT):
+            return None
+        is_remote = False
+    elif "git" in source or "tar" in source:
+        if (recipe_dir / "Cargo.lock").is_file():
+            return line("sources", lock_subject, "pass", "committed Cargo.lock in recipe")
+        base = recipe_dir / "source"
+        is_remote = True
+    elif "same_as" in source:
+        if (recipe_dir / "Cargo.lock").is_file():
+            return line("sources", lock_subject, "pass", "committed Cargo.lock in recipe")
+        base = (recipe_dir / source["same_as"] / "source").resolve()
+        is_remote = True
+    else:
+        base = recipe_dir
+        is_remote = False
+    if is_remote and not base.is_dir():
+        return line(
+            "sources",
+            lock_subject,
+            "info",
+            "remote source not fetched; Cargo.lock checked when fetched",
+        )
+    target_dir = (base / cpath) if cpath else base
+    if (target_dir / "Cargo.toml").is_file():
+        manifests = [target_dir]
+    elif not cpath and (base / "crate" / "Cargo.toml").is_file():
+        manifests = [base / "crate"]
+    else:
+        manifests = find_cargo_manifests(target_dir)
+        if manifests is None:
+            return line(
+                "sources",
+                lock_subject,
+                "fail",
+                f"directory walk exceeded bound {MAX_CARGO_LOCK_ENTRIES}",
+                f"reduce directory depth or set cargopath in {rel(path)}",
+            )
+    if not manifests:
+        if is_remote:
+            return line("sources", lock_subject, "info", "no Cargo.toml found in fetched source")
+        return line(
+            "sources",
+            lock_subject,
+            "fail",
+            "cargo recipe has no Cargo.toml or Cargo.lock",
+            f"commit Cargo.lock beside Cargo.toml in {subject}",
+        )
+    missing = [m for m in manifests if not has_cargo_lock(m, base)]
+    if missing:
+        first = missing[0]
+        try:
+            where = first.resolve().relative_to(ROOT).as_posix()
+        except ValueError:
+            where = str(first)
+        return line(
+            "sources",
+            lock_subject,
+            "fail",
+            f"cargo recipe missing committed Cargo.lock in {where}",
+            f"generate and commit Cargo.lock in {where} and build with --locked",
+        )
+    return line("sources", lock_subject, "pass", "committed Cargo.lock present")
+
+
 def check_sources(closures=(), repo_bin=None):
     out = []
     recipes = ROOT / "recipes"
@@ -165,7 +306,9 @@ def check_sources(closures=(), repo_bin=None):
         try:
             path.relative_to(recipes)
             subject = rel(path.parent)
-            source = tomllib.loads(path.read_text()).get("source", {})
+            data = tomllib.loads(path.read_text())
+            source = data.get("source", {})
+            build = data.get("build", {})
         except (OSError, ValueError) as err:
             try:
                 err_subject = rel(path)
@@ -209,6 +352,9 @@ def check_sources(closures=(), repo_bin=None):
             out.append(line("sources", subject, "info", f"shared source {source['same_as']}"))
         elif use_closure:
             out.append(line("sources", subject, "info", "local source; no remote download"))
+        lock_row = check_cargo_lock(path, subject, source, build)
+        if lock_row is not None:
+            out.append(lock_row)
     return sorted(out, key=lambda row: row["subject"])
 
 
