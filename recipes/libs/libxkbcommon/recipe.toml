@@ -17,6 +17,7 @@ DYNAMIC_INIT
 cookbook_meson \
     -Denable-wayland=false \
     -Denable-x11=false
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE" "${COOKBOOK_STAGE}/usr/share/licenses/libxkbcommon/LICENSE"
 """
 
 [package]
