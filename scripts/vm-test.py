@@ -1331,6 +1331,45 @@ def test_auxv(vm, args):
     return True, f"auxv ok ({', '.join(summaries)})"
 
 
+def test_waitpid(vm, args):
+    """Checks waitpid WNOHANG, WUNTRACED, WCONTINUED, and blocking status handling against host glibc (use --config desktop)."""
+    src = ROOT / "recipes" / "tests" / "waitpid-probe" / "waitpid-probe.c"
+    with tempfile.TemporaryDirectory(prefix="ferrion-waitpid-ref-") as scratch:
+        ref_bin = Path(scratch) / "waitpid-probe"
+        subprocess.run(
+            ["gcc", "-std=gnu17", "-O2", "-Wall", "-Wextra", "-Werror", str(src), "-o", str(ref_bin)],
+            check=True,
+        )
+        glibc_text = subprocess.check_output([str(ref_bin)], text=True)
+    (vm.out / "glibc.txt").write_text(glibc_text)
+    if "waitpid-probe: DONE" not in glibc_text.splitlines():
+        return False, f"host glibc waitpid-probe failed; see {vm.out / 'glibc.txt'}"
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("bash -c '/usr/bin/waitpid-probe; echo waitpid-exit-$?'\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)waitpid-exit-(\d+)\s", 90, since)
+    raw = found.group(1) if found else vm.text(since)
+    status = int(found.group(2)) if found else None
+    guest_lines = [line.rstrip("\r") for line in raw.splitlines() if line.startswith(("case ", "waitpid-probe:"))]
+    guest_text = "\n".join(guest_lines) + ("\n" if guest_lines else "")
+    (vm.out / "guest.txt").write_text(guest_text)
+    glibc_cases = [line for line in glibc_text.splitlines() if line.startswith("case ")]
+    guest_cases = [line for line in guest_lines if line.startswith("case ")]
+    diffs = []
+    if len(glibc_cases) != len(guest_cases):
+        diffs.append(f"case count guest={len(guest_cases)} glibc={len(glibc_cases)}")
+    for g, r in zip(guest_cases, glibc_cases):
+        if g != r:
+            diffs.append(f"guest={g!r} glibc={r!r}")
+    if status != 0 or "waitpid-probe: DONE" not in guest_lines or diffs:
+        detail = "; ".join(diffs[:4]) if diffs else f"exit={status}"
+        return False, f"waitpid mismatch ({detail}); see {vm.out}"
+    return True, f"{len(guest_cases)}/{len(glibc_cases)} waitpid cases match host glibc"
+
+
 def test_jit_signal(vm, args):
     """What SpiderMonkey's JIT asks of signals and memory: SIGSEGV and SIGILL handlers that read and change the machine context and resume, faults on PROT_NONE loads, non-executable and RW-to-RX code pages, a handler on a thread's alternate stack, and SIG_DFL after a handler (use --config firefox)."""
     passes = ("segv-store", "sigill-ud2", "segv-exec-nx", "wx-reserve", "wx-exec", "wx-store-faults",
@@ -10784,6 +10823,7 @@ TESTS["firefox-window"] = test_firefox_window
 TESTS["firefox-start"] = test_firefox_start
 TESTS["directory-fsync"] = test_directory_fsync
 TESTS["auxv"] = test_auxv
+TESTS["waitpid"] = test_waitpid
 TESTS["math-bessel"] = test_math_bessel
 TESTS["printf-precision"] = test_printf_precision
 TESTS["file-locks"] = test_file_locks

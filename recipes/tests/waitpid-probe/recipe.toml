@@ -1,0 +1,16 @@
+[package]
+description = "Checks waitpid WNOHANG, WUNTRACED, WCONTINUED, and blocking status handling against glibc"
+
+[build]
+template = "custom"
+dependencies = [
+    "relibc",
+]
+script = """
+DYNAMIC_INIT
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -std=gnu17 -O2 -Wall -Wextra -Werror \
+    -isystem "${COOKBOOK_SYSROOT}/usr/include" \
+    -o "${COOKBOOK_STAGE}/usr/bin/waitpid-probe" \
+    "${COOKBOOK_RECIPE}/waitpid-probe.c" ${LDFLAGS}
+"""

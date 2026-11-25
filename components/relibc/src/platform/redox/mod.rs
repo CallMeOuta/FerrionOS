@@ -8,7 +8,7 @@ use core::{
 };
 use object::bytes_of_slice_mut;
 use redox_path::{RedoxReference, RedoxStr};
-use redox_protocols::protocol::{Rlimit, WaitFlags, wifstopped};
+use redox_protocols::protocol::{Rlimit, WaitFlags};
 use redox_rt::{
     RtTcb,
     signal::tmp_disable_signals,
@@ -2031,30 +2031,23 @@ impl Pal for Sys {
         //     }
         // }
 
-        // If ptrace didn't impact this waitpid, proceed *almost* as
-        // normal: We still need to add WUNTRACED, but we only return
-        // it if (and only if) a ptrace traceme was activated during
-        // the wait.
         let res = res.unwrap_or_else(|| {
-            loop {
-                let res = inner(&mut status, options | WaitFlags::WUNTRACED);
-
-                // TODO: Also handle special PIDs here
-                if !wifstopped(status)
-                    || options.contains(WaitFlags::WUNTRACED)
-                    || ptrace::is_traceme(pid)
-                {
-                    break res;
-                }
-            }
+            let flags = if ptrace::is_traceme(pid) {
+                options | WaitFlags::WUNTRACED
+            } else {
+                options
+            };
+            inner(&mut status, flags)
         });
 
-        // If stat_loc is non-null, set that and the return
-        if let Some(mut stat_loc) = stat_loc {
+        let res = res? as pid_t;
+        if res > 0
+            && let Some(mut stat_loc) = stat_loc
+        {
             stat_loc.write(status as c_int);
         }
 
-        Ok(res? as pid_t)
+        Ok(res)
     }
 
     fn write(fd: c_int, buf: &[u8]) -> Result<usize> {
