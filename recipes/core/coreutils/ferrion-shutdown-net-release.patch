@@ -1,0 +1,30 @@
+diff --git a/src/bin/shutdown.rs b/src/bin/shutdown.rs
+index 6121241..1f2cd49 100644
+--- a/src/bin/shutdown.rs
++++ b/src/bin/shutdown.rs
+@@ -40,8 +40,25 @@ fn main() -> anyhow::Result<()> {
+     Ok(())
+ }
+ 
++#[cfg(target_os = "redox")]
++fn release_network_lease() {
++    let handle = std::thread::spawn(|| {
++        if let Ok(mut file) = std::fs::OpenOptions::new()
++            .write(true)
++            .open("/scheme/netctl/ctl")
++        {
++            let _ = std::io::Write::write_all(&mut file, b"release\n");
++        }
++    });
++    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
++    while !handle.is_finished() && std::time::Instant::now() < deadline {
++        std::thread::sleep(std::time::Duration::from_millis(20));
++    }
++}
++
+ #[cfg(target_os = "redox")]
+ fn shutdown(reboot: bool) -> anyhow::Result<()> {
++    release_network_lease();
+     let message = if reboot {
+         "reset"
+     } else {
