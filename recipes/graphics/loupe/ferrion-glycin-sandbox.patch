@@ -1,0 +1,316 @@
+Source: https://download.gnome.org/sources/loupe/51/loupe-51.2.tar.xz
+License: GPL-3.0-or-later
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 82e30f6..50db279 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -38,24 +38,6 @@ dependencies = [
+  "rustversion",
+ ]
+ 
+-[[package]]
+-name = "ashpd"
+-version = "0.13.13"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fb8421aaa9644a5faf26735f258b669b15f063313ef8f8e2bdb28912a1a6f111"
+-dependencies = [
+- "enumflags2",
+- "futures-channel",
+- "futures-util",
+- "gdk4-wayland",
+- "gdk4-x11",
+- "getrandom",
+- "glib",
+- "gtk4",
+- "serde",
+- "zbus",
+-]
+-
+ [[package]]
+ name = "async-broadcast"
+ version = "0.7.2"
+@@ -429,15 +411,6 @@ dependencies = [
+  "thiserror",
+ ]
+ 
+-[[package]]
+-name = "dlib"
+-version = "0.5.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
+-dependencies = [
+- "libloading",
+-]
+-
+ [[package]]
+ name = "either"
+ version = "1.18.0"
+@@ -689,11 +662,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+ dependencies = [
+  "futures-core",
+- "futures-io",
+  "futures-macro",
+  "futures-sink",
+  "futures-task",
+- "memchr",
+  "pin-project-lite",
+  "slab",
+ ]
+@@ -755,56 +726,6 @@ dependencies = [
+  "system-deps",
+ ]
+ 
+-[[package]]
+-name = "gdk4-wayland"
+-version = "0.11.4"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "32d95828dadc0357dee236cc6a5712808bd894d3217159982592ce24f2b8aaf7"
+-dependencies = [
+- "gdk4",
+- "gdk4-wayland-sys",
+- "gio",
+- "glib",
+- "libc",
+-]
+-
+-[[package]]
+-name = "gdk4-wayland-sys"
+-version = "0.11.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "653cafb8715f2ac1c56edaf8060d9360ae3acbe3c6fb61b676a2917d42b668cf"
+-dependencies = [
+- "glib-sys",
+- "libc",
+- "system-deps",
+-]
+-
+-[[package]]
+-name = "gdk4-x11"
+-version = "0.11.4"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9d892b4cf5a07e90e1390e93cd792975746c68b59f790a2de9e96ce77211ea9a"
+-dependencies = [
+- "gdk4",
+- "gdk4-x11-sys",
+- "gio",
+- "glib",
+- "libc",
+- "x11-dl",
+-]
+-
+-[[package]]
+-name = "gdk4-x11-sys"
+-version = "0.11.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "24d41f2e28f62378b081288914325d73bddbb6ccbbadb41aa6392afc71d27002"
+-dependencies = [
+- "gdk4-sys",
+- "glib-sys",
+- "libc",
+- "system-deps",
+-]
+-
+ [[package]]
+ name = "getrandom"
+ version = "0.4.3"
+@@ -947,8 +868,6 @@ dependencies = [
+ [[package]]
+ name = "glycin"
+ version = "4.0.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7e5b54873fd0e4ea8fe447e4f2b8c670c485862b5d9d0d624dcc886bb3a89ecd"
+ dependencies = [
+  "glycin-builtin",
+  "glycin-external",
+@@ -985,8 +904,6 @@ dependencies = [
+ [[package]]
+ name = "glycin-core"
+ version = "4.0.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fdade20eb67ac75b5c306a99c594155e1096ea7aa536741f64158afa1ffdeb36"
+ dependencies = [
+  "async-fs",
+  "async-global-executor",
+@@ -1011,21 +928,17 @@ dependencies = [
+  "gufo-exif",
+  "half",
+  "libc",
+- "libseccomp",
+  "moxcms",
+  "nix",
+  "static_assertions",
+  "thiserror",
+  "tracing",
+- "yeslogic-fontconfig-sys",
+  "zbus",
+ ]
+ 
+ [[package]]
+ name = "glycin-external"
+ version = "4.0.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2c9b985c8fe1d1c2cdc91566faa52f5d3226506201a4121580ae8cfcb71992e5"
+ dependencies = [
+  "glycin-core",
+ ]
+@@ -1055,9 +968,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "glycin-utils"
+-version = "5.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "68b112ddb84bd9c1453b119292e38788aa18015d5c12158c1d6fab1b9e353ee7"
++version = "5.0.1"
+ dependencies = [
+  "async-lock",
+  "bitflags 2.13.1",
+@@ -1072,9 +983,7 @@ dependencies = [
+  "half",
+  "image",
+  "libc",
+- "libseccomp",
+  "log",
+- "memmap2",
+  "nix",
+  "paste",
+  "rayon",
+@@ -1333,19 +1242,6 @@ dependencies = [
+  "quote",
+ ]
+ 
+-[[package]]
+-name = "gweather-sys"
+-version = "4.8.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5bd48d8a64d00703dc2a77efb2284c07192a1345d0162e0bc15488b55d577f0e"
+-dependencies = [
+- "gio-sys",
+- "glib-sys",
+- "gobject-sys",
+- "libc",
+- "system-deps",
+-]
+-
+ [[package]]
+ name = "half"
+ version = "2.7.1"
+@@ -1555,52 +1451,12 @@ version = "0.2.189"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+ 
+-[[package]]
+-name = "libgweather"
+-version = "4.8.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "18dd39da07edc7e068f1b02da95d5813030343cfd94ae1f132d25695ba8e6c9f"
+-dependencies = [
+- "gio",
+- "glib",
+- "gweather-sys",
+- "libc",
+-]
+-
+-[[package]]
+-name = "libloading"
+-version = "0.8.9"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+-dependencies = [
+- "cfg-if",
+- "windows-link",
+-]
+-
+ [[package]]
+ name = "libm"
+ version = "0.2.16"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+ 
+-[[package]]
+-name = "libseccomp"
+-version = "0.4.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0e5310a2c5b6ffbc094b5f70a2ca7b79ed36ad90e6f90994b166489a1bce3fcc"
+-dependencies = [
+- "bitflags 2.13.1",
+- "libc",
+- "libseccomp-sys",
+- "pkg-config",
+-]
+-
+-[[package]]
+-name = "libseccomp-sys"
+-version = "0.3.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "60276e2d41bbb68b323e566047a1bfbf952050b157d8b5cdc74c07c1bf4ca3b6"
+-
+ [[package]]
+ name = "linux-raw-sys"
+ version = "0.12.1"
+@@ -1641,7 +1497,6 @@ version = "51.2.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+- "ashpd",
+  "async-channel",
+  "async-lock",
+  "cairo-rs",
+@@ -1656,7 +1511,6 @@ dependencies = [
+  "indexmap",
+  "libadwaita",
+  "libc",
+- "libgweather",
+  "moxcms",
+  "strum",
+  "thiserror",
+@@ -2662,17 +2516,6 @@ dependencies = [
+  "memchr",
+ ]
+ 
+-[[package]]
+-name = "x11-dl"
+-version = "2.21.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "38735924fedd5314a6e548792904ed8c6de6636285cb9fec04d5b1db85c1516f"
+-dependencies = [
+- "libc",
+- "once_cell",
+- "pkg-config",
+-]
+-
+ [[package]]
+ name = "xml"
+ version = "1.4.0"
+@@ -2685,17 +2528,6 @@ version = "1.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
+ 
+-[[package]]
+-name = "yeslogic-fontconfig-sys"
+-version = "6.0.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1d8b8abf912b9a29ff112e1671c97c33636903d13a69712037190e6805af4f76"
+-dependencies = [
+- "dlib",
+- "once_cell",
+- "pkg-config",
+-]
+-
+ [[package]]
+ name = "zbus"
+ version = "5.19.0"
+diff --git a/meson.build b/meson.build
+index 394243f..4d7b16b 100644
+--- a/meson.build
++++ b/meson.build
+@@ -13,8 +13,6 @@ gnome = import('gnome')
+ 
+ dependency('gtk4', version: '>=4.16.0')
+ dependency('libadwaita-1', version: '>=1.8.0')
+-# Required by glycin crate
+-dependency('libseccomp', version: '>= 2.5.0')
+ 
+ # Optional dependencies
+ gtk4_x11 = dependency('gtk4-x11', required: get_option('x11'))
