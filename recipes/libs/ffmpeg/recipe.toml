@@ -6,7 +6,6 @@ tar = "https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz"
 blake3 = "c76da5cbd367114d78c9421f74de4a15649bd5cc8a3e299225dbae048d2630fc"
 patches = [
     "redox.patch",
-    "ferrion-j1-decl.patch",
 ]
 
 [build]
@@ -169,6 +168,7 @@ COOKBOOK_CONFIGURE_FLAGS=(
     --enable-avfilter
     --enable-zlib
     --enable-libdav1d
+    --extra-cflags="-D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600"
 )
 
 for name in "${DECODERS[@]}"; do
