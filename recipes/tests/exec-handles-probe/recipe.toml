@@ -6,6 +6,6 @@ template = "custom"
 script = """
 DYNAMIC_INIT
 mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
-${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/exec-handles-checker" "${COOKBOOK_RECIPE}/exec-handles-checker.c" ${LDFLAGS}
+${CC} ${CFLAGS} -O2 -Wall -Wextra -Wl,--wrap=relibc_start_v1 -o "${COOKBOOK_STAGE}/usr/bin/exec-handles-checker" "${COOKBOOK_RECIPE}/exec-handles-checker.c" ${LDFLAGS}
 ${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/exec-handles-probe" "${COOKBOOK_RECIPE}/exec-handles-probe.c" ${LDFLAGS} -lpthread
 """

@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/auxv.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -18,6 +17,8 @@
 
 #define UPPER_FDTBL_TAG ((size_t)1 << (sizeof(size_t) * 8 - 2))
 #define MAX_AUXV_HANDLES 5
+#define MAX_ENVP_ENTRIES 4096U
+#define MAX_AUXV_SCAN 128U
 #define MAX_TABLE_FDS 65536
 #define READ_CHUNK_FDS 256
 #define MAX_READ_ITERS 1024
@@ -66,9 +67,49 @@ static int in_u64_set(const uint64_t *set, size_t n, uint64_t val)
     return 0;
 }
 
+static uintptr_t initial_stack_sp = 0;
+
+extern void __real_relibc_start_v1(uintptr_t sp, void *main_fn) __attribute__((noreturn));
+
+void __wrap_relibc_start_v1(uintptr_t sp, void *main_fn)
+{
+    initial_stack_sp = sp;
+    __real_relibc_start_v1(sp, main_fn);
+}
+
+static unsigned long read_initial_auxv(unsigned long key)
+{
+    assert(initial_stack_sp != 0);
+    const uintptr_t *p = (const uintptr_t *)initial_stack_sp;
+    size_t argc = (size_t)p[0];
+    p += 1 + argc + 1;
+    int env_end = 0;
+    for (size_t i = 0; i < MAX_ENVP_ENTRIES; i++) {
+        if (*p == 0) {
+            p++;
+            env_end = 1;
+            break;
+        }
+        p++;
+    }
+    assert(env_end);
+    for (size_t i = 0; i < MAX_AUXV_SCAN; i++) {
+        unsigned long k = (unsigned long)p[0];
+        unsigned long v = (unsigned long)p[1];
+        if (k == 0UL) {
+            return 0UL;
+        }
+        if (k == key) {
+            return v;
+        }
+        p += 2;
+    }
+    return 0UL;
+}
+
 static void add_auxv_handle(size_t *set, size_t *count, unsigned long key)
 {
-    unsigned long v = getauxval(key);
+    unsigned long v = read_initial_auxv(key);
     if (v == 0UL || v == ~0UL) {
         return;
     }
@@ -222,7 +263,7 @@ int main(int argc, char **argv)
     add_auxv_handle(keep, &keep_count, AT_REDOX_CWD_FD);
     add_auxv_handle(keep, &keep_count, AT_REDOX_FILETABLE_FD);
 
-    size_t thr_fd = (size_t)getauxval(AT_REDOX_THR_FD);
+    size_t thr_fd = (size_t)read_initial_auxv(AT_REDOX_THR_FD);
     if (thr_fd == 0 || thr_fd == ~(size_t)0) {
         thr_fd = redox_cur_thrfd_v0();
     }
