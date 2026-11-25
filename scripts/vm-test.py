@@ -10733,7 +10733,7 @@ SCOPE_LINKS = ("cd /home/user/scope && ln -s /home/user/.ssh to-ssh && ln -s ins
 SCOPE_LINKS_OUT = {"/home/user/scope/to-ssh", "/home/user/scope/d/up", "/home/user/scope/l2", "/home/user/scope/old2"}
 SCOPE_SCHEMES = {"event", "memory", "pipe", "time", "rand", "null", "zero", "sys", "proc", "uds_stream", "uds_dgram",
                  "eventfd", "timerfd", "ip", "icmp", "tcp", "udp", "file", "shm"}
-SCOPE_TOP = {"bin", "dev", "etc", "home", "include", "lib", "share", "ssl", "tmp", "usr"}
+SCOPE_TOP = {"bin", "dev", "etc", "home", "include", "lib", "share", "ssl", "tmp", "usr", "var"}
 SCOPE_VARS = {"PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "COLUMNS", "LINES", "USER", "LOGNAME", "HOME", "TMPDIR"}
 
 
@@ -10854,6 +10854,29 @@ def test_agent_scope(vm, args):
     top = set(output.split())
     if top - SCOPE_TOP or "usr" not in top:
         problems.append(f"the session's / holds {sorted(top)}")
+    fc_rc, _ = run("scfc0", "test -d /var/cache/fontconfig")
+    if fc_rc == 0:
+        if "var" not in top:
+            problems.append(f"/var missing from session / despite /var/cache/fontconfig existing: {sorted(top)}")
+        _, var_out = run("scvar", "ferrion-run ls -A /var")
+        var_entries = set(var_out.split())
+        if var_entries != {"cache"}:
+            problems.append(f"the session's /var holds {sorted(var_entries)}, expected only ['cache']")
+        _, vcache_out = run("scvcache", "ferrion-run ls -A /var/cache")
+        vcache_entries = set(vcache_out.split())
+        if vcache_entries != {"fontconfig"}:
+            problems.append(f"the session's /var/cache holds {sorted(vcache_entries)}, expected only ['fontconfig']")
+        var_lib = run("scvarlib", "ferrion-run ls -A /var/lib 2>&1")
+        if not refused(var_lib):
+            problems.append(f"/var/lib was reachable inside a session: {var_lib}")
+        fc_w = run(
+            "scfcw",
+            "ferrion-run bash -c \"echo x > /var/cache/fontconfig/.ferrion-ro-probe\" 2>&1",
+        )
+        if not refused(fc_w) or "Read-only file system" not in fc_w.out:
+            problems.append(
+                f"writing to /var/cache/fontconfig inside a session was not refused with EROFS: {fc_w}"
+            )
 
     status, before = run("scst0", "ls /home/user/.local/state/ferrion-run | wc -l")
     _, output = run("schome", "ferrion-run ferrion-run-probe home")

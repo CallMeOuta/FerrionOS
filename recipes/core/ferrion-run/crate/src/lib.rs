@@ -50,8 +50,16 @@ pub const SCOPED_SCHEMES: [&str; 13] = [
     "timerfd",
 ];
 
-pub const SYSTEM_PATHS: [&str; 8] = [
-    "/usr", "/bin", "/lib", "/include", "/share", "/ssl", "/etc", "/dev",
+pub const SYSTEM_PATHS: [&str; 9] = [
+    "/usr",
+    "/bin",
+    "/lib",
+    "/include",
+    "/share",
+    "/ssl",
+    "/etc",
+    "/dev",
+    "/var/cache/fontconfig",
 ];
 
 pub const PASSED_VARIABLES: [&str; 10] = [
@@ -98,7 +106,8 @@ system holds only what the session was given. Every path keeps its real name.
 Options may repeat; ferrion-run holds at most 32 folders and files.
 
 Besides these, every session gets read-only /usr, /bin, /lib, /include, /share,
-/ssl, /etc and /dev, an empty home of its own (HOME) and an empty /tmp of its own,
+/ssl, /etc, /dev and /var/cache/fontconfig (when present, nothing else under
+/var), an empty home of its own (HOME) and an empty /tmp of its own,
 both in ~/.local/state/ferrion-run/SESSION, which the session itself cannot see
 otherwise. Any other path answers as missing. PROGRAM cannot rename or remove a
 folder that holds another of its folders or ferrion-run's sessions. A symlink it
