@@ -17,7 +17,7 @@ pub(super) fn sysconf_impl(name: c_int) -> c_long {
     match name {
         _SC_ARG_MAX => 4096,
         _SC_CHILD_MAX => 65536,
-        _SC_CLK_TCK => 100,
+        _SC_CLK_TCK => redox_rt::CLK_TCK as c_long,
         _SC_NGROUPS_MAX => limits::NGROUPS_MAX as c_long,
         _SC_OPEN_MAX => 1024,
         _SC_STREAM_MAX => 16,

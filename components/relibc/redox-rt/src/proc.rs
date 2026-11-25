@@ -79,7 +79,63 @@ pub struct ExtraInfo<'a> {
 }
 
 pub const AT_RANDOM_BYTES: usize = 16;
+pub const MAX_AUXV_ENTRIES: usize = 32;
+const STANDARD_AUXV_MAX_ENTRIES: usize = 16;
 const EXEC_RANDOM_MAX_BYTES: usize = 256;
+
+#[cfg(target_arch = "x86_64")]
+fn auxv_hwcap() -> Option<usize> {
+    Some(core::arch::x86_64::__cpuid(1).edx as usize)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn auxv_hwcap() -> Option<usize> {
+    None
+}
+
+fn standard_auxv_entries(
+    at_entry: usize,
+    at_base: usize,
+    at_phdr: usize,
+    at_phnum: usize,
+    at_phent: usize,
+    resugid: &crate::sys::Resugid<u32>,
+    random_addr: Option<usize>,
+    execfn_addr: usize,
+) -> ([(usize, usize); STANDARD_AUXV_MAX_ENTRIES], usize) {
+    let mut entries = [(AT_NULL, 0_usize); STANDARD_AUXV_MAX_ENTRIES];
+    let mut count = 0_usize;
+    let mut add = |kind: usize, val: usize| {
+        assert!(count < STANDARD_AUXV_MAX_ENTRIES);
+        entries[count] = (kind, val);
+        count += 1;
+    };
+
+    let secure = usize::from(resugid.ruid != resugid.euid || resugid.rgid != resugid.egid);
+    add(AT_ENTRY, at_entry);
+    add(AT_BASE, at_base);
+    add(AT_PHDR, at_phdr);
+    add(AT_PHNUM, at_phnum);
+    add(AT_PHENT, at_phent);
+    add(AT_PAGESZ, PAGE_SIZE);
+    add(AT_FLAGS, 0);
+    add(AT_CLKTCK, crate::CLK_TCK);
+    add(AT_UID, resugid.ruid as usize);
+    add(AT_EUID, resugid.euid as usize);
+    add(AT_GID, resugid.rgid as usize);
+    add(AT_EGID, resugid.egid as usize);
+    add(AT_SECURE, secure);
+    if let Some(hwcap) = auxv_hwcap() {
+        add(AT_HWCAP, hwcap);
+    }
+    if let Some(addr) = random_addr {
+        add(AT_RANDOM, addr);
+    }
+    add(AT_EXECFN, execfn_addr);
+
+    assert!(count <= STANDARD_AUXV_MAX_ENTRIES);
+    (entries, count)
+}
 const EXEC_RANDOM_MAX_READS: usize = 64;
 #[cfg(feature = "proc")]
 const THREAD_CALL_TERMINATE_SIBLINGS: u64 = 0x4645_0001;
@@ -399,33 +455,25 @@ pub fn fexec_impl(
         Ok(())
     };
 
-    push(0)?;
-    push(AT_NULL)?;
-    if let Some(ref r#override) = interp_override {
-        push(r#override.at_entry)?;
-        push(AT_ENTRY)?;
-        push(base_addr)?;
-        push(AT_BASE)?;
-        push(r#override.phdrs_vaddr)?;
-        push(AT_PHDR)?;
-    } else {
-        push(base_addr + header.e_entry as usize)?;
-        push(AT_ENTRY)?;
-        push(phdrs_vaddr)?;
-        push(AT_PHDR)?;
-    }
-    push(
-        interp_override
-            .as_ref()
-            .map_or(header.e_phnum as usize, |o| o.at_phnum),
-    )?;
-    push(AT_PHNUM)?;
-    push(
-        interp_override
-            .as_ref()
-            .map_or(header.e_phentsize as usize, |o| o.at_phent),
-    )?;
-    push(AT_PHENT)?;
+    let (at_entry, at_base, at_phdr, at_phnum, at_phent) =
+        if let Some(ref r#override) = interp_override {
+            (
+                r#override.at_entry,
+                base_addr,
+                r#override.phdrs_vaddr,
+                r#override.at_phnum,
+                r#override.at_phent,
+            )
+        } else {
+            (
+                base_addr + header.e_entry as usize,
+                0,
+                phdrs_vaddr,
+                header.e_phnum as usize,
+                header.e_phentsize as usize,
+            )
+        };
+    let execfn = interp_override.as_ref().map_or(path, |o| &o.name);
 
     let mut random_bytes = [0_u8; AT_RANDOM_BYTES];
     let has_random = match exec_random_bytes(&mut random_bytes) {
@@ -442,6 +490,8 @@ pub fn fexec_impl(
     let total_args_envs_auxvpointee_size = args.iter().map(|arg| arg.len() + 1).sum::<usize>()
         + envs.iter().map(|env| env.len() + 1).sum::<usize>()
         + extrainfo.cwd.map_or(0, |s| s.len() + 1)
+        + execfn.len()
+        + 1
         + if has_random { AT_RANDOM_BYTES + 1 } else { 0 };
     let args_envs_size_aligned = total_args_envs_auxvpointee_size.next_multiple_of(PAGE_SIZE);
     let target_args_env_address = mmap_anon_remote(
@@ -478,46 +528,79 @@ pub fn fexec_impl(
             Ok(address)
         };
 
-        if has_random {
-            push(append(&random_bytes)?)?;
-            push(AT_RANDOM)?;
-        }
+        let random_addr = if has_random {
+            Some(append(&random_bytes)?)
+        } else {
+            None
+        };
+        let execfn_addr = append(execfn)?;
+        let cwd_auxv = match extrainfo.cwd {
+            Some(cwd) => Some((append(cwd)?, cwd.len())),
+            None => None,
+        };
+        let resugid = crate::sys::posix_getresugid();
+        let (standard_entries, standard_count) = standard_auxv_entries(
+            at_entry,
+            at_base,
+            at_phdr,
+            at_phnum,
+            at_phent,
+            &resugid,
+            random_addr,
+            execfn_addr,
+        );
 
-        if let Some(cwd) = extrainfo.cwd {
-            push(append(cwd)?)?;
-            push(AT_REDOX_INITIAL_CWD_PTR)?;
-            push(cwd.len())?;
-            push(AT_REDOX_INITIAL_CWD_LEN)?;
-        }
-
-        #[cfg(target_pointer_width = "32")]
         {
-            push((extrainfo.sigignmask >> 32) as usize)?;
-            push(AT_REDOX_INHERITED_SIGIGNMASK_HI)?;
-        }
-        push(extrainfo.sigignmask as usize)?;
-        push(AT_REDOX_INHERITED_SIGIGNMASK)?;
-        #[cfg(target_pointer_width = "32")]
-        {
-            push((extrainfo.sigprocmask >> 32) as usize)?;
-            push(AT_REDOX_INHERITED_SIGPROCMASK_HI)?;
-        }
-        push(extrainfo.sigprocmask as usize)?;
-        push(AT_REDOX_INHERITED_SIGPROCMASK)?;
+            let mut auxv_count = 0_usize;
+            let mut push_auxv = |kind: usize, val: usize| -> Result<()> {
+                if auxv_count >= MAX_AUXV_ENTRIES {
+                    return Err(Error::new(E2BIG));
+                }
+                push(val)?;
+                push(kind)?;
+                auxv_count += 1;
+                Ok(())
+            };
 
-        push(extrainfo.umask as usize)?;
-        push(AT_REDOX_UMASK)?;
+            push_auxv(AT_NULL, 0)?;
+            for &(kind, val) in &standard_entries[..standard_count] {
+                push_auxv(kind, val)?;
+            }
 
-        push(extrainfo.thr_fd)?;
-        push(AT_REDOX_THR_FD)?;
-        push(extrainfo.proc_fd)?;
-        push(AT_REDOX_PROC_FD)?;
-        push(extrainfo.ns_fd.unwrap_or(usize::MAX))?;
-        push(AT_REDOX_NS_FD)?;
-        push(extrainfo.cwd_fd.unwrap_or(usize::MAX))?;
-        push(AT_REDOX_CWD_FD)?;
-        push(extrainfo.filetable_fd.unwrap_or(usize::MAX))?;
-        push(AT_REDOX_FILETABLE_FD)?;
+            if let Some((cwd_ptr, cwd_len)) = cwd_auxv {
+                push_auxv(AT_REDOX_INITIAL_CWD_PTR, cwd_ptr)?;
+                push_auxv(AT_REDOX_INITIAL_CWD_LEN, cwd_len)?;
+            }
+
+            #[cfg(target_pointer_width = "32")]
+            push_auxv(
+                AT_REDOX_INHERITED_SIGIGNMASK_HI,
+                (extrainfo.sigignmask >> 32) as usize,
+            )?;
+            push_auxv(AT_REDOX_INHERITED_SIGIGNMASK, extrainfo.sigignmask as usize)?;
+            #[cfg(target_pointer_width = "32")]
+            push_auxv(
+                AT_REDOX_INHERITED_SIGPROCMASK_HI,
+                (extrainfo.sigprocmask >> 32) as usize,
+            )?;
+            push_auxv(
+                AT_REDOX_INHERITED_SIGPROCMASK,
+                extrainfo.sigprocmask as usize,
+            )?;
+
+            push_auxv(AT_REDOX_UMASK, extrainfo.umask as usize)?;
+
+            push_auxv(AT_REDOX_THR_FD, extrainfo.thr_fd)?;
+            push_auxv(AT_REDOX_PROC_FD, extrainfo.proc_fd)?;
+            push_auxv(AT_REDOX_NS_FD, extrainfo.ns_fd.unwrap_or(usize::MAX))?;
+            push_auxv(AT_REDOX_CWD_FD, extrainfo.cwd_fd.unwrap_or(usize::MAX))?;
+            push_auxv(
+                AT_REDOX_FILETABLE_FD,
+                extrainfo.filetable_fd.unwrap_or(usize::MAX),
+            )?;
+
+            assert!(auxv_count <= MAX_AUXV_ENTRIES);
+        }
 
         push(0)?;
 

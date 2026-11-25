@@ -40,6 +40,8 @@ macro_rules! asmfunction(
 pub mod arch;
 pub mod proc;
 
+pub const CLK_TCK: usize = 100;
+
 // TODO: Replace auxvs with a non-stack-based interface, but keep getauxval for compatibility
 #[path = "../../src/platform/auxv_defs.rs"]
 pub mod auxv_defs;
