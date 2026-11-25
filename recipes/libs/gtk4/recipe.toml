@@ -1,0 +1,73 @@
+[package]
+description = "GTK 4 graphical user interface toolkit with Wayland backend"
+
+[source]
+tar = "https://download.gnome.org/sources/gtk/4.20/gtk-4.20.4.tar.xz"
+blake3 = "ada1c9fa499be3f48a8e5c459da1594f309b3a4629a82e6f5c1f5f9792980766"
+patches = [
+    "ferrion-input-event-codes.patch",
+]
+
+[build]
+template = "custom"
+dependencies = [
+    "cairo",
+    "fontconfig",
+    "fribidi",
+    "gdk-pixbuf",
+    "glib",
+    "graphene",
+    "harfbuzz",
+    "libepoxy",
+    "libglvnd",
+    "libjpeg",
+    "libpng",
+    "librsvg",
+    "libtiff",
+    "libwayland",
+    "libxkbcommon",
+    "pango",
+    "shared-mime-info",
+]
+dev-dependencies = [
+    "linux-input-event-codes",
+    "wayland-protocols",
+]
+script = """
+DYNAMIC_INIT
+
+cat > wayland_scanner_cross.txt <<'EOF'
+[binaries]
+wayland-scanner = '/usr/bin/wayland-scanner'
+EOF
+
+cookbook_meson \
+    --cross-file wayland_scanner_cross.txt \
+    --wrap-mode=nodownload \
+    -Dauto_features=disabled \
+    -Dwayland-backend=true \
+    -Dx11-backend=false \
+    -Dbroadway-backend=false \
+    -Dwin32-backend=false \
+    -Dmacos-backend=false \
+    -Dandroid-backend=false \
+    -Dvulkan=disabled \
+    -Dmedia-gstreamer=disabled \
+    -Dprint-cpdb=disabled \
+    -Dprint-cups=disabled \
+    -Dcolord=disabled \
+    -Dcloudproviders=disabled \
+    -Dtracker=disabled \
+    -Dsysprof=disabled \
+    -Daccesskit=disabled \
+    -Dintrospection=disabled \
+    -Ddocumentation=false \
+    -Dman-pages=false \
+    -Dbuild-demos=false \
+    -Dbuild-examples=false \
+    -Dbuild-tests=false \
+    -Dbuild-testsuite=false \
+    -Dprofile=default
+
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/gtk4/COPYING"
+"""
