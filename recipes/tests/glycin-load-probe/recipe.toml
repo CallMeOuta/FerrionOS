@@ -31,6 +31,7 @@ EOF
 
 "${COOKBOOK_CARGO}" build \
     --manifest-path "${COOKBOOK_BUILD}/crate/Cargo.toml" \
+    --locked \
     --release \
     -j "${COOKBOOK_MAKE_JOBS}"
 
