@@ -1339,7 +1339,10 @@ impl<'a> ProcScheme<'a> {
                     )),
                     ProcCall::DisableSetpgid => {
                         if let Some(proc) = self.processes.get(&fd_pid) {
-                            proc.borrow_mut().disabled_setpgid = true;
+                            let mut proc = proc.borrow_mut();
+                            proc.disabled_setpgid = true;
+                            proc.suid = proc.euid;
+                            proc.sgid = proc.egid;
                             Response::ready_ok(0, op)
                         } else {
                             Response::ready_err(ESRCH, op)

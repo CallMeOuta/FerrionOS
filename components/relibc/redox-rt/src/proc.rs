@@ -642,13 +642,6 @@ pub fn fexec_impl(
         );
     }
 
-    // TODO: Error handling
-    let _ = sys_call(
-        proc_fd.as_raw_fd(),
-        CallFlags::empty(),
-        &[ProcCall::DisableSetpgid as u64],
-    );
-
     if interp_override.is_some() {
         let mmap_min_fd = grants_fd.dup_into_upper(b"mmap-min-addr")?;
         let _ = mmap_min_fd.write(&usize::to_ne_bytes(min_mmap_addr));
@@ -661,6 +654,12 @@ pub fn fexec_impl(
     };
 
     let addrspace_selection_fd = thread_fd.dup_into_upper(b"current-addrspace")?;
+
+    sys_call(
+        proc_fd.as_raw_fd(),
+        CallFlags::empty(),
+        &[ProcCall::DisableSetpgid as u64],
+    )?;
 
     let _ = addrspace_selection_fd.write(&create_set_addr_space_buf(
         grants_fd.as_raw_fd(),
