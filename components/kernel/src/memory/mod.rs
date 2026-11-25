@@ -1456,6 +1456,11 @@ pub fn page_fault_handler(
                         crate::syscall::exit_context(None, &mut token, ctx_lock);
                     }
                 }
+                Err(PfError::Killed) if caused_by_kernel && is_usercopy => break,
+                Err(PfError::Killed) => {
+                    crate::syscall::exit_this_context(None, &mut token);
+                    unreachable!();
+                }
                 Err(PfError::Segv | PfError::RecursionLimitExceeded) => break,
                 Err(PfError::NonfatalInternalError) => todo!(),
             }

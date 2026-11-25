@@ -2523,6 +2523,7 @@ pub enum AccessMode {
 pub enum PfError {
     Segv,
     Oom,
+    Killed,
     NonfatalInternalError,
     // TODO: Handle recursion limit by mapping a zeroed page? Or forbid borrowing borrowed memory,
     // and ensure pages are mapped at grant time?
@@ -2884,6 +2885,11 @@ fn correct_inner<'l>(
             // XXX: This is cheating, but guaranteed we won't deadlock because we've dropped addr_space_guard
             let mut token = unsafe { CleanLockToken::new() };
 
+            let context_lock = Arc::clone(&*crate::context::current());
+            if context_lock.read(token.token()).being_sigkilled {
+                return Err(PfError::Killed);
+            }
+
             let (scheme_res, scheme_number) = {
                 let desc = &file_ref.description.read(token.token());
                 (desc.scheme_ref.upgrade(), desc.number)
@@ -2899,23 +2905,54 @@ fn correct_inner<'l>(
                 })
                 .ok_or(PfError::Segv)?;
 
+            const FMAP_WAIT_MAX_RESUMES: usize = 64;
+
             let offset = file_ref.base_offset as u64 + (pages_from_grant_start * PAGE_SIZE) as u64;
-            user_inner
+            let tag = user_inner
                 .request_fmap(scheme_number, offset, 1, flags, &mut token)
-                .unwrap();
+                .map_err(|_| PfError::Segv)?;
 
-            let context_lock = Arc::clone(&*crate::context::current());
-            context_lock
-                .write(token.token())
-                .hard_block(HardBlockedReason::AwaitingMmap { file_ref });
+            let frame = {
+                let mut resolved = None;
+                for _ in 0..FMAP_WAIT_MAX_RESUMES {
+                    let mut guard = context_lock.write(token.token());
+                    if guard.being_sigkilled {
+                        let _ = guard.fmap_ret.take();
+                        drop(guard);
+                        user_inner.cancel_fmap(tag, &context_lock, &mut token);
+                        return Err(PfError::Killed);
+                    }
+                    if let Some(frame) = guard.fmap_ret.take() {
+                        resolved = Some(frame);
+                        break;
+                    }
+                    let _ = guard.hard_block(HardBlockedReason::AwaitingMmap {
+                        file_ref: file_ref.clone(),
+                    });
+                    drop(guard);
 
-            super::switch(&mut token);
-
-            let frame = context_lock
-                .write(token.token())
-                .fmap_ret
-                .take()
-                .ok_or(PfError::NonfatalInternalError)?;
+                    super::switch(&mut token);
+                }
+                match resolved {
+                    Some(frame) => frame,
+                    None => {
+                        let mut guard = context_lock.write(token.token());
+                        let killed = guard.being_sigkilled;
+                        let frame = guard.fmap_ret.take();
+                        drop(guard);
+                        if killed {
+                            user_inner.cancel_fmap(tag, &context_lock, &mut token);
+                            return Err(PfError::Killed);
+                        }
+                        if let Some(frame) = frame {
+                            frame
+                        } else {
+                            user_inner.cancel_fmap(tag, &context_lock, &mut token);
+                            return Err(PfError::Segv);
+                        }
+                    }
+                }
+            };
 
             // SAFETY: Caller guarantees addr_space_guard is coming from this addr_space_lock
             addr_space = unsafe { addr_space_lock.acquire_rewrite(addr_space_guard_token) };

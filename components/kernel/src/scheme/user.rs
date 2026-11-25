@@ -786,7 +786,7 @@ impl UserInner {
         required_page_count: usize,
         flags: MapFlags,
         token: &mut CleanLockToken,
-    ) -> Result<()> {
+    ) -> Result<u32> {
         info!("REQUEST FMAP");
 
         let tag = self.next_id(token)?;
@@ -813,7 +813,22 @@ impl UserInner {
         );
         event::trigger(self.root_id, self.scheme_id.get(), EVENT_READ, token);
 
-        Ok(())
+        Ok(tag)
+    }
+    pub fn cancel_fmap(
+        &self,
+        tag: u32,
+        context_lock: &Arc<ContextLock>,
+        token: &mut CleanLockToken,
+    ) {
+        let expected = Arc::downgrade(context_lock);
+        let mut states = self.states.lock(token.token());
+        if matches!(
+            states.get(tag as usize),
+            Some(State::Fmap(weak)) if Weak::ptr_eq(weak, &expected)
+        ) {
+            states.remove(tag as usize);
+        }
     }
     fn handle_parsed(&self, cqe: &ParsedCqe, token: &mut CleanLockToken) -> Result<()> {
         match *cqe {
@@ -930,6 +945,10 @@ impl UserInner {
 
                 {
                     let mut context = context_lock.write(token.token());
+                    if context.being_sigkilled || context.status.is_dead() {
+                        return Err(Error::new(ESRCH));
+                    }
+                    context.fmap_ret = Some(Frame::containing(frame));
                     if let Status::HardBlocked {
                         reason: HardBlockedReason::AwaitingMmap { .. },
                     } = context.status
@@ -937,7 +956,6 @@ impl UserInner {
                         context.status = Status::Runnable;
                         wake = (true, context.cpu_id);
                     }
-                    context.fmap_ret = Some(Frame::containing(frame));
                 }
                 if wake.0 {
                     wakeup_context(&context_lock, wake.1, &mut token.downgrade());
