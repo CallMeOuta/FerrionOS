@@ -11063,6 +11063,27 @@ def run_session_login_check(args, out):
 
 OWN_IMAGE = {"disk-keys": test_disk_keys, "disk-install": test_disk_install}
 OWN_IMAGE["session-login"] = run_session_login_check
+def test_gtk4_window(args, out):
+    """Checks GTK 4 + libadwaita Wayland window (CPU Cairo), key input, AdwAboutDialog, and libappstream under ferrion-run --no-network (use --config wm-session)."""
+    import gtk4_window
+    vm = VM(args, out)
+    try:
+        return gtk4_window.run_gtk4_window(
+            vm,
+            args,
+            {
+                "Blocked": Blocked,
+                "root_shell": root_shell,
+                "run_status": run_status,
+                "sendkeys": sendkeys,
+                "settle": settle,
+            },
+        )
+    finally:
+        vm.close()
+
+
+OWN_IMAGE["gtk4-window"] = test_gtk4_window
 OWN_IMAGE["hw-live"] = test_hw_live
 OWN_IMAGE["mpv-sound"] = test_mpv_sound
 OWN_IMAGE["one-password"] = test_one_password

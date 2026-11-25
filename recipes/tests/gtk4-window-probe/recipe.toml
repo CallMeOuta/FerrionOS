@@ -1,0 +1,22 @@
+[package]
+description = "Checks a GTK 4 / libadwaita Wayland window, key input, and AppStream about dialog"
+
+[build]
+template = "custom"
+dependencies = [
+    "appstream",
+    "glib",
+    "gtk4",
+    "libadwaita",
+]
+dev-dependencies = [
+    "shared-mime-info",
+]
+script = """
+DYNAMIC_INIT
+export PKG_CONFIG_PATH="${COOKBOOK_SYSROOT}/usr/share/pkgconfig:${PKG_CONFIG_PATH}"
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra $(pkg-config --cflags appstream gtk4 libadwaita-1) \
+    -o "${COOKBOOK_STAGE}/usr/bin/gtk4-window-probe" "${COOKBOOK_RECIPE}/main.c" \
+    ${LDFLAGS} $(pkg-config --libs appstream gtk4 libadwaita-1)
+"""
