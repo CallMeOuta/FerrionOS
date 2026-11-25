@@ -400,6 +400,29 @@ impl<L: Level, T> RwLock<L, T> {
         }
     }
 
+    pub fn write_pair<'a, LP: Lower<L> + 'a>(
+        a: &'a Self,
+        b: &'a Self,
+        lock_token: LockToken<'a, LP>,
+    ) -> Option<(RwLockWriteGuard<'a, L, T>, RwLockWriteGuard<'a, L, T>)> {
+        let ptr_a = core::ptr::from_ref(a) as usize;
+        let ptr_b = core::ptr::from_ref(b) as usize;
+        if ptr_a == ptr_b {
+            return None;
+        }
+        if ptr_a < ptr_b {
+            assert!(ptr_a < ptr_b);
+            let first = a.write(lock_token);
+            let second = unsafe { b.rewrite(LockToken(PhantomData)) };
+            Some((first, second))
+        } else {
+            assert!(ptr_b < ptr_a);
+            let first = b.write(lock_token);
+            let second = unsafe { a.rewrite(LockToken(PhantomData)) };
+            Some((second, first))
+        }
+    }
+
     /// Locks this RwLock with shared read access, blocking the current thread until it can be acquired.
     ///
     /// The calling thread will be blocked until there are no more writers which hold the lock.

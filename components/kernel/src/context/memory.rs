@@ -181,6 +181,16 @@ impl AddrSpaceWrapper {
     ) -> RwLockWriteGuard<'a, L5, AddrSpace> {
         self.inner.write(lock_token)
     }
+    pub fn acquire_write_pair<'a>(
+        a: &'a Self,
+        b: &'a Self,
+        lock_token: LockToken<'a, L4>,
+    ) -> Result<(
+        RwLockWriteGuard<'a, L5, AddrSpace>,
+        RwLockWriteGuard<'a, L5, AddrSpace>,
+    )> {
+        RwLock::write_pair(&a.inner, &b.inner, lock_token).ok_or(Error::new(EBUSY))
+    }
     pub unsafe fn acquire_reupgradeable_read<'a>(
         &'a self,
         lock_token: LockToken<'a, L5>,
@@ -398,18 +408,36 @@ impl AddrSpaceWrapper {
     }
     pub fn r#move(
         &self,
-        src_opt: Option<(&AddrSpaceWrapper, &mut AddrSpace)>,
         src_span: PageSpan,
         requested_dst_base: Option<Page>,
         new_page_count: usize,
         new_flags: MapFlags,
         notify_files_out: &mut UnmapVec,
-        token: LockToken<L5>,
+        token: LockToken<L4>,
+    ) -> Result<Page> {
+        let mut dst = self.acquire_write(token);
+        self.move_locked(
+            None,
+            &mut dst,
+            src_span,
+            requested_dst_base,
+            new_page_count,
+            new_flags,
+            notify_files_out,
+        )
+    }
+    pub fn move_locked(
+        &self,
+        src_opt: Option<(&AddrSpaceWrapper, &mut AddrSpace)>,
+        dst: &mut AddrSpace,
+        src_span: PageSpan,
+        requested_dst_base: Option<Page>,
+        new_page_count: usize,
+        new_flags: MapFlags,
+        notify_files_out: &mut UnmapVec,
     ) -> Result<Page> {
         let dst_lock = self;
-        // SAFETY: This is moving data between two AddrSpace. Caller ensures the two is a different AddrSpace
-        let mut dst = unsafe { dst_lock.acquire_rewrite(token) };
-        let dst = &mut *dst;
+        assert_eq!(dst_lock.inner.as_mut_ptr(), dst as *mut AddrSpace);
 
         let mut src_flusher;
         let mut src_opt = match src_opt {

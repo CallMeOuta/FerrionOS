@@ -620,8 +620,17 @@ impl UserInner {
             None
         };
 
-        let mut dst_space_guard = dst_space_lock.acquire_write(token.downgrade());
-        let (dst_space, _token_split) = dst_space_guard.token_split();
+        let (mut dst_space_guard, mut cur_space_guard) = if middle_page_count > 0 {
+            let (dst_g, cur_g) = AddrSpaceWrapper::acquire_write_pair(
+                &dst_space_lock,
+                &cur_space_lock,
+                token.downgrade(),
+            )?;
+            (dst_g, Some(cur_g))
+        } else {
+            (dst_space_lock.acquire_write(token.downgrade()), None)
+        };
+        let dst_space = &mut *dst_space_guard;
 
         let free_span = dst_space
             .grants
@@ -663,6 +672,10 @@ impl UserInner {
         };
 
         if let Some(middle_page_count) = NonZeroUsize::new(middle_page_count) {
+            let cur_space_ref = cur_space_guard
+                .as_mut()
+                .expect("middle_page_count > 0 acquired pair");
+            let cur_space_arc = Arc::clone(&cur_space_lock);
             dst_space.mmap(
                 &dst_space_lock,
                 Some(first_middle_dst_page),
@@ -683,15 +696,9 @@ impl UserInner {
                     // unmap them is to respond to the scheme socket.
                     let is_pinned_userscheme_borrow = true;
 
-                    // TODO: Not a Lock ordering violation
-                    // we've checked Arc::ptr_eq(&dst_space_lock, &cur_space_lock) before,
-                    // but it's difficult to apply cur_space_lock.arquire_rewrite
-                    let mut token = unsafe { CleanLockToken::new() };
-                    let mut cur_space_guard =
-                        unsafe { cur_space_lock.acquire_rewrite(token.downgrade()) };
                     Grant::borrow(
-                        Arc::clone(&cur_space_lock),
-                        &mut cur_space_guard,
+                        cur_space_arc,
+                        cur_space_ref,
                         first_middle_src_page,
                         dst_page,
                         middle_page_count.get(),
@@ -737,6 +744,7 @@ impl UserInner {
             }
         };
 
+        drop(cur_space_guard);
         drop(dst_space_guard);
 
         let base = free_span.base.start_address().data() + offset;
@@ -1145,52 +1153,68 @@ impl UserInner {
             base_offset: map.offset,
         };
 
-        let mut lock_token = token.token();
-        let src = match base_page_opt {
-            Some(base_addr) => Some({
-                if base_addr % PAGE_SIZE != 0 {
-                    return Err(Error::new(EINVAL));
-                }
-                let addr_space_lock = &src_address_space;
-                BorrowedFmapSource {
-                    src_base: Page::containing_address(VirtualAddress::new(base_addr)),
-                    addr_space_lock,
-                    addr_space_guard: addr_space_lock.acquire_write(lock_token.downgrade()),
-                    mode: if map.flags.contains(MapFlags::MAP_SHARED) {
-                        MmapMode::Shared
-                    } else {
-                        MmapMode::Cow
-                    },
-                }
-            }),
-            None => None,
-        };
-
         let page_count_nz = NonZeroUsize::new(page_count).expect("already validated map.size != 0");
         let mut notify_files = UnmapVec::new();
-        // TODO: Not a Lock ordering violation
-        // we've checked Arc::ptr_eq(&src_address_space, &dst_addr_space) before,
-        // but it's difficult to apply src.arquire_rewrite
-        let mut clean_token = unsafe { CleanLockToken::new() };
         let dst_base = {
-            dst_addr_space.acquire_write(clean_token.downgrade()).mmap(
-                &dst_addr_space,
-                dst_base,
-                page_count_nz,
-                map.flags,
-                &mut notify_files,
-                |dst_base, flags, mapper, flusher| {
-                    Grant::borrow_fmap(
-                        PageSpan::new(dst_base, page_count),
-                        flags,
-                        file_ref,
-                        src,
+            let mut lock_token = token.token();
+            match base_page_opt {
+                Some(base_addr) => {
+                    if base_addr % PAGE_SIZE != 0 {
+                        return Err(Error::new(EINVAL));
+                    }
+                    let (src_guard, mut dst_guard) = AddrSpaceWrapper::acquire_write_pair(
+                        &src_address_space,
                         &dst_addr_space,
-                        mapper,
-                        flusher,
+                        lock_token.downgrade(),
+                    )?;
+                    let src = Some(BorrowedFmapSource {
+                        src_base: Page::containing_address(VirtualAddress::new(base_addr)),
+                        addr_space_lock: &src_address_space,
+                        addr_space_guard: src_guard,
+                        mode: if map.flags.contains(MapFlags::MAP_SHARED) {
+                            MmapMode::Shared
+                        } else {
+                            MmapMode::Cow
+                        },
+                    });
+                    dst_guard.mmap(
+                        &dst_addr_space,
+                        dst_base,
+                        page_count_nz,
+                        map.flags,
+                        &mut notify_files,
+                        |dst_base, flags, mapper, flusher| {
+                            Grant::borrow_fmap(
+                                PageSpan::new(dst_base, page_count),
+                                flags,
+                                file_ref,
+                                src,
+                                &dst_addr_space,
+                                mapper,
+                                flusher,
+                            )
+                        },
                     )
-                },
-            )
+                }
+                None => dst_addr_space.acquire_write(lock_token.downgrade()).mmap(
+                    &dst_addr_space,
+                    dst_base,
+                    page_count_nz,
+                    map.flags,
+                    &mut notify_files,
+                    |dst_base, flags, mapper, flusher| {
+                        Grant::borrow_fmap(
+                            PageSpan::new(dst_base, page_count),
+                            flags,
+                            file_ref,
+                            None,
+                            &dst_addr_space,
+                            mapper,
+                            flusher,
+                        )
+                    },
+                ),
+            }
         };
 
         handle_notify_files(notify_files, token);

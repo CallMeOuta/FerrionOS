@@ -524,7 +524,6 @@ pub fn mremap(
         let base_res = {
             let mut lock_token = token.token();
             addr_space.r#move(
-                None,
                 src_span,
                 requested_dst_base,
                 new_page_count,
