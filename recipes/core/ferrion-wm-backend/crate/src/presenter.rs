@@ -10,7 +10,6 @@ use crate::{MAX_IN_FLIGHT_FLIPS, PresentMode, PresentPreference, Presentation, S
 
 const FLIP_PROBE_TIMEOUT_MS: i32 = 2_000;
 const MAX_PROBE_POLL_ROUNDS: usize = 16;
-const MAX_PROBE_EVENTS: usize = 64;
 
 struct SwapSlot {
     framebuffer: framebuffer::Handle,
@@ -204,13 +203,13 @@ impl Drop for Presenter {
     }
 }
 
-pub(crate) fn open_presenter(
+pub(crate) fn open_presenter_probing(
     drm: Arc<DrmHandle>,
     crtc: crtc::Handle,
     connector: connector::Handle,
     mode: Mode,
     preference: PresentPreference,
-) -> io::Result<(Presenter, bool)> {
+) -> io::Result<(Presenter, PresentMode, bool)> {
     let dimensions = (u32::from(mode.size().0), u32::from(mode.size().1));
     assert!(dimensions.0 > 0 && dimensions.1 > 0);
     let mut slot0 = SwapSlot::create(&drm, dimensions)?;
@@ -231,6 +230,7 @@ pub(crate) fn open_presenter(
                 dimensions,
                 kind: PresenterKind::Cpu { slot: slot0 },
             },
+            PresentMode::DirtyFb,
             false,
         ));
     }
@@ -244,7 +244,7 @@ pub(crate) fn open_presenter(
     };
     match drm.page_flip(crtc, slot1.framebuffer, PageFlipFlags::EVENT, None) {
         Ok(()) => {
-            let hotplug_seen = match wait_probe_flip(&drm) {
+            let hotplug_seen = match wait_probe_flip(&drm, crtc) {
                 Ok(hotplug) => hotplug,
                 Err(error) => {
                     slot1.destroy(&drm);
@@ -263,6 +263,7 @@ pub(crate) fn open_presenter(
                         in_flight: 0,
                     },
                 },
+                PresentMode::PageFlip,
                 hotplug_seen,
             ))
         }
@@ -279,6 +280,7 @@ pub(crate) fn open_presenter(
                     dimensions,
                     kind: PresenterKind::Cpu { slot: slot0 },
                 },
+                PresentMode::DirtyFb,
                 false,
             ))
         }
@@ -290,7 +292,56 @@ pub(crate) fn open_presenter(
     }
 }
 
-fn wait_probe_flip(drm: &DrmHandle) -> io::Result<bool> {
+pub(crate) fn open_presenter_with_mode(
+    drm: Arc<DrmHandle>,
+    crtc: crtc::Handle,
+    connector: connector::Handle,
+    mode: Mode,
+    chosen_mode: PresentMode,
+) -> io::Result<Presenter> {
+    let dimensions = (u32::from(mode.size().0), u32::from(mode.size().1));
+    assert!(dimensions.0 > 0 && dimensions.1 > 0);
+    let mut slot0 = SwapSlot::create(&drm, dimensions)?;
+    if let Err(error) = drm.set_crtc(
+        crtc,
+        Some(slot0.framebuffer),
+        (0, 0),
+        &[connector],
+        Some(mode),
+    ) {
+        slot0.destroy(&drm);
+        return Err(error);
+    }
+    match chosen_mode {
+        PresentMode::DirtyFb => Ok(Presenter {
+            drm,
+            dimensions,
+            kind: PresenterKind::Cpu { slot: slot0 },
+        }),
+        PresentMode::PageFlip => {
+            let slot1 = match SwapSlot::create(&drm, dimensions) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    let _ = drm.set_crtc(crtc, None, (0, 0), &[], None);
+                    slot0.destroy(&drm);
+                    return Err(error);
+                }
+            };
+            Ok(Presenter {
+                drm,
+                dimensions,
+                kind: PresenterKind::Flip {
+                    crtc,
+                    slots: [slot0, slot1],
+                    back: 1,
+                    in_flight: 0,
+                },
+            })
+        }
+    }
+}
+
+fn wait_probe_flip(drm: &DrmHandle, crtc: crtc::Handle) -> io::Result<bool> {
     let mut hotplug_seen = false;
     for _ in 0..MAX_PROBE_POLL_ROUNDS {
         let mut pfd = libc::pollfd {
@@ -319,15 +370,30 @@ fn wait_probe_flip(drm: &DrmHandle) -> io::Result<bool> {
             ));
         }
         if pfd.revents & libc::POLLIN != 0 {
-            for (count, event) in drm.redox_receive_events()?.enumerate() {
-                if count >= MAX_PROBE_EVENTS {
-                    return Err(io::Error::other("probe page flip event limit exceeded"));
+            let events = match drm.redox_receive_events() {
+                Ok(events) => events,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
                 }
+                Err(error) => return Err(error),
+            };
+            let mut probe_completed = false;
+            for event in events {
                 match event {
-                    RedoxDrmEvent::PageFlip(_) => return Ok(hotplug_seen),
+                    RedoxDrmEvent::PageFlip(flip) if flip.crtc == crtc => {
+                        probe_completed = true;
+                    }
                     RedoxDrmEvent::RedoxConnectorHotplug(_) => hotplug_seen = true,
                     _ => {}
                 }
+            }
+            if probe_completed {
+                return Ok(hotplug_seen);
             }
         }
     }

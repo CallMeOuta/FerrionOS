@@ -64,6 +64,7 @@ struct Shared {
 
 struct Display {
     presenter: Presenter,
+    present_mode: PresentMode,
     dimensions: (u32, u32),
     refresh: Option<Duration>,
 }
@@ -143,7 +144,11 @@ impl Backend {
         self.display.presenter.stride()
     }
     pub fn present_mode(&self) -> PresentMode {
-        self.display.presenter.present_mode()
+        debug_assert_eq!(
+            self.display.present_mode,
+            self.display.presenter.present_mode()
+        );
+        self.display.present_mode
     }
     pub fn flip_in_flight(&self) -> bool {
         self.display.presenter.flip_in_flight()
@@ -397,6 +402,7 @@ impl Display {
                 crtc,
                 with_cursor,
                 preference,
+                None,
             )?;
             if !hotplug_seen {
                 return Ok((display, output));
@@ -416,16 +422,31 @@ impl Display {
         crtc: crtc::Handle,
         with_cursor: bool,
         preference: PresentPreference,
+        chosen_mode: Option<PresentMode>,
     ) -> io::Result<(Self, ActiveOutput, bool)> {
-        let (presenter, hotplug_seen) = presenter::open_presenter(
-            Arc::clone(&drm),
-            crtc,
-            connector,
-            mode,
-            preference,
-        )?;
+        let (presenter, present_mode, hotplug_seen) = match chosen_mode {
+            Some(mode_choice) => (
+                presenter::open_presenter_with_mode(
+                    Arc::clone(&drm),
+                    crtc,
+                    connector,
+                    mode,
+                    mode_choice,
+                )?,
+                mode_choice,
+                false,
+            ),
+            None => presenter::open_presenter_probing(
+                Arc::clone(&drm),
+                crtc,
+                connector,
+                mode,
+                preference,
+            )?,
+        };
         let display = Self {
             presenter,
+            present_mode,
             dimensions,
             refresh: (mode.vrefresh() > 0)
                 .then(|| Duration::from_secs_f64(1.0 / f64::from(mode.vrefresh()))),
