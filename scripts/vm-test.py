@@ -141,6 +141,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r")
+ANSI_WITH_CURSOR = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[78]|\r")
 BRIGHT = 97  # a green value at or above this counts as a lit pixel
 LIT = bytes(0 if v < BRIGHT else 1 for v in range(256))  # bytes.translate table: 1 for a lit green value
 # The login screen and the wallpaper are drawn on FerrionOS's ground color (`ground` in
@@ -1419,26 +1420,31 @@ def read_root_contexts(vm, tag="root-ctx", timeout=60):
     """Reads /scheme/sys/context through sudo from a user shell and returns bounded ContextRow entries."""
     for attempt in range(ROOT_CONTEXT_MAX_ATTEMPTS):
         seq = vm._next_cmd_seq()
-        begin_mark = f"RCTX-BEGIN-{tag}-{seq}"
-        end_mark = f"RCTX-END-{tag}-{seq}"
-        rc_mark = f"RCTX-RC-{tag}-{seq}"
+        nonce = os.urandom(6).hex()
+        begin_expr = f"RCTX-BEGIN-{tag}-{seq}-{nonce}-$((40+2))"
+        begin_mark = f"RCTX-BEGIN-{tag}-{seq}-{nonce}-42"
+        end_expr = f"RCTX-END-{tag}-{seq}-{nonce}-$((40+2))"
+        end_mark = f"RCTX-END-{tag}-{seq}-{nonce}-42"
+        rc_expr = f"RCTX-RC-{tag}-{seq}-{nonce}-$((40+2))"
+        rc_mark = f"RCTX-RC-{tag}-{seq}-{nonce}-42"
         tmp_path = f"/tmp/rctx-{tag}.txt"
         since = vm.mark()
         vm.type(
             f"bash -c 'sudo sh -c \"cat /scheme/sys/context > {tmp_path} "
-            f"&& echo {begin_mark} && cat {tmp_path} && echo {end_mark}\"; "
-            f"echo {rc_mark}-$?'\n"
+            f"&& echo {begin_expr} && cat {tmp_path} && echo {end_expr}\"; "
+            f"echo {rc_expr}-$?'\n"
         )
-        if vm.wait_serial(rf"\[sudo\] password|{re.escape(rc_mark)}-\d", timeout, since):
-            if not re.search(rf"{re.escape(rc_mark)}-\d", vm.text(since)):
+        rc_re = rf"{re.escape(rc_mark)}-(\d+)"
+        if vm.wait_serial(rf"\[sudo\] password|{rc_re}", timeout, since):
+            if not re.search(rc_re, vm.text(since)):
                 vm.type("\n")
-        found = vm.wait_serial(rf"(?s)\n(.*?){re.escape(rc_mark)}-(\d+)\s", timeout, since)
-        if not found or int(found.group(2)) != 0:
+        found = vm.wait_serial(rc_re, timeout, since)
+        if not found or int(found.group(1)) != 0:
             continue
-        raw = found.group(1)
+        cleaned = ANSI_WITH_CURSOR.sub("", vm.text(since))
         block = re.search(
-            rf"(?ms)^{re.escape(begin_mark)}\r?\n(.*?)^{re.escape(end_mark)}\r?\n",
-            raw,
+            rf"(?s){re.escape(begin_mark)}\n(.*?){re.escape(end_mark)}",
+            cleaned,
         )
         if not block:
             continue
@@ -3218,17 +3224,44 @@ def refused(reply):
     return isinstance(reply, Answered) and reply.status != 0
 
 
+def fenced_run(vm, line, timeout, *, tag="cmd", shell="bash", sudo=False, desync=False, answer_type=False):
+    seq = vm._next_cmd_seq()
+    nonce = os.urandom(6).hex()
+    begin_expr = f"VMRUN-BEGIN-{tag}-{seq}-{nonce}-$((40+2))"
+    begin_mark = f"VMRUN-BEGIN-{tag}-{seq}-{nonce}-42"
+    end_expr = f"VMRUN-END-{tag}-{seq}-{nonce}-$((40+2))"
+    end_mark = f"VMRUN-END-{tag}-{seq}-{nonce}-42"
+    body = line.rstrip()
+    sep = "" if body.endswith(";") else ";"
+    inner = f"echo {begin_expr}; {body}{sep} echo {end_expr}-$?"
+    if shell == "bash":
+        typed = f"bash -c '{inner}'\n"
+    elif shell == "bash_shlex":
+        typed = f"bash -c {shlex.quote(inner)}\n"
+    elif shell == "raw":
+        typed = f"{inner}\n"
+    else:
+        raise ValueError(f"unsupported fenced_run shell mode: {shell}")
+    since = vm.mark()
+    vm.type(typed)
+    end_re = rf"{re.escape(end_mark)}-(\d+)"
+    if sudo and vm.wait_serial(rf"\[sudo\] password|{end_re}", timeout, since):
+        if not re.search(end_re, vm.text(since)):
+            vm.type("\n")
+    found_end = vm.wait_serial(end_re, timeout, since)
+    cleaned = ANSI_WITH_CURSOR.sub("", vm.text(since))
+    match = re.search(rf"(?s){re.escape(begin_mark)}\n(.*?){end_re}", cleaned) if found_end else None
+    if not match:
+        if desync:
+            vm.console_desynced = f"{tag}: {line}" if tag else line
+        return NoAnswer(cleaned) if answer_type else (None, cleaned)
+    status, out = int(match.group(2)), match.group(1)
+    return Answered(status, out) if answer_type else (status, out)
+
+
 def guest_run(vm, tag, line, timeout):
     """Runs a line through bash on the serial console; returns Answered(status, out) or NoAnswer(out)."""
-    seq = vm._next_cmd_seq()
-    since = vm.mark()
-    # The status is echoed inside bash: `user`'s login shell is not POSIX.
-    vm.type(f"bash -c '{line}; echo {tag}-{seq}-end-$?'\n")
-    found = vm.wait_serial(rf"(?s)\n(.*){re.escape(tag)}-{seq}-end-(\d+)", timeout, since)
-    if not found:
-        vm.console_desynced = f"{tag}: {line}"
-        return NoAnswer(vm.text(since))
-    return Answered(int(found.group(2)), found.group(1))
+    return fenced_run(vm, line, timeout, tag=tag, shell="bash", desync=True, answer_type=True)
 
 
 def test_foreign_call(vm, args):
@@ -6533,16 +6566,9 @@ def ferrion_run_checks(vm, args, port, seen):
     def run(tag, line, timeout=60, sudo=False):
         """Runs `line` in bash as `user`; returns (exit status, output) or (None, output so far).
         With `sudo`, answers sudo's password prompt with `user`'s empty password."""
-        since = vm.mark()
-        vm.type(f"bash -c '{line}; echo fr-end-{tag}-$?'\n")
-        end = rf"(?s)\n(.*)fr-end-{tag}-(\d+)"
-        if sudo and vm.wait_serial(rf"\[sudo\] password|fr-end-{tag}-\d", timeout, since):
-            if not re.search(rf"fr-end-{tag}-\d", vm.text(since)):
-                vm.type("\n")
-        found = vm.wait_serial(end, timeout, since)
-        output = found.group(1) if found else vm.text(since)
-        transcript.append(f"$ {line}\n{output}exit {found.group(2) if found else 'none'}\n")
-        return (int(found.group(2)) if found else None), output
+        status, output = fenced_run(vm, line, timeout, tag=f"fr-{tag}", shell="bash", sudo=sudo)
+        transcript.append(f"$ {line}\n{output}exit {status if status is not None else 'none'}\n")
+        return status, output
 
     def curl(path):
         return f"curl -sS -m 10 -o /dev/null -w http-%{{http_code}} http://{address}{path}"
@@ -6650,16 +6676,9 @@ def ferrion_run_checks(vm, args, port, seen):
 
 
 def pfr1_run_as_user(vm, transcript, tag, line, timeout=60, sudo=False):
-    since = vm.mark()
-    vm.type(f"bash -c {shlex.quote(line + f'; echo pfr1-end-{tag}-$?')}\n")
-    end = rf"(?s)\n(.*)pfr1-end-{tag}-(\d+)"
-    if sudo and vm.wait_serial(rf"\[sudo\] password|pfr1-end-{tag}-\d", timeout, since):
-        if not re.search(rf"pfr1-end-{tag}-\d", vm.text(since)):
-            vm.type("\n")
-    found = vm.wait_serial(end, timeout, since)
-    output = found.group(1) if found else vm.text(since)
-    transcript.append(f"$ {line}\n{output}exit {found.group(2) if found else 'none'}\n")
-    return (int(found.group(2)) if found else None), output
+    status, output = fenced_run(vm, line, timeout, tag=f"pfr1-{tag}", shell="bash_shlex", sudo=sudo)
+    transcript.append(f"$ {line}\n{output}exit {status if status is not None else 'none'}\n")
+    return status, output
 
 
 def pfr1_parse_caps(output):
@@ -7143,14 +7162,7 @@ def root_shell(vm, timeout):
 
 def run_status(vm, line, timeout=120):
     """Runs a line in the guest's root shell; returns Answered(status, out) or NoAnswer(out)."""
-    seq = vm._next_cmd_seq()
-    since = vm.mark()
-    vm.type(f"{line}; echo vm-test-status-{seq}-$?\n")
-    found = vm.wait_serial(rf"(?s)\n(.*)vm-test-status-{seq}-(\d+)", timeout, since)
-    if not found:
-        vm.console_desynced = line
-        return NoAnswer(vm.text(since))
-    return Answered(int(found.group(2)), found.group(1))
+    return fenced_run(vm, line, timeout, tag="status", shell="raw", desync=True, answer_type=True)
 
 
 MKFS_REUSE_MARK = b"FERRION-MKFS-REUSE"
@@ -9165,11 +9177,7 @@ def test_net_calls(args, out):
     vm = None
 
     def run(tag, line, timeout):
-        # The status is echoed inside bash: `user`'s login shell is not POSIX.
-        since = vm.mark()
-        vm.type(f"bash -c '{line}; echo nc-end-{tag}-$?'\n")
-        found = vm.wait_serial(rf"(?s)\n(.*)nc-end-{tag}-(\d+)", timeout, since)
-        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(since))
+        return fenced_run(vm, line, timeout, tag=f"nc-{tag}", shell="bash")
 
     def lookup_and_connect(tag):
         """The address a lookup of `tag` gave, or None, and whether the peer then saw the
@@ -11303,9 +11311,6 @@ def scope_escape(vm, tag, launcher):
     return guest_run(vm, tag, line, 600)
 
 
-ANSI_WITH_CURSOR = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[78]|\r")
-
-
 def parse_bracketed_listing(output, begin_marker, end_marker):
     cleaned = ANSI_WITH_CURSOR.sub("", output)
     match = re.search(
@@ -12723,6 +12728,64 @@ def test_hw_live(args, out):
     return ok, f"text: {note}; desktop: {desktop_note}"
 
 
+def test_echo_fence(vm, args):
+    """Checks that fenced_run and its migrated helpers never leak echoed command lines of 1, 2, or 4 console rows into captured output and preserve no-trailing-newline stdout and exit status (use --config desktop)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    nonce = os.urandom(4).hex()
+    problems = []
+    transcript = []
+    row_pads = ((1, 0), (2, 160), (4, 340))
+
+    def check_helper(name, invoke, check_nonzero):
+        for rows, pad in row_pads:
+            marker = f"ECHO_FENCE_{name}_{rows}_{nonce}"
+            cmd = f"true {'x' * pad} {marker}" if pad else f"true {marker}"
+            status, out = invoke(f"{name}-r{rows}", cmd)
+            if status != 0:
+                problems.append(f"{name} {rows}-row command failed (status {status})")
+            elif marker in out:
+                problems.append(f"{name} {rows}-row leaked marker {marker!r} into output")
+        status, out = invoke(f"{name}-nonl", "printf abc")
+        if status != 0 or out != "abc":
+            problems.append(f"{name} no-newline printf gave status={status} out={out!r}")
+        real_mark = f"REAL_OUT_{name}_{nonce}"
+        if check_nonzero:
+            status, out = invoke(f"{name}-real", f"echo {real_mark}; (exit 7)")
+            if status != 7 or real_mark not in out:
+                problems.append(f"{name} real/nonzero gave status={status} out={out!r}")
+        else:
+            status, out = invoke(f"{name}-real", f"echo {real_mark}")
+            if status != 0 or real_mark not in out:
+                problems.append(f"{name} real output gave status={status} out={out!r}")
+            status, _ = invoke(f"{name}-false", "false")
+            if status != 1:
+                problems.append(f"{name} false gave status={status}")
+
+    check_helper("guest-run", lambda tag, cmd: guest_run(vm, tag, cmd, 60), True)
+    check_helper("pfr1", lambda tag, cmd: pfr1_run_as_user(vm, transcript, tag, cmd, 60), True)
+    check_helper("fenced-bash", lambda tag, cmd: fenced_run(vm, cmd, 60, tag=tag, shell="bash"), True)
+
+    rctx = read_root_contexts(vm, "ef-rctx", timeout=60)
+    if rctx is None or not rctx[0]:
+        problems.append("read_root_contexts returned no rows")
+
+    since = vm.mark()
+    vm.type("exit\n")
+    ok, err = login(vm, "root", "password", r"root:.*# ", since, timeout=args.timeout)
+    if not ok:
+        problems.append(f"root login failed: {err}")
+    else:
+        check_helper("run-status", lambda _tag, cmd: run_status(vm, cmd, 60), False)
+
+    (vm.out / "echo-fence.txt").write_text("".join(transcript))
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, "guest_run, pfr1_run_as_user, fenced_run(bash), read_root_contexts, and run_status fenced 1/2/4-row lines and preserved printf abc"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
          "signal-handle": test_signal_handle, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
@@ -12767,6 +12830,7 @@ TESTS["exit-during-fork"] = test_exit_during_fork
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["blocked-wait"] = test_blocked_wait
+TESTS["echo-fence"] = test_echo_fence
 
 
 def test_display_socket(vm, args):

@@ -4333,7 +4333,7 @@
   "scripts/verified-boot-sign.sh": 0,
   "scripts/virtgpu-layout-check.py": 28,
   "scripts/virtiofs-run.sh": 0,
-  "scripts/vm-test.py": 293,
+  "scripts/vm-test.py": 291,
   "src/bin/cookbook_redoxer.rs": 0,
   "src/bin/repo/app.rs": 0,
   "src/bin/repo/main.rs": 1,
