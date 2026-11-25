@@ -1,0 +1,21 @@
+[package]
+name = "ferrion-manifest"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Format-1 app manifest parser and capability catalog for FerrionOS"
+
+[lib]
+name = "ferrion_manifest"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "ferrion-manifest-check"
+path = "src/bin/ferrion-manifest-check.rs"
+
+[dependencies]
+toml = "1"
+
+[workspace]
