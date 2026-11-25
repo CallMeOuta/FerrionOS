@@ -155,6 +155,7 @@ impl Smolnetd {
                 Rc::clone(&route_table),
                 Rc::clone(&socket_set),
                 ip_file,
+                timer,
             )?,
             udp_scheme: UdpScheme::new(
                 "udp",
@@ -162,6 +163,7 @@ impl Smolnetd {
                 Rc::clone(&route_table),
                 Rc::clone(&socket_set),
                 udp_file,
+                timer,
             )?,
             tcp_scheme: TcpScheme::new(
                 "tcp",
@@ -169,6 +171,7 @@ impl Smolnetd {
                 Rc::clone(&route_table),
                 Rc::clone(&socket_set),
                 tcp_file,
+                timer,
             )?,
             icmp_scheme: IcmpScheme::new(
                 "icmp",
@@ -176,6 +179,7 @@ impl Smolnetd {
                 Rc::clone(&route_table),
                 Rc::clone(&socket_set),
                 icmp_file,
+                timer,
             )?,
             netcfg_scheme: NetCfgScheme::new(
                 Rc::clone(&iface),
@@ -329,6 +333,7 @@ impl Smolnetd {
             }
         };
 
+        self.tcp_scheme.sweep_lingering(self.now().total_micros());
         self.notify_sockets()?;
 
         Ok(::std::cmp::min(
@@ -395,15 +400,27 @@ where
         route_table: Rc<RefCell<RouteTable>>,
         socket_set: Rc<RefCell<SocketSet>>,
         scheme_file: Socket,
+        timer: ::std::time::Instant,
     ) -> Result<Self> {
         Ok(Self {
-            scheme: SocketScheme::<SocketT>::new(name, iface, route_table, socket_set, scheme_file)
-                .map_err(|e| {
-                    Error::from_syscall_error(e, format!("failed to initialize {name} scheme"))
-                })?,
+            scheme: SocketScheme::<SocketT>::new(
+                name,
+                iface,
+                route_table,
+                socket_set,
+                scheme_file,
+                timer,
+            )
+            .map_err(|e| {
+                Error::from_syscall_error(e, format!("failed to initialize {name} scheme"))
+            })?,
             state: SchemeState::new(),
             wait_queue: Vec::new(),
         })
+    }
+
+    pub fn sweep_lingering(&mut self, now_us: i64) {
+        self.scheme.sweep_lingering(now_us);
     }
     pub fn on_scheme_event(&mut self) -> Result<bool> {
         for _ in 0..MAX_SCHEME_REQUESTS_PER_BATCH {

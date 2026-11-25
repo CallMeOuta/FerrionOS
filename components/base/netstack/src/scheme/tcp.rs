@@ -3,7 +3,9 @@ use std::str;
 use libredox::flag;
 use scheme_utils::FpathWriter;
 use smoltcp::iface::SocketHandle;
-use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer as TcpSocketBuffer};
+use smoltcp::socket::tcp::{
+    Socket as TcpSocket, SocketBuffer as TcpSocketBuffer, State as TcpState,
+};
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
@@ -16,6 +18,19 @@ const SO_RCVBUF: usize = 8;
 const TCP_DEFAULT_BUF_BYTES: usize = 1048576;
 const TCP_MIN_BUF_BYTES: usize = 16 * 1024;
 const TCP_MAX_BUF_BYTES: usize = 4 * 1024 * 1024;
+const MAX_LINGERING_SOCKETS: usize = 64;
+const LINGER_TIMEOUT_US: i64 = 15_000_000;
+
+struct LingeringTcp {
+    handle: SocketHandle,
+    port: u16,
+    started_us: i64,
+}
+
+pub struct TcpSchemeData {
+    pub port_set: PortSet,
+    lingering: Vec<LingeringTcp>,
+}
 
 #[derive(Clone, Copy)]
 pub struct TcpListenData {
@@ -27,14 +42,17 @@ pub struct TcpListenData {
 pub type TcpScheme = SchemeWrapper<TcpSocket<'static>>;
 
 impl<'a> SchemeSocket for TcpSocket<'a> {
-    type SchemeDataT = PortSet;
+    type SchemeDataT = TcpSchemeData;
     type DataT = Option<TcpListenData>;
     type SettingT = ();
 
     const BASE_PATH: &'static str = "/scheme/tcp/";
 
     fn new_scheme_data() -> Self::SchemeDataT {
-        PortSet::new(49_152u16, 65_535u16).expect("Wrong TCP port numbers")
+        TcpSchemeData {
+            port_set: PortSet::new(49_152u16, 65_535u16).expect("Wrong TCP port numbers"),
+            lingering: Vec::new(),
+        }
     }
 
     fn can_send(&self) -> bool {
@@ -123,12 +141,12 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         let tx_buffer = TcpSocketBuffer::new(tx_packets);
         let socket = TcpSocket::new(rx_buffer, tx_buffer);
 
-        // TODO: claim port with ethernet ip address
         if local_endpoint.port == 0 {
             local_endpoint.port = port_set
+                .port_set
                 .get_port()
                 .ok_or_else(|| SyscallError::new(syscall::EINVAL))?;
-        } else if !port_set.claim_port(local_endpoint.port) {
+        } else if !port_set.port_set.claim_port(local_endpoint.port) {
             return Err(SyscallError::new(syscall::EADDRINUSE));
         }
 
@@ -182,17 +200,79 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     fn close_file(
         &self,
         file: &SchemeFile<Self>,
-        port_set: &mut Self::SchemeDataT,
+        scheme_data: &mut Self::SchemeDataT,
     ) -> SyscallResult<()> {
         if let SchemeFile::Socket(SocketFile { data, .. }) = *file {
             if let Some(endpoint) = self.local_endpoint() {
-                // Socket was connected on some port
-                port_set.release_port(endpoint.port);
+                scheme_data.port_set.release_port(endpoint.port);
             } else if let Some(listen_data) = data {
-                port_set.release_port(listen_data.endpoint.port);
+                scheme_data.port_set.release_port(listen_data.endpoint.port);
             }
         }
         Ok(())
+    }
+
+    fn on_last_close(
+        sockets: &mut SocketSet,
+        handle: SocketHandle,
+        _file: &SchemeFile<Self>,
+        scheme_data: &mut Self::SchemeDataT,
+        now_us: i64,
+    ) -> bool {
+        let (state, port) = {
+            let tcp_socket = sockets.get_mut::<TcpSocket>(handle);
+            tcp_socket.close();
+            (
+                tcp_socket.state(),
+                tcp_socket.local_endpoint().map(|ep| ep.port).unwrap_or(0),
+            )
+        };
+        if state == TcpState::Closed {
+            return true;
+        }
+        if scheme_data.lingering.len() >= MAX_LINGERING_SOCKETS {
+            let oldest = scheme_data.lingering.remove(0);
+            sockets.get_mut::<TcpSocket>(oldest.handle).abort();
+            sockets.remove(oldest.handle);
+            if oldest.port != 0 {
+                scheme_data.port_set.release_port(oldest.port);
+            }
+        }
+        if port != 0 {
+            scheme_data.port_set.acquire_port(port);
+        }
+        scheme_data.lingering.push(LingeringTcp {
+            handle,
+            port,
+            started_us: now_us,
+        });
+        assert!(scheme_data.lingering.len() <= MAX_LINGERING_SOCKETS);
+        false
+    }
+
+    fn sweep_lingering(
+        sockets: &mut SocketSet,
+        scheme_data: &mut Self::SchemeDataT,
+        now_us: i64,
+    ) {
+        let mut i = 0usize;
+        while i < scheme_data.lingering.len() {
+            let entry = &scheme_data.lingering[i];
+            let state = sockets.get::<TcpSocket>(entry.handle).state();
+            let expired = now_us.saturating_sub(entry.started_us) >= LINGER_TIMEOUT_US;
+            if state == TcpState::Closed || expired {
+                let removed = scheme_data.lingering.swap_remove(i);
+                if state != TcpState::Closed {
+                    sockets.get_mut::<TcpSocket>(removed.handle).abort();
+                }
+                sockets.remove(removed.handle);
+                if removed.port != 0 {
+                    scheme_data.port_set.release_port(removed.port);
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     fn write_buf(
@@ -276,7 +356,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                             .listen(listen_data.endpoint)
                             .expect("Can't listen on local endpoint");
                     }
-                    port_set.acquire_port(
+                    port_set.port_set.acquire_port(
                         local_endpoint
                             .expect("Socket was active so local endpoint must be set")
                             .port,
@@ -301,7 +381,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
 
         if let SchemeFile::Socket(_) = file {
             if let Some(local_endpoint) = local_endpoint {
-                port_set.acquire_port(local_endpoint.port);
+                port_set.port_set.acquire_port(local_endpoint.port);
             }
         }
 

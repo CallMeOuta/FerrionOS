@@ -33,6 +33,13 @@ const SO_SNDBUF: usize = 7;
 pub struct Context {
     pub iface: Interface,
     pub route_table: Rc<RefCell<RouteTable>>,
+    pub timer: ::std::time::Instant,
+}
+
+impl Context {
+    pub fn now_us(&self) -> i64 {
+        i64::try_from(self.timer.elapsed().as_micros()).unwrap_or(i64::MAX)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -230,6 +237,23 @@ where
         data: &mut Self::SchemeDataT,
     ) -> SyscallResult<()>;
 
+    fn on_last_close(
+        _sockets: &mut SocketSet,
+        _handle: SocketHandle,
+        _file: &SchemeFile<Self>,
+        _data: &mut Self::SchemeDataT,
+        _now_us: i64,
+    ) -> bool {
+        true
+    }
+
+    fn sweep_lingering(
+        _sockets: &mut SocketSet,
+        _data: &mut Self::SchemeDataT,
+        _now_us: i64,
+    ) {
+    }
+
     fn write_buf(&mut self, file: &mut SocketFile<Self::DataT>, buf: &[u8])
         -> SyscallResult<usize>;
 
@@ -314,6 +338,7 @@ where
         route_table: Rc<RefCell<RouteTable>>,
         socket_set: Rc<RefCell<SocketSet>>,
         scheme_file: Socket,
+        timer: ::std::time::Instant,
     ) -> SyscallResult<SocketScheme<SocketT>> {
         let mut scheme = SocketScheme {
             handles: HandleMap::new(),
@@ -322,11 +347,20 @@ where
             scheme_data: SocketT::new_scheme_data(),
             scheme_file,
             _phantom_socket: PhantomData,
-            context: Context { iface, route_table },
+            context: Context {
+                iface,
+                route_table,
+                timer,
+            },
         };
         let cap_id = scheme.scheme_root()?;
         register_scheme_inner(&scheme.scheme_file, name, cap_id)?;
         Ok(scheme)
+    }
+
+    pub fn sweep_lingering(&mut self, now_us: i64) {
+        let mut socket_set = self.socket_set.borrow_mut();
+        SocketT::sweep_lingering(&mut socket_set, &mut self.scheme_data, now_us);
     }
 
     pub fn handle_block(&mut self, op: &Op) -> SyscallResult<Option<TimeSpec>> {
@@ -735,7 +769,16 @@ where
                 };
 
                 if remove {
-                    socket_set.remove(socket_handle);
+                    let now_us = self.context.now_us();
+                    if SocketT::on_last_close(
+                        &mut socket_set,
+                        socket_handle,
+                        &scheme_file,
+                        &mut self.scheme_data,
+                        now_us,
+                    ) {
+                        socket_set.remove(socket_handle);
+                    }
                 }
             }
         }
