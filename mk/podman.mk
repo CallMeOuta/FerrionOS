@@ -34,6 +34,10 @@ endif
 PODMAN_HOME=$(ROOT)/build/podman
 ## Podman command with its many arguments
 PODMAN_VOLUMES=--volume $(ROOT):$(CONTAINER_WORKDIR)$(PODMAN_VOLUME_FLAG) --volume $(PODMAN_HOME):/root$(PODMAN_VOLUME_FLAG)
+ifneq ($(PREFIX_ARCHIVE_MIRROR),)
+PODMAN_VOLUMES+=--volume "$(abspath $(PREFIX_ARCHIVE_MIRROR)):/ferrion-toolchain-archives:ro"
+PODMAN_CONFIG_MIRROR=--env PREFIX_ARCHIVE_MIRROR=/ferrion-toolchain-archives
+endif
 # The containers share the host's network, so sccache's default TCP server would be one
 # server for every checkout, and a cache hit would write into the checkout that started it.
 # A socket in the checkout's own container home gives each checkout its own server.
@@ -43,7 +47,7 @@ PODMAN_CONFIG=--env ARCH=$(ARCH) --env BOARD=$(BOARD) --env CONFIG_NAME=$(CONFIG
 	--env COOKBOOK_VERBOSE=$(COOKBOOK_VERBOSE) --env COOKBOOK_VERBOSE_CMD=$(COOKBOOK_VERBOSE_CMD) \
 	--env REPO_APPSTREAM=$(REPO_APPSTREAM) --env REPO_BINARY=$(REPO_BINARY) --env REPO_NONSTOP=$(REPO_NONSTOP) --env REPO_OFFLINE=$(REPO_OFFLINE) --env TESTBIN=$(TESTBIN) \
 	--env HOSTED_REDOX=$(HOSTED_REDOX) --env PREFIX_USE_UPSTREAM_RUST_COMPILER=$(PREFIX_USE_UPSTREAM_RUST_COMPILER) --env COOKBOOK_CLEAN_TARGET=$(COOKBOOK_CLEAN_TARGET) \
-	--env VERIFIED_BOOT=$(VERIFIED_BOOT) --env VERIFIED_BOOT_KEYS=$(VERIFIED_BOOT_KEYS) --env 'VERIFIED_BOOT_SIGNER=$(VERIFIED_BOOT_SIGNER)'
+	--env VERIFIED_BOOT=$(VERIFIED_BOOT) --env VERIFIED_BOOT_KEYS=$(VERIFIED_BOOT_KEYS) --env 'VERIFIED_BOOT_SIGNER=$(VERIFIED_BOOT_SIGNER)' $(PODMAN_CONFIG_MIRROR)
 PODMAN_OPTIONS=--rm --workdir $(CONTAINER_WORKDIR) --interactive --tty --cap-add SYS_ADMIN --device /dev/fuse --network=host --env TERM=$(TERM) --pids-limit=-1
 PODMAN_RUN=podman run $(PODMAN_OPTIONS) $(PODMAN_VOLUMES) $(PODMAN_ENV) $(PODMAN_CONFIG) $(IMAGE_TAG)
 

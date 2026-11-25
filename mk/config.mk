@@ -11,6 +11,8 @@ ARCH?=$(HOST_ARCH)
 BOARD?=
 ## Enable to use binary prefix (much faster)
 PREFIX_BINARY?=1
+## Optional local folder containing the three pinned *-install.tar.gz archives; checked before unpacking
+PREFIX_ARCHIVE_MIRROR?=
 ## Enable to use up-to-date rust compiler (experimental, only available to Tier 2 targets)
 ## Even more experimental, add -Zbuild-std to cookbook.toml to allow compilation to Tier 3 targets
 PREFIX_USE_UPSTREAM_RUST_COMPILER?=0

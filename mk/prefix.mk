@@ -120,19 +120,55 @@ ifeq ($(PREFIX_BINARY),1)
 # PREFIX_BINARY FOR LINUX -----------------------------------------
 ifneq ($(HOSTED_REDOX),1)
 
+ifeq ($(HOST_TARGET)/$(TARGET),x86_64-unknown-linux-gnu/x86_64-unknown-redox)
+PREFIX_SHA256_clang-install.tar.gz=fcf965f0a08fabb060a8fe8b96372ed95f3d8bff7c087b613a439a1cda003115
+PREFIX_SHA256_gcc-install.tar.gz=4bb5d1691d727546dc5064da794d798e9157cb85be8d463ebf7545bc01d9c362
+PREFIX_SHA256_rust-install.tar.gz=ecfe0e260cc7544b0e29ec4f217eacd0e6802248cf70e2fb689ce87808bfa2bb
+else ifeq ($(HOST_TARGET)/$(TARGET),x86_64-unknown-linux-gnu/aarch64-unknown-redox)
+PREFIX_SHA256_clang-install.tar.gz=53c371ed39044fefd17a296e741cc35f7a0f0a80c22e466d03b24233273acf97
+PREFIX_SHA256_gcc-install.tar.gz=c6fdbc3c72e065acd6d5b9ae45228d236b8e2bfe7c7c866919e40bba7a11a1e7
+PREFIX_SHA256_rust-install.tar.gz=d4c708980e49ebe55bf0549d7982eb4cda67d17d4bf4e5cacd6bbcb6b7d86085
+else ifeq ($(HOST_TARGET)/$(TARGET),x86_64-unknown-linux-gnu/riscv64gc-unknown-redox)
+PREFIX_SHA256_clang-install.tar.gz=c64ca6da7b2aa0bcd4b59f149da9bf50891fc6d4afe37f8abbd2413e1b539b0e
+PREFIX_SHA256_gcc-install.tar.gz=616d368d0234200fb3252dc52603ebd0ff570155936af15d63d922889206e5bd
+PREFIX_SHA256_rust-install.tar.gz=bb31259db412f41d199d34c2a927d3a01e309f869beaa3f6fd0e82b0f26c6546
+else ifeq ($(HOST_TARGET)/$(TARGET),aarch64-unknown-linux-gnu/x86_64-unknown-redox)
+PREFIX_SHA256_clang-install.tar.gz=c890cbdaa956d8c29162c707166a651850c48f82269eca7e0c433c365ee26ecc
+PREFIX_SHA256_gcc-install.tar.gz=cd810571146d17e91776364034965efba16f2df62cdd3476d2a5d5c2d391f180
+PREFIX_SHA256_rust-install.tar.gz=f52966be44b95029a9beeeef419e4e30cbddc95bb97828574332ac2f161a63f2
+else ifeq ($(HOST_TARGET)/$(TARGET),aarch64-unknown-linux-gnu/aarch64-unknown-redox)
+PREFIX_SHA256_clang-install.tar.gz=ffd3534f37fb8eac0f2d37b52c342dd70478a426285957295c23eeafced2987d
+PREFIX_SHA256_gcc-install.tar.gz=b0ddf2438b25303ac2c73934ccb77e5bcab14d31e68011bb4d5f363141b7f46f
+PREFIX_SHA256_rust-install.tar.gz=498ec1413a14b25e15c1f8905c5ab767b1346085cc484f032d3329376ea05352
+endif
+
+define prefix_verify
+	@test -n "$(PREFIX_SHA256_$(notdir $(1)))" || { \
+		$(if $(3),rm -f "$(2)"; )echo "prefix: no sha256 pinned for $(HOST_TARGET)/$(TARGET)/$(notdir $(1))" >&2; \
+		exit 1; }
+	@echo "$(PREFIX_SHA256_$(notdir $(1)))  $(2)" | sha256sum --check --quiet - \
+		|| { $(if $(3),rm -f "$(2)"; )echo "prefix: $(2) does not match pinned sha256 $(PREFIX_SHA256_$(notdir $(1)))" >&2; exit 1; }
+endef
+
 $(PREFIX)/%.tar.gz: | $(CONTAINER_TAG)
 ifeq ($(PODMAN_BUILD),1)
 	$(PODMAN_RUN) make $@
 else
 	mkdir -p "$(@D)"
-	wget -O $@.partial "https://static.redox-os.org/toolchain/$(HOST_TARGET)/$(TARGET)/$(@F)"
-	mv $@.partial $@
+	if [ -n "$(PREFIX_ARCHIVE_MIRROR)" ]; then \
+		cp "$(PREFIX_ARCHIVE_MIRROR)/$(@F)" "$@.partial"; \
+	else \
+		curl -fL --retry 3 --retry-delay 1 -o "$@.partial" "https://static.redox-os.org/toolchain/$(HOST_TARGET)/$(TARGET)/$(@F)"; \
+	fi
+	$(call prefix_verify,$@,$@.partial,1)
+	mv "$@.partial" "$@"
 endif
 
 $(PREFIX)/gcc-install $(PREFIX)/rust-install $(PREFIX)/clang-install: %: %.tar.gz | $(CONTAINER_TAG)
 ifeq ($(PODMAN_BUILD),1)
 	$(PODMAN_RUN) make $@
 else
+	$(call prefix_verify,$<,$<)
 	rm -rf "$@.partial" "$@"
 	mkdir -p "$@.partial"
 	tar --extract --file "$<" --directory "$@.partial" --no-same-owner --strip-components=1

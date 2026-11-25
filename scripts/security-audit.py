@@ -214,10 +214,6 @@ def check_sources(closures=(), repo_bin=None):
 # (subject, file, text that marks the unpinned download, note, fix). When the text is
 # gone from the file the download counts as pinned; delete the entry once it passes.
 DOWNLOADS = [
-    ("prebuilt toolchain", "mk/prefix.mk",
-     'wget -O $@.partial "https://static.redox-os.org/toolchain/',
-     "toolchain tarball downloaded with no pinned hash",
-     "download it with ch_download (mk/ch.mk) and a pinned sha256"),
     ("prebuilt package key", "mk/prefix.mk",
      'wget -O $@.partial "https://static.redox-os.org/pkg/id_ed25519.pub.toml"',
      "the key that verifies prebuilt packages is downloaded with no pinned hash",
@@ -230,6 +226,14 @@ DOWNLOADS = [
      'curl "https://sh.rustup.rs" -sSf | sh',
      "Rust is installed from a script piped to sh",
      "download rustup-init with a pinned sha256 and run it"),
+]
+
+DOWNLOAD_PINS = [
+    ("prebuilt toolchain", "mk/prefix.mk",
+     [rf"^PREFIX_SHA256_{name}-install\.tar\.gz=[0-9a-f]{{64}}$"
+      for name in ("clang", "gcc", "rust")] +
+     [r"sha256sum --check --quiet", r"\$\(call prefix_verify,\$@,\$@\.partial,1\)",
+      r"\$\(call prefix_verify,\$<,\$<\)"]),
 ]
 
 
@@ -247,6 +251,17 @@ def check_downloads():
             out.append(line("downloads", subject, "fail", f"{note} ({where})", fix))
         else:
             out.append(line("downloads", subject, "pass", f"no unpinned download left in {file}"))
+    for subject, file, patterns in DOWNLOAD_PINS:
+        try:
+            text = (ROOT / file).read_text()
+            pinned = all(re.search(pattern, text, re.MULTILINE) for pattern in patterns)
+        except OSError as err:
+            out.append(line("downloads", subject, "fail", f"cannot read {file}: {err}"))
+            continue
+        out.append(line("downloads", subject, "pass" if pinned else "fail",
+                        f"pinned input and verification present in {file}" if pinned else
+                        f"missing pin or verification in {file}",
+                        "" if pinned else f"restore the pinned input and verification in {file}"))
     # pkgutils lives outside this repository, so this entry cannot be read from the tree.
     out.append(line("downloads", "pkgutils repository key", "fail",
                     "pkgutils fetches a repository's key from that repository when it has none "
