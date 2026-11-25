@@ -11393,6 +11393,181 @@ TESTS["forcekill-wakeup"] = test_forcekill_wakeup
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["blocked-wait"] = test_blocked_wait
+
+
+def test_display_socket(vm, args):
+    """On wm-session: verifies ferrion-run --display connects to ferrion-wm, maps a 256x256 window on screen, lists all wl_registry globals with zero forbidden restricted globals (reporting ext_idle_notifier_v1 as expected-until-O3; once O3 lands ext_idle_notifier_v1 moves into the must-be-absent list), and refuses FERRION_WM_SOCKET, a socket planted in --files, a second runtime socket, and connections without --display."""
+    deadline = time.monotonic() + args.timeout
+    login_frame = None
+    while time.monotonic() < deadline:
+        frame = vm.screenshot()
+        if frame.kind() == "text":
+            login_frame = settle(vm, 10, still=1.5)
+            break
+        time.sleep(0.5)
+    if login_frame is None:
+        vm.screenshot().save_png(vm.out / "no-text-login.png")
+        return False, f"no text login on VT 3 within {args.timeout}s; see {vm.out}"
+    login_frame.save_png(vm.out / "login.png")
+
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    transcript = []
+
+    def run(tag, line, timeout=60):
+        since = vm.mark()
+        vm.type(f"bash -c {shlex.quote(line + f'; echo ds-end-{tag}-$?')}\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)ds-end-{tag}-(\d+)", timeout, since)
+        output = found.group(1) if found else vm.text(since)
+        transcript.append(f"$ {line}\n{output}exit {found.group(2) if found else 'none'}\n")
+        return (int(found.group(2)) if found else None), output
+
+    sendkeys(vm.command, "user\n")
+
+    wm_ready = False
+    wm_deadline = time.monotonic() + args.timeout
+    runtime_dir = ""
+    wayland_display = ""
+    wm_socket = ""
+    while time.monotonic() < wm_deadline:
+        st, out = run("find-wm", 'uid=$(id -u); rt="/var/run/user/$uid"; wl=$(ls "$rt" 2>/dev/null | grep -E "^wayland-[0-9]+$" | head -n 1); wm=$(ls "$rt" 2>/dev/null | grep -E "\\.sock$" | head -n 1); echo "RT=$rt WL=$wl WM=$wm"')
+        m = re.search(r"(?m)^RT=(/\S+) WL=(wayland-\d+) WM=(\S+\.sock)\s*$", out)
+        if st == 0 and m:
+            runtime_dir, wayland_display, wm_socket = m.group(1), m.group(2), m.group(3)
+            wm_ready = True
+            break
+        time.sleep(1.0)
+    if not wm_ready:
+        (vm.out / "display-socket.log").write_text("\n".join(transcript))
+        return False, f"ferrion-wm Wayland socket did not appear within {args.timeout}s; see {vm.out}"
+
+    session_before = None
+    screen_deadline = time.monotonic() + 30
+    while time.monotonic() < screen_deadline:
+        frame = vm.screenshot()
+        if frame.has_ground_row() and frame.rgb != login_frame.rgb:
+            session_before = settle(vm, 10, still=1.5)
+            break
+        time.sleep(0.5)
+    if session_before is None:
+        session_before = vm.screenshot()
+    session_before.save_png(vm.out / "session-before.png")
+
+    problems = []
+    wm_sock_path = f"{runtime_dir}/{wm_socket}" if wm_socket else ""
+    extra_sock = f"{runtime_dir}/wayland-99"
+    run("prep-sockets", f'mkdir -p "$HOME/Documents"; ferrion-run-probe unix-listen "$HOME/Documents/planted.sock" 90 >/tmp/ds-planted.log 2>&1 & ferrion-run-probe unix-listen "{extra_sock}" 90 >/tmp/ds-extra.log 2>&1 & sleep 2; ls -l "$HOME/Documents/planted.sock" "{extra_sock}"')
+
+    st, out = run("ctrl-planted", 'ferrion-run-probe unix-connect "$HOME/Documents/planted.sock"')
+    if st != 0 or "UNIX_CONNECT OK" not in out:
+        problems.append(f"control planted socket failed: exit {st} {out.strip()!r}")
+    st, out = run("ctrl-extra", f'ferrion-run-probe unix-connect "{extra_sock}"')
+    if st != 0 or "UNIX_CONNECT OK" not in out:
+        problems.append(f"control extra runtime socket failed: exit {st} {out.strip()!r}")
+    if wm_sock_path:
+        st, out = run("ctrl-wm", f'ferrion-run-probe unix-connect "{wm_sock_path}"')
+        if st != 0 or "UNIX_CONNECT OK" not in out:
+            problems.append(f"control FERRION_WM_SOCKET failed: exit {st} {out.strip()!r}")
+    st, out = run("ctrl-wl", f'XDG_RUNTIME_DIR="{runtime_dir}" WAYLAND_DISPLAY="{wayland_display}" ferrion-run-probe wayland-check')
+    if st != 0 or "WL_FORBIDDEN 0" not in out:
+        problems.append(f"control wayland-check failed: exit {st} {out.strip()!r}")
+
+    env_prefix = f'XDG_RUNTIME_DIR="{runtime_dir}" WAYLAND_DISPLAY="{wayland_display}"'
+    if wm_sock_path:
+        env_prefix += f' FERRION_WM_SOCKET="{wm_sock_path}"'
+
+    st, out = run("no-display-env", f'{env_prefix} ferrion-run --no-network -- env')
+    if st != 0 or "WAYLAND_DISPLAY=" in out or "XDG_RUNTIME_DIR=" in out or "FERRION_WM_SOCKET=" in out:
+        problems.append(f"without --display runtime env leaked: exit {st} {out.strip()!r}")
+    st, out = run("no-display-conn", f'{env_prefix} ferrion-run --no-network -- ferrion-run-probe unix-connect "{runtime_dir}/{wayland_display}"')
+    if st == 0 or "UNIX_CONNECT ERR 2 " not in out:
+        problems.append(f"without --display socket connect did not get ENOENT: exit {st} {out.strip()!r}")
+
+    st, out = run("bad-wl-name", f'XDG_RUNTIME_DIR="{runtime_dir}" WAYLAND_DISPLAY="../{wayland_display}" ferrion-run --no-network --display -- /bin/true')
+    if st != 125 or "bad-display-socket" not in out:
+        problems.append(f"bad WAYLAND_DISPLAY name not refused with 125: exit {st} {out.strip()!r}")
+
+    if wm_sock_path:
+        st, out = run("bad-wm-match", f'XDG_RUNTIME_DIR="{runtime_dir}" WAYLAND_DISPLAY="{wayland_display}" FERRION_WM_SOCKET="{runtime_dir}/{wayland_display}" ferrion-run --no-network --display -- /bin/true')
+        if st != 125 or "bad-display-socket" not in out:
+            problems.append(f"FERRION_WM_SOCKET collision not refused with 125: exit {st} {out.strip()!r}")
+
+    st, out = run("display-env", f'{env_prefix} ferrion-run --no-network --display -- env')
+    if st != 0 or "WAYLAND_DISPLAY=wayland-0" not in out or "FERRION_WM_SOCKET=" in out:
+        problems.append(f"--display env mismatch: exit {st} {out.strip()!r}")
+
+    st, out = run("planted-in-files", f'{env_prefix} ferrion-run --no-network --display --files "$HOME/Documents" -- ferrion-run-probe unix-connect "$HOME/Documents/planted.sock"')
+    if st == 0 or "UNIX_CONNECT ERR 2 " not in out:
+        problems.append(f"planted socket in --files did not get ENOENT: exit {st} {out.strip()!r}")
+
+    st, out = run("extra-rt-sock", f'{env_prefix} ferrion-run --no-network --display -- ferrion-run-probe unix-connect "{extra_sock}"')
+    if st == 0 or "UNIX_CONNECT ERR 2 " not in out:
+        problems.append(f"second runtime socket did not get ENOENT: exit {st} {out.strip()!r}")
+
+    if wm_sock_path:
+        st, out = run("wm-sock-in-scope", f'{env_prefix} ferrion-run --no-network --display -- ferrion-run-probe unix-connect "{wm_sock_path}"')
+        if st == 0 or "UNIX_CONNECT ERR 2 " not in out:
+            problems.append(f"FERRION_WM_SOCKET inside --display did not get ENOENT: exit {st} {out.strip()!r}")
+
+    st, out = run("sock-mut-refused", f'{env_prefix} ferrion-run --no-network --display -- bash -c \'rm -f "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; r1=$?; mv "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR/x"; r2=$?; chmod 600 "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; r3=$?; echo "MUT $r1 $r2 $r3"\'')
+    m_mut = re.search(r"MUT (\d+) (\d+) (\d+)", out)
+    if not m_mut or any(int(g) == 0 for g in m_mut.groups()):
+        problems.append(f"socket grant mutation was not refused: exit {st} {out.strip()!r}")
+
+    since_map = vm.mark()
+    vm.type(f'bash -c {shlex.quote(f"{env_prefix} ferrion-run --no-network --display -- ferrion-run-probe wayland-check --map 10; echo ds-end-map-$?")}\n')
+    mapped_seen = vm.wait_serial(r"WL_MAPPED 256x256", 20, since_map)
+    time.sleep(1.5)
+    session_mapped = vm.screenshot()
+    session_mapped.save_png(vm.out / "session-mapped.png")
+    map_done = vm.wait_serial(r"(?s)ds-end-map-(\d+)", 25, since_map)
+    map_out = vm.text(since_map)
+    transcript.append(f"$ wayland-check --map 10\n{map_out}\n")
+    map_exit = int(map_done.group(1)) if map_done else None
+
+    wl_globals = re.findall(r"(?m)^WL_GLOBAL (\S+) (\d+)$", map_out)
+    idle_match = re.search(r"(?m)^WL_IDLE_NOTIFIER (\S+)$", map_out)
+    idle_status = idle_match.group(1) if idle_match else "missing"
+    forb_match = re.search(r"(?m)^WL_FORBIDDEN (\d+)$", map_out)
+    forb_count = int(forb_match.group(1)) if forb_match else -1
+
+    if map_exit != 0 or not mapped_seen:
+        problems.append(f"--display wayland-check --map failed: exit {map_exit}, mapped={bool(mapped_seen)}")
+    if forb_count != 0:
+        problems.append(f"--display saw {forb_count} forbidden globals")
+    if idle_status not in ("expected-until-O3", "absent"):
+        problems.append(f"unexpected ext_idle_notifier_v1 status: {idle_status!r}")
+
+    diff_pixels = sum(
+        1 for i in range(0, min(len(session_before.rgb), len(session_mapped.rgb)), 3)
+        if session_before.rgb[i:i + 3] != session_mapped.rgb[i:i + 3]
+    )
+    if diff_pixels < 1000:
+        problems.append(f"mapped window did not appear on screen (diff_pixels={diff_pixels})")
+
+    (vm.out / "display-socket.log").write_text("\n".join(transcript))
+    (vm.out / "display-socket.json").write_text(json.dumps({
+        "runtime_dir": runtime_dir,
+        "wayland_display": wayland_display,
+        "wm_socket": wm_sock_path,
+        "globals": [{"interface": g, "version": int(v)} for g, v in wl_globals],
+        "ext_idle_notifier_v1": idle_status,
+        "forbidden_count": forb_count,
+        "diff_pixels": diff_pixels,
+        "problems": problems,
+    }, indent=2) + "\n")
+    if problems:
+        return False, "; ".join(problems)
+    return True, (
+        f"--display mapped 256x256 ({diff_pixels} px), {len(wl_globals)} globals, "
+        f"0 forbidden, ext_idle_notifier_v1={idle_status}; "
+        f"FERRION_WM_SOCKET, planted-in-files, extra-rt-sock and no-display all ENOENT"
+    )
+
+
+TESTS["display-socket"] = test_display_socket
 TESTS["daemon-continue"] = test_daemon_continue
 TESTS["firefox-js"] = test_firefox_js
 TESTS["fd-primitives"] = test_fd_primitives

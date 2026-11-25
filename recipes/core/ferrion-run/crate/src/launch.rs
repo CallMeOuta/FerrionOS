@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -16,7 +16,7 @@ use libredox::flag::{F_SETFD, O_CLOEXEC, O_RDWR};
 use crate::sessions::{CLONE_PREFIX, PID, clone_dirs, state_root};
 use crate::{
     GrantKind, Options, PASSED_VARIABLES, SYSTEM_PATHS, check_pass_fd, check_stdio, child_schemes,
-    new_handles, parse_snapshot, to_close,
+    is_valid_wayland_display, new_handles, parse_snapshot, to_close,
 };
 
 const SCOPE_SERVICE: &str = "/scheme/file-scope/new";
@@ -148,6 +148,69 @@ fn private_dir(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", path.display()))
 }
 
+fn validate_display_socket() -> Result<String, String> {
+    let runtime_raw = std::env::var_os("XDG_RUNTIME_DIR")
+        .ok_or_else(|| "bad-display-socket: XDG_RUNTIME_DIR is not set".to_owned())?;
+    let wayland_raw = std::env::var_os("WAYLAND_DISPLAY")
+        .ok_or_else(|| "bad-display-socket: WAYLAND_DISPLAY is not set".to_owned())?;
+    let wayland_name = wayland_raw
+        .to_str()
+        .ok_or_else(|| "bad-display-socket: WAYLAND_DISPLAY is not UTF-8".to_owned())?;
+    if !is_valid_wayland_display(wayland_name) {
+        return Err(format!(
+            "bad-display-socket: WAYLAND_DISPLAY {wayland_name:?} must match wayland-[0-9]{{1,3}}"
+        ));
+    }
+    let runtime_dir = fs::canonicalize(&runtime_raw)
+        .map_err(|e| format!("bad-display-socket: cannot resolve XDG_RUNTIME_DIR: {e}"))?;
+    let rt_meta = fs::symlink_metadata(&runtime_dir)
+        .map_err(|e| format!("bad-display-socket: cannot stat XDG_RUNTIME_DIR: {e}"))?;
+    let uid = unsafe { libc::geteuid() };
+    if rt_meta.file_type().is_symlink() || !rt_meta.is_dir() {
+        return Err("bad-display-socket: XDG_RUNTIME_DIR is not a directory".to_owned());
+    }
+    if rt_meta.uid() != uid {
+        return Err(format!(
+            "bad-display-socket: XDG_RUNTIME_DIR is not owned by uid {uid}"
+        ));
+    }
+    if rt_meta.mode() & 0o777 != 0o700 {
+        return Err(format!(
+            "bad-display-socket: XDG_RUNTIME_DIR mode is {:o}, expected 700",
+            rt_meta.mode() & 0o777
+        ));
+    }
+    let socket_path = runtime_dir.join(wayland_name);
+    let sock_meta = fs::symlink_metadata(&socket_path).map_err(|e| {
+        format!(
+            "bad-display-socket: cannot stat {}: {e}",
+            socket_path.display()
+        )
+    })?;
+    if sock_meta.file_type().is_symlink() {
+        return Err("bad-display-socket: Wayland socket must not be a symlink".to_owned());
+    }
+    if (sock_meta.mode() & (libc::S_IFMT as u32)) != (libc::S_IFSOCK as u32) {
+        return Err("bad-display-socket: Wayland path is not a UNIX socket".to_owned());
+    }
+    if sock_meta.uid() != uid {
+        return Err(format!(
+            "bad-display-socket: Wayland socket is not owned by uid {uid}"
+        ));
+    }
+    let socket_text = text(&socket_path)?;
+    if let Some(wm_raw) = std::env::var_os("FERRION_WM_SOCKET") {
+        let wm_matches = fs::canonicalize(&wm_raw).ok().as_deref() == Some(socket_path.as_path())
+            || wm_raw.to_str() == Some(socket_text.as_str());
+        if wm_matches {
+            return Err(
+                "bad-display-socket: Wayland path must not be FERRION_WM_SOCKET".to_owned(),
+            );
+        }
+    }
+    Ok(socket_text)
+}
+
 enum Life {
     Preparing,
     Ran { clones: usize },
@@ -198,6 +261,7 @@ impl Drop for SessionDir {
             Life::Ran { .. } => {
                 let _ = fs::remove_dir_all(self.dir.join("home"));
                 let _ = fs::remove_dir_all(self.dir.join("tmp"));
+                let _ = fs::remove_dir_all(self.dir.join("run"));
                 let _ = fs::remove_file(self.dir.join(PID));
             }
         }
@@ -207,11 +271,17 @@ impl Drop for SessionDir {
 struct Prepared {
     dir: SessionDir,
     home: String,
+    run_dir: Option<String>,
     scope: Scope,
     clones: usize,
 }
 
 fn prepare_session(options: &Options) -> Result<Prepared, String> {
+    let display_socket = if options.display {
+        Some(validate_display_socket()?)
+    } else {
+        None
+    };
     let root = state_root()?;
     private_dir(&root)?;
     let root =
@@ -296,9 +366,30 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
             layer: None,
         });
     }
+    let run_dir = if let Some(real_socket) = display_socket {
+        let run_path = dir.path().join("run");
+        private_dir(&run_path)?;
+        let run_text = text(&run_path)?;
+        scope.grants.push(Grant {
+            virt: run_text.clone(),
+            real: run_text.clone(),
+            access: Access::ReadWrite,
+            layer: None,
+        });
+        scope.grants.push(Grant {
+            virt: format!("{run_text}/wayland-0"),
+            real: real_socket,
+            access: Access::Socket,
+            layer: None,
+        });
+        Some(run_text)
+    } else {
+        None
+    };
     Ok(Prepared {
         dir,
         home,
+        run_dir,
         scope,
         clones,
     })
@@ -362,7 +453,7 @@ impl Drop for ProxySession {
     }
 }
 
-fn child_env(options: &Options, home: &str) -> Vec<(OsString, OsString)> {
+fn child_env(options: &Options, home: &str, run_dir: Option<&str>) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = PASSED_VARIABLES
         .iter()
         .filter_map(|name| std::env::var_os(name).map(|v| (OsString::from(name), v)))
@@ -373,9 +464,19 @@ fn child_env(options: &Options, home: &str) -> Vec<(OsString, OsString)> {
             env.push((name.clone(), value));
         }
     }
-    env.retain(|(n, _)| n != "HOME" && n != "TMPDIR");
+    env.retain(|(n, _)| {
+        n != "HOME"
+            && n != "TMPDIR"
+            && n != "FERRION_WM_SOCKET"
+            && n != "XDG_RUNTIME_DIR"
+            && n != "WAYLAND_DISPLAY"
+    });
     env.push(("HOME".into(), home.into()));
     env.push(("TMPDIR".into(), "/tmp".into()));
+    if let Some(run_dir) = run_dir {
+        env.push(("XDG_RUNTIME_DIR".into(), run_dir.into()));
+        env.push(("WAYLAND_DISPLAY".into(), "wayland-0".into()));
+    }
     env
 }
 
@@ -406,12 +507,22 @@ fn enter(
         let mut skip = Vec::with_capacity(5);
         skip.extend_from_slice(&[proc_fd, thread_fd, namespace_fd, cwd_fd]);
         if let Some(fd) = options.pass_fd {
+            if skip.contains(&fd) {
+                return Err(format!(
+                    "--pass-fd {fd} collides with a runtime, namespace or cwd handle"
+                ));
+            }
             skip.push(fd);
         }
         let file_table_fd = runtime_file_table(&table, &skip, thread_fd)?;
         let mut keep = Vec::with_capacity(6);
         keep.extend_from_slice(&[proc_fd, thread_fd, file_table_fd, namespace_fd, cwd_fd]);
         if let Some(fd) = options.pass_fd {
+            if keep.contains(&fd) {
+                return Err(format!(
+                    "--pass-fd {fd} collides with a runtime, namespace or cwd handle"
+                ));
+            }
             call::fcntl(fd, F_SETFD as usize, 0)
                 .map_err(|e| format!("cannot keep passed descriptor {fd} across exec: {e}"))?;
             keep.push(fd);
@@ -628,7 +739,7 @@ fn launch(
         }
         _ => PathBuf::from(&prepared.home),
     };
-    let env = child_env(options, &prepared.home);
+    let env = child_env(options, &prepared.home, prepared.run_dir.as_deref());
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         let _ = call::close(namespace);

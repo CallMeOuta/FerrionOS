@@ -66,6 +66,12 @@ system holds only what the session was given. Every path keeps its real name.
   --pty              PROGRAM may open new terminals (the pty scheme). WARNING: the
                      pty scheme is not scoped to the session; give it only to
                      programs you trust.
+  --display          grants the compositor's Wayland socket in a private
+                     XDG_RUNTIME_DIR as wayland-0. WARNING: with --display a
+                     session reaches ferrion-wm's main socket as a restricted
+                     client: windows, input to its own windows, paste with
+                     focus; no capture, input emulation, clipboard monitoring,
+                     layer surfaces or lock; it can see the person's idle state.
 Options may repeat; ferrion-run holds at most 32 folders and files.
 
 Besides these, every session gets read-only /usr, /bin, /lib, /include, /share,
@@ -119,6 +125,7 @@ pub struct Options {
     pub no_network: bool,
     pub pty: bool,
     pub pass_fd: Option<usize>,
+    pub display: bool,
     pub grants: Vec<(GrantKind, PathBuf)>,
     pub env: Vec<OsString>,
     pub program: OsString,
@@ -176,6 +183,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
     let mut no_network = false;
     let mut pty = false;
     let mut pass_fd = None;
+    let mut display = false;
     let mut grants = Vec::new();
     let mut env = Vec::new();
     let program = loop {
@@ -209,6 +217,10 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                 pass_fd = Some(fd);
                 continue;
             }
+            Some("--display") => {
+                display = true;
+                continue;
+            }
             Some("--env") => {
                 let name = args.next().ok_or("--env needs a variable name")?;
                 env.push(name);
@@ -238,11 +250,19 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
         no_network,
         pty,
         pass_fd,
+        display,
         grants,
         env,
         program,
         args: args.collect(),
     }))
+}
+
+pub fn is_valid_wayland_display(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix("wayland-") else {
+        return false;
+    };
+    (1..=3).contains(&suffix.len()) && suffix.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]

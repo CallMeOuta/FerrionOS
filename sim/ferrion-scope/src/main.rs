@@ -413,6 +413,35 @@ fn make_scope(rng: &mut Rng, real: &Tree) -> Option<Scope> {
             scope.hidden.push(hidden);
         }
     }
+    let files: Vec<&String> = entries
+        .iter()
+        .filter(|(p, id)| p != "/" && matches!(real.nodes[*id], Node::File))
+        .map(|(p, _)| p)
+        .collect();
+    if !files.is_empty() && rng.chance(50) {
+        let real_sock = files[rng.below(files.len())].clone();
+        let rw_virts: Vec<String> = scope
+            .grants
+            .iter()
+            .filter(|g| g.access == Access::ReadWrite)
+            .map(|g| g.virt.clone())
+            .collect();
+        let virt = if !rw_virts.is_empty() && rng.chance(50) {
+            join(&rw_virts[rng.below(rw_virts.len())], "zz-sock")
+        } else {
+            "/zz-run/zz-sock".to_owned()
+        };
+        if !scope.grants.iter().any(|g| g.virt == virt)
+            && !scope.hidden.iter().any(|h| within(&real_sock, h))
+        {
+            scope.grants.push(Grant {
+                virt,
+                real: real_sock,
+                access: Access::Socket,
+                layer: None,
+            });
+        }
+    }
     let mut seen = BTreeSet::new();
     scope.grants.retain(|g| seen.insert(g.virt.clone()));
     Some(scope)

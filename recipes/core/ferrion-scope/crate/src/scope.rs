@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 pub const MAX_GRANTS: usize = 64;
+pub const MAX_SOCKET_GRANTS: usize = 4;
 pub const MAX_HIDDEN: usize = 8;
 pub const MAX_PATH: usize = 4096;
 pub const MAX_NAME: usize = 255;
@@ -27,6 +28,7 @@ pub enum Access {
     ReadOnly,
     ReadWrite,
     Clone,
+    Socket,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,6 +200,7 @@ impl Scope {
         }
         let text = std::str::from_utf8(spec).map_err(|_| "the scope is not UTF-8".to_owned())?;
         let mut scope = Scope::default();
+        let mut socket_grants = 0usize;
         for line in text.split('\n').filter(|l| !l.is_empty()) {
             let fields: Vec<&str> = line.split('\0').collect();
             match fields[..] {
@@ -212,6 +215,7 @@ impl Scope {
                         "ro" => Access::ReadOnly,
                         "rw" => Access::ReadWrite,
                         "clone" => Access::Clone,
+                        "socket" => Access::Socket,
                         other => return Err(format!("unknown access {other:?}")),
                     };
                     let layer = match (access, layer) {
@@ -230,6 +234,15 @@ impl Scope {
                     if scope.grants.len() >= MAX_GRANTS {
                         return Err(format!("more than {MAX_GRANTS} grants"));
                     }
+                    if access == Access::Socket {
+                        if virt == "/" || real == "/" {
+                            return Err("socket grant cannot be root".to_owned());
+                        }
+                        if socket_grants >= MAX_SOCKET_GRANTS {
+                            return Err(format!("more than {MAX_SOCKET_GRANTS} socket grants"));
+                        }
+                        socket_grants += 1;
+                    }
                     if scope.grants.iter().any(|g| g.virt == virt) {
                         return Err(format!("{virt:?} is granted twice"));
                     }
@@ -243,6 +256,7 @@ impl Scope {
                 _ => return Err(format!("bad scope line {line:?}")),
             }
         }
+        assert!(socket_grants <= MAX_SOCKET_GRANTS);
         Ok(scope)
     }
 
@@ -256,6 +270,7 @@ impl Scope {
                 Access::ReadOnly => "ro",
                 Access::ReadWrite => "rw",
                 Access::Clone => "clone",
+                Access::Socket => "socket",
             };
             out.push_str(&format!("grant\0{access}\0{}\0{}", g.virt, g.real));
             if let Some(layer) = &g.layer {
@@ -271,9 +286,12 @@ impl Scope {
         debug_assert!(is_canonical(vpath));
         let mut best: Option<usize> = None;
         for (i, g) in self.grants.iter().enumerate() {
-            if within(vpath, &g.virt)
-                && best.is_none_or(|b| self.grants[b].virt.len() < g.virt.len())
-            {
+            let matched = if g.access == Access::Socket {
+                vpath == g.virt
+            } else {
+                within(vpath, &g.virt)
+            };
+            if matched && best.is_none_or(|b| self.grants[b].virt.len() < g.virt.len()) {
                 best = Some(i);
             }
         }

@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 use redox_scheme::scheme::{SchemeState, SchemeSync};
@@ -33,7 +33,39 @@ const MAX_LISTING: usize = 1 << 16;
 const MAX_MAPS: usize = 4096;
 const MAX_CREATE_TRIES: usize = 4;
 const MAX_RECORDED_LINKS: usize = 4096;
+const MAX_FPATH_BYTES: usize = 256;
 const AT_REMOVEDIR: usize = 0x200;
+
+fn fd_fpath(fd: usize) -> Result<String> {
+    let mut buf = [0u8; MAX_FPATH_BYTES];
+    let n = syscall::fpath(fd, &mut buf)?;
+    Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
+}
+
+fn is_file_scheme_fd(fd: usize) -> bool {
+    let Ok(path) = fd_fpath(fd) else {
+        return false;
+    };
+    path.starts_with("/scheme/file/") || path == "/scheme/file" || path.starts_with("file:")
+}
+
+fn is_uds_stream_fd(fd: usize) -> bool {
+    let Ok(path) = fd_fpath(fd) else {
+        return false;
+    };
+    path.starts_with("/scheme/uds_stream") || path.starts_with("uds_stream:")
+}
+
+fn is_real_socket(real: &str) -> bool {
+    let Ok(c) = cpath(real) else {
+        return false;
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(c.as_ptr(), &mut st) } < 0 {
+        return false;
+    }
+    (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+}
 
 fn err(e: i32) -> Error {
     Error::new(e)
@@ -209,6 +241,9 @@ enum GrantState {
         layer: String,
         overlay: Overlay,
     },
+    Socket {
+        real: String,
+    },
 }
 
 enum Phase {
@@ -323,6 +358,13 @@ fn locate(grants: &[GrantState], grant: usize, rel: &str) -> Located {
                 Lookup::Missing => Located::Missing,
             }
         }
+        GrantState::Socket { real } => {
+            if rel.is_empty() {
+                Located::Real(real.clone(), false)
+            } else {
+                Located::Missing
+            }
+        }
     }
 }
 
@@ -361,6 +403,7 @@ impl View for RealView<'_> {
 enum Opened {
     Node(Node),
     Symlink(String),
+    OtherScheme(usize),
 }
 
 pub struct Proxy {
@@ -704,6 +747,9 @@ impl Proxy {
                         flags: NewFdFlags::POSITIONED,
                     });
                 }
+                Opened::OtherScheme(fd) => {
+                    return Ok(OpenResult::OtherScheme { fd });
+                }
                 Opened::Symlink(target) => {
                     links += 1;
                     if links > MAX_LINKS {
@@ -731,6 +777,36 @@ impl Proxy {
             Place::Skeleton => skeleton(scope, session, vpath, flags, mode),
             Place::Inside { grant, rel } => {
                 let access = scope.grants[grant].access;
+                if access == Access::Socket {
+                    assert!(rel.is_empty());
+                    if flags & (O_CREAT | O_TRUNC | O_DIRECTORY) != 0 {
+                        return Err(err(EINVAL));
+                    }
+                    let real = scope.real_path(grant, "");
+                    if flags & O_STAT != 0 {
+                        let fd = sys_open(&real, O_STAT | O_NOFOLLOW)?;
+                        if !is_file_scheme_fd(fd.as_raw_fd() as usize) {
+                            return Err(err(ENOENT));
+                        }
+                        return Ok(Opened::Node(Node {
+                            session,
+                            vpath: vpath.to_owned(),
+                            state: NodeState::Open {
+                                fd,
+                                place: NodePlace::Lower,
+                            },
+                            lock_inode: Cell::new(None),
+                            listing: None,
+                            grant: Some(grant),
+                            flags,
+                        }));
+                    }
+                    let fd = sys_open(&real, O_RDWR | O_NOFOLLOW)?;
+                    if !is_uds_stream_fd(fd.as_raw_fd() as usize) {
+                        return Err(err(ENOENT));
+                    }
+                    return Ok(Opened::OtherScheme(fd.into_raw_fd() as usize));
+                }
                 let wants_write = accmode_writes(flags) || flags & O_TRUNC != 0;
                 if access == Access::ReadOnly && wants_write {
                     let real = scope.real_path(grant, &rel);
@@ -812,6 +888,9 @@ impl Proxy {
         for _ in 0..MAX_CREATE_TRIES {
             match sys_open(real, base) {
                 Ok(fd) => {
+                    if !is_file_scheme_fd(fd.as_raw_fd() as usize) {
+                        return Err(err(ENOENT));
+                    }
                     if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
                         return Err(err(syscall::error::EEXIST));
                     }
@@ -860,7 +939,9 @@ impl Proxy {
                 layer,
                 overlay,
             } => Ok((overlay, real.clone(), layer.clone())),
-            GrantState::ReadOnly { .. } | GrantState::ReadWrite { .. } => {
+            GrantState::ReadOnly { .. }
+            | GrantState::ReadWrite { .. }
+            | GrantState::Socket { .. } => {
                 unreachable!("clone_grant_mut called on non-clone grant")
             }
         }
@@ -972,7 +1053,9 @@ impl Proxy {
             Located::Real(real, true) => {
                 let origin_inode = match &self.live(session)?.1[grant] {
                     GrantState::Clone { overlay, .. } => overlay.origin_inode(rel),
-                    GrantState::ReadOnly { .. } | GrantState::ReadWrite { .. } => {
+                    GrantState::ReadOnly { .. }
+                    | GrantState::ReadWrite { .. }
+                    | GrantState::Socket { .. } => {
                         unreachable!("open_clone called on non-clone grant")
                     }
                 };
@@ -1164,6 +1247,7 @@ impl Proxy {
         };
         match &self.live(session)?.1[grant] {
             GrantState::ReadOnly { .. } => return Err(err(EROFS)),
+            GrantState::Socket { .. } => return Err(err(EPERM)),
             GrantState::ReadWrite { .. } => return self.node_fd(id),
             GrantState::Clone { .. } if place == Some(NodePlace::Upper) => return self.node_fd(id),
             GrantState::Clone { .. } => {}
@@ -1214,6 +1298,9 @@ impl Proxy {
     fn writable_place(&self, session: u32, vpath: &str) -> Result<(usize, String, Access)> {
         let (grant, rel) = self.parent_rel_of(session, vpath)?;
         let access = self.scope(session)?.grants[grant].access;
+        if access == Access::Socket {
+            return Err(err(EPERM));
+        }
         if access == Access::ReadOnly {
             return Err(err(EROFS));
         }
@@ -1586,6 +1673,15 @@ impl Proxy {
                         overlay,
                     }
                 }
+                (Access::Socket, None) => {
+                    if !is_real_socket(&g.real) {
+                        eprintln!("ferrion-scope-proxy: {} is not a socket", g.real);
+                        return Err(err(EINVAL));
+                    }
+                    GrantState::Socket {
+                        real: g.real.clone(),
+                    }
+                }
                 _ => return Err(err(EINVAL)),
             };
             grants.push(state);
@@ -1814,7 +1910,13 @@ impl SchemeSync for Proxy {
                     }
                 }
             }
-            Some(Handle::Node(_)) => {}
+            Some(Handle::Node(node)) => {
+                if let Some(grant) = node.grant
+                    && matches!(self.live(node.session)?.1[grant], GrantState::Socket { .. })
+                {
+                    return Err(err(EPERM));
+                }
+            }
             _ => return Err(err(EBADF)),
         }
         let fd = self.node_fd(id)?;

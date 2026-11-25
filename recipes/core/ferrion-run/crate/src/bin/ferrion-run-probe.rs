@@ -83,6 +83,11 @@ mod probe {
             ["pass-unix", ref rest @ ..] => pass_unix(rest),
             ["unix-child", fd, pipe_bytes] => unix_child(fd, pipe_bytes),
             ["pass-bad", kind, ref rest @ ..] => pass_bad(kind, rest),
+            ["unix-connect", path] => unix_connect(path),
+            ["unix-listen", path, secs] => unix_listen(path, secs.parse().unwrap_or(10)),
+            ["wayland-check"] => wayland_check(false, 0),
+            ["wayland-check", "--map"] => wayland_check(true, 0),
+            ["wayland-check", "--map", secs] => wayland_check(true, secs.parse().unwrap_or(5)),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
@@ -787,5 +792,446 @@ mod probe {
         let error = std::process::Command::new(program).args(&resolved).exec();
         eprintln!("ferrion-run-probe: exec {program}: {error}");
         2
+    }
+
+    const MAX_LISTEN_SECS: u64 = 120;
+    const MAX_WL_EVENTS: usize = 512;
+    const MAX_WL_MSG_BYTES: usize = 4096;
+    const WL_WIN_W: u32 = 256;
+    const WL_WIN_H: u32 = 256;
+    const WL_SHM_FORMAT_XRGB8888: u32 = 1;
+    const WL_IDLE_NOTIFIER: &str = "ext_idle_notifier_v1";
+    const FORBIDDEN_RESTRICTED_GLOBALS: &[&str] = &[
+        "zwlr_screencopy_manager_v1",
+        "ext_image_copy_capture_manager_v1",
+        "ext_output_image_capture_source_manager_v1",
+        "zwlr_virtual_pointer_manager_v1",
+        "zwp_virtual_keyboard_manager_v1",
+        "zwlr_data_control_manager_v1",
+        "ext_data_control_manager_v1",
+        "zwlr_layer_shell_v1",
+        "ext_session_lock_manager_v1",
+        "wp_security_context_manager_v1",
+    ];
+
+    fn unix_connect(path: &str) -> i32 {
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => {
+                println!("UNIX_CONNECT OK");
+                0
+            }
+            Err(e) => {
+                println!("UNIX_CONNECT ERR {} {e}", e.raw_os_error().unwrap_or(-1));
+                1
+            }
+        }
+    }
+
+    fn unix_listen(path: &str, secs: u64) -> i32 {
+        let _ = std::fs::remove_file(path);
+        let listener = match std::os::unix::net::UnixListener::bind(path) {
+            Ok(l) => l,
+            Err(e) => {
+                println!("UNIX_LISTEN_ERR {} {e}", e.raw_os_error().unwrap_or(-1));
+                return 1;
+            }
+        };
+        let _ = listener.set_nonblocking(true);
+        println!("UNIX_LISTENING {path}");
+        let _ = std::io::stdout().flush();
+        let hold = secs.min(MAX_LISTEN_SECS);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(hold);
+        let max_polls = hold.saturating_mul(25).saturating_add(1);
+        for _ in 0..max_polls {
+            for _ in 0..8 {
+                match listener.accept() {
+                    Ok((stream, _)) => drop(stream),
+                    Err(_) => break,
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+        0
+    }
+
+    fn wl_push_u32(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_ne_bytes());
+    }
+
+    fn wl_push_str(buf: &mut Vec<u8>, s: &str) {
+        let len = (s.len() + 1) as u32;
+        wl_push_u32(buf, len);
+        buf.extend_from_slice(s.as_bytes());
+        buf.push(0);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+
+    fn wl_msg(obj: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
+        let size = 8 + payload.len();
+        assert!(size <= MAX_WL_MSG_BYTES && size.is_multiple_of(4));
+        let mut out = Vec::with_capacity(size);
+        wl_push_u32(&mut out, obj);
+        wl_push_u32(&mut out, ((size as u32) << 16) | (opcode as u32));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn wl_send_with_fd(sock_fd: i32, data: &[u8], fd: i32) -> std::io::Result<()> {
+        let iov = libc::iovec {
+            iov_base: data.as_ptr() as *mut libc::c_void,
+            iov_len: data.len(),
+        };
+        let cmsg_space = unsafe { libc::CMSG_SPACE(size_of::<i32>() as u32) as usize };
+        let mut ctrl = vec![0u8; cmsg_space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &iov as *const libc::iovec as *mut libc::iovec;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl.as_mut_ptr().cast();
+        msg.msg_controllen = ctrl.len() as _;
+        let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        if cmsg.is_null() {
+            return Err(std::io::Error::other("CMSG_FIRSTHDR returned null"));
+        }
+        unsafe {
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as u32) as _;
+            std::ptr::copy_nonoverlapping(
+                &fd as *const i32 as *const u8,
+                libc::CMSG_DATA(cmsg),
+                size_of::<i32>(),
+            );
+        }
+        let sent = unsafe { libc::sendmsg(sock_fd, &msg, 0) };
+        if sent < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn wl_read_event(
+        stream: &mut std::os::unix::net::UnixStream,
+    ) -> std::io::Result<(u32, u16, Vec<u8>)> {
+        let mut hdr = [0u8; 8];
+        stream.read_exact(&mut hdr)?;
+        let obj = u32::from_ne_bytes(hdr[0..4].try_into().unwrap());
+        let word = u32::from_ne_bytes(hdr[4..8].try_into().unwrap());
+        let opcode = (word & 0xFFFF) as u16;
+        let size = (word >> 16) as usize;
+        if !(8..=MAX_WL_MSG_BYTES).contains(&size) {
+            return Err(std::io::Error::other(format!("bad wl event size {size}")));
+        }
+        let mut body = vec![0u8; size - 8];
+        stream.read_exact(&mut body)?;
+        Ok((obj, opcode, body))
+    }
+
+    fn wl_parse_u32(body: &[u8], off: &mut usize) -> Option<u32> {
+        let end = off.checked_add(4)?;
+        let bytes = body.get(*off..end)?;
+        *off = end;
+        Some(u32::from_ne_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn wl_parse_str(body: &[u8], off: &mut usize) -> Option<String> {
+        let len = wl_parse_u32(body, off)? as usize;
+        if len == 0 || *off + len > body.len() {
+            return None;
+        }
+        let raw = &body[*off..*off + len - 1];
+        let padded = (len + 3) & !3;
+        *off = off.checked_add(padded)?;
+        Some(String::from_utf8_lossy(raw).into_owned())
+    }
+
+    fn wayland_check(map_window: bool, hold_secs: u64) -> i32 {
+        let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") else {
+            println!("WL_CONNECT_ERR 2 XDG_RUNTIME_DIR unset");
+            return 1;
+        };
+        let Ok(disp) = std::env::var("WAYLAND_DISPLAY") else {
+            println!("WL_CONNECT_ERR 2 WAYLAND_DISPLAY unset");
+            return 1;
+        };
+        let sock_path = format!("{rt}/{disp}");
+        let mut stream = match std::os::unix::net::UnixStream::connect(&sock_path) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("WL_CONNECT_ERR {} {e}", e.raw_os_error().unwrap_or(-1));
+                return 1;
+            }
+        };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let mut init = Vec::new();
+        init.extend_from_slice(&wl_msg(1, 1, &2u32.to_ne_bytes()));
+        init.extend_from_slice(&wl_msg(1, 0, &3u32.to_ne_bytes()));
+        if let Err(e) = stream.write_all(&init) {
+            println!("WL_WRITE_ERR {e}");
+            return 1;
+        }
+        let mut compositor: Option<(u32, u32)> = None;
+        let mut shm: Option<(u32, u32)> = None;
+        let mut xdg_base: Option<(u32, u32)> = None;
+        let mut saw_idle_notifier = false;
+        let mut forbidden_found: Vec<String> = Vec::new();
+        let mut synced = false;
+        for _ in 0..MAX_WL_EVENTS {
+            let (obj, opcode, body) = match wl_read_event(&mut stream) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    println!("WL_READ_ERR {e}");
+                    return 1;
+                }
+            };
+            if obj == 1 && opcode == 0 {
+                let mut off = 8;
+                let msg = wl_parse_str(&body, &mut off).unwrap_or_default();
+                println!("WL_ERROR {msg}");
+                return 1;
+            }
+            if obj == 2 && opcode == 0 {
+                let mut off = 0;
+                if let (Some(name), Some(iface), Some(ver)) = (
+                    wl_parse_u32(&body, &mut off),
+                    wl_parse_str(&body, &mut off),
+                    wl_parse_u32(&body, &mut off),
+                ) {
+                    println!("WL_GLOBAL {iface} {ver}");
+                    if iface == "wl_compositor" {
+                        compositor = Some((name, ver));
+                    } else if iface == "wl_shm" {
+                        shm = Some((name, ver));
+                    } else if iface == "xdg_wm_base" {
+                        xdg_base = Some((name, ver));
+                    }
+                    if iface == WL_IDLE_NOTIFIER {
+                        saw_idle_notifier = true;
+                    }
+                    if FORBIDDEN_RESTRICTED_GLOBALS.contains(&iface.as_str()) {
+                        forbidden_found.push(iface);
+                    }
+                }
+            } else if obj == 3 && opcode == 0 {
+                synced = true;
+                break;
+            }
+        }
+        if !synced {
+            println!("WL_SYNC_TIMEOUT");
+            return 1;
+        }
+        if saw_idle_notifier {
+            println!("WL_IDLE_NOTIFIER expected-until-O3");
+        } else {
+            println!("WL_IDLE_NOTIFIER absent");
+        }
+        println!("WL_FORBIDDEN {}", forbidden_found.len());
+        for g in &forbidden_found {
+            println!("WL_FORBIDDEN_GLOBAL {g}");
+        }
+        let _ = std::io::stdout().flush();
+        if !forbidden_found.is_empty() {
+            return 1;
+        }
+        if !map_window {
+            return 0;
+        }
+        let (Some((comp_name, comp_ver)), Some((shm_name, _)), Some((xdg_name, xdg_ver))) =
+            (compositor, shm, xdg_base)
+        else {
+            println!("WL_MAP_ERR missing wl_compositor, wl_shm, or xdg_wm_base");
+            return 1;
+        };
+        let mut req = Vec::new();
+        let bind_req = |name: u32, iface: &str, ver: u32, new_id: u32| -> Vec<u8> {
+            let mut p = Vec::new();
+            wl_push_u32(&mut p, name);
+            wl_push_str(&mut p, iface);
+            wl_push_u32(&mut p, ver);
+            wl_push_u32(&mut p, new_id);
+            wl_msg(2, 0, &p)
+        };
+        req.extend_from_slice(&bind_req(comp_name, "wl_compositor", comp_ver.min(4), 4));
+        req.extend_from_slice(&bind_req(shm_name, "wl_shm", 1, 5));
+        req.extend_from_slice(&bind_req(xdg_name, "xdg_wm_base", xdg_ver.min(2), 6));
+        req.extend_from_slice(&wl_msg(4, 0, &7u32.to_ne_bytes()));
+        let mut get_xdg = Vec::new();
+        wl_push_u32(&mut get_xdg, 8);
+        wl_push_u32(&mut get_xdg, 7);
+        req.extend_from_slice(&wl_msg(6, 2, &get_xdg));
+        req.extend_from_slice(&wl_msg(8, 1, &9u32.to_ne_bytes()));
+        let mut title = Vec::new();
+        wl_push_str(&mut title, "ferrion-display-probe");
+        req.extend_from_slice(&wl_msg(9, 2, &title));
+        req.extend_from_slice(&wl_msg(7, 6, &[]));
+        if let Err(e) = stream.write_all(&req) {
+            println!("WL_MAP_ERR write initial commit: {e}");
+            return 1;
+        }
+        let mut configure_serial: Option<u32> = None;
+        for _ in 0..MAX_WL_EVENTS {
+            let (obj, opcode, body) = match wl_read_event(&mut stream) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    println!("WL_MAP_ERR configure wait: {e}");
+                    return 1;
+                }
+            };
+            if obj == 1 && opcode == 0 {
+                let mut off = 8;
+                let msg = wl_parse_str(&body, &mut off).unwrap_or_default();
+                println!("WL_ERROR {msg}");
+                return 1;
+            }
+            if obj == 6 && opcode == 0 {
+                let mut off = 0;
+                if let Some(serial) = wl_parse_u32(&body, &mut off) {
+                    let _ = stream.write_all(&wl_msg(6, 3, &serial.to_ne_bytes()));
+                }
+            } else if obj == 8 && opcode == 0 {
+                let mut off = 0;
+                configure_serial = wl_parse_u32(&body, &mut off);
+                break;
+            }
+        }
+        let Some(serial) = configure_serial else {
+            println!("WL_MAP_ERR no xdg_surface.configure");
+            return 1;
+        };
+        let shm_size = (WL_WIN_W * WL_WIN_H * 4) as usize;
+        let shm_path = format!("/tmp/ferrion-wl-probe-{}.shm", std::process::id());
+        let mut shm_file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&shm_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                println!("WL_MAP_ERR shm create {shm_path}: {e}");
+                return 1;
+            }
+        };
+        let pixel = 0x00FF_4020u32.to_ne_bytes();
+        let mut row = Vec::with_capacity((WL_WIN_W * 4) as usize);
+        for _ in 0..WL_WIN_W {
+            row.extend_from_slice(&pixel);
+        }
+        for _ in 0..WL_WIN_H {
+            if let Err(e) = shm_file.write_all(&row) {
+                println!("WL_MAP_ERR shm write: {e}");
+                let _ = std::fs::remove_file(&shm_path);
+                return 1;
+            }
+        }
+        let _ = shm_file.flush();
+        let mut pool_payload = Vec::new();
+        wl_push_u32(&mut pool_payload, 10);
+        wl_push_u32(&mut pool_payload, shm_size as u32);
+        let pool_msg = wl_msg(5, 0, &pool_payload);
+        if let Err(e) = wl_send_with_fd(stream.as_raw_fd(), &pool_msg, shm_file.as_raw_fd()) {
+            println!("WL_MAP_ERR create_pool sendmsg: {e}");
+            let _ = std::fs::remove_file(&shm_path);
+            return 1;
+        }
+        let mut commit_req = Vec::new();
+        commit_req.extend_from_slice(&wl_msg(8, 4, &serial.to_ne_bytes()));
+        let mut buf_payload = Vec::new();
+        wl_push_u32(&mut buf_payload, 11);
+        wl_push_u32(&mut buf_payload, 0);
+        wl_push_u32(&mut buf_payload, WL_WIN_W);
+        wl_push_u32(&mut buf_payload, WL_WIN_H);
+        wl_push_u32(&mut buf_payload, WL_WIN_W * 4);
+        wl_push_u32(&mut buf_payload, WL_SHM_FORMAT_XRGB8888);
+        commit_req.extend_from_slice(&wl_msg(10, 0, &buf_payload));
+        let mut attach_payload = Vec::new();
+        wl_push_u32(&mut attach_payload, 11);
+        wl_push_u32(&mut attach_payload, 0);
+        wl_push_u32(&mut attach_payload, 0);
+        commit_req.extend_from_slice(&wl_msg(7, 1, &attach_payload));
+        let mut damage_payload = Vec::new();
+        wl_push_u32(&mut damage_payload, 0);
+        wl_push_u32(&mut damage_payload, 0);
+        wl_push_u32(&mut damage_payload, WL_WIN_W);
+        wl_push_u32(&mut damage_payload, WL_WIN_H);
+        commit_req.extend_from_slice(&wl_msg(7, 2, &damage_payload));
+        commit_req.extend_from_slice(&wl_msg(7, 6, &[]));
+        commit_req.extend_from_slice(&wl_msg(1, 0, &12u32.to_ne_bytes()));
+        if let Err(e) = stream.write_all(&commit_req) {
+            println!("WL_MAP_ERR commit write: {e}");
+            let _ = std::fs::remove_file(&shm_path);
+            return 1;
+        }
+        let mut map_synced = false;
+        for _ in 0..MAX_WL_EVENTS {
+            let (obj, opcode, body) = match wl_read_event(&mut stream) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    println!("WL_MAP_ERR post-commit wait: {e}");
+                    let _ = std::fs::remove_file(&shm_path);
+                    return 1;
+                }
+            };
+            if obj == 1 && opcode == 0 {
+                let mut off = 8;
+                let msg = wl_parse_str(&body, &mut off).unwrap_or_default();
+                println!("WL_ERROR {msg}");
+                let _ = std::fs::remove_file(&shm_path);
+                return 1;
+            }
+            if obj == 6 && opcode == 0 {
+                let mut off = 0;
+                if let Some(p) = wl_parse_u32(&body, &mut off) {
+                    let _ = stream.write_all(&wl_msg(6, 3, &p.to_ne_bytes()));
+                }
+            } else if obj == 8 && opcode == 0 {
+                let mut off = 0;
+                if let Some(s) = wl_parse_u32(&body, &mut off) {
+                    let _ = stream.write_all(&wl_msg(8, 4, &s.to_ne_bytes()));
+                }
+            } else if obj == 12 && opcode == 0 {
+                map_synced = true;
+                break;
+            }
+        }
+        if !map_synced {
+            println!("WL_MAP_ERR sync timeout");
+            let _ = std::fs::remove_file(&shm_path);
+            return 1;
+        }
+        println!("WL_MAPPED {WL_WIN_W}x{WL_WIN_H}");
+        let _ = std::io::stdout().flush();
+        let hold = hold_secs.min(MAX_LISTEN_SECS);
+        if hold > 0 {
+            let _ = stream.set_nonblocking(true);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(hold);
+            let max_polls = hold.saturating_mul(25).saturating_add(1);
+            for _ in 0..max_polls {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                if let Ok((obj, opcode, body)) = wl_read_event(&mut stream)
+                    && obj == 6
+                    && opcode == 0
+                {
+                    let mut off = 0;
+                    if let Some(p) = wl_parse_u32(&body, &mut off) {
+                        let _ = stream.write_all(&wl_msg(6, 3, &p.to_ne_bytes()));
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        let _ = std::fs::remove_file(&shm_path);
+        0
     }
 }
