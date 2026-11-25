@@ -3,7 +3,7 @@ description = "Minimal terminal text editor like GNU nano, written in Rust"
 
 [source]
 git = "https://github.com/ilai-deutel/kibi"
-rev = "v0.3.3"
+rev = "805819d57228cf4f2b64a7313f6d473348a4a844"
 
 [build]
 template = "custom"

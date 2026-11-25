@@ -3,7 +3,7 @@ description = "Python interpreter written in Rust"
 
 [source]
 git = "https://github.com/RustPython/RustPython"
-rev = "2025-10-13-main-51"
+rev = "3b48dcc7c1549f598bd9a96d2ee97b1cb83f910b"
 shallow_clone = true
 patches = [
   "redox.patch"

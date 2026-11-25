@@ -4,6 +4,7 @@ description = "Rust compiler and tooling"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/rust.git"
 branch = "redox-2026-05-24"
+rev = "c879a53564d06bd0451d2ae767ccc5467bfffe7a"
 shallow_clone = true
 
 [build]

@@ -3,7 +3,7 @@ description = "Resolve and print binary or shared library dependencies (ldd impl
 
 [source]
 git = "https://github.com/zatrazz/rldd"
-rev = "v0.4.0"
+rev = "e147c156fb8e4be87fbd36ae84be88baf90f03cc"
 patches = [ "redox.patch" ]
 
 [build]

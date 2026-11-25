@@ -3,5 +3,6 @@ description = "Command-line JSON processor"
 
 [source]
 tar = "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-1.8.1.tar.gz"
+blake3 = "9cd38d1bbee1edf69145fb22032b12eccc49cda2741d3bc8b6c1eb9d7d10ff1e"
 [build]
 template = "configure"

@@ -4,6 +4,7 @@ description = "\"Post-modern\" modal text editor for terminals"
 [source]
 git = "https://github.com/greyshaman/helix.git"
 branch = "port-to-redoxos"
+rev = "8fabaaecbd46d7afe611d4583ff67a08c76a09c4"
 
 [build]
 template = "custom"

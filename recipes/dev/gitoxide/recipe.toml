@@ -3,7 +3,7 @@ description = "Rust reimplementation of Git"
 
 [source]
 git = "https://github.com/Byron/gitoxide.git"
-rev = "v0.54.0"
+rev = "10c58bb56597d9335611da121aac21f9b09b6e5b"
 shallow_clone = true
 patches = [
     "redox.patch"

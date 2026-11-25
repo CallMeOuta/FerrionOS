@@ -3,6 +3,7 @@ description = "Print lines that match patterns (uutils implementation)"
 
 [source]
 git = "https://github.com/uutils/grep"
+rev = "050ed543216404680c69f4619e06e35de8911365"
 shallow_clone = true
 [build]
 template = "cargo"
