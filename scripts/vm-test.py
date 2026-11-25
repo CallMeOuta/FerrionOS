@@ -13254,9 +13254,9 @@ def test_nested_scope(vm, args):
             f"ferrion-run pfr1-nested-parent -c {shlex.quote(swap_home_script)}",
             timeout=60,
         )
-        _, pwn_check = pfr1_run_as_user(vm, transcript, "n-swap-pwn", "test -e /home/user/Documents/swap-pwn.txt && echo PWN_EXISTS || echo PWN_ABSENT")
-        if "SWAP_HOME_SUB=.ferrion-sub-" not in out or "SWAP_HOME_MV_RC=0" in out or "SWAP_HOME_MV_RC=" not in out or "busy" not in out.lower() or "PFR1-DOC-SECRET" in out or "PWN_EXISTS" in pwn_check:
-            problems.append(f"parent swap of live child .ferrion-sub/home was not refused with EBUSY: {out.strip()[:200]} {pwn_check.strip()}")
+        pwn_st, pwn_check = pfr1_run_as_user(vm, transcript, "n-swap-pwn", "test ! -e /home/user/Documents/swap-pwn.txt")
+        if "SWAP_HOME_SUB=.ferrion-sub-" not in out or "SWAP_HOME_MV_RC=0" in out or "SWAP_HOME_MV_RC=" not in out or "busy" not in out.lower() or "PFR1-DOC-SECRET" in out or pwn_st != 0:
+            problems.append(f"parent swap of live child .ferrion-sub/home was not refused with EBUSY: {out.strip()[:200]} pwn_st={pwn_st} {pwn_check.strip()}")
 
         depth_script = (
             "ferrion-run --no-network bash -c "
