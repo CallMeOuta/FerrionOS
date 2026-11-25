@@ -50,6 +50,7 @@ Each record explains a decision a reader would otherwise reverse by mistake: its
 | [0044](0044-network-lab-and-baseline.md) | Unprivileged network lab, probe crate and NW0 repeatability and priority rules |
 | [0046](0046-gpu-driver-host.md) | GPUs on real hardware are driven by Linux's drivers in a driver host process |
 | [0047](0047-drivers-in-ferrion-hardware.md) | Drivers live in ferrion-hardware, are GPL-2.0-only, and get the hardware right only when signed |
+| [0048](0048-nw1-network-stack.md) | NW1 network stack transport, direct-IRQ virtio-netd, socket options, DNS retry/TCP fallback and IPv4 getifaddrs |
 | [0049](0049-fork-file-table-and-grants.md) | Fork, exec and posix_spawn lock order, child file-table reconciliation, fail-closed close-on-exec, grant snapshots and bounded child cleanup |
 | [0050](0050-exec-runtime-handles.md) | Upper-table runtime handle retention, separate scan handles and fail-closed enforcement across exec and posix_spawn |
 | [0053](0053-exec-sibling-threads.md) | Ending sibling threads on exec via FerrionOS-owned procmgr thread-handle verb `0x4645_0001` |
