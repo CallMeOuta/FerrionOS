@@ -1,5 +1,0 @@
-[source]
-tar = "https://download.gnome.org/sources/libadwaita/1.8/libadwaita-1.8.4.tar.xz"
-[build]
-template = "meson"
-mesonflags = ["-Dtests=false"]
