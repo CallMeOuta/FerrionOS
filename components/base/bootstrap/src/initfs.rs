@@ -19,6 +19,7 @@ use syscall::schemev2::NewFdFlags;
 enum Handle {
     Node(Node),
     SchemeRoot,
+    Seal,
 }
 impl Handle {
     fn as_node(&self) -> Result<&Node> {
@@ -46,6 +47,8 @@ pub struct InitFsScheme {
     handles: HashMap<usize, Handle, BuildHasherDefault<SipHasher>>,
     next_id: usize,
     fs: InitFs<'static>,
+    sealed: bool,
+    seal_issued: bool,
 }
 impl InitFsScheme {
     pub fn new(bytes: &'static [u8]) -> Self {
@@ -54,6 +57,8 @@ impl InitFsScheme {
             next_id: 0,
             fs: InitFs::new(bytes, Some(PAGE_SIZE.try_into().unwrap()))
                 .expect("failed to parse initfs"),
+            sealed: false,
+            seal_issued: false,
         }
     }
 
@@ -111,12 +116,15 @@ impl SchemeSync for InitFsScheme {
         path: &str,
         flags: usize,
         _fcntl_flags: u32,
-        _ctx: &CallerCtx,
+        ctx: &CallerCtx,
     ) -> Result<OpenResult> {
         if !matches!(
             self.handles.get(&dirfd).ok_or(Error::new(EBADF))?,
             Handle::SchemeRoot
         ) {
+            return Err(Error::new(EACCES));
+        }
+        if self.sealed || ctx.uid != 0 {
             return Err(Error::new(EACCES));
         }
         let mut components = path
@@ -197,6 +205,46 @@ impl SchemeSync for InitFsScheme {
             number: id,
             flags: NewFdFlags::POSITIONED,
         })
+    }
+
+    fn dup(&mut self, old_id: usize, buf: &[u8], _ctx: &CallerCtx) -> Result<OpenResult> {
+        if !matches!(
+            self.handles.get(&old_id).ok_or(Error::new(EBADF))?,
+            Handle::SchemeRoot
+        ) {
+            return Err(Error::new(EOPNOTSUPP));
+        }
+        if buf != b"seal" {
+            return Err(Error::new(EINVAL));
+        }
+        if self.seal_issued {
+            return Err(Error::new(EEXIST));
+        }
+        self.seal_issued = true;
+        let id = self.next_id();
+        let old = self.handles.insert(id, Handle::Seal);
+        assert!(old.is_none());
+        Ok(OpenResult::ThisScheme {
+            number: id,
+            flags: NewFdFlags::empty(),
+        })
+    }
+
+    fn write(
+        &mut self,
+        id: usize,
+        buf: &[u8],
+        _offset: u64,
+        _fcntl_flags: u32,
+        _ctx: &CallerCtx,
+    ) -> Result<usize> {
+        match self.handles.get(&id).ok_or(Error::new(EBADF))? {
+            Handle::Seal => {
+                self.sealed = true;
+                Ok(buf.len())
+            }
+            _ => Err(Error::new(EBADF)),
+        }
     }
 
     fn read(

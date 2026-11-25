@@ -26,6 +26,7 @@ const HARDWARE_SCHEMES: &[&str] = &["irq", "serio", "kernel.acpi", "pci", "acpi"
 /// The kernel's memory scheme. Through a handle without the hardware right it is the kernel's
 /// restricted root, which allocates ordinary memory and refuses physical memory and port I/O.
 const MEMORY_SCHEME: &str = "memory";
+const INITFS_SCHEME: &str = "initfs";
 /// The bit of a `ShrinkPermissions` request that keeps the hardware right. libredox's
 /// `NsPermissions` does not define it, so a request built from those permissions drops the right.
 const NS_HARDWARE: usize = 1 << (usize::BITS - 1);
@@ -37,7 +38,7 @@ const KEEP_SCHEME_CREATE: &str = "namespace:scheme-create";
 
 /// Whether only a handle with the hardware right may register or remove `name`.
 fn is_protected_scheme(name: &str) -> bool {
-    name == MEMORY_SCHEME || HARDWARE_SCHEMES.contains(&name)
+    name == MEMORY_SCHEME || name == INITFS_SCHEME || HARDWARE_SCHEMES.contains(&name)
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +159,7 @@ pub struct NamespaceScheme<'sock> {
     scheme_creation_cap: Rc<FdGuardUpper>,
     /// What `memory` resolves to without the hardware right; `None` hides `memory` instead.
     restricted_memory: Option<Arc<FdGuard>>,
+    initfs_seal: Option<FdGuard>,
 }
 
 const HIGH_PERMISSIONS: NsPermissions = NsPermissions::SCHEME_CREATE;
@@ -177,6 +179,12 @@ impl<'sock> NamespaceScheme<'sock> {
                 .ok()
                 .map(Arc::new)
         });
+        let initfs_seal = schemes.get(INITFS_SCHEME).and_then(|initfs| {
+            initfs
+                .dup(b"seal")
+                .inspect_err(|err| error!("Failed to acquire initfs seal handle: {}", err))
+                .ok()
+        });
         Self {
             socket,
             handles: HashMap::new(),
@@ -184,6 +192,7 @@ impl<'sock> NamespaceScheme<'sock> {
             next_id: 0,
             scheme_creation_cap: Rc::new(scheme_creation_cap),
             restricted_memory,
+            initfs_seal,
         }
     }
 
@@ -484,27 +493,41 @@ impl<'sock> SchemeSync for NamespaceScheme<'sock> {
     }
 
     fn unlinkat(&mut self, fd: usize, path: &str, _flags: usize, _ctx: &CallerCtx) -> Result<()> {
-        let ns_access = self.get_ns_access(fd).ok_or_else(|| {
-            error!("Namespace with ID {} not found", fd);
-            Error::new(ENOENT)
-        })?;
-        let mut ns = ns_access.namespace.borrow_mut();
-
         let redox_path = RedoxPath::from_absolute(path).ok_or(Error::new(EINVAL))?;
         let (scheme, reference) = redox_path.as_parts().ok_or(Error::new(EINVAL))?;
         if !reference.as_ref().is_empty() {
             return Err(Error::new(EXDEV));
         }
-        if !ns_access.has_permission(NsPermissions::DELETE) {
-            error!("Permission denied to remove scheme for namespace {}", fd);
-            return Err(Error::new(EACCES));
-        }
-        if !ns_access.hardware && is_protected_scheme(scheme.as_ref()) {
-            error!("Removing {} needs the hardware right", scheme);
-            return Err(Error::new(EACCES));
-        }
-        match ns.remove_scheme(scheme.as_ref()) {
-            Some(_) => Ok(()),
+        let removed = {
+            let ns_access = self.get_ns_access(fd).ok_or_else(|| {
+                error!("Namespace with ID {} not found", fd);
+                Error::new(ENOENT)
+            })?;
+            if !ns_access.has_permission(NsPermissions::DELETE) {
+                error!("Permission denied to remove scheme for namespace {}", fd);
+                return Err(Error::new(EACCES));
+            }
+            if !ns_access.hardware && is_protected_scheme(scheme.as_ref()) {
+                error!("Removing {} needs the hardware right", scheme);
+                return Err(Error::new(EACCES));
+            }
+            let mut ns = ns_access.namespace.borrow_mut();
+            ns.remove_scheme(scheme.as_ref())
+        };
+        match removed {
+            Some(_) => {
+                if scheme.as_ref() == INITFS_SCHEME {
+                    let Some(seal_fd) = self.initfs_seal.take() else {
+                        error!("Missing initfs seal handle");
+                        return Err(Error::new(EIO));
+                    };
+                    if let Err(err) = seal_fd.write(&[1]) {
+                        error!("Failed to seal initfs scheme: {}", err);
+                        return Err(err);
+                    }
+                }
+                Ok(())
+            }
             None => {
                 error!("Scheme {} not found in namespace", scheme);
                 Err(Error::new(ENODEV))

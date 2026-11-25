@@ -899,6 +899,12 @@ def test_boot(vm, args):
         return False, f"no login within {args.timeout}s; screens {seen}"
     if "text" in kinds:
         return False, f"text on screen before the login ({vm.out / 'text.png'}); screens {seen}"
+    serial = vm.text(0)
+    for bad in ("failed to seal", "Failed to acquire initfs seal handle"):
+        if bad in serial:
+            return False, f"initfs seal error in serial log ({bad!r}); see {vm.out / 'serial.log'}"
+    if "init: sealed /scheme/initfs" not in serial:
+        return False, f"serial log missing 'init: sealed /scheme/initfs'; see {vm.out / 'serial.log'}"
     return True, f"login at {seen[-1][0]}s; screens {seen}"
 
 

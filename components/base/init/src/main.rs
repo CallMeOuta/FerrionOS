@@ -150,6 +150,18 @@ fn main() {
         .schedule_start_and_report_errors(&mut unit_store, UnitId("90_initfs.target".to_owned()));
     scheduler.step(&mut unit_store, &mut init_config);
 
+    match libredox::call::getns().and_then(|ns| {
+        libredox::call::call_wo(
+            ns,
+            b"/scheme/initfs",
+            syscall::CallFlags::STD_FS,
+            &syscall::StdFsCallMeta::new(syscall::StdFsCallKind::Unlinkat, 0, 0),
+        )
+    }) {
+        Ok(_) => eprintln!("init: sealed /scheme/initfs"),
+        Err(err) => eprintln!("init: failed to seal /scheme/initfs: {err}"),
+    }
+
     switch_root(
         &mut unit_store,
         &mut init_config,
