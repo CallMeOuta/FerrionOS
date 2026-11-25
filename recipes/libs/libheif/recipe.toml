@@ -1,0 +1,39 @@
+[package]
+description = "ISO/IEC 23008-12:2017 HEIF and AVIF decoder library (AV1 via dav1d only)"
+
+[source]
+tar = "https://github.com/strukturag/libheif/releases/download/v1.23.7/libheif-1.23.7.tar.gz"
+blake3 = "e3432cbb65508c14b024fc589a0ebd8f801453ff1fab21c4568edcbfbf9992f9"
+
+[build]
+template = "cmake"
+cmakeflags = [
+    "-DBUILD_TESTING=OFF",
+    "-DENABLE_PLUGIN_LOADING=OFF",
+    "-DWITH_DAV1D=ON",
+    "-DWITH_DAV1D_PLUGIN=OFF",
+    "-DWITH_LIBDE265=OFF",
+    "-DWITH_X265=OFF",
+    "-DWITH_KVAZAAR=OFF",
+    "-DWITH_UVG266=OFF",
+    "-DWITH_VVDEC=OFF",
+    "-DWITH_VVENC=OFF",
+    "-DWITH_X264=OFF",
+    "-DWITH_OpenH264_DECODER=OFF",
+    "-DWITH_AOM_DECODER=OFF",
+    "-DWITH_AOM_ENCODER=OFF",
+    "-DWITH_SvtEnc=OFF",
+    "-DWITH_RAV1E=OFF",
+    "-DWITH_JPEG_DECODER=OFF",
+    "-DWITH_JPEG_ENCODER=OFF",
+    "-DWITH_OpenJPEG_DECODER=OFF",
+    "-DWITH_OpenJPEG_ENCODER=OFF",
+    "-DWITH_OPENJPH_ENCODER=OFF",
+    "-DWITH_FFMPEG_DECODER=OFF",
+    "-DWITH_LIBSHARPYUV=OFF",
+    "-DWITH_EXAMPLES=OFF",
+    "-DWITH_GDK_PIXBUF=OFF",
+]
+dependencies = [
+    "dav1d",
+]
