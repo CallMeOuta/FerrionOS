@@ -226,6 +226,18 @@ DOWNLOADS = [
      'curl "https://sh.rustup.rs" -sSf | sh',
      "Rust is installed from a script piped to sh",
      "download rustup-init with a pinned sha256 and run it"),
+    ("upstream Rust archives", "mk/prefix.mk",
+     'wget -O $@.partial "https://static.rust-lang.org/dist/',
+     "optional upstream compiler archives lack checksums",
+     "pin every archive before enabling PREFIX_USE_UPSTREAM_RUST_COMPILER"),
+    ("virtiofsd", "mk/virtiofs.mk",
+     "VIRTIOFSD_URL?=https://gitlab.com/virtio-fs/virtiofsd/",
+     "optional host virtiofsd download follows a branch without a checksum",
+     "use a distribution's virtiofsd or pin the downloaded binary"),
+    ("U-Boot firmware", "mk/qemu.mk",
+     "wget -O $@ https://gitlab.redox-os.org/Ivan/redox_firmware/",
+     "optional ARM U-Boot downloads follow a branch without checksums",
+     "pin each firmware download by sha256"),
 ]
 
 DOWNLOAD_PINS = [
