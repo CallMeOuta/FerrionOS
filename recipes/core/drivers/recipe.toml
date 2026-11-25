@@ -3,7 +3,7 @@ description = "FerrionOS's drivers"
 
 [source]
 git = "https://github.com/CallMeOuta/ferrion-hardware.git"
-rev = "5793ed127b9f17993dfbdb146a21c2f2e6b54936"
+rev = "9cdd69ed61e1a115490d605f01f5316759577293"
 
 [build]
 template = "custom"

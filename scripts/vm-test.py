@@ -2524,7 +2524,7 @@ def test_blocked_wait(vm, args):
     )
 
 
-DAEMON_CONTINUE_TARGETS = ("zerod", "udsd", "randd")
+DAEMON_CONTINUE_TARGETS = ("zerod", "nvmed", "udsd", "randd")
 DAEMON_CONTINUE_IO_ERROR_RE = re.compile(
     r"Input/output error|I/O error|\berrno=5\b|BLOCKED-WAIT-ERROR|RINGWAKE-STUCK",
     re.I,
