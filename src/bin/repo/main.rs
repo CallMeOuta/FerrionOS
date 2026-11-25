@@ -79,6 +79,7 @@ const REPO_HELP_STR: &str = r#"
         COOKBOOK_WRITE_FILETREE=false whether to write stage files tree
         COOKBOOK_MAKE_JOBS=          override build jobs count from nproc
         COOKBOOK_WEB=false           whether to generate package web files
+        (recipe [build] env-vars)    forwarded and hashed into build_env.blake3 to re-cook on change
 "#;
 
 #[derive(Clone)]

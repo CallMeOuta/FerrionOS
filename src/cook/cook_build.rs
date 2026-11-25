@@ -73,6 +73,8 @@ fn stage_app_manifest(recipe_dir: &Path, package_name: &str, stage_dir: &Path) -
 }
 
 const RELIBC_STATIC_TAG_FILE: &str = "relibc_static.blake3";
+const BUILD_ENV_TAG_FILE: &str = "build_env.blake3";
+const BUILD_ENV_DOMAIN: &[u8] = b"ferrion-build-env-v1\0";
 const RELIBC_STATIC_NONE: &str = "none";
 const RELIBC_START_MARKER: &[u8] = b"no thread fd present";
 const RELIBC_STATIC_OBJECTS: &[&str] = &["libc.a", "crt0.o", "crti.o", "crtn.o"];
@@ -344,9 +346,21 @@ pub fn build(
         None => true,
     };
 
+    let build_env_tag_file = get_sub_target_dir(target_dir, BUILD_ENV_TAG_FILE);
+    let build_env_digest =
+        if recipe.build.kind == BuildKind::Remote || recipe.build.env_vars.is_empty() {
+            None
+        } else {
+            Some(compute_build_env_digest(&recipe.build.env_vars))
+        };
+    let build_env_ok = match &build_env_digest {
+        Some(digest) => build_env_tag_current(logger, &build_env_tag_file, digest)?,
+        None => true,
+    };
+
     if !check_source {
         let stage_present = all_stage_packages_committed(recipe, target_dir);
-        if stage_present && auto_deps_file.is_file() && static_relibc_ok {
+        if stage_present && auto_deps_file.is_file() && static_relibc_ok && build_env_ok {
             log_to_pty!(logger, "DEBUG: using cached build, not checking source");
             let auto_deps = make_auto_deps!(true)?;
             return Ok(BuildResult::cached(stage_dirs, auto_deps));
@@ -373,6 +387,7 @@ pub fn build(
     if !sysroot_tags_ok
         || !toolchain_tags_ok
         || !static_relibc_ok
+        || !build_env_ok
         || !all_stage_packages_committed(recipe, target_dir)
         || build_is_source_newer(
             logger,
@@ -387,6 +402,9 @@ pub fn build(
         }
         if relibc_tag_file.is_file() {
             fs::remove_all(&relibc_tag_file)?;
+        }
+        if build_env_tag_file.is_file() {
+            fs::remove_all(&build_env_tag_file)?;
         }
         for stage_dir in &stage_dirs {
             remove_stage_dir(stage_dir)?;
@@ -410,7 +428,7 @@ pub fn build(
         let stage_dir_tmp = target_dir.join("stage.tmp");
         fs::create_dir_clean(&stage_dir_tmp)?;
 
-        if cook_config.clean_build || !static_relibc_ok || !build_dir.is_dir() {
+        if cook_config.clean_build || !static_relibc_ok || !build_env_ok || !build_dir.is_dir() {
             fs::create_dir_clean(&build_dir)?;
         }
 
@@ -574,6 +592,16 @@ pub fn build(
                 command.env("COOKBOOK_SOURCE_IDENT", ident_source.source_identifier);
                 command.env("COOKBOOK_COMMIT_IDENT", ident_source.commit_identifier);
             }
+            for var in &recipe.build.env_vars {
+                match std::env::var_os(var) {
+                    Some(val) => {
+                        command.env(var, val);
+                    }
+                    None => {
+                        command.env_remove(var);
+                    }
+                }
+            }
             command
         };
 
@@ -616,6 +644,9 @@ pub fn build(
     if let Some(digest) = &static_relibc_digest {
         write_static_relibc_tag(logger, &relibc_tag_file, &stage_dirs, digest)?;
     }
+    if let Some(digest) = &build_env_digest {
+        write_build_env_tag(&build_env_tag_file, digest)?;
+    }
 
     if cook_config.clean_target {
         fs::remove_all(&build_dir)?;
@@ -627,6 +658,51 @@ pub fn build(
 
     let auto_deps = make_auto_deps!(false)?;
     Ok(BuildResult::new(stage_dirs, auto_deps))
+}
+
+fn compute_build_env_digest(env_vars: &[String]) -> String {
+    assert!(env_vars.len() <= crate::recipe::MAX_BUILD_ENV_VARS);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(BUILD_ENV_DOMAIN);
+    hasher.update(&(env_vars.len() as u64).to_le_bytes());
+    for var in env_vars {
+        hasher.update(&(var.len() as u64).to_le_bytes());
+        hasher.update(var.as_bytes());
+        match std::env::var_os(var) {
+            Some(val) => {
+                let bytes = val.as_encoded_bytes();
+                hasher.update(&[1u8]);
+                hasher.update(&(bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+            None => {
+                hasher.update(&[0u8]);
+            }
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn build_env_tag_current(logger: &PtyOut, tag_file: &Path, current_digest: &str) -> Result<bool> {
+    if tag_file.is_file() {
+        let recorded = fs::read_to_string(tag_file)?;
+        if recorded.trim() == current_digest {
+            return Ok(true);
+        }
+        log_to_pty!(logger, "DEBUG: updating build: declared env-vars changed");
+        return Ok(false);
+    }
+    log_to_pty!(
+        logger,
+        "DEBUG: updating build: {} is absent",
+        BUILD_ENV_TAG_FILE
+    );
+    Ok(false)
+}
+
+fn write_build_env_tag(tag_file: &Path, digest: &str) -> Result<()> {
+    let contents = format!("{digest}\n");
+    std::fs::write(tag_file, contents).map_err(wrap_io_err!(tag_file, "Writing build env tag"))
 }
 
 fn gnu_target_for(target: &str) -> &str {

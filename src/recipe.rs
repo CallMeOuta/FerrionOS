@@ -7,7 +7,39 @@ use std::{
 
 use pkg::{PackageError, PackageName};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+pub const MAX_BUILD_ENV_VARS: usize = 32;
+
+fn is_valid_build_env_var(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn deserialize_build_env_vars<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let vars = Vec::<String>::deserialize(deserializer)?;
+    if vars.len() > MAX_BUILD_ENV_VARS {
+        return Err(serde::de::Error::custom(format!(
+            "build.env-vars declares {} names, exceeding limit {}",
+            vars.len(),
+            MAX_BUILD_ENV_VARS
+        )));
+    }
+    for name in &vars {
+        if !is_valid_build_env_var(name) {
+            return Err(serde::de::Error::custom(format!(
+                "build.env-vars name {:?} is invalid; expected [A-Z0-9_]+",
+                name
+            )));
+        }
+    }
+    Ok(vars)
+}
 
 use crate::{WALK_DEPTH, bail_other_err, cook::package as cook_package, staged_pkg};
 
@@ -106,6 +138,15 @@ pub struct BuildRecipe {
     pub compiler: Option<BuildCompiler>,
     #[serde(rename = "dev-dependencies")]
     pub dev_dependencies: Vec<PackageName>,
+    #[doc = "Environment variable names whose presence and values are hashed into"]
+    #[doc = "`build_env.blake3` to invalidate cached builds on changes. Each name must"]
+    #[doc = "match `[A-Z0-9_]+` and at most `MAX_BUILD_ENV_VARS` names may be declared."]
+    #[serde(
+        rename = "env-vars",
+        default,
+        deserialize_with = "deserialize_build_env_vars"
+    )]
+    pub env_vars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
