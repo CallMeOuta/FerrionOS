@@ -4,11 +4,11 @@ dependencies = ["mesa"]
 
 [build]
 template = "custom"
-dependencies = ["mesa", "libglvnd", "sdl2", "libvulkan"]
+dependencies = ["mesa", "libglvnd", "sdl2", "libvulkan", "libwayland"]
 script = """
 DYNAMIC_INIT
 ${CC} ${CFLAGS} -std=c11 -Wall -Wextra "${COOKBOOK_RECIPE}/main.c" "${COOKBOOK_RECIPE}/sdl.c" "${COOKBOOK_RECIPE}/vulkan.c" "${COOKBOOK_RECIPE}/vk_exact.c" "${COOKBOOK_RECIPE}/gl_exact.c" \
-    ${LDFLAGS} $("${PKG_CONFIG}" --cflags --libs egl opengl sdl2 vulkan) -o gpu-probe
+    ${LDFLAGS} $("${PKG_CONFIG}" --cflags --libs egl opengl sdl2 vulkan wayland-client) -o gpu-probe
 mkdir -p "${COOKBOOK_STAGE}/usr/bin"
 cp gpu-probe "${COOKBOOK_STAGE}/usr/bin/"
 """

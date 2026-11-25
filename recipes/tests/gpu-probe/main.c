@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <wayland-client.h>
 #include "version.h"
 
 /* Platform value supplied by Mesa's Orbital port. */
@@ -246,6 +247,71 @@ static int pbuffer_clear_check(void)
     return 0;
 }
 
+static int wayland_egl_check(void)
+{
+    const char *client_exts = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    int ext_present = client_exts && strstr(client_exts, "EGL_KHR_platform_wayland") != NULL;
+    printf("GPU_WAYLAND_EGL_EXT present=%d\n", ext_present);
+
+    struct wl_display *wl = wl_display_connect(NULL);
+    if (!wl) {
+        fputs("GPU_ERROR wl_display_connect failed\n", stderr);
+        return 1;
+    }
+
+    EGLDisplay display = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl, NULL);
+    EGLint major = 0, minor = 0;
+    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) {
+        fprintf(stderr, "GPU_ERROR wayland EGL initialize: %#x (ext_present=%d)\n",
+                eglGetError(), ext_present);
+        wl_display_disconnect(wl);
+        return 1;
+    }
+
+    const char *vendor = eglQueryString(display, EGL_VENDOR);
+    const char *egl_version = eglQueryString(display, EGL_VERSION);
+    const EGLint attributes[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
+    EGLConfig config;
+    EGLint count = 0;
+    if (!eglBindAPI(EGL_OPENGL_API) || !eglChooseConfig(display, attributes, &config, 1, &count) || count != 1) {
+        fprintf(stderr, "GPU_ERROR wayland EGL OpenGL config: %#x\n", eglGetError());
+        eglTerminate(display);
+        wl_display_disconnect(wl);
+        return 1;
+    }
+
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, NULL);
+    if (context == EGL_NO_CONTEXT || !eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) {
+        fprintf(stderr, "GPU_ERROR wayland EGL context: %#x\n", eglGetError());
+        if (context != EGL_NO_CONTEXT)
+            eglDestroyContext(display, context);
+        eglTerminate(display);
+        wl_display_disconnect(wl);
+        return 1;
+    }
+
+    const char *renderer = (const char *)glGetString(GL_RENDERER);
+    const char *gl_version = (const char *)glGetString(GL_VERSION);
+    printf("GPU_WAYLAND_EGL egl=%d.%d vendor=\"%s\" egl_version=\"%s\" gl_version=\"%s\" renderer=\"%s\"\n",
+           major, minor,
+           vendor ? vendor : "",
+           egl_version ? egl_version : "",
+           gl_version ? gl_version : "",
+           renderer ? renderer : "");
+    int ok = ext_present && vendor && vendor[0] != '\0' && renderer && renderer[0] != '\0';
+
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context);
+    eglTerminate(display);
+    wl_display_disconnect(wl);
+    if (!ok) {
+        fputs("GPU_ERROR wayland EGL missing vendor or renderer\n", stderr);
+        return 1;
+    }
+    puts("GPU_WAYLAND_EGL_OK");
+    return 0;
+}
+
 int sdl_lifecycle(void);
 int sdl_recreate(void);
 int vulkan_cpu(void);
@@ -279,6 +345,9 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "gl-exact") == 0) {
         return gl_exact();
     }
-    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle|sdl-recreate|pbuffer-sw|mesa-cpu|vk-exact|gl-exact\n", stderr);
+    if (argc == 2 && strcmp(argv[1], "wayland-egl") == 0) {
+        return wayland_egl_check();
+    }
+    fputs("Usage: gpu-probe egl-dispatch|sdl-lifecycle|sdl-recreate|pbuffer-sw|mesa-cpu|vk-exact|gl-exact|wayland-egl\n", stderr);
     return 2;
 }

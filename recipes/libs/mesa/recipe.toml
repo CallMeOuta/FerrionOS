@@ -16,6 +16,7 @@ patches = [
     "ferrion-venus.patch",
     "ferrion-zink.patch",
     "ferrion-gbm.patch",
+    "ferrion-wayland-clock.patch",
 ]
 
 [build]
@@ -24,7 +25,9 @@ dependencies = [
     "expat",
     "libdrm",
     "liborbital",
+    "libwayland",
     "llvm21",
+    "wayland-protocols",
     "zlib",
     "libglvnd",
 ]
@@ -45,7 +48,11 @@ export CFLAGS+=" -DHAVE_PTHREAD=1 -I${COOKBOOK_SYSROOT}/include/libdrm"
 export LLVM_CONFIG="${TARGET}-llvm-config"
 export LDFLAGS+=" -lorbital"
 
-COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox -Dvulkan-drivers=swrast,virtio -Dvulkan-layers=device-select -Dglvnd=enabled)
+cat > wayland_scanner_cross.txt <<EOF
+[binaries]
+wayland-scanner = 'wayland-scanner'
+EOF
+COOKBOOK_MESON_FLAGS+=(-Dshared-llvm=enabled -Degl=enabled -Dplatforms=redox,wayland -Dvulkan-drivers=swrast,virtio -Dvulkan-layers=device-select -Dglvnd=enabled --cross-file "${COOKBOOK_BUILD}/wayland_scanner_cross.txt")
 
 cookbook_meson \
     -Ddri-drivers-path=/usr/lib/dri \

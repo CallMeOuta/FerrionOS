@@ -6,6 +6,7 @@ filesystem_size = 1024
 [packages]
 ferrion-wm = "source"
 desktop-layout-probe = "source"
+gpu-probe = "source"
 shm-reuse-probe = "source"
 wayland-deny-probe = "source"
 xkeyboard-config = {}

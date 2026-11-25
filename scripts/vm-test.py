@@ -13337,6 +13337,39 @@ def test_desktop_deny(vm, args):
 TESTS["desktop-deny"] = test_desktop_deny
 
 
+def test_wayland_egl(vm, args):
+    """Checks EGL_PLATFORM_WAYLAND_KHR display init, EGL_VENDOR and GL_RENDERER under ferrion-wm (use --config wm-columns)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root shell"
+    max_wait_s = 30
+    ready_cmd = (
+        f"for _ in $(seq 1 {max_wait_s}); do "
+        "[ -s /tmp/ferrion-wm-session ] && break; sleep 1; done; "
+        "[ -s /tmp/ferrion-wm-session ]"
+    )
+    status, _ = run_status(vm, f"bash -c {shlex.quote(ready_cmd)}", args.timeout)
+    if status != 0:
+        return False, "ferrion-wm session did not become ready"
+    probe_cmd = (
+        ". /tmp/ferrion-wm-session && "
+        "LIBGL_ALWAYS_SOFTWARE=1 gpu-probe wayland-egl"
+    )
+    status, output = run_status(vm, f"bash -c {shlex.quote(probe_cmd)}", args.timeout)
+    (vm.out / "wayland-egl.txt").write_text(output)
+    if status != 0:
+        return False, f"gpu-probe wayland-egl exited {status}; see wayland-egl.txt"
+    match = re.search(
+        r'GPU_WAYLAND_EGL egl=(\d+\.\d+) vendor="([^"]+)" egl_version="([^"]+)" gl_version="([^"]+)" renderer="([^"]+)"',
+        output,
+    )
+    if not match or "GPU_WAYLAND_EGL_OK" not in output:
+        return False, "missing GPU_WAYLAND_EGL or GPU_WAYLAND_EGL_OK; see wayland-egl.txt"
+    return True, f"EGL {match.group(1)} vendor={match.group(2)!r} renderer={match.group(5)!r}"
+
+
+TESTS["wayland-egl"] = test_wayland_egl
+
+
 def test_mpv_headless(vm, args):
     """M2a: check guest mpv headless (--vo=null --ao=null) exact frame counts, EOF, LGPL/licenses across video and audio clips (default --config wm-session)."""
     import media_decode
