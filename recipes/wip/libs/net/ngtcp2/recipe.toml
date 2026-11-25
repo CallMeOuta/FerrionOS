@@ -1,5 +1,6 @@
 [source]
 tar = "https://github.com/ngtcp2/ngtcp2/releases/download/v1.21.0/ngtcp2-1.21.0.tar.xz"
+blake3 = "9b379ab68df77ea73e3c9f0117a1e23318b0576948bd092c509070f73a427b35"
 [build]
 template = "cmake"
 cmakeflags = ["-DENABLE_OPENSSL=OFF"]

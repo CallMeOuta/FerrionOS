@@ -1,7 +1,7 @@
 [source]
 git = "https://github.com/NLnetLabs/ldns"
 shallow_clone = true
-rev = "1.9.2"
+rev = "06466f0a20dc298a9dd6f444c15fa568398fff3c"
 script = """
 autotools_recursive_regenerate
 cp drill/install-sh .

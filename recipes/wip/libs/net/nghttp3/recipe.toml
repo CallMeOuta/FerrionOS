@@ -1,4 +1,5 @@
 [source]
 tar = "https://github.com/ngtcp2/nghttp3/releases/download/v1.15.0/nghttp3-1.15.0.tar.xz"
+blake3 = "043941ceb0ab27bc025d27f5b9a1ef40861edec0987e5293b511d67db37276c5"
 [build]
 template = "cmake"

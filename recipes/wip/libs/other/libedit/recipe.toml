@@ -1,5 +1,6 @@
 [source]
 tar = "https://www.thrysoee.dk/editline/libedit-20250104-3.1.tar.gz"
+blake3 = "67203cdc2a86697de5ea3a85dade36a3bbcafce85d74fed08b61494160b563db"
 patches = [
     "redox.patch"
 ]
