@@ -10,6 +10,7 @@ glycin = "source"
 glycin-load-probe = "source"
 gtk4-window-probe = "source"
 loupe = "source"
+mpv = "source"
 session-probe = "source"
 xkeyboard-config = {}
 mesa = {}
