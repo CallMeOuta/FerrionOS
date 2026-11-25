@@ -1,0 +1,54 @@
+Source: https://download.gnome.org/sources/loupe/51/loupe-51.2.tar.xz
+License: GPL-3.0-or-later
+
+diff --git a/src/util.rs b/src/util.rs
+index 4ee145f..d5a9d40 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -238,6 +238,46 @@ pub struct LocaleSettings {
+     pub thousands_sep: Option<String>,
+ }
+ 
++#[cfg(target_os = "redox")]
++#[repr(C)]
++struct RelibcLconv {
++    decimal_point: *const libc::c_char,
++    thousands_sep: *const libc::c_char,
++}
++
++#[cfg(target_os = "redox")]
++unsafe extern "C" {
++    fn localeconv() -> *const RelibcLconv;
++}
++
++#[cfg(target_os = "redox")]
++pub fn locale_settings() -> LocaleSettings {
++    unsafe {
++        let lconv = localeconv();
++        let mut locale_settings = LocaleSettings::default();
++
++        if lconv.is_null() {
++            return locale_settings;
++        }
++
++        let decimal_point = (*lconv).decimal_point;
++        let thousands_sep = (*lconv).thousands_sep;
++
++        if !decimal_point.is_null() {
++            let s = CStr::from_ptr(decimal_point);
++            locale_settings.decimal_point = s.to_str().map(|x| x.to_string()).ok();
++        }
++
++        if !thousands_sep.is_null() {
++            let s = CStr::from_ptr(thousands_sep);
++            locale_settings.thousands_sep = s.to_str().map(|x| x.to_string()).ok();
++        }
++
++        locale_settings
++    }
++}
++
++#[cfg(not(target_os = "redox"))]
+ pub fn locale_settings() -> LocaleSettings {
+     unsafe {
+         let lconv = libc::localeconv();
