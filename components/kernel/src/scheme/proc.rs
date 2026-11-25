@@ -382,7 +382,13 @@ impl ProcScheme {
                 }
             },
             OpenTy::Auth => {
-                extern "C" fn ret() {}
+                extern "C" fn ret() {
+                    let mut token = unsafe { CleanLockToken::new() };
+                    let killed = context::current().read(token.token()).being_sigkilled;
+                    if killed {
+                        crate::syscall::exit_this_context(None, &mut token);
+                    }
+                }
                 let context = match operation_str.ok_or(Error::new(ENOENT))? {
                     "new-context" => {
                         let id = NonZeroUsize::new(NEXT_ID.fetch_add(1, Ordering::Relaxed))
