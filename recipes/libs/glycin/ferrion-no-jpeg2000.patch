@@ -1,0 +1,116 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index edfe9b4..9bbf3ff 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -78,7 +78,6 @@ gufo-exif = { version = "0.5.5" }
+ gufo-jpeg = { version = "0.5.1" }
+ gufo-svg = { version = "0.5.0" }
+ half = "2.4.1"
+-hayro-jpeg2000 = "0.3.2"
+ image = { version = "0.25.9", default-features = false }
+ image-extras = { version = "0.1.1", default-features = false, features = [
+     "xbm",
+diff --git a/glycin-loaders/glycin-image-rs/Cargo.toml b/glycin-loaders/glycin-image-rs/Cargo.toml
+index 866cc1b..0021a69 100644
+--- a/glycin-loaders/glycin-image-rs/Cargo.toml
++++ b/glycin-loaders/glycin-image-rs/Cargo.toml
+@@ -45,7 +45,6 @@ jpeg-encoder = "0.7.0"
+ # Force newer version for bugfixes
+ zune-jpeg = "0.5.11"
+ image-extras.workspace = true
+-hayro-jpeg2000 = { workspace = true, features = ["image"] }
+ exr = "1.74.0"
+ moxcms = "0.8.1"
+ tiff = "0.11.3"
+diff --git a/glycin-loaders/glycin-image-rs/glycin-image-rs.conf b/glycin-loaders/glycin-image-rs/glycin-image-rs.conf
+index cd83b04..e6102c3 100644
+--- a/glycin-loaders/glycin-image-rs/glycin-image-rs.conf
++++ b/glycin-loaders/glycin-image-rs/glycin-image-rs.conf
+@@ -160,13 +160,3 @@ Extension=xpm
+ 
+ [loader:image/x-xbitmap]
+ Exec = @EXEC@
+-
+-[loader:image/jp2]
+-Exec = @EXEC@
+-Identifiers=0:\\x00\\x00\\x00\\x0CjP\\x20\\x20\\x0D\\x0A\\x87\\x0A;
+-Extension=jp2
+-
+-[loader:image/x-jp2-codestream]
+-Exec = @EXEC@
+-Identifiers=0:\\xFF\\x4F\\xFF\\x51;
+-Extension=jpc
+diff --git a/glycin-loaders/glycin-image-rs/glycin-image-rs.thumbnailer.in b/glycin-loaders/glycin-image-rs/glycin-image-rs.thumbnailer.in
+index fbdd1b4..752c485 100644
+--- a/glycin-loaders/glycin-image-rs/glycin-image-rs.thumbnailer.in
++++ b/glycin-loaders/glycin-image-rs/glycin-image-rs.thumbnailer.in
+@@ -1,4 +1,4 @@
+ [Thumbnailer Entry]
+ TryExec=@BINDIR@/glycin-thumbnailer
+ Exec=@BINDIR@/glycin-thumbnailer --input %u --output %o --size %s
+-MimeType=image/apng;image/bmp;image/gif;image/jp2;image/jpeg;image/png;image/qoi;image/tiff;image/vnd.microsoft.icon;image/webp;image/x-dds;image/x-exr;image/x-jp2-codestream;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;image/x-tga;image/x-win-bitmap;image/x-xbitmap;image/x-xpixmap;
++MimeType=image/apng;image/bmp;image/gif;image/jpeg;image/png;image/qoi;image/tiff;image/vnd.microsoft.icon;image/webp;image/x-dds;image/x-exr;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;image/x-tga;image/x-win-bitmap;image/x-xbitmap;image/x-xpixmap;
+diff --git a/glycin-loaders/glycin-image-rs/src/lib.rs b/glycin-loaders/glycin-image-rs/src/lib.rs
+index 4c891e0..e4994ea 100644
+--- a/glycin-loaders/glycin-image-rs/src/lib.rs
++++ b/glycin-loaders/glycin-image-rs/src/lib.rs
+@@ -248,7 +248,6 @@ pub enum ImageRsDecoder<T: std::io::BufRead + std::io::Seek> {
+     Hdr(codecs::hdr::HdrDecoder<T>),
+     Ico(codecs::ico::IcoDecoder<T>),
+     Jpeg(codecs::jpeg::JpegDecoder<T>),
+-    Jpeg2000(hayro_jpeg2000::integration::Jp2Decoder),
+     Png(codecs::png::PngDecoder<T>),
+     Pnm(codecs::pnm::PnmDecoder<T>),
+     Qoi(codecs::qoi::QoiDecoder<T>),
+@@ -311,11 +310,6 @@ impl ImageRsFormat<Reader> {
+             .default_bit_depth(8)
+             .supports_two_grayscale_modes(true),
+ 
+-            "image/jp2" | "image/x-jp2-codestream" => Self::new(ImageRsDecoder::Jpeg2000(
+-                hayro_jpeg2000::integration::Jp2Decoder::new(data).expected_error()?,
+-            ))
+-            .format_name("JPEG 2000"),
+-
+             "image/png" => Self::new(ImageRsDecoder::Png(
+                 codecs::png::PngDecoder::new(data).expected_error()?,
+             ))
+@@ -437,7 +431,6 @@ impl<T: std::io::BufRead + std::io::Seek> ImageRsFormat<T> {
+             ImageRsDecoder::Hdr(ref mut d) => f(Box::new(d)),
+             ImageRsDecoder::Ico(ref mut d) => f(Box::new(d)),
+             ImageRsDecoder::Jpeg(ref mut d) => f(Box::new(d)),
+-            ImageRsDecoder::Jpeg2000(ref mut d) => f(Box::new(d)),
+             ImageRsDecoder::Png(ref mut d) => f(Box::new(d)),
+             ImageRsDecoder::Pnm(ref mut d) => f(Box::new(d)),
+             ImageRsDecoder::Qoi(ref mut d) => f(Box::new(d)),
+@@ -466,7 +459,6 @@ impl<T: std::io::BufRead + std::io::Seek> ImageRsFormat<T> {
+             ImageRsDecoder::Hdr(ref mut d) => self.handler.info(d),
+             ImageRsDecoder::Ico(ref mut d) => self.handler.info(d),
+             ImageRsDecoder::Jpeg(ref mut d) => self.handler.info(d),
+-            ImageRsDecoder::Jpeg2000(ref mut d) => self.handler.info(d),
+             ImageRsDecoder::Png(ref mut d) => self.handler.info(d),
+             ImageRsDecoder::Pnm(ref mut d) => self.handler.info(d),
+             ImageRsDecoder::Qoi(ref mut d) => self.handler.info(d),
+@@ -487,7 +479,6 @@ impl<T: std::io::BufRead + std::io::Seek> ImageRsFormat<T> {
+             ImageRsDecoder::Hdr(d) => self.handler.frame(d),
+             ImageRsDecoder::Ico(d) => self.handler.frame(d),
+             ImageRsDecoder::Jpeg(d) => self.handler.frame(d),
+-            ImageRsDecoder::Jpeg2000(d) => self.handler.frame(d),
+             ImageRsDecoder::Png(d) => self.handler.frame(d),
+             ImageRsDecoder::Pnm(d) => self.handler.frame(d),
+             ImageRsDecoder::Qoi(d) => self.handler.frame(d),
+@@ -508,7 +499,6 @@ impl<T: std::io::BufRead + std::io::Seek> ImageRsFormat<T> {
+             ImageRsDecoder::Hdr(ref mut d) => self.handler.frame_details(d),
+             ImageRsDecoder::Ico(ref mut d) => self.handler.frame_details(d),
+             ImageRsDecoder::Jpeg(ref mut d) => self.handler.frame_details(d),
+-            ImageRsDecoder::Jpeg2000(ref mut d) => self.handler.frame_details(d),
+             ImageRsDecoder::Png(ref mut d) => self.handler.frame_details(d),
+             ImageRsDecoder::Pnm(ref mut d) => self.handler.frame_details(d),
+             ImageRsDecoder::Qoi(ref mut d) => self.handler.frame_details(d),
+@@ -531,7 +521,6 @@ impl<T: std::io::BufRead + std::io::Seek> ImageRsFormat<T> {
+             ImageRsDecoder::Hdr(ref mut d) => d.set_limits(limits),
+             ImageRsDecoder::Ico(ref mut d) => d.set_limits(limits),
+             ImageRsDecoder::Jpeg(ref mut d) => d.set_limits(limits),
+-            ImageRsDecoder::Jpeg2000(ref mut d) => d.set_limits(limits),
+             ImageRsDecoder::Png(ref mut d) => d.set_limits(limits),
+             ImageRsDecoder::Pnm(ref mut d) => d.set_limits(limits),
+             ImageRsDecoder::Qoi(ref mut d) => d.set_limits(limits),
