@@ -1,4 +1,5 @@
 mod audio;
+mod network;
 
 use std::ffi::CStr;
 use std::fs;
@@ -21,6 +22,9 @@ const HELP: &str = "FerrionOS system commands
   ferrion audio apps               List audio apps (root)
   ferrion audio volume [0..100] [--app ID | --session ID]
                                   Read or set volume (app/session require root)
+  ferrion network status           Read network interface and lease status
+  ferrion network up [IFACE]       Bring a network interface up (root)
+  ferrion network down [IFACE]     Release lease and bring interface down (root)
   ferrion help                     Show this help
 
 Options (any command): --json, --yes
@@ -80,6 +84,7 @@ enum Action {
     Help,
     Status,
     Audio(audio::Action),
+    Network(network::Action),
     ShellList,
     ShellSet(String),
     Package(String, Vec<String>),
@@ -104,6 +109,7 @@ fn parse(args: &[String]) -> Result<Options> {
         [] | ["help"] | ["--help"] => Action::Help,
         ["status"] => Action::Status,
         ["audio", rest @ ..] => Action::Audio(audio::parse(rest)?),
+        ["network", rest @ ..] => Action::Network(network::parse(rest)?),
         ["shell", "list"] => Action::ShellList,
         ["shell", "set", shell] => Action::ShellSet((*shell).into()),
         [op @ ("install" | "remove" | "update" | "search"), rest @ ..] => {
@@ -441,6 +447,7 @@ fn execute(options: &Options) -> Result<Value> {
         Action::Help => Ok(json!({"help": HELP})),
         Action::Status => system_status(),
         Action::Audio(action) => audio::execute(action, options.yes),
+        Action::Network(action) => network::execute(action, options.yes),
         Action::ShellList | Action::ShellSet(_) => shell_command(&options.action, options.yes),
         Action::Package(op, packages) => package_command(op, packages, options.yes),
     }
@@ -451,6 +458,7 @@ fn command_name(action: &Action) -> &str {
         Action::Help => "help",
         Action::Status => "status",
         Action::Audio(action) => audio::name(action),
+        Action::Network(action) => network::name(action),
         Action::ShellList => "shell list",
         Action::ShellSet(_) => "shell set",
         Action::Package(op, _) => op,
@@ -494,6 +502,7 @@ fn print_text(action: Option<&Action>, value: &Value) {
             }
         }
         Action::Audio(audio_action) => audio::print(audio_action, data),
+        Action::Network(net_action) => network::print(net_action, data),
         Action::Package(..) => {
             if data.get("stdout").is_some() {
                 print!("{}", data["stdout"].as_str().unwrap_or(""));
