@@ -1,0 +1,119 @@
+FerrionOS change to fish-shell at 54e8ad7e90a8213c01ba58de0640223bee6846d6 (GPL-2.0-only AND LGPL-2.0-or-later AND MIT AND PSF-2.0, kept), after redox.patch and ferrion-eventfd.patch:
+- updates Cargo.lock to match the patched Cargo.toml (vendored libc 1.0.0-alpha.1 path dependency and pinned nix/libc git revisions) so cargo fetch --locked and cookbook_cargo (--locked) work without rewriting Cargo.lock.
+
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -36,7 +36,7 @@
+ checksum = "a012a0df96dd6d06ba9a1b29d6402d1a5d77c6befd2566afdc26e10603dc93d7"
+ dependencies = [
+  "jobserver",
+- "libc",
++ "libc 0.2.172",
+  "shlex",
+ ]
+ 
+@@ -58,7 +58,7 @@
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "16b80225097f2e5ae4e7179dd2266824648f3e2f49d9134d584b76389d31c4c3"
+ dependencies = [
+- "libc",
++ "libc 0.2.172",
+ ]
+ 
+ [[package]]
+@@ -93,7 +93,7 @@
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "976dd42dc7e85965fe702eb8164f21f450704bdde31faefd6471dba214cb594e"
+ dependencies = [
+- "libc",
++ "libc 0.2.172",
+  "windows-sys",
+ ]
+ 
+@@ -106,7 +106,7 @@
+  "errno",
+  "fish-gettext-extraction",
+  "fish-printf",
+- "libc",
++ "libc 1.0.0-alpha.1",
+  "lru",
+  "nix",
+  "num-traits",
+@@ -133,7 +133,7 @@
+ name = "fish-printf"
+ version = "0.2.1"
+ dependencies = [
+- "libc",
++ "libc 0.2.172",
+  "unicode-segmentation",
+  "unicode-width",
+  "widestring",
+@@ -178,7 +178,7 @@
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "48d1dbcbbeb6a7fec7e059840aa538bd62aaccf972c7346c4d9d2059312853d0"
+ dependencies = [
+- "libc",
++ "libc 0.2.172",
+ ]
+ 
+ [[package]]
+@@ -188,6 +188,15 @@
+ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
+ 
+ [[package]]
++name = "libc"
++version = "1.0.0-alpha.1"
++
++[[package]]
++name = "libc"
++version = "1.0.0-alpha.1"
++source = "git+https://github.com/joshuamegnauth54/libc?branch=resource-consts-for-nix#ea267560b23c437a2b2599c6555a5f62480691dc"
++
++[[package]]
+ name = "lock_api"
+ version = "0.4.12"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -227,13 +236,12 @@
+ [[package]]
+ name = "nix"
+ version = "0.30.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
++source = "git+https://github.com/joshuamegnauth54/nix?branch=redox-fish-no-merge#04bd55387fe2bb5320929437608e749343355929"
+ dependencies = [
+  "bitflags",
+  "cfg-if",
+  "cfg_aliases",
+- "libc",
++ "libc 1.0.0-alpha.1 (git+https://github.com/joshuamegnauth54/libc?branch=resource-consts-for-nix)",
+ ]
+ 
+ [[package]]
+@@ -278,7 +286,7 @@
+ checksum = "1e401f977ab385c9e4e3ab30627d6f26d00e2c73eef317493c4ec6d468726cf8"
+ dependencies = [
+  "cfg-if",
+- "libc",
++ "libc 0.2.172",
+  "redox_syscall",
+  "smallvec",
+  "windows-targets",
+@@ -289,7 +297,7 @@
+ version = "0.2.9"
+ source = "git+https://github.com/fish-shell/rust-pcre2?tag=0.2.9-utf32#85b7afba1a9d9bd445779800e5bcafeb732e4421"
+ dependencies = [
+- "libc",
++ "libc 0.2.172",
+  "log",
+  "pcre2-sys",
+ ]
+@@ -300,7 +308,7 @@
+ source = "git+https://github.com/fish-shell/rust-pcre2?tag=0.2.9-utf32#85b7afba1a9d9bd445779800e5bcafeb732e4421"
+ dependencies = [
+  "cc",
+- "libc",
++ "libc 0.2.172",
+  "pkg-config",
+ ]
+ 

@@ -4,7 +4,7 @@ description = "Modern user-friendly terminal shell"
 [source]
 git = "https://github.com/fish-shell/fish-shell"
 rev = "54e8ad7e90a8213c01ba58de0640223bee6846d6"
-patches = ["redox.patch", "ferrion-eventfd.patch"]
+patches = ["redox.patch", "ferrion-eventfd.patch", "ferrion-lockfile.patch"]
 script = """
 recipe_dir="$(dirname "${PWD}")"
 libc_rev="b31ee9b22f99354f2ca00c68d038d6f377c8b8a4"
@@ -16,14 +16,17 @@ echo "${libc_sha256}  ferrion-vendor/libc-${libc_rev}.tar.gz" | sha256sum -c -
 tar -xzf "ferrion-vendor/libc-${libc_rev}.tar.gz" -C ferrion-vendor
 rm "ferrion-vendor/libc-${libc_rev}.tar.gz"
 patch --directory="ferrion-vendor/libc-${libc_rev}" --strip=1 < "${recipe_dir}/ferrion-libc-eventfd.patch"
+cookbook_crate_patch libc "ferrion-vendor/libc-${libc_rev}" --rev="${libc_rev}"
 """
 
 [build]
 template = "custom"
+crate_patches = ["libc"]
 dependencies = ["gettext", "ncursesw", "pcre"]
 script = """
 DYNAMIC_INIT
 
+cookbook_cargo_fetch_locked "${COOKBOOK_SOURCE}/Cargo.toml"
 export PREFIX=/usr SYSCONFDIR=/etc
 cookbook_cargo --no-default-features
 mkdir -p "${COOKBOOK_STAGE}/usr/share/fish"

@@ -16,11 +16,11 @@ patches = [
     "ferrion-no-wallpaper.patch",
     "ferrion-no-jpeg2000-mime.patch",
     "ferrion-glycin-sandbox.patch",
-    "ferrion-lconv-abi.patch",
 ]
 
 [build]
 template = "custom"
+crate_patches = ["libc"]
 dependencies = [
     "cairo",
     "fontconfig",
@@ -63,6 +63,8 @@ glycin-core = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-core-4.0.
 glycin-external = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-external-4.0.5" }
 glycin-utils = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-utils-5.0.1" }
 EOF
+
+cookbook_cargo_fetch_locked "${COOKBOOK_BUILD}/src/Cargo.toml"
 
 APP_ID="org.gnome.Loupe" \
 VERSION="51.2" \
