@@ -9,7 +9,7 @@ patches = [
 ]
 script = """
 sandbox_patch="${COOKBOOK_ROOT}/recipes/libs/glycin/ferrion-sandbox.patch"
-echo "da0b973d38798006ee8c677aa35f863ac082c2753ad5d46f61d344c883154b38  ${sandbox_patch}" | sha256sum --check --quiet -
+echo "9886551ace949dcff37fc9602942647daa9a9b2476d53854cba7af8e890edf7c  ${sandbox_patch}" | sha256sum --check --quiet -
 
 rm -rf vendor
 mkdir -p vendor

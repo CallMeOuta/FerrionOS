@@ -934,7 +934,7 @@ index c41629f..2d0cfa1 100644
 -                Self::set_memory_limit();
 -                Ok(())
 -            });
-+            command.arg("--ro");
++            command.arg("--read-only");
 +            command.arg(dir);
          }
  
