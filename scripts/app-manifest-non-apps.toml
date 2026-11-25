@@ -3,6 +3,9 @@ format = 1
 [non_app.audio-probe]
 reason = "In-OS test probe for audio ring and stream checks."
 
+[non_app.auxv-probe]
+reason = "In-OS test probe for auxiliary vector checks."
+
 [non_app.base]
 reason = "Base system daemons and runtime namespace started by init."
 
@@ -251,6 +254,9 @@ reason = "Command-line pattern search utility."
 
 [non_app.uutils-procps]
 reason = "Command-line process inspection utilities."
+
+[non_app.waitpid-probe]
+reason = "In-OS test probe for waitpid status checks."
 
 [non_app.zsh]
 reason = "Command-line shell."
