@@ -1,0 +1,69 @@
+Source: https://gitlab.redox-os.org/redox-os/installer
+
+MIT License
+
+Copyright (c) 2017 Redox OS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--- a/src/installer.rs
++++ b/src/installer.rs
+@@ -442,6 +442,42 @@
+         }
+     }
+ 
++    let schemas_dir = output_dir.join("usr/share/glib-2.0/schemas");
++    if schemas_dir.is_dir() {
++        const MAX_SCHEMA_ENTRIES: usize = 4096;
++        let mut schema_count = 0usize;
++        let mut entry_count = 0usize;
++        for entry in fs::read_dir(&schemas_dir)? {
++            entry_count += 1;
++            if entry_count > MAX_SCHEMA_ENTRIES {
++                bail!("GSettings schema directory exceeds limit of {MAX_SCHEMA_ENTRIES} entries");
++            }
++            let name = entry?.file_name();
++            if name.to_string_lossy().ends_with(".gschema.xml") {
++                schema_count += 1;
++            }
++        }
++        if schema_count > 0 {
++            println!("Compiling {schema_count} GSettings schema file(s)");
++            let compiler = std::env::var_os("GLIB_COMPILE_SCHEMAS")
++                .unwrap_or_else(|| "glib-compile-schemas".into());
++            let status = std::process::Command::new(compiler)
++                .arg("--strict")
++                .arg(fs::canonicalize(&schemas_dir)?)
++                .status()
++                .context("Compiling GSettings schemas requires glib-compile-schemas")?;
++            if !status.success() {
++                bail!("glib-compile-schemas failed while compiling the image's schemas: {status}");
++            }
++            let compiled = schemas_dir.join("gschemas.compiled");
++            let metadata = fs::metadata(&compiled)
++                .context("glib-compile-schemas did not create gschemas.compiled")?;
++            if metadata.len() == 0 {
++                bail!("glib-compile-schemas produced an empty gschemas.compiled");
++            }
++        }
++    }
++
+     Ok(())
+ }
+ 
