@@ -18,7 +18,7 @@ FerrionOS pins its inputs (AGENTS.md "Security"): a git recipe has `rev`, a tar 
 - `recipes/wip/games/open-world/asciicker`: the newer release line pulls in an unnecessary V8 JavaScript dependency.
 - `recipes/wip/gnome/mutter`: the pinned release series is the last with the logind and udev feature flags.
 - `recipes/wip/libs/gnome/gtksourceview`: later versions use GTK 4.
-- `recipes/wip/libs/gnome/librsvg`: newer versions need cargo-c to build.
+- `recipes/libs/librsvg`: newer versions need cargo-c to build.
 - `recipes/wip/libs/other/libusb`: later versions make libudev mandatory.
 - `recipes/wip/libs/other/xxhash`: the pinned development snapshot is the one with CMake support.
 - `recipes/wip/net/other/bind9`: the pinned version is the last before IPv6 became mandatory.
