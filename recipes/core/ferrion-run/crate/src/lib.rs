@@ -13,7 +13,7 @@ pub mod escape;
 pub mod manifest;
 pub mod sessions;
 
-pub const NETWORK_SCHEMES: [&str; 4] = ["ip", "icmp", "tcp", "udp"];
+pub const NETWORK_SCHEMES: [&str; 5] = ["ip", "icmp", "tcp", "udp", "netstatus"];
 
 pub const AUDIO_SCHEMES: [&str; 1] = ["audio"];
 
@@ -90,8 +90,9 @@ system holds only what the session was given. Every path keeps its real name.
                      The layer outlives the session: `ferrion-run diff SESSION`
                      lists what changed, `apply SESSION` writes it into DIR,
                      `discard SESSION` throws it away, `sessions` lists layers.
-  --no-network       PROGRAM gets no ip, icmp, tcp or udp scheme, so it cannot open
-                     a socket; a connection fails as on a machine without a network.
+  --no-network       PROGRAM gets no ip, icmp, tcp, udp or netstatus scheme, so it
+                     cannot open a socket; a connection fails as on a machine without
+                     a network.
   --env NAME         passes the caller's variable NAME on to PROGRAM.
   --pass-fd FD       passes one pre-opened Unix socket descriptor (FD > 2) to
                      PROGRAM; at most one may be given.
@@ -151,7 +152,7 @@ Under a manifest, --files, --exec-written, --read-only, --clone, --pty,
 is declared and granted; shared user folders stay non-executable);
 granted folders are advertised in XDG_*_DIR and $HOME/.config/user-dirs.dirs;
 display grants the compositor's Wayland socket as wayland-0 in a private
-XDG_RUNTIME_DIR; network-internet gates ip, icmp, tcp and udp (network-local
+XDG_RUNTIME_DIR; network-internet gates ip, icmp, tcp, udp and netstatus (network-local
 and network-loopback-shared fail closed until netstack views land);
 audio-playback gates the audio scheme (capture still requires audiod's grant);
 sudo is never passed.

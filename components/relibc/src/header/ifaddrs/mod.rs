@@ -149,12 +149,11 @@ fn has_network_scheme() -> bool {
     false
 }
 
-fn read_eth0_addr_list(buf: &mut [u8; MAX_NETCFG_BYTES + 1]) -> Result<Option<usize>, c_int> {
-    let Ok(fd) = Sys::open(
-        c"/scheme/netcfg/ifaces/eth0/addr/list".into(),
-        fcntl::O_RDONLY | fcntl::O_CLOEXEC,
-        0,
-    ) else {
+fn read_bounded_file(
+    path: crate::c_str::CStr<'_>,
+    buf: &mut [u8; MAX_NETCFG_BYTES + 1],
+) -> Result<Option<usize>, c_int> {
+    let Ok(fd) = Sys::open(path, fcntl::O_RDONLY | fcntl::O_CLOEXEC, 0) else {
         return Ok(None);
     };
     let _guard = RawFdGuard(fd);
@@ -171,6 +170,14 @@ fn read_eth0_addr_list(buf: &mut [u8; MAX_NETCFG_BYTES + 1]) -> Result<Option<us
         }
     }
     Err(errno::EIO)
+}
+
+fn read_netstatus_ifaddrs(buf: &mut [u8; MAX_NETCFG_BYTES + 1]) -> Result<Option<usize>, c_int> {
+    read_bounded_file(c"/scheme/netstatus/ifaddrs".into(), buf)
+}
+
+fn read_eth0_addr_list(buf: &mut [u8; MAX_NETCFG_BYTES + 1]) -> Result<Option<usize>, c_int> {
+    read_bounded_file(c"/scheme/netcfg/ifaces/eth0/addr/list".into(), buf)
 }
 
 /// Either the broadcast address associated with `ifa_addr` (if applicable
@@ -255,7 +262,8 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut ifaddrs) -> c_int {
         Ok(())
     };
 
-    let lo_flags = if has_network_scheme() {
+    let has_net = has_network_scheme();
+    let lo_flags = if has_net {
         (IFF_UP | IFF_LOOPBACK | IFF_RUNNING) as c_uint
     } else {
         IFF_LOOPBACK as c_uint
@@ -272,58 +280,75 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut ifaddrs) -> c_int {
         return -1;
     }
 
-    let mut buf = [0u8; MAX_NETCFG_BYTES + 1];
-    match read_eth0_addr_list(&mut buf) {
-        Err(err) => {
+    if has_net {
+        let mut push_eth_cidr =
+            |name: &str, cidr_str: &str, running: bool| -> Result<(), c_int> {
+                let Some((addr, prefix)) = parse_ipv4_cidr(cidr_str) else {
+                    return Err(errno::EIO);
+                };
+                let mask = prefix_mask(prefix);
+                let broad = broadcast_addr(addr, mask);
+                let mut eth_flags = (IFF_UP | IFF_BROADCAST) as c_uint;
+                if running {
+                    eth_flags |= IFF_RUNNING as c_uint;
+                }
+                let Some(eth_node) = alloc_entry(name, eth_flags, addr, mask, Some(broad)) else {
+                    return Err(errno::ENOMEM);
+                };
+                push_node(eth_node)
+            };
+
+        let mut buf = [0u8; MAX_NETCFG_BYTES + 1];
+        let mut loaded_from_status = false;
+        let load_res: Result<(), c_int> = (|| {
+            if let Some(len) = read_netstatus_ifaddrs(&mut buf)? {
+                loaded_from_status = true;
+                let text = str::from_utf8(&buf[..len]).map_err(|_| errno::EIO)?;
+                for raw_line in text.lines() {
+                    let line = raw_line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let mut parts = line.split_whitespace();
+                    let Some(name) = parts.next() else {
+                        continue;
+                    };
+                    let Some(cidr_str) = parts.next() else {
+                        continue;
+                    };
+                    let link_str = parts.next().unwrap_or("unknown");
+                    if cidr_str == "-" {
+                        continue;
+                    }
+                    push_eth_cidr(name, cidr_str, link_str != "down")?;
+                }
+            }
+            if !loaded_from_status {
+                if let Some(len) = read_eth0_addr_list(&mut buf)? {
+                    let text = str::from_utf8(&buf[..len]).map_err(|_| errno::EIO)?;
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty()
+                        && trimmed != "Not configured"
+                        && trimmed != "Device not found"
+                    {
+                        for raw_line in trimmed.lines() {
+                            let line = raw_line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            push_eth_cidr("eth0", line, true)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(err) = load_res {
             unsafe {
                 freeifaddrs(head);
             }
             platform::ERRNO.set(err);
             return -1;
-        }
-        Ok(None) => {}
-        Ok(Some(len)) => {
-            let Ok(text) = str::from_utf8(&buf[..len]) else {
-                unsafe {
-                    freeifaddrs(head);
-                }
-                platform::ERRNO.set(errno::EIO);
-                return -1;
-            };
-            let trimmed = text.trim();
-            if !trimmed.is_empty() && trimmed != "Not configured" && trimmed != "Device not found" {
-                for raw_line in trimmed.lines() {
-                    let line = raw_line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let Some((addr, prefix)) = parse_ipv4_cidr(line) else {
-                        unsafe {
-                            freeifaddrs(head);
-                        }
-                        platform::ERRNO.set(errno::EIO);
-                        return -1;
-                    };
-                    let mask = prefix_mask(prefix);
-                    let broad = broadcast_addr(addr, mask);
-                    let eth_flags = (IFF_UP | IFF_BROADCAST | IFF_RUNNING) as c_uint;
-                    let Some(eth_node) = alloc_entry("eth0", eth_flags, addr, mask, Some(broad))
-                    else {
-                        unsafe {
-                            freeifaddrs(head);
-                        }
-                        platform::ERRNO.set(errno::ENOMEM);
-                        return -1;
-                    };
-                    if let Err(err) = push_node(eth_node) {
-                        unsafe {
-                            freeifaddrs(head);
-                        }
-                        platform::ERRNO.set(err);
-                        return -1;
-                    }
-                }
-            }
         }
     }
 

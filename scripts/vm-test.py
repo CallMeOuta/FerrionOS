@@ -4463,7 +4463,7 @@ def test_driver_namespaces(vm, args):
 
 
 # Network schemes config/login-namespace.toml leaves out of `netless`'s namespace.
-NETWORK_SCHEMES = ["ip", "icmp", "tcp", "udp"]
+NETWORK_SCHEMES = ["ip", "icmp", "tcp", "udp", "netstatus"]
 
 
 def test_login_namespace(vm, args):
@@ -8800,8 +8800,8 @@ def test_net_hardening(args, out):
             vm = VM(args, boot_out, qemu_flags=peer.qemu_flags(card), make=("net=no",))
             if not root_shell(vm, args.timeout):
                 return False, f"boot {boot}: no root shell on the serial console; see {boot_out}"
-            # dhcpd starts in the background; wait until it has exited.
-            _, text = run_status(vm, "bash -c 'for i in $(seq 600); do grep -q dhcpd /scheme/sys/context || break; "
+            _, text = run_status(vm, "bash -c 'for i in $(seq 200); do "
+                                     "grep -q \"/\" /scheme/netcfg/ifaces/eth0/addr/list 2>/dev/null && break; "
                                      "sleep 0.1; done; cat /etc/net/dns; echo; cat /scheme/netcfg/ifaces/eth0/addr/list'", 90)
             (boot_out / "dhcp.txt").write_text(text)
             configured = re.findall(r"(?m)^\s*(\d+\.\d+\.\d+\.\d+(?:/\d+)?)\s*$", text)
@@ -11024,7 +11024,7 @@ SCOPE_LINKS = ("cd /home/user/scope && ln -s /home/user/.ssh to-ssh && ln -s ins
                "ln -s ../.. d/up && ln -s ../in d/back && ln -s ../../x d2/sub/l && mv d2/sub/l l2 && mv p/q/old old2")
 SCOPE_LINKS_OUT = {"/home/user/scope/to-ssh", "/home/user/scope/d/up", "/home/user/scope/l2", "/home/user/scope/old2"}
 SCOPE_SCHEMES = {"event", "memory", "pipe", "time", "rand", "null", "zero", "sys", "proc", "uds_stream", "uds_dgram",
-                 "eventfd", "timerfd", "ip", "icmp", "tcp", "udp", "file", "shm"}
+                 "eventfd", "timerfd", "ip", "icmp", "tcp", "udp", "netstatus", "file", "shm"}
 SCOPE_TOP = {"bin", "dev", "etc", "home", "include", "lib", "share", "ssl", "tmp", "usr", "var"}
 SCOPE_VARS = {"PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "COLUMNS", "LINES", "USER", "LOGNAME", "HOME", "TMPDIR"}
 
@@ -13502,13 +13502,24 @@ def test_ifaddrs(vm, args):
         found = vm.wait_serial(rf"(?s)\n(.*)ifa-{tag}-(\d+)", 45, mark)
         return (int(found.group(2)), found.group(1)) if found else (None, vm.text(mark))
 
+    wait_rc, wait_out = run_user(
+        "wait",
+        'ok=0; for i in $(seq 120); do '
+        'a=$(cat /scheme/netstatus/ifaddrs 2>/dev/null); '
+        'if echo "$a" | grep -q "/"; then echo "$a"; ok=1; break; fi; '
+        'sleep 0.25; done; [ "$ok" = 1 ]',
+    )
+    if wait_rc != 0:
+        return False, f"user did not see eth0 lease via /scheme/netstatus/ifaddrs: {wait_out.strip()[-120:]}"
+
     user_rc, user_out = run_user("u", "/usr/bin/ifaddrs-probe")
     (vm.out / "ifaddrs-user.txt").write_text(user_out)
     user_p = parse_ifaddrs_probe(user_out)
     if user_rc != 0 or user_p["error"] is not None:
         return False, f"user ifaddrs-probe failed (rc={user_rc}): {user_p['error'] or user_out.strip()[-160:]}"
     ulo = user_p["ifaces"].get("lo")
-    if not ulo or ulo["flags"] != 0x49 or "eth0" in user_p["ifaces"] or user_p["total"] != 1:
+    ueth0 = user_p["ifaces"].get("eth0")
+    if not ulo or ulo["flags"] != 0x49 or not ueth0 or ueth0["addr"] in ("none", "0.0.0.0") or ueth0["flags"] != 0x43 or user_p["total"] != 2:
         return False, f"user ifaddrs mismatch: {user_p}"
 
     nonet_rc, nonet_out = run_user("nn", "ferrion-run --no-network -- /usr/bin/ifaddrs-probe")
@@ -13519,6 +13530,14 @@ def test_ifaddrs(vm, args):
     nlo = nonet_p["ifaces"].get("lo")
     if not nlo or (nlo["flags"] & 0x1) != 0 or (nlo["flags"] & 0x8) == 0 or "eth0" in nonet_p["ifaces"] or nonet_p["total"] != 1:
         return False, f"no-network ifaddrs mismatch: {nonet_p}"
+
+    nonet_st_rc, nonet_st_out = run_user("nnst", "ferrion-run --no-network -- ferrion network status --json")
+    if nonet_st_rc != 0 or '"online":false' not in nonet_st_out.replace(" ", ""):
+        return False, f"no-network ferrion network status mismatch (rc={nonet_st_rc}): {nonet_st_out.strip()[-160:]}"
+
+    udown_rc, udown_out = run_user("udown", "ferrion network down --yes")
+    if udown_rc != 4:
+        return False, f"non-root ferrion network down expected rc 4, got {udown_rc}: {udown_out.strip()[-120:]}"
 
     since = vm.mark()
     vm.type("exit\n")
@@ -13563,8 +13582,8 @@ def test_ifaddrs(vm, args):
 
     return True, (
         f"root lo(0x{lo['flags']:x})+eth0({eth0['addr']} 0x{eth0['flags']:x}), "
-        f"user lo(0x{ulo['flags']:x}) only, "
-        f"ferrion-run --no-network lo(0x{nlo['flags']:x}) without IFF_UP"
+        f"user lo(0x{ulo['flags']:x})+eth0({ueth0['addr']} 0x{ueth0['flags']:x}), "
+        f"ferrion-run --no-network lo(0x{nlo['flags']:x}) without IFF_UP and offline status"
     )
 
 

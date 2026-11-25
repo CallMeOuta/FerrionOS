@@ -1328,7 +1328,7 @@ def run_net_no_lease(args, out, ctx):
             return False, f"no root shell on serial console; see {boot_out}"
         _, addr_out = ctx["run_status"](
             vm,
-            "bash -c 'for i in $(seq 80); do grep -q dhcpd /scheme/sys/context || break; sleep 0.2; done; cat /scheme/netcfg/ifaces/eth0/addr/list'",
+            "bash -c 'sleep 4; cat /scheme/netcfg/ifaces/eth0/addr/list'",
             45,
         )
         rows_before = context_snapshot(vm, ctx["run_status"])
