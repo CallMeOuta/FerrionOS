@@ -1,0 +1,59 @@
+Source: https://download.gnome.org/sources/loupe/51/loupe-51.2.tar.xz
+License: GPL-3.0-or-later
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 88ea2a1..1ed812e 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -40,7 +40,6 @@ gufo = { version = "0.5.4", features = ["chrono"] }
+ gvdb-macros = "0.1.6"
+ indexmap = "2.0.0"
+ libc = "0.2.158"
+-libgweather = "4.8.0"
+ moxcms = "0.8.1"
+ strum = { version = "0.28.0", features = ["derive"] }
+ thiserror = "2.0.3"
+diff --git a/meson.build b/meson.build
+index b9342ab..394243f 100644
+--- a/meson.build
++++ b/meson.build
+@@ -13,7 +13,6 @@ gnome = import('gnome')
+ 
+ dependency('gtk4', version: '>=4.16.0')
+ dependency('libadwaita-1', version: '>=1.8.0')
+-dependency('gweather4', version: '>=4.0.0')
+ # Required by glycin crate
+ dependency('libseccomp', version: '>= 2.5.0')
+ 
+diff --git a/src/metadata.rs b/src/metadata.rs
+index 21670e4..7482433 100644
+--- a/src/metadata.rs
++++ b/src/metadata.rs
+@@ -425,26 +425,7 @@ impl Metadata {
+     ///
+     /// Falls back to coordinates
+     pub fn gps_location_place(&self) -> Option<String> {
+-        if let Some(location) = self.gps_location() {
+-            if let Some(world) = libgweather::Location::world() {
+-                let lat = location.lat.0;
+-                let lon = location.lon.0;
+-                let nearest_city = world.find_nearest_city(lat, lon);
+-                let location_exact = libgweather::Location::new_detached("", None, lat, lon);
+-
+-                // do not use city if more than 15 km away
+-                if nearest_city.distance(&location_exact) < 15.
+-                    && let (Some(city), Some(country)) =
+-                        (nearest_city.city_name(), nearest_city.country_name())
+-                {
+-                    return Some(format!("{city}, {country}"));
+-                }
+-            }
+-
+-            self.gps_location_display()
+-        } else {
+-            None
+-        }
++        self.gps_location_display()
+     }
+ 
+     pub fn pixel_density(&self) -> Option<physical_dimension::PixelDensity> {
