@@ -1,29 +1,124 @@
 FerrionOS change to userutils (MIT license, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88 with ferrion-login-name.patch applied:
+- move the /etc/login_schemes.toml namespace builder (apply_login_schemes) into src/lib.rs so login and su share one implementation;
 - login applies the account's scheme namespace from /etc/login_schemes.toml to every login, with or without a password, through one shared login_session helper.
 
 diff --git a/src/bin/login.rs b/src/bin/login.rs
-index d48c225..70619ce 100644
+index d48c225..ca1e50b 100644
 --- a/src/bin/login.rs
 +++ b/src/bin/login.rs
-@@ -117,6 +117,31 @@ fn load_config_schemes(user: &User<redox_users::auth::Full>) -> Option<Vec<Strin
-         .map(|cfg| cfg.schemes.clone())
- }
+@@ -1,7 +1,6 @@
+ #[macro_use]
+ extern crate clap;
  
+-use libredox::error::Result;
+ use std::fs::File;
+ use std::io::{self, Write};
+ use std::str;
+@@ -9,7 +8,7 @@ use std::str;
+ use extra::option::OptionalExt;
+ use redox_users::{All, AllUsers, Config, User};
+ use termion::input::TermRead;
+-use userutils::spawn_shell;
++use userutils::{apply_login_schemes, spawn_shell};
+ 
+ const _MAN_PAGE: &'static str = /* @MANSTART{login} */
+     r#"
+@@ -34,87 +33,29 @@ AUTHOR
+ const ISSUE_FILE: &'static str = "/etc/issue";
+ const MOTD_FILE: &'static str = "/etc/motd";
+ 
+-// TODO: Move to redox_users once the definition solidifies.
+-const DEFAULT_SCHEMES: [&'static str; 26] = [
+-    // Kernel schemes
+-    "debug",
+-    "event",
+-    "memory",
+-    "pipe",
+-    "serio",
+-    "irq",
+-    "time",
+-    "sys",
+-    // Base schemes
+-    "rand",
+-    "null",
+-    "zero",
+-    "log",
+-    // Network schemes
+-    "ip",
+-    "icmp",
+-    "tcp",
+-    "udp",
+-    // IPC schemes
+-    "shm",
+-    "chan",
+-    "uds_stream",
+-    "uds_dgram",
+-    // File schemes
+-    "file",
+-    // Display schemes
+-    "display.vesa",
+-    "display*",
+-    // Other schemes
+-    "pty",
+-    "sudo",
+-    "audio",
+-];
+-pub fn apply_login_schemes(
 +/// Prints the message of the day, then runs the user's shell inside the namespace
 +/// `/etc/login_schemes.toml` gives the user, and returns to the previous namespace
 +/// once the shell exits. Every successful login goes through here.
 +fn login_session(
-+    user: &User<redox_users::auth::Full>,
+     user: &User<redox_users::auth::Full>,
+-    default_schemes: &[&str],
+-) -> Result<libredox::Fd> {
+-    let schemes = match load_config_schemes(user) {
+-        Some(s) => s,
+-        _ => default_schemes.iter().map(|s| s.to_string()).collect(),
+-    };
+-
+-    let mut names: Vec<ioslice::IoSlice> = Vec::with_capacity(schemes.len());
+-    for scheme in schemes.iter() {
+-        names.push(ioslice::IoSlice::new(scheme.as_bytes()));
 +    stdout: &mut io::Stdout,
 +    stderr: &mut io::Stderr,
 +) {
 +    if let Ok(mut motd) = File::open(MOTD_FILE) {
 +        io::copy(&mut motd, stdout).r#try(stderr);
 +        stdout.flush().r#try(stderr);
-+    }
-+
-+    let before_ns_fd = apply_login_schemes(user, &DEFAULT_SCHEMES).unwrap_or_exit(1);
-+
+     }
+ 
+-    let ns_fd = libredox::call::mkns(&names)?;
+-    let before_ns_fd = libredox::Fd::new(libredox::call::setns(ns_fd)?);
++    let before_ns_fd = apply_login_schemes(user).unwrap_or_exit(1);
+ 
+-    Ok(before_ns_fd)
+-}
+-
+-fn load_config_schemes(user: &User<redox_users::auth::Full>) -> Option<Vec<String>> {
+-    use serde::{Deserialize, Serialize};
+-    use std::collections::BTreeMap;
+-    use std::fs;
+-
+-    const LOGIN_SCHEMES_FILE: &'static str = "/etc/login_schemes.toml";
+-
+-    #[derive(Debug, Clone, Serialize, Deserialize)]
+-    struct UserSchemeConfig {
+-        pub schemes: Vec<String>,
+-    }
+-
+-    #[derive(Debug, Clone, Serialize, Deserialize)]
+-    struct LoginConfig {
+-        #[serde(rename = "user_schemes")]
+-        pub user_schemes: BTreeMap<String, UserSchemeConfig>,
+-    }
+-
+-    let config_str = fs::read_to_string(LOGIN_SCHEMES_FILE).ok()?;
+-    let config: LoginConfig = toml::from_str(&config_str).ok()?;
+-
+-    config
+-        .user_schemes
+-        .get(&user.user)
+-        .map(|cfg| cfg.schemes.clone())
 +    let _ = libredox::call::fcntl(
 +        before_ns_fd.raw(),
 +        libredox::flag::F_SETFD as usize,
@@ -32,12 +127,10 @@ index d48c225..70619ce 100644
 +    spawn_shell(user).unwrap_or_exit(1);
 +    let _ = libredox::call::fcntl(before_ns_fd.raw(), libredox::flag::F_SETFD as usize, 0);
 +    let _ = libredox::call::close(libredox::call::setns(before_ns_fd.into_raw()).unwrap_or_exit(1));
-+}
-+
+ }
+ 
  pub fn main() {
-     let mut stdout = io::stdout();
-     let mut stderr = io::stderr();
-@@ -162,28 +187,7 @@ pub fn main() {
+@@ -162,28 +103,7 @@ pub fn main() {
                  }
                  Some(user) => {
                      if user.is_passwd_blank() {
@@ -67,7 +160,7 @@ index d48c225..70619ce 100644
                          break;
                      }
  
-@@ -196,12 +200,7 @@ pub fn main() {
+@@ -196,12 +116,7 @@ pub fn main() {
                          stdout.flush().r#try(&mut stderr);
  
                          if user.verify_passwd(&password) {
@@ -81,3 +174,84 @@ index d48c225..70619ce 100644
                              break;
                          }
                      }
+diff --git a/src/lib.rs b/src/lib.rs
+index c49b6e5..085e7f6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -89,3 +89,76 @@ where
+     fchown(fd, user.uid as u32, user.gid as u32)?;
+     Ok(())
+ }
++
++const DEFAULT_SCHEMES: [&'static str; 26] = [
++    "debug",
++    "event",
++    "memory",
++    "pipe",
++    "serio",
++    "irq",
++    "time",
++    "sys",
++    "rand",
++    "null",
++    "zero",
++    "log",
++    "ip",
++    "icmp",
++    "tcp",
++    "udp",
++    "shm",
++    "chan",
++    "uds_stream",
++    "uds_dgram",
++    "file",
++    "display.vesa",
++    "display*",
++    "pty",
++    "sudo",
++    "audio",
++];
++
++fn load_config_schemes<T>(user: &User<T>) -> Option<Vec<String>> {
++    use serde::{Deserialize, Serialize};
++    use std::collections::BTreeMap;
++    use std::fs;
++
++    const LOGIN_SCHEMES_FILE: &'static str = "/etc/login_schemes.toml";
++
++    #[derive(Debug, Clone, Serialize, Deserialize)]
++    struct UserSchemeConfig {
++        pub schemes: Vec<String>,
++    }
++
++    #[derive(Debug, Clone, Serialize, Deserialize)]
++    struct LoginConfig {
++        #[serde(rename = "user_schemes")]
++        pub user_schemes: BTreeMap<String, UserSchemeConfig>,
++    }
++
++    let config_str = fs::read_to_string(LOGIN_SCHEMES_FILE).ok()?;
++    let config: LoginConfig = toml::from_str(&config_str).ok()?;
++
++    config
++        .user_schemes
++        .get(&user.user)
++        .map(|cfg| cfg.schemes.clone())
++}
++
++pub fn apply_login_schemes<T>(user: &User<T>) -> SysResult<libredox::Fd> {
++    let schemes = match load_config_schemes(user) {
++        Some(s) => s,
++        _ => DEFAULT_SCHEMES.iter().map(|s| s.to_string()).collect(),
++    };
++
++    let mut names: Vec<ioslice::IoSlice> = Vec::with_capacity(schemes.len());
++    for scheme in schemes.iter() {
++        names.push(ioslice::IoSlice::new(scheme.as_bytes()));
++    }
++
++    let ns_fd = libredox::call::mkns(&names)?;
++    let before_ns_fd = libredox::Fd::new(libredox::call::setns(ns_fd)?);
++
++    Ok(before_ns_fd)
++}

@@ -1,12 +1,35 @@
 FerrionOS change to userutils (MIT licence, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88:
-- after the sudo daemon accepts the root password in su, hand over the caller's process handle to obtain root credentials, and enter the root namespace only when targeting root (keeping the caller's namespace for any other target), exiting with an error if any step fails.
+- when root runs su to a non-root user, apply that user's /etc/login_schemes.toml namespace via userutils::apply_login_schemes and close the prior namespace handle before spawning the shell, keeping root's namespace when targeting root;
+- after the sudo daemon accepts the root password in su for a non-root caller, hand over the caller's process handle to obtain root credentials, enter the root namespace only when targeting root, and narrow the caller's current namespace via userutils::apply_login_schemes for any non-root target, closing the prior namespace handle and exiting with an error if any step fails.
 
 diff --git a/src/bin/su.rs b/src/bin/su.rs
-index 49c3496..740acbf 100644
+index 49c3496..9691121 100644
 --- a/src/bin/su.rs
 +++ b/src/bin/su.rs
-@@ -61,7 +61,8 @@ pub fn main() {
+@@ -10,7 +10,7 @@ use libredox::flag::O_CLOEXEC;
+ use redox_users::{All, AllUsers, Config, get_uid};
+ use syscall::EPERM;
+ use termion::input::TermRead;
+-use userutils::spawn_shell;
++use userutils::{apply_login_schemes, spawn_shell};
+ 
+ const _MAN_PAGE: &'static str = /* @MANSTART{su} */
+     r#"
+@@ -59,9 +59,21 @@ pub fn main() {
+     // Same if the user we're being asked to login as doesn't have a password.
+     if uid == 0 {
          writeln!(stdout).unwrap_or_exit(1);
++        if user.uid != 0 {
++            match apply_login_schemes(user) {
++                Ok(before_ns_fd) => {
++                    let _ = libredox::call::close(before_ns_fd.into_raw());
++                }
++                Err(err) => {
++                    let _ = writeln!(stderr, "su: failed to apply login namespace: {err}");
++                    exit(1);
++                }
++            }
++        }
          exit(spawn_shell(user).unwrap_or_exit(1));
      } else {
 -        let file = libredox::call::open("/scheme/sudo/su", O_CLOEXEC, 0).unwrap();
@@ -15,7 +38,7 @@ index 49c3496..740acbf 100644
  
          write!(stdout, "password: ").unwrap_or_exit(1);
          stdout.flush().unwrap_or_exit(1);
-@@ -72,8 +73,43 @@ pub fn main() {
+@@ -72,8 +84,53 @@ pub fn main() {
              .r#try(&mut stderr)
              .unwrap_or(String::new());
  
@@ -52,6 +75,16 @@ index 49c3496..740acbf 100644
 +                        }
 +                        Err(err) => {
 +                            let _ = writeln!(stderr, "su: failed to enter root namespace: {err}");
++                            exit(1);
++                        }
++                    }
++                } else {
++                    match apply_login_schemes(user) {
++                        Ok(before_ns_fd) => {
++                            let _ = libredox::call::close(before_ns_fd.into_raw());
++                        }
++                        Err(err) => {
++                            let _ = writeln!(stderr, "su: failed to apply login namespace: {err}");
 +                            exit(1);
 +                        }
 +                    }
