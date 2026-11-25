@@ -1296,7 +1296,8 @@ impl<'a> ProcScheme<'a> {
                     // Rlimit verb with CallFlags not containing READ or WRITE is invalid.
                     ProcCall::Rlimit => Response::ready_err(EINVAL, op),
                     ProcCall::SetResugid => Ready(Response::new(
-                        self.on_setresugid(fd_pid, payload).map(|()| 0),
+                        self.on_setresugid(fd_pid, ProcessId(caller.pid), payload)
+                            .map(|()| 0),
                         op,
                     )),
                     ProcCall::Kill | ProcCall::Sigq => {
@@ -2073,7 +2074,12 @@ impl<'a> ProcScheme<'a> {
         }
         // TODO: notify parent's other waiters if ECHILD would now occur?
     }
-    fn on_setresugid(&mut self, pid: ProcessId, raw_buf: &[u8]) -> Result<()> {
+    fn on_setresugid(
+        &mut self,
+        pid: ProcessId,
+        caller_pid: ProcessId,
+        raw_buf: &[u8],
+    ) -> Result<()> {
         let [new_ruid, new_euid, new_suid, new_rgid, new_egid, new_sgid] = {
             let raw_ids: [u32; 6] = plain::slice_from_bytes::<u32>(raw_buf)
                 .unwrap()
@@ -2087,7 +2093,17 @@ impl<'a> ProcScheme<'a> {
             .ok_or(Error::new(ESRCH))?
             .borrow_mut();
 
-        if proc.euid != 0 {
+        if caller_pid != pid {
+            let caller_euid = self
+                .processes
+                .get(&caller_pid)
+                .ok_or(Error::new(ESRCH))?
+                .borrow()
+                .euid;
+            if caller_euid != 0 {
+                return Err(Error::new(EPERM));
+            }
+        } else if proc.euid != 0 {
             if ![new_ruid, new_euid, new_suid]
                 .iter()
                 .filter_map(|x| *x)
