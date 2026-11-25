@@ -18,4 +18,5 @@ fi
 
 COOKBOOK_MESON_FLAGS+=(-Dx11=false -Dtests=false)
 cookbook_meson
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/libepoxy/COPYING"
 """
