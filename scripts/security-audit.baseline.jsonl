@@ -144,81 +144,81 @@
 {"check": "sources", "subject": "recipes/archives/lz4", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/archives/xz", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/archives/zstd", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/artwork/pop-wallpapers", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/artwork/pop-wallpapers/recipe.toml"}
+{"check": "sources", "subject": "recipes/artwork/pop-wallpapers", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/artwork/pop-wallpapers/recipe.toml"}
 {"check": "sources", "subject": "recipes/artwork/ubuntu-wallpapers", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/core/base", "status": "pass", "note": "path source inside repository", "fix": ""}
-{"check": "sources", "subject": "recipes/core/binutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/binutils/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/binutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/bootloader", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/core/contain", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/contain/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/coreutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/coreutils/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/dash", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/dash/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/contain", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/coreutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/dash", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/drivers", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/extrautils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/core/findutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/findutils/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/findutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/installer", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/core/ion", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/ion/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/ion", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/kernel", "status": "pass", "note": "path source inside repository", "fix": ""}
-{"check": "sources", "subject": "recipes/core/netdb", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/netdb/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/netutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/netutils/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/pkgutils", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/pkgutils/recipe.toml"}
-{"check": "sources", "subject": "recipes/core/profiled", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/profiled/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/netdb", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/netutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/pkgutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/core/profiled", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/redoxfs", "status": "pass", "note": "path source inside repository", "fix": ""}
 {"check": "sources", "subject": "recipes/core/relibc", "status": "pass", "note": "path source inside repository", "fix": ""}
-{"check": "sources", "subject": "recipes/core/strace", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/core/strace/recipe.toml"}
+{"check": "sources", "subject": "recipes/core/strace", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/userutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/core/uutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/cosmic/cosmic-edit", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/cosmic/cosmic-files", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/cosmic/cosmic-monitor", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-monitor/recipe.toml"}
-{"check": "sources", "subject": "recipes/cosmic/cosmic-reader", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-reader/recipe.toml"}
-{"check": "sources", "subject": "recipes/cosmic/cosmic-settings", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-settings/recipe.toml"}
-{"check": "sources", "subject": "recipes/cosmic/cosmic-store", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-store/recipe.toml"}
-{"check": "sources", "subject": "recipes/cosmic/cosmic-term", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-term/recipe.toml"}
-{"check": "sources", "subject": "recipes/cosmic/cosmic-text", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/cosmic/cosmic-text/recipe.toml"}
+{"check": "sources", "subject": "recipes/cosmic/cosmic-monitor", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/cosmic/cosmic-monitor/recipe.toml"}
+{"check": "sources", "subject": "recipes/cosmic/cosmic-reader", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/cosmic/cosmic-reader/recipe.toml"}
+{"check": "sources", "subject": "recipes/cosmic/cosmic-settings", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/cosmic/cosmic-settings/recipe.toml"}
+{"check": "sources", "subject": "recipes/cosmic/cosmic-store", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/cosmic/cosmic-store/recipe.toml"}
+{"check": "sources", "subject": "recipes/cosmic/cosmic-term", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/cosmic/cosmic-text", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/cosmic/cosmic-text/recipe.toml"}
 {"check": "sources", "subject": "recipes/data/ca-certificates", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/data/generaluser-gs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/data/generaluser-gs/recipe.toml"}
+{"check": "sources", "subject": "recipes/data/generaluser-gs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/data/generaluser-gs/recipe.toml"}
 {"check": "sources", "subject": "recipes/data/shared-mime-info", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/data/terminfo", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/data/terminfo/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/cmatrix", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/cmatrix/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/cpal", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/cpal/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/dynamic-example", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/dynamic-example/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/exampled", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/exampled/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/glutin", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/glutin/recipe.toml"}
+{"check": "sources", "subject": "recipes/data/terminfo", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/demos/cmatrix", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/cmatrix/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/cpal", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/cpal/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/dynamic-example", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/dynamic-example/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/exampled", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/exampled/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/glutin", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/glutin/recipe.toml"}
 {"check": "sources", "subject": "recipes/demos/iced", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/demos/orbclient", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/orbclient/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/pixelcannon", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/pixelcannon/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/softbuffer", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/softbuffer/recipe.toml"}
-{"check": "sources", "subject": "recipes/demos/winit", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/demos/winit/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/orbclient", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/orbclient/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/pixelcannon", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/pixelcannon/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/softbuffer", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/softbuffer/recipe.toml"}
+{"check": "sources", "subject": "recipes/demos/winit", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/demos/winit/recipe.toml"}
 {"check": "sources", "subject": "recipes/dev/autoconf", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/automake", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/dev/binutils-gdb", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/binutils-gdb/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/binutils-gdb", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/binutils-gdb/recipe.toml"}
 {"check": "sources", "subject": "recipes/dev/cmake", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/fontconfig", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/dev/gcc13", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/gcc13/recipe.toml"}
-{"check": "sources", "subject": "recipes/dev/gdbserver", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/gdbserver/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/gcc13", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/dev/gdbserver", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/gdbserver/recipe.toml"}
 {"check": "sources", "subject": "recipes/dev/gdk-pixbuf", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/git", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/gitoxide", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/gnu-make", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/dev/hello-world-examples", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/hello-world-examples/recipe.toml"}
-{"check": "sources", "subject": "recipes/dev/jq", "status": "fail", "note": "tar source without blake3: any content is accepted", "fix": "add blake3 = \"<hash>\" to [source] in recipes/dev/jq/recipe.toml"}
-{"check": "sources", "subject": "recipes/dev/lci", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/lci/recipe.toml"}
-{"check": "sources", "subject": "recipes/dev/libtool", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/libtool/recipe.toml"}
-{"check": "sources", "subject": "recipes/dev/llvm18", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/llvm18/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/hello-world-examples", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/hello-world-examples/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/jq", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/dev/lci", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/lci/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/libtool", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/libtool/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/llvm18", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/llvm18/recipe.toml"}
 {"check": "sources", "subject": "recipes/dev/llvm21", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/lua54", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/luajit", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/dev/luarocks", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/luarocks/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/luarocks", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/luarocks/recipe.toml"}
 {"check": "sources", "subject": "recipes/dev/nasm", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/patch", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/dev/pciids", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/pciids/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/pciids", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/pciids/recipe.toml"}
 {"check": "sources", "subject": "recipes/dev/php84", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/pkg-config", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/python312", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/dev/redoxer", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/redoxer/recipe.toml"}
-{"check": "sources", "subject": "recipes/dev/rust", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/rust/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/redoxer", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/redoxer/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/rust", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/dev/rustpython", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/dev/wasi-libc", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/dev/wasi-libc/recipe.toml"}
+{"check": "sources", "subject": "recipes/dev/wasi-libc", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/dev/wasi-libc/recipe.toml"}
 {"check": "sources", "subject": "recipes/dri/drm-info", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/dejavu", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/freefont", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -227,14 +227,15 @@
 {"check": "sources", "subject": "recipes/fonts/noto-color-emoji", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/noto-sans-cjk", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/fonts/ttf-hack", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/graphics/procedural-wallpapers-rs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/graphics/procedural-wallpapers-rs/recipe.toml"}
+{"check": "sources", "subject": "recipes/graphics/procedural-wallpapers-rs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/graphics/procedural-wallpapers-rs/recipe.toml"}
 {"check": "sources", "subject": "recipes/gui/orbdata", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/gui/orbital", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/gui/orbital/recipe.toml"}
-{"check": "sources", "subject": "recipes/gui/orbterm", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/gui/orbterm/recipe.toml"}
+{"check": "sources", "subject": "recipes/gui/orbital", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/gui/orbterm", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/gui/orbutils", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/icons/cosmic-icons", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/icons/hicolor-icon-theme", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/icons/hicolor-icon-theme/recipe.toml"}
-{"check": "sources", "subject": "recipes/icons/pop-icon-theme", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/icons/pop-icon-theme/recipe.toml"}
+{"check": "sources", "subject": "recipes/icons/hicolor-icon-theme", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/icons/pop-icon-theme", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/appstream", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/atk", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/cairo", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/dav1d", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -245,16 +246,21 @@
 {"check": "sources", "subject": "recipes/libs/freetype2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/fribidi", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/glib", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/graphene", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/gstreamer", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/gtk4", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/harfbuzz", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/jansson", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/json-c", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/json-c/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/json-c", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/libs/json-c/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/libadwaita", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libarchive", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/libass", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libbrotli", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/libcosmic", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/libcosmic/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/libcosmic", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/libs/libcosmic/recipe.toml"}
 {"check": "sources", "subject": "recipes/libs/libdrm", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libffi", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libflac", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/libfyaml", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libglvnd", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libgmp", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libiconv", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -267,22 +273,25 @@
 {"check": "sources", "subject": "recipes/libs/libonig", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libopus", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/liborbital", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/libplacebo", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libpng", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libpsl", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libsodium", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libssh2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/liburcu", "status": "fail", "note": "tar source without blake3: any content is accepted", "fix": "add blake3 = \"<hash>\" to [source] in recipes/libs/liburcu/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/libtiff", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/liburcu", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libuv", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libvorbis", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/libxml2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/lua-compat-53", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/lua-compat-53/recipe.toml"}
-{"check": "sources", "subject": "recipes/libs/luv", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/luv/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/libxmlb", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
+{"check": "sources", "subject": "recipes/libs/lua-compat-53", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/libs/lua-compat-53/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/luv", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/libs/luv/recipe.toml"}
 {"check": "sources", "subject": "recipes/libs/mesa", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/mesa-glu", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/mpc", "status": "fail", "note": "tar source without blake3: any content is accepted", "fix": "add blake3 = \"<hash>\" to [source] in recipes/libs/mpc/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/mpc", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/ncurses", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/nghttp2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/openssl1", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/openssl1/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/openssl1", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/libs/openssl1/recipe.toml"}
 {"check": "sources", "subject": "recipes/libs/openssl3", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/opusfile", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/pango", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -290,9 +299,9 @@
 {"check": "sources", "subject": "recipes/libs/pcre2", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/pixman", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/readline", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/redox-fatfs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/redox-fatfs/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/redox-fatfs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/libs/redox-fatfs/recipe.toml"}
 {"check": "sources", "subject": "recipes/libs/sdl-gfx", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/libs/sdl1", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/libs/sdl1/recipe.toml"}
+{"check": "sources", "subject": "recipes/libs/sdl1", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl1-image", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl1-mixer", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/sdl1-ttf", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
@@ -306,75 +315,76 @@
 {"check": "sources", "subject": "recipes/libs/utf8proc", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/venus-protocol", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/libs/zlib", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/math/orbcalculator", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/math/orbcalculator/recipe.toml"}
+{"check": "sources", "subject": "recipes/math/orbcalculator", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/math/orbcalculator/recipe.toml"}
 {"check": "sources", "subject": "recipes/net/curl", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/net/http/simple-http-server", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/net/http/simple-http-server/recipe.toml"}
-{"check": "sources", "subject": "recipes/net/nginx", "status": "fail", "note": "tar source without blake3: any content is accepted", "fix": "add blake3 = \"<hash>\" to [source] in recipes/net/nginx/recipe.toml"}
+{"check": "sources", "subject": "recipes/net/http/simple-http-server", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/net/http/simple-http-server/recipe.toml"}
+{"check": "sources", "subject": "recipes/net/nginx", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/net/openssh", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/net/redox-ssh", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/net/redox-ssh/recipe.toml"}
+{"check": "sources", "subject": "recipes/net/redox-ssh", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/net/redox-ssh/recipe.toml"}
 {"check": "sources", "subject": "recipes/net/rsync", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/net/wget", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/other/book", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/other/book/recipe.toml"}
-{"check": "sources", "subject": "recipes/other/cookbook", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/other/cookbook/recipe.toml"}
-{"check": "sources", "subject": "recipes/other/website", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/other/website/recipe.toml"}
-{"check": "sources", "subject": "recipes/sound/freepats", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/sound/freepats/recipe.toml"}
-{"check": "sources", "subject": "recipes/sound/rodioplay", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/sound/rodioplay/recipe.toml"}
-{"check": "sources", "subject": "recipes/sound/timidity", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/sound/timidity/recipe.toml"}
+{"check": "sources", "subject": "recipes/other/book", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/other/book/recipe.toml"}
+{"check": "sources", "subject": "recipes/other/cookbook", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/other/cookbook/recipe.toml"}
+{"check": "sources", "subject": "recipes/other/website", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/other/website/recipe.toml"}
+{"check": "sources", "subject": "recipes/sound/freepats", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/sound/freepats/recipe.toml"}
+{"check": "sources", "subject": "recipes/sound/rodioplay", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/sound/rodioplay/recipe.toml"}
+{"check": "sources", "subject": "recipes/sound/timidity", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/sound/timidity/recipe.toml"}
 {"check": "sources", "subject": "recipes/terminal/bash", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/terminal/bash-completion", "status": "fail", "note": "tar source without blake3: any content is accepted", "fix": "add blake3 = \"<hash>\" to [source] in recipes/terminal/bash-completion/recipe.toml"}
+{"check": "sources", "subject": "recipes/terminal/bash-completion", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/terminal/fish-shell", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/terminal/nushell", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/tests/acid", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/acid/recipe.toml"}
-{"check": "sources", "subject": "recipes/tests/benchmarks", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/benchmarks/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/acid", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/acid/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/benchmarks", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/benchmarks/recipe.toml"}
 {"check": "sources", "subject": "recipes/tests/iperf3", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tests/openposixtestsuite", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/openposixtestsuite/recipe.toml"}
-{"check": "sources", "subject": "recipes/tests/os-test", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/os-test/recipe.toml"}
-{"check": "sources", "subject": "recipes/tests/redox-posix-tests", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/redox-posix-tests/recipe.toml"}
-{"check": "sources", "subject": "recipes/tests/schedrs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/schedrs/recipe.toml"}
-{"check": "sources", "subject": "recipes/tests/sysbench", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/sysbench/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/openposixtestsuite", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/openposixtestsuite/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/os-test", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/os-test/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/redox-posix-tests", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/redox-posix-tests/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/schedrs", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/schedrs/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/sysbench", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/sysbench/recipe.toml"}
 {"check": "sources", "subject": "recipes/tests/vttest", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tests/wasi-testsuite", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tests/wasi-testsuite/recipe.toml"}
+{"check": "sources", "subject": "recipes/tests/wasi-testsuite", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tests/wasi-testsuite/recipe.toml"}
 {"check": "sources", "subject": "recipes/text/diffutils", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/text/gawk", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/text/helix", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/text/helix/recipe.toml"}
+{"check": "sources", "subject": "recipes/text/helix", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/text/kibi", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/text/nano", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/text/sodium", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/text/sodium/recipe.toml"}
+{"check": "sources", "subject": "recipes/text/sodium", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/text/sodium/recipe.toml"}
 {"check": "sources", "subject": "recipes/text/vim", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tools/cleye", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/cleye/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/cleye", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/cleye/recipe.toml"}
 {"check": "sources", "subject": "recipes/tools/dos2unix", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/tools/fd", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/tools/file", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tools/friar", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/friar/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/friar", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/friar/recipe.toml"}
 {"check": "sources", "subject": "recipes/tools/gettext", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/tools/gnu-binutils", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/tools/gnu-grep", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tools/hf", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/hf/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/hf", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/hf/recipe.toml"}
 {"check": "sources", "subject": "recipes/tools/libc-bench", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tools/lsd", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/lsd/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/onefetch", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/onefetch/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/lsd", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/lsd/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/onefetch", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/onefetch/recipe.toml"}
 {"check": "sources", "subject": "recipes/tools/patchelf", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tools/pathfinder", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/pathfinder/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/pathfinder", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/pathfinder/recipe.toml"}
 {"check": "sources", "subject": "recipes/tools/perg", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/tools/periodictable", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/periodictable/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/powerline", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/powerline/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/ripgrep", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/ripgrep/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/periodictable", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/periodictable/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/powerline", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/powerline/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/ripgrep", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/ripgrep/recipe.toml"}
 {"check": "sources", "subject": "recipes/tools/rldd", "status": "pass", "note": "git source pinned by rev", "fix": ""}
 {"check": "sources", "subject": "recipes/tools/schismtracker", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/tools/sed", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
 {"check": "sources", "subject": "recipes/tools/shellharden", "status": "pass", "note": "git source pinned by rev", "fix": ""}
-{"check": "sources", "subject": "recipes/tools/shellstorm", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/shellstorm/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/smith", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/smith/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/tokei", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/tokei/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/twin-commander", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/twin-commander/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/uutils-grep", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/uutils-grep/recipe.toml"}
-{"check": "sources", "subject": "recipes/tools/uutils-sed", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tools/uutils-sed/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/shellstorm", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/shellstorm/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/smith", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/smith/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/tokei", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/tokei/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/twin-commander", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/twin-commander/recipe.toml"}
+{"check": "sources", "subject": "recipes/tools/uutils-grep", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/tools/uutils-sed", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tools/uutils-sed/recipe.toml"}
 {"check": "sources", "subject": "recipes/tui/goaccess", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tui/mdp", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tui/mdp/recipe.toml"}
+{"check": "sources", "subject": "recipes/tui/mdp", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tui/mdp/recipe.toml"}
 {"check": "sources", "subject": "recipes/tui/ncdu", "status": "pass", "note": "tar source pinned by blake3", "fix": ""}
-{"check": "sources", "subject": "recipes/tui/pls", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tui/pls/recipe.toml"}
-{"check": "sources", "subject": "recipes/tui/zoxide", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/tui/zoxide/recipe.toml"}
-{"check": "sources", "subject": "recipes/video/sdl-player", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<commit>\" to [source] in recipes/video/sdl-player/recipe.toml"}
+{"check": "sources", "subject": "recipes/tui/pls", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tui/pls/recipe.toml"}
+{"check": "sources", "subject": "recipes/tui/zoxide", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/tui/zoxide/recipe.toml"}
+{"check": "sources", "subject": "recipes/video/mpv", "status": "pass", "note": "git source pinned by rev", "fix": ""}
+{"check": "sources", "subject": "recipes/video/sdl-player", "status": "fail", "note": "git source without rev: it follows a branch", "fix": "add rev = \"<40-hex commit>\" to [source] in recipes/video/sdl-player/recipe.toml"}
 {"check": "downloads", "subject": "prebuilt toolchain", "status": "fail", "note": "toolchain tarball downloaded with no pinned hash (mk/prefix.mk:128)", "fix": "download it with ch_download (mk/ch.mk) and a pinned sha256"}
 {"check": "downloads", "subject": "prebuilt package key", "status": "fail", "note": "the key that verifies prebuilt packages is downloaded with no pinned hash (mk/prefix.mk:151)", "fix": "check the key in to the repository or pin its sha256 with ch_download"}
 {"check": "downloads", "subject": "build container base", "status": "fail", "note": "container starts from a tag, not a digest (podman/redox-base-containerfile:3)", "fix": "pin the base image as debian:trixie@sha256:<digest>"}

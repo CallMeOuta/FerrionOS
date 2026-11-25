@@ -9,8 +9,10 @@
 
 import json
 import os
+import re
 import stat
 import struct
+import subprocess
 import sys
 import tomllib
 from collections import Counter
@@ -20,6 +22,16 @@ ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "security-audit.baseline.jsonl"
 CHECKS = ("accounts", "sources", "downloads")
 ALL_CHECKS = ("accounts", "sources", "downloads", "files")
+CLOSURE_CONFIGS = (
+    "config/minimal.toml",
+    "config/desktop-minimal.toml",
+    "config/server.toml",
+    "config/x86_64/desktop.toml",
+    "config/x86_64/dev-parity.toml",
+)
+MAX_CLOSURE_RECIPES = 10_000
+GIT_REV_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+BLAKE3_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_IMAGE_ENTRIES = 200_000
 MAX_ELF_PHDRS = 256
 MAX_DYN_ENTRIES = 4096
@@ -39,11 +51,14 @@ DF_1_NOW = 0x1
 ELF_TYPES = {0: "ET_NONE", 1: "ET_REL", 2: "ET_EXEC", 3: "ET_DYN", 4: "ET_CORE"}
 USAGE = f"""Audits FerrionOS's configs, recipes, build files and mounted images for security findings.
 
-Usage: {sys.argv[0]} [--json] [--check <name>]... [--root <dir>]
-  --json          one JSON object per line: check, subject, status, note, fix
-  --check <name>  run only this check ({", ".join(ALL_CHECKS)}); repeatable
-  --root <dir>    mounted image root for the `files` check
-Exit code 1 when a `fail` line is absent from {BASELINE.relative_to(ROOT)}."""
+Usage: {sys.argv[0]} [--json] [--check <name>]... [--closure <config|all>]... [--repo-bin <path>] [--root <dir>]
+  --json               one JSON object per line: check, subject, status, note, fix
+  --check <name>       run only this check ({", ".join(ALL_CHECKS)}); repeatable
+  --closure <cfg|all>  check every source cooked for this config (or 'all' for the 5 release configs),
+                       including wip, with zero baseline; repeatable; requires target/release/repo
+  --repo-bin <path>    path to cookbook repo binary (default: target/release/repo)
+  --root <dir>         mounted image root for the `files` check
+Exit code 1 for any unpinned or unreadable closure source, otherwise when a `fail` line is absent from {BASELINE.relative_to(ROOT)}."""
 
 
 def line(check, subject, status, note, fix=""):
@@ -108,30 +123,76 @@ def check_accounts():
 
 # sources --------------------------------------------------------------------
 
-def check_sources():
+def check_sources(closures=(), repo_bin=None):
     out = []
     recipes = ROOT / "recipes"
-    for path in sorted(recipes.rglob("recipe.toml")):
-        if path.relative_to(recipes).parts[0] == "wip":
+    use_closure = bool(closures)
+    if use_closure:
+        binary = Path(repo_bin) if repo_bin else (ROOT / "target/release/repo")
+        paths = set()
+        for cfg in closures:
+            try:
+                result = subprocess.run(
+                    [str(binary), "cook-list",
+                     f"--filesystem={cfg}", "--with-package-deps", "--display=path"],
+                    cwd=ROOT, text=True, capture_output=True, check=True)
+                cfg_paths = {ROOT / p / "recipe.toml" for p in result.stdout.splitlines() if p.strip()}
+                if not cfg_paths:
+                    raise ValueError("cook-list returned no recipes")
+                paths.update(cfg_paths)
+            except (OSError, ValueError, subprocess.CalledProcessError) as err:
+                detail = err.stderr.strip() if isinstance(err, subprocess.CalledProcessError) else str(err)
+                out.append(line("sources", str(cfg), "fail", f"cannot resolve closure: {detail}",
+                                "build the cookbook and check the filesystem config"))
+    else:
+        paths = {p for p in recipes.rglob("recipe.toml")
+                 if p.relative_to(recipes).parts[0] != "wip"}
+    seen = set()
+    while paths:
+        if len(seen) >= MAX_CLOSURE_RECIPES:
+            out.append(line("sources", "recipes", "fail",
+                            f"recipe count exceeded bound {MAX_CLOSURE_RECIPES}"))
+            break
+        path = min(paths)
+        paths.remove(path)
+        path = path.resolve()
+        if path in seen:
             continue
-        subject = rel(path.parent)
+        seen.add(path)
         try:
+            path.relative_to(recipes)
+            subject = rel(path.parent)
             source = tomllib.loads(path.read_text()).get("source", {})
-        except (OSError, tomllib.TOMLDecodeError) as err:
-            out.append(line("sources", subject, "unknown", f"cannot parse recipe.toml: {err}"))
+        except (OSError, ValueError) as err:
+            try:
+                err_subject = rel(path)
+            except ValueError:
+                err_subject = path.name
+            out.append(line("sources", err_subject, "fail" if use_closure else "unknown",
+                            f"cannot parse recipe.toml: {err}"))
             continue
         if "git" in source:
-            if "rev" in source:
+            rev = source.get("rev", "")
+            if isinstance(rev, str) and GIT_REV_RE.match(rev):
                 out.append(line("sources", subject, "pass", "git source pinned by rev"))
+            elif isinstance(rev, str) and rev:
+                out.append(line("sources", subject, "fail",
+                                f"git source rev is not a full 40-hex commit: {rev}",
+                                f'set rev = "<40-hex commit>" in [source] in {rel(path)}'))
             else:
                 out.append(line("sources", subject, "fail", "git source without rev: it follows a branch",
-                                f"add rev = \"<commit>\" to [source] in {rel(path)}"))
+                                f'add rev = "<40-hex commit>" to [source] in {rel(path)}'))
         elif "tar" in source:
-            if "blake3" in source:
+            digest = source.get("blake3", "")
+            if isinstance(digest, str) and BLAKE3_RE.match(digest):
                 out.append(line("sources", subject, "pass", "tar source pinned by blake3"))
+            elif isinstance(digest, str) and digest:
+                out.append(line("sources", subject, "fail",
+                                f"tar source blake3 is not a 64-hex hash: {digest}",
+                                f'set blake3 = "<64-hex hash>" in [source] in {rel(path)}'))
             else:
                 out.append(line("sources", subject, "fail", "tar source without blake3: any content is accepted",
-                                f"add blake3 = \"<hash>\" to [source] in {rel(path)}"))
+                                f'add blake3 = "<64-hex hash>" to [source] in {rel(path)}'))
         elif "path" in source:
             target = (path.parent / source["path"]).resolve()
             if target.is_dir() and target.is_relative_to(ROOT):
@@ -140,7 +201,12 @@ def check_sources():
                 out.append(line("sources", subject, "fail",
                                 f"path source does not resolve to a directory inside this repository: {source['path']}",
                                 f"point [source] path in {rel(path)} at a directory under this repository"))
-    return out
+        elif use_closure and "same_as" in source:
+            paths.add(path.parent / source["same_as"] / "recipe.toml")
+            out.append(line("sources", subject, "info", f"shared source {source['same_as']}"))
+        elif use_closure:
+            out.append(line("sources", subject, "info", "local source; no remote download"))
+    return sorted(out, key=lambda row: row["subject"])
 
 
 # downloads ------------------------------------------------------------------
@@ -372,7 +438,7 @@ def check_files(image_root):
 # main -----------------------------------------------------------------------
 
 def main(argv):
-    as_json, only, image_root = False, [], None
+    as_json, only, closures, repo_bin, image_root = False, [], [], None, None
     args = iter(argv)
     for arg in args:
         if arg == "--json":
@@ -383,6 +449,20 @@ def main(argv):
                 print(USAGE, file=sys.stderr)
                 return 2
             only.append(name)
+        elif arg == "--closure":
+            cfg = next(args, None)
+            if not cfg:
+                print(USAGE, file=sys.stderr)
+                return 2
+            if cfg == "all":
+                closures.extend(CLOSURE_CONFIGS)
+            else:
+                closures.append(cfg)
+        elif arg == "--repo-bin":
+            repo_bin = next(args, None)
+            if not repo_bin:
+                print(USAGE, file=sys.stderr)
+                return 2
         elif arg == "--root":
             image_root = next(args, None)
             if not image_root:
@@ -391,13 +471,15 @@ def main(argv):
         else:
             print(USAGE, file=sys.stderr)
             return 0 if arg in ("-h", "--help") else 2
+    if closures and not only:
+        only = ["sources"]
     if "files" in only and not image_root:
         print(USAGE, file=sys.stderr)
         return 2
     active = list(only) if only else list(CHECKS) + (["files"] if image_root else [])
     run = {
         "accounts": check_accounts,
-        "sources": check_sources,
+        "sources": lambda: check_sources(closures, repo_bin),
         "downloads": check_downloads,
         "files": lambda: check_files(image_root),
     }
@@ -410,7 +492,8 @@ def main(argv):
                 b = json.loads(raw)
                 if b["status"] == "fail":
                     known.add((b["check"], b["subject"]))
-    new = [r for r in results if r["status"] == "fail" and (r["check"], r["subject"]) not in known]
+    new = [r for r in results if r["status"] == "fail"
+           and ((closures and r["check"] == "sources") or (r["check"], r["subject"]) not in known)]
 
     if as_json:
         for r in results:
@@ -423,9 +506,11 @@ def main(argv):
                          if counts[(name, s)]]
                 print(f"{name}: {', '.join(parts) or 'nothing checked'}")
         for r in new:
-            print(f"NEW FAIL {r['check']}: {r['subject']}: {r['note']}\n    fix: {r['fix']}")
+            label = "FAIL" if (closures and r["check"] == "sources") else "NEW FAIL"
+            print(f"{label} {r['check']}: {r['subject']}: {r['note']}\n    fix: {r['fix']}")
         if not new:
-            print("No fail outside the baseline. Details: --json")
+            print("Closure sources pinned. Details: --json" if closures else
+                  "No fail outside the baseline. Details: --json")
     return 1 if new else 0
 
 
