@@ -187,8 +187,8 @@ impl Smolnetd {
     }
 
     pub fn on_network_scheme_event(&mut self) -> Result<()> {
-        self.poll()?;
-        Ok(())
+        let timeout = self.poll()?;
+        self.arm_timer(timeout)
     }
 
     fn run_scheme_batches<F>(&mut self, mut step: F) -> Result<()>
@@ -197,9 +197,9 @@ impl Smolnetd {
     {
         for _ in 0..MAX_SCHEME_BATCHES_PER_EVENT {
             let more = step(self)?;
-            let _ = self.poll()?;
+            let timeout = self.poll()?;
             if !more {
-                return Ok(());
+                return self.arm_timer(timeout);
             }
         }
         self.pending_scheme_events = true;
@@ -246,9 +246,7 @@ impl Smolnetd {
         } else {
             timeout
         };
-        self.arm_timer(next)?;
-        //TODO: Fix network scheme to ensure events are not missed
-        self.on_network_scheme_event()
+        self.arm_timer(next)
     }
 
     pub fn on_netcfg_scheme_event(&mut self) -> Result<()> {
