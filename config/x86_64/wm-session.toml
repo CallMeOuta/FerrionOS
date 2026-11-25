@@ -9,6 +9,7 @@ desktop-layout-probe = "source"
 glycin = "source"
 glycin-load-probe = "source"
 gtk4-window-probe = "source"
+loupe = "source"
 session-probe = "source"
 xkeyboard-config = {}
 mesa = {}

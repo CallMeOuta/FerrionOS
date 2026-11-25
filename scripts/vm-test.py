@@ -12178,6 +12178,29 @@ def test_glycin_load(args, out):
 
 
 OWN_IMAGE["glycin-load"] = test_glycin_load
+
+
+def test_loupe_view(args, out):
+    """Checks Loupe 51.2 on wm-session: 8 formats + arrow paging, 24 MP pipe-copy timing, and GSettings persistence (use --config wm-session)."""
+    import loupe_view
+    vm = VM(args, out)
+    try:
+        return loupe_view.run_loupe_view(
+            vm,
+            args,
+            {
+                "Blocked": Blocked,
+                "root_shell": root_shell,
+                "run_status": run_status,
+                "sendkeys": sendkeys,
+                "settle": settle,
+            },
+        )
+    finally:
+        vm.close()
+
+
+OWN_IMAGE["loupe-view"] = test_loupe_view
 OWN_IMAGE["hw-live"] = test_hw_live
 OWN_IMAGE["mpv-sound"] = test_mpv_sound
 OWN_IMAGE["one-password"] = test_one_password
