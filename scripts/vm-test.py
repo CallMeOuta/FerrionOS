@@ -11452,6 +11452,15 @@ def test_gtk4_window(args, out):
 
 
 OWN_IMAGE["gtk4-window"] = test_gtk4_window
+
+
+def test_glycin_load(args, out):
+    """Checks glycin sandboxed loaders under ferrion-run --no-network --pass-fd, 24 MP pipe handoff, and negative codec and isolation checks (use --config wm-session)."""
+    import glycin_load
+    return glycin_load.run_glycin_load(VM, args, out)
+
+
+OWN_IMAGE["glycin-load"] = test_glycin_load
 OWN_IMAGE["hw-live"] = test_hw_live
 OWN_IMAGE["mpv-sound"] = test_mpv_sound
 OWN_IMAGE["one-password"] = test_one_password

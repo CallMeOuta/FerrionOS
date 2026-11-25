@@ -6,6 +6,8 @@ filesystem_size = 1024
 [packages]
 ferrion-wm = "source"
 desktop-layout-probe = "source"
+glycin = "source"
+glycin-load-probe = "source"
 gtk4-window-probe = "source"
 session-probe = "source"
 xkeyboard-config = {}

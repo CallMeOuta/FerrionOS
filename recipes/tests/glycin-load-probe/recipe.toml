@@ -1,0 +1,35 @@
+[package]
+description = "Headless glycin sandboxed image loading and isolation probe"
+
+[build]
+template = "custom"
+dependencies = [
+    "glib",
+    "glycin",
+    "libffi",
+    "zlib",
+]
+script = """
+DYNAMIC_INIT
+
+rm -rf "${COOKBOOK_BUILD}/crate"
+cp -a "${COOKBOOK_RECIPE}/crate" "${COOKBOOK_BUILD}/crate"
+
+cat >> "${COOKBOOK_BUILD}/crate/Cargo.toml" <<EOF
+
+[patch.crates-io]
+glycin = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-4.0.5" }
+glycin-core = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-core-4.0.5" }
+glycin-external = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-external-4.0.5" }
+glycin-utils = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-utils-5.0.1" }
+EOF
+
+"${COOKBOOK_CARGO}" build \
+    --manifest-path "${COOKBOOK_BUILD}/crate/Cargo.toml" \
+    --release \
+    -j "${COOKBOOK_MAKE_JOBS}"
+
+install -Dm755 \
+    "${CARGO_TARGET_DIR}/${TARGET}/release/glycin-load-probe" \
+    "${COOKBOOK_STAGE}/usr/bin/glycin-load-probe"
+"""
