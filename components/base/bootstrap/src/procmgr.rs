@@ -3085,9 +3085,7 @@ impl<'a> ProcScheme<'a> {
         }
         Some(still_true)
     }
-    fn ps_data(&mut self, _ctx: &CallerCtx) -> Result<Vec<u8>> {
-        // TODO: enforce uid == 0?
-
+    fn ps_data(&mut self, ctx: &CallerCtx) -> Result<Vec<u8>> {
         let mut string = alloc::format!(
             "{:<6}{:<6}{:<6}{:<6}{:<6}{:<6}{:<6}{:<6}{:<6}{:<8}{:<16}\n",
             "PID",
@@ -3104,6 +3102,9 @@ impl<'a> ProcScheme<'a> {
         );
         for (pid, process_rc) in self.processes.iter() {
             let process = process_rc.borrow();
+            if ctx.uid != 0 && (process.ruid != ctx.uid || process.euid != ctx.uid) {
+                continue;
+            }
             let status = match process.status {
                 ProcessStatus::PossiblyRunnable => "R",
                 ProcessStatus::Stopped(_) => "S",
