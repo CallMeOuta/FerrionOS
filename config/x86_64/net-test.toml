@@ -1,5 +1,6 @@
 include = ["desktop.toml"]
 
 [packages]
+ifaddrs-probe = {}
 iperf3 = {}
 net-probe = {}

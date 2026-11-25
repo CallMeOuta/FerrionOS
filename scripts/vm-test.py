@@ -10703,6 +10703,114 @@ TESTS["canary-random"] = test_canary_random
 TESTS["stack-smash-aborts"] = test_stack_smash_aborts
 TESTS["fortify-chk-aborts"] = test_fortify_chk_aborts
 TESTS["iommu"] = test_iommu
+def parse_ifaddrs_probe(text):
+    ifaces = {}
+    nameindex = []
+    for m in re.finditer(
+        r"iface name=(\S+) family=(-?\d+) addr=(\S+) netmask=(\S+) broadcast=(\S+) flags=0x([0-9a-fA-F]+) ifindex=(\d+) rev=(\S+)",
+        text,
+    ):
+        ifaces[m.group(1)] = {
+            "family": int(m.group(2)),
+            "addr": m.group(3),
+            "netmask": m.group(4),
+            "broadcast": m.group(5),
+            "flags": int(m.group(6), 16),
+            "ifindex": int(m.group(7)),
+            "rev": m.group(8),
+        }
+    for m in re.finditer(r"nameindex idx=(\d+) name=(\S+)", text):
+        nameindex.append((int(m.group(1)), m.group(2)))
+    err_m = re.search(r"getifaddrs error errno=(\d+) \(([^)]+)\)", text)
+    total_m = re.search(r"total=(\d+)", text)
+    return {
+        "ifaces": ifaces,
+        "nameindex": nameindex,
+        "error": (int(err_m.group(1)), err_m.group(2)) if err_m else None,
+        "total": int(total_m.group(1)) if total_m else None,
+    }
+
+
+def test_ifaddrs(vm, args):
+    """Checks getifaddrs and net/if.h across user, ferrion-run --no-network, and root."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+
+    def run_user(tag, line):
+        mark = vm.mark()
+        vm.type(f"bash -c '{line}; echo ifa-{tag}-$?'\n")
+        found = vm.wait_serial(rf"(?s)\n(.*)ifa-{tag}-(\d+)", 45, mark)
+        return (int(found.group(2)), found.group(1)) if found else (None, vm.text(mark))
+
+    user_rc, user_out = run_user("u", "/usr/bin/ifaddrs-probe")
+    (vm.out / "ifaddrs-user.txt").write_text(user_out)
+    user_p = parse_ifaddrs_probe(user_out)
+    if user_rc != 0 or user_p["error"] is not None:
+        return False, f"user ifaddrs-probe failed (rc={user_rc}): {user_p['error'] or user_out.strip()[-160:]}"
+    ulo = user_p["ifaces"].get("lo")
+    if not ulo or ulo["flags"] != 0x49 or "eth0" in user_p["ifaces"] or user_p["total"] != 1:
+        return False, f"user ifaddrs mismatch: {user_p}"
+
+    nonet_rc, nonet_out = run_user("nn", "ferrion-run --no-network -- /usr/bin/ifaddrs-probe")
+    (vm.out / "ifaddrs-nonet.txt").write_text(nonet_out)
+    nonet_p = parse_ifaddrs_probe(nonet_out)
+    if nonet_rc != 0 or nonet_p["error"] is not None:
+        return False, f"no-network ifaddrs-probe failed (rc={nonet_rc}): {nonet_p['error'] or nonet_out.strip()[-160:]}"
+    nlo = nonet_p["ifaces"].get("lo")
+    if not nlo or (nlo["flags"] & 0x1) != 0 or (nlo["flags"] & 0x8) == 0 or "eth0" in nonet_p["ifaces"] or nonet_p["total"] != 1:
+        return False, f"no-network ifaddrs mismatch: {nonet_p}"
+
+    since = vm.mark()
+    vm.type("exit\n")
+    if not vm.wait_serial(r"login: ", 30, since):
+        return False, "did not return to login prompt after user exit"
+    since_pw = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20, since_pw):
+        return False, "no password prompt for root after user exit"
+    since_sh = vm.mark()
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, since_sh):
+        return False, "no root shell after user exit"
+
+    rc, addr_out = run_status(
+        vm,
+        "bash -c 'for i in $(seq 120); do "
+        "a=$(cat /scheme/netcfg/ifaces/eth0/addr/list 2>/dev/null); "
+        "echo \"$a\" | grep -q \"/\" && { echo \"$a\"; exit 0; }; "
+        "sleep 0.25; done; exit 1'",
+        60,
+    )
+    if rc != 0:
+        return False, f"eth0 did not acquire an IPv4 lease: {addr_out.strip()[-120:]}"
+
+    root_rc, root_out = run_status(vm, "/usr/bin/ifaddrs-probe", 30)
+    (vm.out / "ifaddrs-root.txt").write_text(root_out)
+    root_p = parse_ifaddrs_probe(root_out)
+    if root_rc != 0 or root_p["error"] is not None:
+        return False, f"root ifaddrs-probe failed (rc={root_rc}): {root_p['error'] or root_out.strip()[-160:]}"
+
+    lo = root_p["ifaces"].get("lo")
+    eth0 = root_p["ifaces"].get("eth0")
+    if not lo or lo["family"] != 2 or lo["addr"] != "127.0.0.1" or lo["netmask"] != "255.0.0.0" or lo["broadcast"] != "none" or lo["flags"] != 0x49 or lo["ifindex"] != 1 or lo["rev"] != "lo":
+        return False, f"root lo mismatch: {lo}"
+    if not eth0 or eth0["family"] != 2 or eth0["addr"] in ("none", "0.0.0.0") or eth0["netmask"] == "none" or eth0["broadcast"] == "none" or eth0["flags"] != 0x43 or eth0["ifindex"] != 2 or eth0["rev"] != "eth0":
+        return False, f"root eth0 mismatch: {eth0}"
+    if (1, "lo") not in root_p["nameindex"] or (2, "eth0") not in root_p["nameindex"] or any(n == "stub" for _, n in root_p["nameindex"]):
+        return False, f"root nameindex mismatch: {root_p['nameindex']}"
+    if root_p["total"] != 2:
+        return False, f"root expected total=2, got {root_p['total']}"
+
+    return True, (
+        f"root lo(0x{lo['flags']:x})+eth0({eth0['addr']} 0x{eth0['flags']:x}), "
+        f"user lo(0x{ulo['flags']:x}) only, "
+        f"ferrion-run --no-network lo(0x{nlo['flags']:x}) without IFF_UP"
+    )
+
+
+TESTS["ifaddrs"] = test_ifaddrs
 TESTS["dma-outside-grant"] = test_dma_outside_grant
 
 

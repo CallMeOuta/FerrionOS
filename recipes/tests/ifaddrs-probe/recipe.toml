@@ -1,0 +1,10 @@
+[package]
+description = "Prints IPv4 interface addresses and index lookups from getifaddrs and net/if.h"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/ifaddrs-probe" "${COOKBOOK_RECIPE}/ifaddrs-probe.c" ${LDFLAGS}
+"""
