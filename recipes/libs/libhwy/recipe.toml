@@ -1,7 +1,11 @@
+[package]
+description = "Performance-portable SIMD library (Highway)"
+
 [source]
 git = "https://github.com/google/highway"
-rev = "1.4.0"
+rev = "2607d3b5b0113992fe84d3848859eae13b3b52c1"
 shallow_clone = true
+
 [build]
 template = "cmake"
 cmakeflags = [
