@@ -1,0 +1,27 @@
+crate = "libc"
+description = "Align struct lconv on *-unknown-redox with relibc (glibc order, *mut c_char, 24 fields, 96 bytes). Gap: 0.2.170 is uncovered and fails closed."
+
+[[variant]]
+min = "0.2.139"
+max = "0.2.169"
+patch = "lconv-0.2.139.patch"
+blake3 = "f37353bb4e92700ac589087ff8c43bd2b4dc0b0a6154022c6134cdd24d31ccdc"
+
+[[variant]]
+min = "0.2.171"
+max = "0.2.171"
+patch = "lconv-0.2.171.patch"
+blake3 = "450c659dd159ae683430147ad338a3738edd6d54d1a48787e1e89edbbc0aa1f7"
+
+[[variant]]
+min = "0.2.172"
+max = "0.2.191"
+patch = "lconv-0.2.172.patch"
+blake3 = "f4fd6c8644e75ace9ec68244d5780d690c990f96e38b07b7168e47f25a3177b5"
+
+[[variant]]
+min = "1.0.0-alpha.1"
+max = "1.0.0-alpha.1"
+rev = "b31ee9b22f99354f2ca00c68d038d6f377c8b8a4"
+patch = "lconv-1.0.0-alpha.1-b31ee9b2.patch"
+blake3 = "23e991f0d2dcbcfb1d079ada27f06215aae52a9beed98a4a86cbdfe585eb6c9d"
