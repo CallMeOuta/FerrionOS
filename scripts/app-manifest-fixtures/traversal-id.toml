@@ -1,0 +1,5 @@
+format = 1
+id = ".."
+name = "Traversal Fixture"
+kind = "ported"
+exec = "/usr/bin/traversal-app"

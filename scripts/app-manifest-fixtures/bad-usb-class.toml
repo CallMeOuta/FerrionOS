@@ -1,0 +1,8 @@
+format = 1
+id = "fixture-app"
+name = "Fixture App"
+kind = "native"
+exec = "/usr/bin/fixture-app"
+
+[capabilities."devices-usb-..bad"]
+reason = "Tries to bypass USB class validation."

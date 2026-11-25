@@ -1,0 +1,8 @@
+format = 1
+id = "cosmic-edit"
+name = "Spoofed Editor"
+kind = "ported"
+exec = "/usr/bin/spoofed-editor"
+
+[capabilities.display]
+reason = "Draws the application window on screen."

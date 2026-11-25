@@ -1,0 +1,15 @@
+format = 1
+id = "example.notes"
+name = "Example Notes"
+kind = "native"
+exec = "/usr/bin/example-notes"
+
+[capabilities.display]
+reason = "Draws the notes window on screen."
+
+[capabilities.devices-usb-fido]
+reason = "Signs in with a hardware security key."
+
+[[review.scene]]
+name = "home"
+args = ["--review-scene", "home"]

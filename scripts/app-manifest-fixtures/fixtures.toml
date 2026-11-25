@@ -1,0 +1,89 @@
+format = 1
+
+[[case]]
+name = "unlisted-missing-manifest"
+mode = "config"
+config = "unlisted-config.toml"
+recipes = "fake-recipes"
+expect = "missing-manifest"
+
+[[case]]
+name = "unknown-key"
+mode = "repo"
+package = "fixture-app"
+path = "unknown-key.toml"
+expect = "unknown-key"
+
+[[case]]
+name = "unknown-format"
+mode = "repo"
+package = "fixture-app"
+path = "unknown-format.toml"
+expect = "unsupported-format"
+
+[[case]]
+name = "missing-reason"
+mode = "repo"
+package = "fixture-app"
+path = "missing-reason.toml"
+expect = "missing-reason"
+
+[[case]]
+name = "never-capability"
+mode = "repo"
+package = "fixture-app"
+path = "never-capability.toml"
+expect = "forbidden-capability"
+
+[[case]]
+name = "unknown-capability"
+mode = "repo"
+package = "fixture-app"
+path = "unknown-capability.toml"
+expect = "unknown-capability"
+
+[[case]]
+name = "traversal-id"
+mode = "outside"
+path = "traversal-id.toml"
+expect = "invalid-id"
+
+[[case]]
+name = "reserved-id"
+mode = "outside"
+path = "reserved-id.toml"
+expect = "reserved-id"
+
+[[case]]
+name = "package-id-mismatch"
+mode = "repo"
+package = "fixture-app"
+path = "package-id-mismatch.toml"
+expect = "package-id-mismatch"
+
+[[case]]
+name = "short-reason"
+mode = "repo"
+package = "fixture-app"
+path = "short-reason.toml"
+expect = "invalid-reason"
+
+[[case]]
+name = "bad-usb-class"
+mode = "repo"
+package = "fixture-app"
+path = "bad-usb-class.toml"
+expect = "unknown-capability"
+
+[[case]]
+name = "over-cap-limit"
+mode = "repo"
+package = "fixture-app"
+path = "over-cap-limit.toml"
+expect = "too-many-capabilities"
+
+[[case]]
+name = "valid-outside"
+mode = "outside"
+path = "valid-outside.toml"
+expect = "ok"

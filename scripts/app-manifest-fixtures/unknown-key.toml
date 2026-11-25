@@ -1,0 +1,6 @@
+format = 1
+id = "fixture-app"
+name = "Fixture App"
+kind = "native"
+exec = "/usr/bin/fixture-app"
+unexpected = true

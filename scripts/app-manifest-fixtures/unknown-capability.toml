@@ -1,0 +1,8 @@
+format = 1
+id = "fixture-app"
+name = "Fixture App"
+kind = "native"
+exec = "/usr/bin/fixture-app"
+
+[capabilities.telepathy]
+reason = "Requests a capability not in the catalog."

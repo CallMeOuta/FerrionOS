@@ -1,0 +1,104 @@
+format = 1
+id = "fixture-app"
+name = "Fixture App"
+kind = "native"
+exec = "/usr/bin/fixture-app"
+
+[capabilities.devices-usb-c01]
+reason = "Test capability entry number 01."
+
+[capabilities.devices-usb-c02]
+reason = "Test capability entry number 02."
+
+[capabilities.devices-usb-c03]
+reason = "Test capability entry number 03."
+
+[capabilities.devices-usb-c04]
+reason = "Test capability entry number 04."
+
+[capabilities.devices-usb-c05]
+reason = "Test capability entry number 05."
+
+[capabilities.devices-usb-c06]
+reason = "Test capability entry number 06."
+
+[capabilities.devices-usb-c07]
+reason = "Test capability entry number 07."
+
+[capabilities.devices-usb-c08]
+reason = "Test capability entry number 08."
+
+[capabilities.devices-usb-c09]
+reason = "Test capability entry number 09."
+
+[capabilities.devices-usb-c10]
+reason = "Test capability entry number 10."
+
+[capabilities.devices-usb-c11]
+reason = "Test capability entry number 11."
+
+[capabilities.devices-usb-c12]
+reason = "Test capability entry number 12."
+
+[capabilities.devices-usb-c13]
+reason = "Test capability entry number 13."
+
+[capabilities.devices-usb-c14]
+reason = "Test capability entry number 14."
+
+[capabilities.devices-usb-c15]
+reason = "Test capability entry number 15."
+
+[capabilities.devices-usb-c16]
+reason = "Test capability entry number 16."
+
+[capabilities.devices-usb-c17]
+reason = "Test capability entry number 17."
+
+[capabilities.devices-usb-c18]
+reason = "Test capability entry number 18."
+
+[capabilities.devices-usb-c19]
+reason = "Test capability entry number 19."
+
+[capabilities.devices-usb-c20]
+reason = "Test capability entry number 20."
+
+[capabilities.devices-usb-c21]
+reason = "Test capability entry number 21."
+
+[capabilities.devices-usb-c22]
+reason = "Test capability entry number 22."
+
+[capabilities.devices-usb-c23]
+reason = "Test capability entry number 23."
+
+[capabilities.devices-usb-c24]
+reason = "Test capability entry number 24."
+
+[capabilities.devices-usb-c25]
+reason = "Test capability entry number 25."
+
+[capabilities.devices-usb-c26]
+reason = "Test capability entry number 26."
+
+[capabilities.devices-usb-c27]
+reason = "Test capability entry number 27."
+
+[capabilities.devices-usb-c28]
+reason = "Test capability entry number 28."
+
+[capabilities.devices-usb-c29]
+reason = "Test capability entry number 29."
+
+[capabilities.devices-usb-c30]
+reason = "Test capability entry number 30."
+
+[capabilities.devices-usb-c31]
+reason = "Test capability entry number 31."
+
+[capabilities.devices-usb-c32]
+reason = "Test capability entry number 32."
+
+[capabilities.devices-usb-c33]
+reason = "Test capability entry number 33."

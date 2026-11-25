@@ -1,0 +1,5 @@
+format = 1
+id = "other-app"
+name = "Fixture App"
+kind = "native"
+exec = "/usr/bin/fixture-app"

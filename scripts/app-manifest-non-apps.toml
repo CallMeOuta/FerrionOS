@@ -1,0 +1,256 @@
+format = 1
+
+[non_app.audio-probe]
+reason = "In-OS test probe for audio ring and stream checks."
+
+[non_app.base]
+reason = "Base system daemons and runtime namespace started by init."
+
+[non_app.bash]
+reason = "Command-line shell."
+
+[non_app.bootloader]
+reason = "UEFI and BIOS bootloader for starting the kernel."
+
+[non_app.bottom]
+reason = "Terminal system monitor command-line tool."
+
+[non_app.ca-certificates]
+reason = "Root TLS certificate bundle data package."
+
+[non_app.coreutils]
+reason = "Base command-line utilities for system and shell use."
+
+[non_app.cosmic-icons]
+reason = "Icon theme data package."
+
+[non_app.curl]
+reason = "Command-line network transfer tool."
+
+[non_app.dejavu]
+reason = "System font data package."
+
+[non_app.diffutils]
+reason = "Command-line file comparison tools."
+
+[non_app.display-drm-probe]
+reason = "In-OS test probe for DRM display checks."
+
+[non_app.drivers]
+reason = "Hardware drivers started by init and the driver tree."
+
+[non_app.event-poll-probe]
+reason = "In-OS test probe for event polling checks."
+
+[non_app.exec-handles-probe]
+reason = "In-OS test probe for exec runtime handle checks."
+
+[non_app.extrautils]
+reason = "Base system utilities including tar and archive tools."
+
+[non_app.fdobjd]
+reason = "Base daemon serving eventfd and timerfd schemes."
+
+[non_app.ferrion-audiod]
+reason = "Base system audio daemon serving the audio scheme."
+
+[non_app.ferrion-cli]
+reason = "Base system administration command-line tool."
+
+[non_app.ferrion-run]
+reason = "Base program launcher and test probe whose v1 profile stays until PFR1."
+
+[non_app.ferrion-scope]
+reason = "Base file-access proxy daemon for scoped sessions."
+
+[non_app.ffmpeg]
+reason = "Shared media decoding libraries and command-line tools."
+
+[non_app.file]
+reason = "Command-line file type inspection tool."
+
+[non_app.findutils]
+reason = "Base command-line file search utilities."
+
+[non_app.fish-shell]
+reason = "Command-line shell."
+
+[non_app.forcekill-wakeup-probe]
+reason = "In-OS test probe for force-kill wake-up checks."
+
+[non_app.foreign-call-probe]
+reason = "In-OS test probe for Linux foreign-call checks."
+
+[non_app.fork-filetable-probe]
+reason = "In-OS test probe for fork file-table checks."
+
+[non_app.freefont]
+reason = "System font data package."
+
+[non_app.gawk]
+reason = "Command-line text processing utility."
+
+[non_app.gettext]
+reason = "Command-line localization tools and runtime library."
+
+[non_app.git]
+reason = "Command-line version control tool."
+
+[non_app.gpu-probe-blob]
+reason = "In-OS test probe for GPU host-visible blob checks."
+
+[non_app.gpu-probe-context]
+reason = "In-OS test probe for GPU context checks."
+
+[non_app.gpu-probe-flip]
+reason = "In-OS test probe for GPU page-flip checks."
+
+[non_app.gpu-probe-submit]
+reason = "In-OS test probe for GPU command submission checks."
+
+[non_app.gpu-probe-syncobj]
+reason = "In-OS test probe for GPU sync-object checks."
+
+[non_app.graphics-bounds-probe]
+reason = "In-OS test probe for display driver bounds checks."
+
+[non_app.hicolor-icon-theme]
+reason = "Fallback icon theme data package."
+
+[non_app.initfs]
+reason = "Initial ramdisk archive read by the kernel at boot."
+
+[non_app.installer]
+reason = "Base command-line disk and system installer."
+
+[non_app.installer-gui]
+reason = "Base-system installer that writes raw disks and runs privileged through sudo."
+
+[non_app.ion]
+reason = "Base system shell used for init and system scripts."
+
+[non_app.kernel]
+reason = "FerrionOS kernel image loaded by the bootloader."
+
+[non_app.kibi]
+reason = "Terminal text editor command-line tool."
+
+[non_app.libgcc]
+reason = "Compiler runtime support library."
+
+[non_app.libstdcxx]
+reason = "C++ standard runtime library."
+
+[non_app.libxkbcommon]
+reason = "Keyboard layout shared library."
+
+[non_app.linux-busybox-fixtures]
+reason = "In-OS test fixtures for Linux busybox checks."
+
+[non_app.linux-hello-fixtures]
+reason = "In-OS test fixtures for Linux hello-world checks."
+
+[non_app.linux-lc3-fixtures]
+reason = "In-OS test fixtures for Linux dynamic-linking checks."
+
+[non_app.linux-lc4-fixtures]
+reason = "In-OS test fixtures for Linux Python checks."
+
+[non_app.linux-lc5-fixtures]
+reason = "In-OS test fixtures for Linux networking checks."
+
+[non_app.linux-root]
+reason = "Read-only Linux runtime root filesystem image."
+
+[non_app.linux-run]
+reason = "Base compatibility launcher for Linux programs."
+
+[non_app.linux-sessiond]
+reason = "Base root service serving Linux session filesystems."
+
+[non_app.lock-probe]
+reason = "In-OS test probe for mutex and futex checks."
+
+[non_app.lockdown-probe]
+reason = "In-OS test probe for raw-hardware lockdown checks."
+
+[non_app.math-bessel-probe]
+reason = "In-OS test probe for math library Bessel checks."
+
+[non_app.net-call-probe]
+reason = "In-OS test probe for network stack bounds checks."
+
+[non_app.netdb]
+reason = "Base network configuration and host lookup data."
+
+[non_app.netutils]
+reason = "Base command-line network tools."
+
+[non_app.noto-sans-cjk]
+reason = "CJK system font data package."
+
+[non_app.nsmgr-bounds-probe]
+reason = "In-OS test probe for namespace manager bounds checks."
+
+[non_app.nushell]
+reason = "Command-line shell."
+
+[non_app.orbdata]
+reason = "Fonts, icons and theme data for the Orbital display server."
+
+[non_app.orbital]
+reason = "Display server started by init, not a user app."
+
+[non_app.orbutils]
+reason = "Bundles orblogin and launcher shell parts (never-class capabilities) and legacy Orbital tools leaving with Orbital."
+
+[non_app.patchelf]
+reason = "Command-line ELF binary inspection and patching tool."
+
+[non_app.pkgutils]
+reason = "Base package management utilities."
+
+[non_app.pop-icon-theme]
+reason = "Icon theme data package."
+
+[non_app.printf-precision-probe]
+reason = "In-OS test probe for printf precision checks."
+
+[non_app.redoxfs]
+reason = "Base filesystem daemon and host image tools."
+
+[non_app.relibc]
+reason = "Base C standard library and dynamic loader."
+
+[non_app.scheme-short-read-probe]
+reason = "In-OS test probe for short-read scheme checks."
+
+[non_app.sed]
+reason = "Command-line stream editor utility."
+
+[non_app.shared-mime-info]
+reason = "MIME type database data package."
+
+[non_app.signal-handle-probe]
+reason = "In-OS test probe for process-handle signal checks."
+
+[non_app.tpmd]
+reason = "Base daemon driving the TPM hardware device."
+
+[non_app.update-index-probe]
+reason = "In-OS test probe for signed update index checks."
+
+[non_app.userutils]
+reason = "Base account, login, su and sudo utilities."
+
+[non_app.uutils]
+reason = "Base command-line utilities suite."
+
+[non_app.uutils-grep]
+reason = "Command-line pattern search utility."
+
+[non_app.uutils-procps]
+reason = "Command-line process inspection utilities."
+
+[non_app.zsh]
+reason = "Command-line shell."

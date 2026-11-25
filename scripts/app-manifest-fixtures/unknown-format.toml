@@ -1,0 +1,6 @@
+format = 2
+id = "fixture-app"
+name = "Fixture App"
+kind = "native"
+exec = "/usr/bin/fixture-app"
+future_field = "added-in-v2"
