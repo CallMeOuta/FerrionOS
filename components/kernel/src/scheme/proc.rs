@@ -995,21 +995,23 @@ impl KernelScheme for ProcScheme {
         };
 
         let target_fd = metadata.first().ok_or(Error::new(EINVAL))?;
+        let file = descs.first().ok_or(Error::new(EINVAL))?;
+        let target_handle =
+            FileHandle(usize::try_from(*target_fd).map_err(|_| Error::new(EBADFD))?);
 
-        if let Some(file) = {
+        if let Some(old_file) = {
             let mut context = context.read(token.token());
             let (context, mut token) = context.token_split();
-            context.remove_file(FileHandle(*target_fd as usize), &mut token.token())
+            context.remove_file(target_handle, &mut token.token())
         } {
-            file.close(token)?;
+            old_file.close(token)?;
         }
 
-        let file = descs.first().unwrap();
         let mut context = context.write(token.token());
         let (context, mut token) = context.token_split();
         context
             .insert_file(
-                FileHandle(usize::try_from(*target_fd).map_err(|_| Error::new(EBADFD))?),
+                target_handle,
                 context::file::FileDescriptor {
                     description: file.clone(),
                 },
