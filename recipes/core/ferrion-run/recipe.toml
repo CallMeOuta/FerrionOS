@@ -6,4 +6,8 @@ template = "custom"
 script = """
 COOKBOOK_SOURCE="${COOKBOOK_RECIPE}/crate"
 cookbook_cargo
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIE -pie \
+    "${COOKBOOK_RECIPE}/dlopen-probe.c" ${LDFLAGS} \
+    -o "${COOKBOOK_STAGE}/usr/bin/ferrion-dlopen-probe"
 """

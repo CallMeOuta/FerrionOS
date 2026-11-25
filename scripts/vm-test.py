@@ -12806,6 +12806,345 @@ def test_nested_scope(vm, args):
 
 TESTS["display-socket"] = test_display_socket
 TESTS["nested-scope"] = test_nested_scope
+
+
+def test_exec_path(vm, args):
+    """PFR2a exec-path (use --config wm-session; runs only on QEMU -snapshot copy): verifies that execve, a script's interpreter and ld.so refuse a program or library whose file the sandbox doesn't grant as executable, before exec's point of no return (not yet a security boundary; S11 and kernel F are planned to make it one). Checks system exec paths (/usr/bin/true, dlopen of a system .so) allowed; writable --files, session HOME, /tmp, --clone (lower and upper), non-system --read-only, /var/cache/fontconfig and /etc refused for ELF exec, dlopen and PROT_EXEC mmap; explicit Linux-noexec script case (./script.sh refused, sh script.sh allowed); manifest code-exec-written enabling execution only in the app's own home while shared user folders stay non-executable and --exec-written under a manifest exits 125; ad-hoc --exec-written DIR enabling exec and dlopen in DIR; nested monotonicity (non-exec parent refuses nested --exec-written with 125 wider-than-parent, while --exec-written parent allows nested --exec-written on that folder and keeps nested .ferrion-sub non-executable); and 500 consecutive execs inside one session."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    transcript, problems = [], []
+
+    st, uid_out = pfr1_run_as_user(vm, transcript, "ep-uid", "id -u")
+    uid_m = re.search(r"(\d+)", uid_out)
+    if st != 0 or not uid_m:
+        return False, f"could not read user uid (exit {st}); see {vm.out}"
+    user_uid = int(uid_m.group(1))
+
+    st, so_out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-find-so",
+        "for p in /usr/lib/libreadline.so* /usr/lib/libz.so* /usr/lib/libexpat.so*; do "
+        "[ -f \"$p\" ] && echo SYS_SO=$p && break; done",
+    )
+    so_m = re.search(r"SYS_SO=(\S+)", so_out)
+    if st != 0 or not so_m:
+        return False, f"no unloaded system .so found in /usr/lib: {so_out!r}; see {vm.out}"
+    sys_so = so_m.group(1)
+
+    st_dl_bin, _ = pfr1_run_as_user(vm, transcript, "ep-has-dl", "command -v ferrion-dlopen-probe")
+    has_dlopen_probe = st_dl_bin == 0
+    if not has_dlopen_probe:
+        problems.append("ferrion-dlopen-probe is not installed")
+
+    setup_user = (
+        "rm -rf /home/user/exec-w /home/user/exec-ro /home/user/exec-clone /home/user/exec-ok && "
+        "mkdir -p /home/user/exec-w /home/user/exec-ro /home/user/exec-clone /home/user/exec-ok "
+        "/home/user/Documents /home/user/Pictures /home/user/Downloads && "
+        "for d in /home/user/exec-w /home/user/exec-ro /home/user/exec-clone /home/user/exec-ok "
+        "/home/user/Documents /home/user/Pictures; do "
+        "cp /usr/bin/true \"$d/bin_true\" && chmod 755 \"$d/bin_true\" && "
+        f"cp {shlex.quote(sys_so)} \"$d/libprobe_pfr2a.so\" && chmod 755 \"$d/libprobe_pfr2a.so\" && "
+        "printf '#!/bin/sh\\necho SCRIPT_OK\\n' > \"$d/script.sh\" && chmod 755 \"$d/script.sh\"; "
+        "done"
+    )
+    st, _ = pfr1_run_as_user(vm, transcript, "ep-setup-user", setup_user, timeout=60)
+    if st != 0:
+        return False, f"user exec-path fixture setup failed (exit {st}); see {vm.out}"
+
+    bins_cmd = (
+        "sudo bash -c "
+        + shlex.quote(
+            "mkdir -p /usr/share/ferrion/apps /var/lib/ferrion/grants && "
+            "chmod 755 /usr/share/ferrion/apps /var/lib/ferrion/grants && "
+            "cp /usr/bin/bash /usr/bin/pfr2a-noexec && "
+            "cp /usr/bin/bash /usr/bin/pfr2a-execwritten && "
+            "chmod 755 /usr/bin/pfr2a-noexec /usr/bin/pfr2a-execwritten"
+        )
+    )
+    st, _ = pfr1_run_as_user(vm, transcript, "ep-setup-bins", bins_cmd, sudo=True)
+    if st != 0:
+        return False, f"root snapshot bin setup failed (exit {st}); see {vm.out}"
+
+    noexec_manifest = (
+        'format = 1\n'
+        'id = "pfr2a-noexec"\n'
+        'name = "PFR2a No-Exec Probe"\n'
+        'kind = "native"\n'
+        'exec = "/usr/bin/pfr2a-noexec"\n\n'
+        '[capabilities.files-pictures]\n'
+        'reason = "Tests Pictures non-exec."\n\n'
+        '[capabilities.files-documents]\n'
+        'reason = "Tests Documents non-exec."\n'
+    )
+    execw_manifest = (
+        'format = 1\n'
+        'id = "pfr2a-execwritten"\n'
+        'name = "PFR2a Exec-Written Probe"\n'
+        'kind = "native"\n'
+        'exec = "/usr/bin/pfr2a-execwritten"\n\n'
+        '[capabilities.code-exec-written]\n'
+        'reason = "Runs binaries written in the app own home."\n\n'
+        '[capabilities.files-pictures]\n'
+        'reason = "Tests Pictures stays non-exec."\n\n'
+        '[capabilities.files-documents]\n'
+        'reason = "Tests Documents stays non-exec."\n'
+    )
+    grants = (
+        'format = 1\n\n'
+        '[apps.pfr2a-noexec]\n'
+        'files-pictures = true\n'
+        'files-documents = true\n\n'
+        '[apps.pfr2a-execwritten]\n'
+        'code-exec-written = true\n'
+        'files-pictures = true\n'
+        'files-documents = true\n'
+    )
+    for tag, path, content in (
+        ("ep-man1", "/usr/share/ferrion/apps/pfr2a-noexec.toml", noexec_manifest),
+        ("ep-man2", "/usr/share/ferrion/apps/pfr2a-execwritten.toml", execw_manifest),
+        ("ep-grants", f"/var/lib/ferrion/grants/{user_uid}.toml", grants),
+    ):
+        if pfr1_write_root_file(vm, transcript, tag, path, content) != 0:
+            return False, f"failed writing {path}; see {vm.out}"
+
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-sys-ok",
+        f"ferrion-run --files /home/user/exec-w bash -c "
+        + shlex.quote(
+            f"/usr/bin/true && echo SYS_EXEC_OK; "
+            f"ferrion-run-probe mmap-exec /usr/bin/true; "
+            + (f"ferrion-dlopen-probe {sys_so}" if has_dlopen_probe else "true")
+        ),
+    )
+    if "SYS_EXEC_OK" not in out:
+        problems.append(f"system /usr/bin/true failed inside session: {out!r}")
+    if "MMAP_EXEC OK" not in out:
+        problems.append(f"mmap-exec on /usr/bin/true failed inside session: {out!r}")
+    if has_dlopen_probe and "DLOPEN OK" not in out:
+        problems.append(f"dlopen on system {sys_so} failed inside session: {out!r}")
+
+    w_script = (
+        "/home/user/exec-w/bin_true 2>&1; echo W_ELF_RC=$?; "
+        "ferrion-run-probe mmap-exec /home/user/exec-w/bin_true; "
+        "(cd /home/user/exec-w && ./script.sh 2>&1); echo W_SCRIPT_DIRECT_RC=$?; "
+        "(cd /home/user/exec-w && sh script.sh 2>&1); echo W_SCRIPT_SH_RC=$?; "
+        + (
+            "ferrion-dlopen-probe /home/user/exec-w/libprobe_pfr2a.so 2>&1; echo W_DLOPEN_RC=$?; "
+            if has_dlopen_probe
+            else ""
+        )
+        + "cp /usr/bin/true \"$HOME/h_true\" && chmod 755 \"$HOME/h_true\" && "
+        "cp /usr/bin/true /tmp/t_true && chmod 755 /tmp/t_true && "
+        "cp /home/user/exec-w/script.sh /tmp/t_script.sh && chmod 755 /tmp/t_script.sh && "
+        "\"$HOME/h_true\" 2>&1; echo HOME_ELF_RC=$?; "
+        "/tmp/t_true 2>&1; echo TMP_ELF_RC=$?; "
+        "/tmp/t_script.sh 2>&1; echo TMP_SCRIPT_RC=$?; "
+        "sh /tmp/t_script.sh 2>&1; echo TMP_SH_RC=$?"
+    )
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-writable",
+        f"ferrion-run --files /home/user/exec-w bash -c {shlex.quote(w_script)}",
+        timeout=90,
+    )
+    if "W_ELF_RC=0" in out or "W_ELF_RC=" not in out:
+        problems.append(f"writable --files ELF exec was not refused: {out.strip()[:240]}")
+    if "MMAP_EXEC ERR 13" not in out:
+        problems.append(f"writable --files mmap-exec did not return EACCES(13): {out.strip()[:240]}")
+    if "W_SCRIPT_DIRECT_RC=0" in out or "W_SCRIPT_DIRECT_RC=" not in out:
+        problems.append(f"./script.sh in writable --files was not refused (Linux noexec): {out.strip()[:240]}")
+    if "W_SCRIPT_SH_RC=0" not in out or "SCRIPT_OK" not in out:
+        problems.append(f"sh script.sh in writable --files was not allowed: {out.strip()[:240]}")
+    if has_dlopen_probe and ("W_DLOPEN_RC=0" in out or "DLOPEN ERR" not in out):
+        problems.append(f"dlopen of .so in writable --files was not refused: {out.strip()[:240]}")
+    if "HOME_ELF_RC=0" in out or "HOME_ELF_RC=" not in out:
+        problems.append(f"ELF exec in session HOME was not refused: {out.strip()[:240]}")
+    if "TMP_ELF_RC=0" in out or "TMP_ELF_RC=" not in out:
+        problems.append(f"ELF exec in /tmp was not refused: {out.strip()[:240]}")
+    if "TMP_SCRIPT_RC=0" in out or "TMP_SCRIPT_RC=" not in out:
+        problems.append(f"./script.sh in /tmp was not refused: {out.strip()[:240]}")
+    if "TMP_SH_RC=0" not in out:
+        problems.append(f"sh /tmp/t_script.sh was not allowed: {out.strip()[:240]}")
+
+    clone_script = (
+        "/home/user/exec-clone/bin_true 2>&1; echo CLONE_LOWER_RC=$?; "
+        "cp /usr/bin/true /home/user/exec-clone/upper_true && chmod 755 /home/user/exec-clone/upper_true && "
+        "/home/user/exec-clone/upper_true 2>&1; echo CLONE_UPPER_RC=$?; "
+        "ferrion-run-probe mmap-exec /home/user/exec-clone/upper_true"
+    )
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-clone",
+        f"ferrion-run --clone /home/user/exec-clone bash -c {shlex.quote(clone_script)}",
+        timeout=90,
+    )
+    if "CLONE_LOWER_RC=0" in out or "CLONE_LOWER_RC=" not in out:
+        problems.append(f"--clone lower-layer ELF exec was not refused: {out.strip()[:240]}")
+    if "CLONE_UPPER_RC=0" in out or "CLONE_UPPER_RC=" not in out:
+        problems.append(f"--clone upper-layer ELF exec was not refused: {out.strip()[:240]}")
+    if "MMAP_EXEC ERR 13" not in out:
+        problems.append(f"--clone upper-layer mmap-exec did not return EACCES(13): {out.strip()[:240]}")
+
+    ro_script = (
+        "/home/user/exec-ro/bin_true 2>&1; echo RO_ELF_RC=$?; "
+        "ferrion-run-probe mmap-exec /home/user/exec-ro/bin_true; "
+        "ferrion-run-probe mmap-exec /etc/passwd; "
+        "fc=$(ls -1 /var/cache/fontconfig 2>/dev/null | head -n 1); "
+        "if [ -n \"$fc\" ]; then echo FC_PROBE=$(ferrion-run-probe mmap-exec \"/var/cache/fontconfig/$fc\"); else echo FC_ABSENT; fi"
+    )
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-ro-data",
+        f"ferrion-run --read-only /home/user/exec-ro bash -c {shlex.quote(ro_script)}",
+        timeout=90,
+    )
+    if "RO_ELF_RC=0" in out or "RO_ELF_RC=" not in out:
+        problems.append(f"non-system --read-only ELF exec was not refused: {out.strip()[:240]}")
+    if out.count("MMAP_EXEC ERR 13") < 2:
+        problems.append(f"non-system --read-only or /etc mmap-exec did not return EACCES(13): {out.strip()[:240]}")
+    if "FC_ABSENT" not in out and "FC_PROBE=MMAP_EXEC ERR 13" not in out:
+        problems.append(f"/var/cache/fontconfig mmap-exec did not return EACCES(13): {out.strip()[:240]}")
+
+    man_noexec_script = (
+        "cp /usr/bin/true \"$HOME/app_true\" && chmod 755 \"$HOME/app_true\" && "
+        "\"$HOME/app_true\" 2>&1; echo M_NOEXEC_HOME_RC=$?; "
+        "/home/user/Pictures/bin_true 2>&1; echo M_NOEXEC_PIC_RC=$?; "
+        "/home/user/Documents/bin_true 2>&1; echo M_NOEXEC_DOC_RC=$?"
+    )
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-man-noexec",
+        f"ferrion-run /usr/bin/pfr2a-noexec -c {shlex.quote(man_noexec_script)}",
+        timeout=90,
+    )
+    for key in ("M_NOEXEC_HOME_RC", "M_NOEXEC_PIC_RC", "M_NOEXEC_DOC_RC"):
+        if f"{key}=0" in out or f"{key}=" not in out:
+            problems.append(f"manifest without code-exec-written did not refuse {key}: {out.strip()[:240]}")
+
+    man_execw_script = (
+        "cp /usr/bin/true \"$HOME/app_true\" && chmod 755 \"$HOME/app_true\" && "
+        f"cp {shlex.quote(sys_so)} \"$HOME/app_lib.so\" && chmod 755 \"$HOME/app_lib.so\" && "
+        "printf '#!/bin/sh\\necho APP_SCRIPT_OK\\n' > \"$HOME/app_script.sh\" && chmod 755 \"$HOME/app_script.sh\" && "
+        "\"$HOME/app_true\" 2>&1; echo M_EW_HOME_RC=$?; "
+        "\"$HOME/app_script.sh\" 2>&1; echo M_EW_SCRIPT_RC=$?; "
+        + (
+            "ferrion-dlopen-probe \"$HOME/app_lib.so\" 2>&1; echo M_EW_DLOPEN_RC=$?; "
+            if has_dlopen_probe
+            else ""
+        )
+        + "/home/user/Pictures/bin_true 2>&1; echo M_EW_PIC_RC=$?; "
+        "/home/user/Documents/bin_true 2>&1; echo M_EW_DOC_RC=$?; "
+        + (
+            "ferrion-dlopen-probe /home/user/Documents/libprobe_pfr2a.so 2>&1; echo M_EW_DOC_DL_RC=$?; "
+            if has_dlopen_probe
+            else ""
+        )
+        + "cp /usr/bin/true /tmp/m_tmp_true && chmod 755 /tmp/m_tmp_true && "
+        "/tmp/m_tmp_true 2>&1; echo M_EW_TMP_RC=$?"
+    )
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-man-execw",
+        f"ferrion-run /usr/bin/pfr2a-execwritten -c {shlex.quote(man_execw_script)}",
+        timeout=90,
+    )
+    if "M_EW_HOME_RC=0" not in out:
+        problems.append(f"manifest with code-exec-written did not allow ELF exec in app home: {out.strip()[:240]}")
+    if "M_EW_SCRIPT_RC=0" not in out or "APP_SCRIPT_OK" not in out:
+        problems.append(f"manifest with code-exec-written did not allow script in app home: {out.strip()[:240]}")
+    if has_dlopen_probe and ("M_EW_DLOPEN_RC=0" not in out or "DLOPEN OK" not in out):
+        problems.append(f"manifest with code-exec-written did not allow dlopen in app home: {out.strip()[:240]}")
+    for key in ("M_EW_PIC_RC", "M_EW_DOC_RC", "M_EW_TMP_RC"):
+        if f"{key}=0" in out or f"{key}=" not in out:
+            problems.append(f"manifest with code-exec-written unexpectedly allowed {key}: {out.strip()[:240]}")
+    if has_dlopen_probe and ("M_EW_DOC_DL_RC=0" in out or "DLOPEN ERR" not in out):
+        problems.append(f"manifest with code-exec-written unexpectedly allowed dlopen in Documents: {out.strip()[:240]}")
+
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-man-flag",
+        "ferrion-run --exec-written /home/user/exec-ok -- /usr/bin/pfr2a-execwritten -c true",
+        timeout=60,
+    )
+    if st != 125:
+        problems.append(f"--exec-written under a manifest exited {st}, expected 125")
+
+    ew_script = (
+        "/home/user/exec-ok/bin_true 2>&1; echo EW_ELF_RC=$?; "
+        "/home/user/exec-ok/script.sh 2>&1; echo EW_SCRIPT_RC=$?; "
+        + (
+            "ferrion-dlopen-probe /home/user/exec-ok/libprobe_pfr2a.so 2>&1; echo EW_DLOPEN_RC=$?; "
+            if has_dlopen_probe
+            else ""
+        )
+        + "ferrion-run --no-network --exec-written /home/user/exec-ok bash -c "
+        "'/home/user/exec-ok/bin_true; echo NEST_EW_OK_RC=$?; "
+        "cp /usr/bin/true \"$HOME/sub_true\" && chmod 755 \"$HOME/sub_true\" && "
+        "\"$HOME/sub_true\" 2>&1; echo NEST_SUB_HOME_RC=$?'"
+    )
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-adhoc-ew",
+        f"ferrion-run --exec-written /home/user/exec-ok bash -c {shlex.quote(ew_script)}",
+        timeout=90,
+    )
+    if "EW_ELF_RC=0" not in out:
+        problems.append(f"ad-hoc --exec-written did not allow ELF exec: {out.strip()[:240]}")
+    if "EW_SCRIPT_RC=0" not in out or "SCRIPT_OK" not in out:
+        problems.append(f"ad-hoc --exec-written did not allow script exec: {out.strip()[:240]}")
+    if has_dlopen_probe and ("EW_DLOPEN_RC=0" not in out or "DLOPEN OK" not in out):
+        problems.append(f"ad-hoc --exec-written did not allow dlopen: {out.strip()[:240]}")
+    if "NEST_EW_OK_RC=0" not in out:
+        problems.append(f"nested --exec-written inside --exec-written parent failed: {out.strip()[:240]}")
+    if "NEST_SUB_HOME_RC=0" in out or "NEST_SUB_HOME_RC=" not in out:
+        problems.append(f"nested .ferrion-sub home was unexpectedly executable: {out.strip()[:240]}")
+
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-nest-wider",
+        "ferrion-run --files /home/user/exec-w bash -c "
+        "'ferrion-run --no-network --exec-written /home/user/exec-w true 2>&1; echo NEST_WIDER_RC=$?'",
+        timeout=60,
+    )
+    if "NEST_WIDER_RC=125" not in out or "wider-than-parent" not in out:
+        problems.append(f"nested --exec-written under non-exec parent did not exit 125 wider-than-parent: {out.strip()[:240]}")
+
+    st, out = pfr1_run_as_user(
+        vm,
+        transcript,
+        "ep-bound500",
+        "ferrion-run --files /home/user/exec-w bash -c "
+        "'for i in $(seq 1 500); do /usr/bin/true || exit 1; done; /usr/bin/true && echo BOUND500_OK'",
+        timeout=180,
+    )
+    if st != 0 or "BOUND500_OK" not in out:
+        problems.append(f"500 consecutive execs inside one session failed (exit {st}): {out.strip()[:240]}")
+
+    (vm.out / "exec-path.txt").write_text("".join(transcript))
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return True, (
+        f"system exec/dlopen({sys_so}) allowed; writable --files/HOME/tmp/--clone(lower+upper)/"
+        f"--read-only/fontconfig/etc refused; ./script.sh refused & sh script.sh allowed; "
+        f"manifest code-exec-written allowed app home only (Documents/Pictures/tmp refused, --exec-written 125); "
+        f"ad-hoc --exec-written allowed & nested monotonicity enforced; 500 consecutive execs ok; see {vm.out}"
+    )
+
+
+TESTS["exec-path"] = test_exec_path
 TESTS["daemon-continue"] = test_daemon_continue
 TESTS["relibc-signal-wait"] = test_relibc_signal_wait
 TESTS["firefox-js"] = test_firefox_js
