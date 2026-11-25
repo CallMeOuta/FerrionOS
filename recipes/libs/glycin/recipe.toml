@@ -1,5 +1,5 @@
 [package]
-description = "Sandboxed image decoding loaders and crate sources for FerrionOS"
+description = "Sandboxed image decoding loaders for FerrionOS"
 
 [source]
 tar = "https://download.gnome.org/sources/glycin/2.2/glycin-2.2.6.tar.xz"
@@ -101,3 +101,9 @@ done
 install -Dm644 "${COOKBOOK_SOURCE}/LICENSE-MPL-2.0" "${COOKBOOK_STAGE}/usr/share/licenses/glycin/LICENSE-MPL-2.0"
 install -Dm644 "${COOKBOOK_SOURCE}/LICENSE-LGPL-2.1" "${COOKBOOK_STAGE}/usr/share/licenses/glycin/LICENSE-LGPL-2.1"
 """
+
+[[optional-packages]]
+name = "dev"
+files = [
+    "usr/share/glycin/vendor/**",
+]

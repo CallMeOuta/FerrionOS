@@ -1,13 +1,18 @@
 [package]
 description = "Headless glycin sandboxed image loading and isolation probe"
+dependencies = [
+    "glycin",
+]
 
 [build]
 template = "custom"
 dependencies = [
     "glib",
-    "glycin",
     "libffi",
     "zlib",
+]
+dev-dependencies = [
+    "glycin.dev",
 ]
 script = """
 DYNAMIC_INIT
