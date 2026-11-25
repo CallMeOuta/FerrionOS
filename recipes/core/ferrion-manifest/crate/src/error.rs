@@ -63,6 +63,17 @@ pub enum ManifestError {
     InvalidReview {
         detail: String,
     },
+    GrantsTooLarge {
+        len: usize,
+        limit: usize,
+    },
+    TooManyGrantApps {
+        count: usize,
+        limit: usize,
+    },
+    InvalidGrant {
+        detail: String,
+    },
 }
 
 impl ManifestError {
@@ -87,6 +98,9 @@ impl ManifestError {
             Self::MissingReason { .. } => "missing-reason",
             Self::InvalidReason { .. } => "invalid-reason",
             Self::InvalidReview { .. } => "invalid-review",
+            Self::GrantsTooLarge { .. } => "grants-too-large",
+            Self::TooManyGrantApps { .. } => "too-many-grant-apps",
+            Self::InvalidGrant { .. } => "invalid-grant",
         }
     }
 }
@@ -136,6 +150,13 @@ impl fmt::Display for ManifestError {
                 write!(f, "invalid reason for {capability:?}: {detail}")
             }
             Self::InvalidReview { detail } => write!(f, "invalid review section: {detail}"),
+            Self::GrantsTooLarge { len, limit } => {
+                write!(f, "grants file is {len} bytes, limit is {limit}")
+            }
+            Self::TooManyGrantApps { count, limit } => {
+                write!(f, "grants file lists {count} apps, limit is {limit}")
+            }
+            Self::InvalidGrant { detail } => write!(f, "invalid grant entry: {detail}"),
         }
     }
 }

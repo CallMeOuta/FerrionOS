@@ -5,8 +5,9 @@ use std::io::Read;
 use std::process::ExitCode;
 
 use ferrion_manifest::{
-    CATALOG, MAX_ID_LEN, MAX_MANIFEST_BYTES, MAX_NON_APP_PACKAGES, MAX_RESERVED_IDS, ManifestError,
-    Origin, parse_manifest_bytes, validate_catalog_invariants,
+    CATALOG, MAX_GRANTS_FILE_BYTES, MAX_ID_LEN, MAX_MANIFEST_BYTES, MAX_NON_APP_PACKAGES,
+    MAX_RESERVED_IDS, ManifestError, Origin, parse_grants_bytes, parse_manifest_bytes,
+    validate_catalog_invariants,
 };
 
 const MAX_RESERVED_FILE_BYTES: usize = (MAX_RESERVED_IDS + 2) * (MAX_ID_LEN + 2);
@@ -119,9 +120,21 @@ fn run() -> Result<(), (i32, String)> {
                 Err(err) => Err((1, format!("ERR {}: {err}", err.reason_code()))),
             }
         }
+        Some("grants") if args.len() == 2 => {
+            let path = &args[1];
+            let bytes = read_bounded(path, MAX_GRANTS_FILE_BYTES)
+                .map_err(|msg| (2, format!("ERR io: {msg}")))?;
+            match parse_grants_bytes(&bytes) {
+                Ok(grants) => {
+                    println!("OK grants {}", grants.apps.len());
+                    Ok(())
+                }
+                Err(err) => Err((1, format!("ERR {}: {err}", err.reason_code()))),
+            }
+        }
         _ => Err((
             2,
-            "ERR usage: ferrion-manifest-check catalog | limits | repo <package> <path> | outside <reserved-ids-file> <path>"
+            "ERR usage: ferrion-manifest-check catalog | limits | grants <path> | repo <package> <path> | outside <reserved-ids-file> <path>"
                 .to_owned(),
         )),
     }

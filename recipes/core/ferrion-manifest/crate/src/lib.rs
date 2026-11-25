@@ -1,9 +1,14 @@
 pub mod catalog;
 pub mod error;
+pub mod grants;
 pub mod parse;
 
 pub const FORMAT_VERSION: u32 = 1;
+pub const GRANTS_FORMAT_VERSION: u32 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+pub const MAX_GRANTS_FILE_BYTES: usize = 64 * 1024;
+pub const MAX_GRANT_APPS: usize = 256;
+pub const MAX_INSTALLED_MANIFESTS: usize = 512;
 pub const MIN_ID_LEN: usize = 1;
 pub const MAX_ID_LEN: usize = 64;
 pub const MIN_NAME_LEN: usize = 1;
@@ -27,6 +32,7 @@ pub use catalog::{
     lookup_capability, validate_catalog_invariants,
 };
 pub use error::ManifestError;
+pub use grants::{GrantsFile, effective_grant, parse_grants, parse_grants_bytes};
 pub use parse::{
     AppKind, CapabilityDecl, Manifest, Origin, ReviewException, ReviewScene, ReviewSection,
     parse_manifest, parse_manifest_bytes, validate_id_segment,

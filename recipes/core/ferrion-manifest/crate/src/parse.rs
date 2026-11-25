@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::catalog::{CapabilityClass, lookup_capability};
+use crate::catalog::{CapabilityClass, lookup_capability, validate_catalog_invariants};
 use crate::error::ManifestError;
 use crate::{
     FORMAT_VERSION, MAX_CAPABILITIES, MAX_EXEC_LEN, MAX_ID_LEN, MAX_MANIFEST_BYTES, MAX_NAME_LEN,
@@ -419,6 +419,7 @@ pub fn parse_manifest_bytes(bytes: &[u8], origin: Origin<'_>) -> Result<Manifest
 }
 
 pub fn parse_manifest(text: &str, origin: Origin<'_>) -> Result<Manifest, ManifestError> {
+    validate_catalog_invariants();
     if text.len() > MAX_MANIFEST_BYTES {
         return Err(ManifestError::ManifestTooLarge {
             len: text.len(),

@@ -87,3 +87,22 @@ name = "valid-outside"
 mode = "outside"
 path = "valid-outside.toml"
 expect = "ok"
+
+[[case]]
+name = "bad-grants-never"
+mode = "grants"
+path = "bad-grants-never.toml"
+expect = "forbidden-capability"
+
+[[case]]
+name = "valid-grants"
+mode = "grants"
+path = "valid-grants.toml"
+expect = "ok"
+
+[[case]]
+name = "duplicate-recipe"
+mode = "config"
+config = "dup-config.toml"
+recipes = "dup-recipes"
+expect = "duplicate-recipe"

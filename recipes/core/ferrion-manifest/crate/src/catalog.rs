@@ -261,7 +261,6 @@ pub fn validate_catalog_invariants() {
 }
 
 pub fn lookup_capability(name: &str) -> Option<&'static CapabilitySpec> {
-    validate_catalog_invariants();
     for spec in CATALOG {
         match spec.match_kind {
             CapabilityMatch::Exact => {

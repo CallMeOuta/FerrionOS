@@ -80,13 +80,17 @@ def run_checker(checker, args):
 
 def recipe_dirs_by_name(recipes_root):
     mapping = {}
+    duplicates = []
     for path in sorted(recipes_root.glob("**/recipe.toml")):
         rel_parts = path.relative_to(recipes_root).parts
         if "source" in rel_parts or "target" in rel_parts:
             continue
         pkg = path.parent.name
-        mapping.setdefault(pkg, path.parent)
-    return mapping
+        if pkg in mapping:
+            duplicates.append((pkg, mapping[pkg], path.parent))
+            continue
+        mapping[pkg] = path.parent
+    return mapping, duplicates
 
 
 def resolve_config_packages(config_path, seen=None):
@@ -139,8 +143,10 @@ def load_non_apps(path, max_non_apps):
 
 def check_config(checker, config_path, recipes_root, non_apps):
     packages = resolve_config_packages(config_path)
-    recipe_map = recipe_dirs_by_name(recipes_root)
+    recipe_map, duplicates = recipe_dirs_by_name(recipes_root)
     failures = []
+    for pkg, first, second in duplicates:
+        failures.append(("duplicate-recipe", pkg, f"duplicate recipe directories {first} and {second}"))
     app_count = 0
     non_app_count = 0
     for pkg in sorted(packages):
@@ -181,7 +187,10 @@ def check_config(checker, config_path, recipes_root, non_apps):
 
 
 def write_reserved_ids(recipes_root, max_reserved):
-    recipe_map = recipe_dirs_by_name(recipes_root)
+    recipe_map, duplicates = recipe_dirs_by_name(recipes_root)
+    if duplicates:
+        pkg, first, second = duplicates[0]
+        raise ValueError(f"duplicate-recipe: {pkg} in {first} and {second}")
     names = sorted(recipe_map.keys())
     if len(names) > max_reserved:
         raise ValueError(f"repository has {len(names)} recipes, limit is {max_reserved}")
@@ -212,6 +221,11 @@ def check_fixtures(checker, reserved_ids_path, non_apps):
         elif mode == "outside":
             path = FIXTURES_DIR / case["path"]
             res = run_checker(checker, ["outside", str(reserved_ids_path), str(path)])
+            actual = "ok" if res[0] else res[1]
+            detail = res[1] if res[0] else res[2]
+        elif mode == "grants":
+            path = FIXTURES_DIR / case["path"]
+            res = run_checker(checker, ["grants", str(path)])
             actual = "ok" if res[0] else res[1]
             detail = res[1] if res[0] else res[2]
         elif mode == "config":
