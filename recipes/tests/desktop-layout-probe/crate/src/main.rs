@@ -13,7 +13,8 @@ use wayland_client::{
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
-const SLOT_BYTES: usize = 1280 * 800 * 4;
+const DEFAULT_SLOT_BYTES: usize = 1280 * 800 * 4;
+const MAX_SLOT_BYTES: usize = 3840 * 2160 * 4;
 const SLOT_COUNT: usize = 3;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -31,6 +32,7 @@ struct State {
         xdg_toplevel::XdgToplevel,
     )>,
     pool: Option<(wl_shm_pool::WlShmPool, shm_storage::Storage)>,
+    slot_bytes: usize,
     buffers: Vec<(u64, wl_buffer::WlBuffer, (i32, i32), bool)>,
     size: (i32, i32),
     configured: bool,
@@ -90,14 +92,37 @@ impl State {
         let (width, height) = self.size;
         let key = self.key.advance_frame();
         let bytes = pixels(&self.role, width, height, key);
-        if bytes.len() > SLOT_BYTES {
+        if bytes.len() > MAX_SLOT_BYTES {
             return Err("window exceeds probe buffer capacity".into());
         }
+        if bytes.len() > self.slot_bytes {
+            let new_slot_bytes = bytes.len();
+            let total_bytes = new_slot_bytes
+                .checked_mul(SLOT_COUNT)
+                .ok_or("probe pool size overflow")?;
+            let total_i32 = i32::try_from(total_bytes).map_err(|_| "probe pool size overflow")?;
+            let new_file = shm_storage::Storage::new(total_bytes)?;
+            let new_pool = self.shm.as_ref().ok_or("no shared memory")?.create_pool(
+                new_file.fd(),
+                total_i32,
+                qh,
+                (),
+            );
+            for (_, buffer, _, _) in self.buffers.drain(..) {
+                buffer.destroy();
+            }
+            if let Some((old_pool, _)) = self.pool.replace((new_pool, new_file)) {
+                old_pool.destroy();
+            }
+            self.slot_bytes = new_slot_bytes;
+        }
+        let slot = if self.buffers.is_empty() { 0 } else { slot };
+        let slot_bytes = self.slot_bytes;
         let (pool, file) = self.pool.as_mut().unwrap();
-        file.write(slot * SLOT_BYTES, &bytes);
+        file.write(slot * slot_bytes, &bytes);
         if self.buffers.get(slot).is_none_or(|b| b.2 != self.size) {
             let buffer = pool.create_buffer(
-                (slot * SLOT_BYTES) as i32,
+                (slot * slot_bytes) as i32,
                 width,
                 height,
                 width * 4,
@@ -159,6 +184,7 @@ fn main() -> Result<()> {
         keyboard: None,
         window: None,
         pool: None,
+        slot_bytes: DEFAULT_SLOT_BYTES,
         buffers: Vec::new(),
         size: (400, 300),
         configured: false,
@@ -170,10 +196,10 @@ fn main() -> Result<()> {
     connection.display().get_registry(&qh, ());
     queue.roundtrip(&mut state)?;
     queue.roundtrip(&mut state)?;
-    let file = shm_storage::Storage::new(SLOT_BYTES * SLOT_COUNT)?;
+    let file = shm_storage::Storage::new(DEFAULT_SLOT_BYTES * SLOT_COUNT)?;
     let pool = state.shm.as_ref().ok_or("no shared memory")?.create_pool(
         file.fd(),
-        (SLOT_BYTES * SLOT_COUNT) as i32,
+        (DEFAULT_SLOT_BYTES * SLOT_COUNT) as i32,
         &qh,
         (),
     );

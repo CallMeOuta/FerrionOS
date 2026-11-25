@@ -16,7 +16,9 @@ def config(radius):
     text = f'''input {{
     keyboard {{ xkb {{ layout "us"; }}; }}
 }}
-output "ferrion-1" {{ scale 1; }}
+output "Virtual-1" {{ scale 1; }}
+output "Virtual-2" {{ scale 1; }}
+output "Unknown-1" {{ scale 1; }}
 layout {{
     workspace-mode "columns"
     gaps {gap}

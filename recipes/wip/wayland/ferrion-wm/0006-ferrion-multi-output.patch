@@ -1,0 +1,1101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FerrionOS contributors <contributors@ferrion.invalid>
+Date: Tue, 24 Nov 2026 17:28:00 -0800
+Subject: [PATCH] backend: Support multiple outputs and per-output pacing in ferrion-wm
+
+Replace single-output state in src/backend/ferrion.rs with per-connector
+HeadState entries keyed from ferrion-wm-backend::OutputInfo, route
+FlipComplete by flip.crtc (ignoring stale completions with one warning),
+append output=<name> to FERRION_FRAME and outputs=<n> to FERRION_READY,
+make defer_redraw per-output so a FlipPending head does not starve other
+ready outputs in Niri::redraw_queued_outputs, and diff hotplug changes
+while keeping unchanged heads live.
+---
+--- a/src/backend/ferrion.rs
++++ b/src/backend/ferrion.rs
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+-// Added for FerrionOS on 2026-11-21, modified 2026-11-22 and 2026-11-23, to niri's backend interface.
++// Added for FerrionOS on 2026-11-21, modified 2026-11-22, 2026-11-23 and 2026-11-24, to niri's backend interface.
+ // Input adapter follows FerrionOS's MIT ferrion-wm-backend; its notices are
+ // retained in ferrion-vendor/backend/LICENSE.
+ use std::collections::{HashMap, VecDeque};
+@@ -14,7 +14,7 @@
+ use calloop::timer::{TimeoutAction, Timer};
+ use calloop::{LoopHandle, RegistrationToken};
+ use ferrion_wm_backend::{
+-    self as native, BackendEvent, FlipCompletion, FrameScheduler, Input, PresentMode,
++    self as native, BackendEvent, FlipCompletion, FrameScheduler, Input, OutputInfo, PresentMode,
+     PresentPreference,
+ };
+ use niri_config::OutputName;
+@@ -45,6 +45,7 @@
+ const MAX_PENDING_INPUTS: usize = 512;
+ const MAX_CONSECUTIVE_FLIP_BUSY: u32 = 8;
+ const DEFAULT_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
++const DEFAULT_REFRESH_MHZ: i32 = 60_000;
+ const FRAME_MARGIN: Duration = Duration::from_micros(500);
+ const DISPLAY_CHANGE_PENDING_ERR: &str = "display change pending";
+ 
+@@ -52,16 +53,24 @@
+ struct DisplayMode {
+     width: u32,
+     height: u32,
++    refresh_mhz: u32,
+     refresh_interval: Option<Duration>,
+ }
+ 
+ impl DisplayMode {
+-    fn from_native(native: &native::Backend) -> Self {
+-        let (width, height) = native.dimensions();
++    fn from_output_info(info: &OutputInfo) -> Self {
++        let refresh_interval = if info.refresh_mhz > 0 {
++            let nanos = (1_000_000_000_000_u64 + u64::from(info.refresh_mhz) / 2)
++                / u64::from(info.refresh_mhz);
++            Some(Duration::from_nanos(nanos.max(1)))
++        } else {
++            None
++        };
+         Self {
+-            width,
+-            height,
+-            refresh_interval: native.refresh_period(),
++            width: info.width,
++            height: info.height,
++            refresh_mhz: info.refresh_mhz,
++            refresh_interval,
+         }
+     }
+ 
+@@ -70,10 +79,14 @@
+     }
+ 
+     fn output_mode(self) -> Mode {
+-        let period_us = self.scheduler_period().as_micros().max(1);
++        let refresh = if self.refresh_mhz > 0 {
++            self.refresh_mhz.min(i32::MAX as u32) as i32
++        } else {
++            DEFAULT_REFRESH_MHZ
++        };
+         Mode {
+             size: (self.width as i32, self.height as i32).into(),
+-            refresh: (1_000_000_000_u128 / period_us) as i32,
++            refresh,
+         }
+     }
+ }
+@@ -85,23 +98,6 @@
+     Shown(Vec<u8>, (u32, u32), (i32, i32)),
+ }
+ 
+-struct ActiveDisplay {
+-    texture: GlesTexture,
+-    damage: OutputDamageTracker,
+-    buffer_valid: bool,
+-    cursor: CursorPlane,
+-}
+-
+-enum Display {
+-    Active(ActiveDisplay),
+-    ChangePending,
+-}
+-
+-enum DisplayEvent {
+-    Changed,
+-    Reconfigured(ActiveDisplay),
+-}
+-
+ struct PendingFlip {
+     frame: u64,
+     started: Instant,
+@@ -126,6 +122,22 @@
+     Wait,
+ }
+ 
++struct HeadState {
++    id: u32,
++    crtc: u32,
++    ipc_id: OutputId,
++    output: Output,
++    mode: DisplayMode,
++    texture: GlesTexture,
++    damage: OutputDamageTracker,
++    buffer_valid: bool,
++    cursor: CursorPlane,
++    scheduler: FrameScheduler,
++    pacing: Pacing,
++    consecutive_flip_busy: u32,
++    frame: u64,
++}
++
+ fn present_mode_name(mode: PresentMode) -> &'static str {
+     match mode {
+         PresentMode::DirtyFb => "dirtyfb",
+@@ -167,19 +179,99 @@
+         .is_some_and(is_flip_busy)
+ }
+ 
++fn build_head(
++    renderer: &mut GlesRenderer,
++    ipc_outputs: &Arc<Mutex<IpcOutputMap>>,
++    info: &OutputInfo,
++) -> anyhow::Result<HeadState> {
++    let mode = DisplayMode::from_output_info(info);
++    let expected_size: Size<i32, _> = (mode.width as i32, mode.height as i32).into();
++    let texture: GlesTexture = renderer.create_buffer(Fourcc::Argb8888, expected_size)?;
++    assert_eq!(texture.size(), expected_size);
++    let physical_mm = (
++        info.mm_width.min(i32::MAX as u32) as i32,
++        info.mm_height.min(i32::MAX as u32) as i32,
++    );
++    let output = Output::new(
++        info.name.clone(),
++        PhysicalProperties {
++            size: physical_mm.into(),
++            subpixel: Subpixel::Unknown,
++            make: "FerrionOS".into(),
++            model: "CPU display".into(),
++            serial_number: String::new(),
++        },
++    );
++    output.user_data().insert_if_missing(|| OutputName {
++        connector: info.name.clone(),
++        make: Some("FerrionOS".into()),
++        model: Some("CPU display".into()),
++        serial: None,
++    });
++    let output_mode = mode.output_mode();
++    output.change_current_state(
++        Some(output_mode),
++        Some(Transform::Normal),
++        None,
++        Some((info.x, info.y).into()),
++    );
++    output.set_preferred(output_mode);
++    let damage = OutputDamageTracker::from_output(&output);
++    let ipc_id = OutputId::next();
++    let ipc_width: u16 = mode.width.try_into()?;
++    let ipc_height: u16 = mode.height.try_into()?;
++    let ipc_refresh = output_mode.refresh as u32;
++    let physical_size = (info.mm_width > 0 && info.mm_height > 0)
++        .then_some((info.mm_width, info.mm_height));
++    let logical = logical_output(&output);
++    ipc_outputs.lock().unwrap().insert(
++        ipc_id,
++        niri_ipc::Output {
++            name: info.name.clone(),
++            make: "FerrionOS".into(),
++            model: "CPU display".into(),
++            serial: None,
++            physical_size,
++            modes: vec![niri_ipc::Mode {
++                width: ipc_width,
++                height: ipc_height,
++                refresh_rate: ipc_refresh,
++                is_preferred: true,
++            }],
++            current_mode: Some(0),
++            is_custom_mode: true,
++            vrr_supported: false,
++            vrr_enabled: false,
++            logical: Some(logical),
++            max_bpc: None,
++        },
++    );
++    Ok(HeadState {
++        id: info.id,
++        crtc: info.crtc,
++        ipc_id,
++        output,
++        mode,
++        texture,
++        damage,
++        buffer_valid: false,
++        cursor: CursorPlane::Unknown,
++        scheduler: FrameScheduler::new(mode.scheduler_period(), FRAME_MARGIN),
++        pacing: Pacing::Idle,
++        consecutive_flip_busy: 0,
++        frame: 0,
++    })
++}
++
+ pub struct Ferrion {
+     native: native::Backend,
+     renderer: GlesRenderer,
+-    display: Display,
+-    mode: DisplayMode,
+-    output: Output,
+-    scheduler: FrameScheduler,
+-    pacing: Pacing,
++    change_pending: bool,
++    display_generation: u64,
++    heads: Vec<HeadState>,
+     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
+     input_epoch: u64,
+     pending_inputs: VecDeque<u64>,
+-    frame: u64,
+-    consecutive_flip_busy: u32,
+ }
+ 
+ impl Ferrion {
+@@ -191,7 +283,6 @@
+             PresentPreference::PageFlip,
+         )?;
+         let input_epoch = get_monotonic_time().as_micros() as u64 - native.now_us();
+-        let initial_mode = DisplayMode::from_native(&native);
+         let mut renderer = unsafe {
+             let display =
+                 EGLDisplay::new(EGLSurfacelessDisplay).context("surfaceless EGL display")?;
+@@ -199,60 +290,27 @@
+             GlesRenderer::new(context).context("GLES renderer")?
+         };
+         let gl_renderer = query_gl_renderer(&mut renderer);
+-        let output = Output::new(
+-            "ferrion-1".into(),
+-            PhysicalProperties {
+-                size: (0, 0).into(),
+-                subpixel: Subpixel::Unknown,
+-                make: "FerrionOS".into(),
+-                model: "CPU display".into(),
+-                serial_number: String::new(),
+-            },
+-        );
+-        output.user_data().insert_if_missing(|| OutputName {
+-            connector: output.name(),
+-            make: Some("FerrionOS".into()),
+-            model: Some("CPU display".into()),
+-            serial: None,
+-        });
+-        let ipc_outputs = Arc::new(Mutex::new(HashMap::from([(
+-            OutputId::next(),
+-            niri_ipc::Output {
+-                name: output.name(),
+-                make: "FerrionOS".into(),
+-                model: "CPU display".into(),
+-                serial: None,
+-                physical_size: None,
+-                modes: vec![niri_ipc::Mode {
+-                    width: initial_mode.width.try_into()?,
+-                    height: initial_mode.height.try_into()?,
+-                    refresh_rate: initial_mode.output_mode().refresh as u32,
+-                    is_preferred: true,
+-                }],
+-                current_mode: Some(0),
+-                is_custom_mode: true,
+-                vrr_supported: false,
+-                vrr_enabled: false,
+-                logical: None,
+-                max_bpc: None,
+-            },
+-        )])));
+-        let mut backend = Self {
++        let ipc_outputs = Arc::new(Mutex::new(HashMap::new()));
++        let output_infos = native.outputs().to_vec();
++        assert!(!output_infos.is_empty());
++        let mut heads = Vec::with_capacity(output_infos.len());
++        for info in &output_infos {
++            heads.push(build_head(&mut renderer, &ipc_outputs, info)?);
++        }
++        let primary_width = heads[0].mode.width;
++        let primary_height = heads[0].mode.height;
++        let output_count = heads.len();
++        let display_generation = native.display_generation();
++        let backend = Self {
+             native,
+             renderer,
+-            display: Display::ChangePending,
+-            mode: initial_mode,
+-            output,
+-            scheduler: FrameScheduler::new(initial_mode.scheduler_period(), FRAME_MARGIN),
+-            pacing: Pacing::Idle,
++            change_pending: false,
++            display_generation,
++            heads,
+             ipc_outputs,
+             input_epoch,
+             pending_inputs: VecDeque::new(),
+-            frame: 0,
+-            consecutive_flip_busy: 0,
+         };
+-        let active = backend.apply_mode(None, initial_mode)?;
+-        backend.transition_display(DisplayEvent::Reconfigured(active));
+ 
+         let reping = ping;
+         event_loop.insert_source(source, move |_, _, state| {
+@@ -293,7 +351,7 @@
+                     }
+                     Ok(Some(BackendEvent::DisplayChanged)) => {
+                         let ferrion = state.backend.ferrion();
+-                        ferrion.transition_display(DisplayEvent::Changed);
++                        ferrion.change_pending = true;
+                         if let Err(err) = ferrion.reconfigure(&mut state.niri) {
+                             error!("display handoff failed: {err:#}");
+                             state.niri.stop_signal.stop();
+@@ -332,10 +390,11 @@
+             present_mode_name(backend.native.present_mode())
+         );
+         info!(
+-            "FERRION_READY width={} height={} vt={}",
+-            initial_mode.width,
+-            initial_mode.height,
+-            backend.native.vt()
++            "FERRION_READY width={} height={} vt={} outputs={}",
++            primary_width,
++            primary_height,
++            backend.native.vt(),
++            output_count
+         );
+         Ok(backend)
+     }
+@@ -343,15 +402,19 @@
+     pub fn init(&mut self, niri: &mut Niri) {
+         resources::init(&mut self.renderer);
+         shaders::init(&mut self.renderer);
+-        niri.add_output(self.output.clone(), self.mode.refresh_interval, false);
+-        assert_eq!(
+-            niri.output_state
+-                .get(&self.output)
+-                .unwrap()
+-                .frame_clock
+-                .refresh_interval(),
+-            self.mode.refresh_interval
+-        );
++        for head in &self.heads {
++            niri.add_output(head.output.clone(), head.mode.refresh_interval, false);
++            assert_eq!(
++                niri.output_state
++                    .get(&head.output)
++                    .unwrap()
++                    .frame_clock
++                    .refresh_interval(),
++                head.mode.refresh_interval
++            );
++        }
++        self.sync_ipc_logical();
++        niri.ipc_outputs_changed = true;
+         niri.update_shaders();
+     }
+ 
+@@ -371,136 +434,189 @@
+         false
+     }
+ 
+-    fn transition_display(&mut self, event: DisplayEvent) {
+-        match event {
+-            DisplayEvent::Changed => {
+-                self.display = Display::ChangePending;
+-            }
+-            DisplayEvent::Reconfigured(active) => {
+-                assert!(matches!(self.display, Display::ChangePending));
+-                self.display = Display::Active(active);
++    fn sync_ipc_logical(&self) {
++        let mut ipc_outputs = self.ipc_outputs.lock().unwrap();
++        for head in &self.heads {
++            if let Some(entry) = ipc_outputs.get_mut(&head.ipc_id) {
++                entry.logical = Some(logical_output(&head.output));
+             }
+         }
+     }
+ 
+-    fn apply_mode(
+-        &mut self,
+-        niri: Option<&mut Niri>,
+-        mode: DisplayMode,
+-    ) -> anyhow::Result<ActiveDisplay> {
+-        assert_eq!(self.native.dimensions(), (mode.width, mode.height));
+-        let expected_size: Size<i32, _> = (mode.width as i32, mode.height as i32).into();
+-        let texture: GlesTexture = self.renderer.create_buffer(Fourcc::Argb8888, expected_size)?;
+-        assert_eq!(texture.size(), expected_size);
+-        let output_mode = mode.output_mode();
+-        self.output
+-            .change_current_state(Some(output_mode), Some(Transform::Normal), None, None);
+-        self.output.set_preferred(output_mode);
+-        let damage = OutputDamageTracker::from_output(&self.output);
+-        let ipc_width: u16 = mode.width.try_into()?;
+-        let ipc_height: u16 = mode.height.try_into()?;
+-        let ipc_refresh = output_mode.refresh as u32;
+-        let logical = logical_output(&self.output);
+-        {
+-            let mut ipc_outputs = self.ipc_outputs.lock().unwrap();
+-            let entry = ipc_outputs.values_mut().next().unwrap();
+-            entry.modes[0] = niri_ipc::Mode {
+-                width: ipc_width,
+-                height: ipc_height,
+-                refresh_rate: ipc_refresh,
+-                is_preferred: true,
+-            };
+-            entry.current_mode = Some(0);
+-            entry.logical = Some(logical);
+-            assert_eq!(entry.modes[0].width, ipc_width);
+-            assert_eq!(entry.modes[0].height, ipc_height);
+-            assert_eq!(entry.modes[0].refresh_rate, ipc_refresh);
+-        }
+-        self.scheduler = FrameScheduler::new(mode.scheduler_period(), FRAME_MARGIN);
+-        self.mode = mode;
+-        assert_eq!(self.output.current_mode(), Some(output_mode));
+-        assert_eq!(self.mode, mode);
+-        if let Some(niri) = niri {
+-            niri.ipc_outputs_changed = true;
+-            if let Some(output_state) = niri.output_state.get_mut(&self.output) {
+-                let vrr = output_state.frame_clock.vrr();
+-                output_state.frame_clock = FrameClock::new(mode.refresh_interval, vrr);
+-                assert_eq!(
+-                    output_state.frame_clock.refresh_interval(),
+-                    mode.refresh_interval
+-                );
+-            }
+-            niri.output_resized(&self.output);
+-        }
+-        Ok(ActiveDisplay {
+-            texture,
+-            damage,
+-            buffer_valid: false,
+-            cursor: CursorPlane::Unknown,
+-        })
++    fn head_index(&self, output: &Output) -> Option<usize> {
++        self.heads.iter().position(|head| head.output == *output)
+     }
+ 
+-    fn on_redraw_request(&mut self, niri: &Niri) -> RedrawGate {
+-        match self.pacing {
++    fn on_redraw_request(&mut self, niri: &Niri, output: &Output) -> RedrawGate {
++        if self.change_pending {
++            return RedrawGate::Wait;
++        }
++        let Some(idx) = self.head_index(output) else {
++            return RedrawGate::Wait;
++        };
++        let now = self.native.now_us();
++        let head = &mut self.heads[idx];
++        match head.pacing {
+             Pacing::Due => {
+-                self.pacing = Pacing::Idle;
++                head.pacing = Pacing::Idle;
+                 RedrawGate::Render
+             }
+             Pacing::Armed(_) | Pacing::FlipPending(_) => RedrawGate::Wait,
+             Pacing::Idle => {
+-                let now = self.native.now_us();
+-                let start = self.scheduler.next_start(now);
++                let start = head.scheduler.next_start(now);
++                let head_id = head.id;
+                 let token = niri
+                     .event_loop
+                     .insert_source(
+                         Timer::from_duration(Duration::from_micros(start - now)),
+-                        |_, _, state| {
++                        move |_, _, state| {
+                             let backend = state.backend.ferrion();
+-                            assert!(matches!(backend.pacing, Pacing::Armed(_)));
+-                            backend.pacing = Pacing::Due;
++                            if let Some(head) = backend.heads.iter_mut().find(|h| h.id == head_id) {
++                                if matches!(head.pacing, Pacing::Armed(_)) {
++                                    head.pacing = Pacing::Due;
++                                }
++                            }
+                             TimeoutAction::Drop
+                         },
+                     )
+                     .expect("register frame deadline");
+-                self.pacing = Pacing::Armed(token);
++                head.pacing = Pacing::Armed(token);
+                 RedrawGate::Wait
+             }
+         }
+     }
+ 
+-    pub fn defer_redraw(&mut self, niri: &Niri) -> bool {
+-        matches!(self.on_redraw_request(niri), RedrawGate::Wait)
++    pub fn defer_redraw(&mut self, niri: &Niri, output: &Output) -> bool {
++        matches!(self.on_redraw_request(niri, output), RedrawGate::Wait)
+     }
+ 
+     fn reconfigure(&mut self, niri: &mut Niri) -> anyhow::Result<()> {
+-        assert!(matches!(self.display, Display::ChangePending));
+-        if let Pacing::Armed(token) = mem::replace(&mut self.pacing, Pacing::Idle) {
+-            niri.event_loop.remove(token);
+-        }
+-        self.consecutive_flip_busy = 0;
++        assert!(self.change_pending);
+         self.native.reconfigure()?;
+         info!(
+             "FERRION_PRESENTER mode={}",
+             present_mode_name(self.native.present_mode())
+         );
+-        let mode = DisplayMode::from_native(&self.native);
+-        let active = self.apply_mode(Some(niri), mode)?;
+-        let (width, height) = self.native.dimensions();
+-        assert_eq!(active.texture.size(), (width as i32, height as i32).into());
+-        self.transition_display(DisplayEvent::Reconfigured(active));
++        let generation = self.native.display_generation();
++        let reset_all = generation != self.display_generation;
++        self.display_generation = generation;
++        let new_infos = self.native.outputs().to_vec();
++        let mut old_by_id: HashMap<u32, HeadState> = self
++            .heads
++            .drain(..)
++            .map(|head| (head.id, head))
++            .collect();
++
++        let new_ids: Vec<u32> = new_infos.iter().map(|info| info.id).collect();
++        let removed_ids: Vec<u32> = old_by_id
++            .keys()
++            .copied()
++            .filter(|id| !new_ids.contains(id))
++            .collect();
++        for removed_id in removed_ids {
++            if let Some(mut head) = old_by_id.remove(&removed_id) {
++                if let Pacing::Armed(token) = mem::replace(&mut head.pacing, Pacing::Idle) {
++                    niri.event_loop.remove(token);
++                }
++                self.ipc_outputs.lock().unwrap().remove(&head.ipc_id);
++                niri.remove_output(&head.output);
++            }
++        }
++
++        let mut next_heads = Vec::with_capacity(new_infos.len());
++        for info in &new_infos {
++            if let Some(mut head) = old_by_id.remove(&info.id) {
++                let next_mode = DisplayMode::from_output_info(info);
++                head.crtc = info.crtc;
++                if head.mode == next_mode && head.output.name() == info.name {
++                    if reset_all {
++                        if let Pacing::Armed(token) = mem::replace(&mut head.pacing, Pacing::Idle) {
++                            niri.event_loop.remove(token);
++                        }
++                        head.consecutive_flip_busy = 0;
++                        head.damage = OutputDamageTracker::from_output(&head.output);
++                        head.buffer_valid = false;
++                        head.cursor = CursorPlane::Unknown;
++                    }
++                    next_heads.push(head);
++                    continue;
++                }
++                if let Pacing::Armed(token) = mem::replace(&mut head.pacing, Pacing::Idle) {
++                    niri.event_loop.remove(token);
++                }
++                head.consecutive_flip_busy = 0;
++                let expected_size: Size<i32, _> =
++                    (next_mode.width as i32, next_mode.height as i32).into();
++                let texture: GlesTexture = self
++                    .renderer
++                    .create_buffer(Fourcc::Argb8888, expected_size)?;
++                assert_eq!(texture.size(), expected_size);
++                let output_mode = next_mode.output_mode();
++                head.output.change_current_state(
++                    Some(output_mode),
++                    Some(Transform::Normal),
++                    None,
++                    None,
++                );
++                head.output.set_preferred(output_mode);
++                head.damage = OutputDamageTracker::from_output(&head.output);
++                head.texture = texture;
++                head.buffer_valid = false;
++                head.cursor = CursorPlane::Unknown;
++                head.scheduler = FrameScheduler::new(next_mode.scheduler_period(), FRAME_MARGIN);
++                head.mode = next_mode;
++                let ipc_width: u16 = next_mode.width.try_into()?;
++                let ipc_height: u16 = next_mode.height.try_into()?;
++                let ipc_refresh = output_mode.refresh as u32;
++                {
++                    let mut ipc_outputs = self.ipc_outputs.lock().unwrap();
++                    if let Some(entry) = ipc_outputs.get_mut(&head.ipc_id) {
++                        entry.modes[0] = niri_ipc::Mode {
++                            width: ipc_width,
++                            height: ipc_height,
++                            refresh_rate: ipc_refresh,
++                            is_preferred: true,
++                        };
++                        entry.current_mode = Some(0);
++                    }
++                }
++                if let Some(output_state) = niri.output_state.get_mut(&head.output) {
++                    let vrr = output_state.frame_clock.vrr();
++                    output_state.frame_clock = FrameClock::new(next_mode.refresh_interval, vrr);
++                }
++                niri.output_resized(&head.output);
++                next_heads.push(head);
++            } else {
++                let head = build_head(&mut self.renderer, &self.ipc_outputs, info)?;
++                niri.add_output(head.output.clone(), head.mode.refresh_interval, false);
++                next_heads.push(head);
++            }
++        }
++        self.heads = next_heads;
++        self.change_pending = false;
++        self.sync_ipc_logical();
++        niri.ipc_outputs_changed = true;
++        niri.queue_redraw_all();
+         Ok(())
+     }
+ 
+     fn on_flip_complete(&mut self, flip: FlipCompletion) -> anyhow::Result<()> {
+-        assert!(matches!(self.display, Display::Active(_)));
+-        self.native.complete_flip()?;
+-        let Pacing::FlipPending(mut pending) = mem::replace(&mut self.pacing, Pacing::Idle) else {
+-            unreachable!("flip completion without pending flip");
++        let matched = self.native.complete_flip_for(flip.crtc)?;
++        let Some(head) = self.heads.iter_mut().find(|head| head.crtc == flip.crtc) else {
++            warn!("ignoring stale page flip completion for crtc {}", flip.crtc);
++            return Ok(());
++        };
++        if !matched || !matches!(head.pacing, Pacing::FlipPending(_)) {
++            warn!("ignoring stale page flip completion for crtc {}", flip.crtc);
++            return Ok(());
++        }
++        let Pacing::FlipPending(mut pending) = mem::replace(&mut head.pacing, Pacing::Idle) else {
++            unreachable!();
+         };
+-        self.consecutive_flip_busy = 0;
++        head.consecutive_flip_busy = 0;
+         let present_us = flip.completed_us.saturating_sub(pending.started_us);
+         info!(
+-            "FERRION_FRAME frame={} started_us={} completed_us={} mode=flip composite_us={} sync_wait_us={} copy_us={} readback_us={} present_us={}",
++            "FERRION_FRAME frame={} started_us={} completed_us={} mode=flip composite_us={} sync_wait_us={} copy_us={} readback_us={} present_us={} output={}",
+             pending.frame,
+             pending.started_us,
+             flip.completed_us,
+@@ -508,7 +624,8 @@
+             pending.sync_wait_us,
+             pending.copy_us,
+             pending.readback_us,
+-            present_us
++            present_us,
++            head.output.name()
+         );
+         for read_us in pending.inputs {
+             info!(
+@@ -521,50 +638,49 @@
+             .feedbacks
+             .presented::<_, smithay::utils::Monotonic>(
+                 presentation_time,
+-                self.mode
++                head.mode
+                     .refresh_interval
+                     .map(Refresh::Fixed)
+                     .unwrap_or(Refresh::Unknown),
+                 pending.frame,
+                 wp_presentation_feedback::Kind::HwCompletion,
+             );
+-        self.scheduler.record_render(pending.started.elapsed());
++        head.scheduler.record_render(pending.started.elapsed());
+         Ok(())
+     }
+ 
+-    fn update_cursor(&mut self, niri: &Niri) -> anyhow::Result<bool> {
++    fn update_cursor(&mut self, niri: &Niri, head_idx: usize) -> anyhow::Result<bool> {
++        let head_id = self.heads[head_idx].id;
++        let output = self.heads[head_idx].output.clone();
++        let pointer_loc = niri.seat.get_pointer().unwrap().current_location();
++        let output_geo = niri.global_space.output_geometry(&output);
++        let pointer_on_output = output_geo.is_some_and(|geo| geo.to_f64().contains(pointer_loc));
++
+         let mut elements = Vec::new();
+-        if niri.pointer_visibility.is_visible() {
+-            niri.render_pointer(&mut self.renderer, &self.output, &mut |e| elements.push(e));
++        if niri.pointer_visibility.is_visible() && pointer_on_output {
++            niri.render_pointer(&mut self.renderer, &output, &mut |e| elements.push(e));
+         }
+         if elements.is_empty() {
+-            let needs_hide = match &self.display {
+-                Display::Active(active) => !matches!(active.cursor, CursorPlane::Hidden),
+-                Display::ChangePending => unreachable!("update_cursor requires Active"),
+-            };
++            let needs_hide = !matches!(self.heads[head_idx].cursor, CursorPlane::Hidden);
+             if needs_hide {
+-                match self.native.set_cursor(None, (0, 0), (0, 0)) {
++                match self.native.set_cursor_for(head_id, None, (0, 0), (0, 0)) {
+                     Ok(()) => {}
+                     Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
+                     Err(err) => return Err(err.into()),
+                 }
+-                if let Display::Active(active) = &mut self.display {
+-                    active.cursor = CursorPlane::Hidden;
+-                }
++                self.heads[head_idx].cursor = CursorPlane::Hidden;
+             }
+             return Ok(false);
+         }
+-        let capacity = match self.native.cursor_size() {
++        let capacity = match self.native.cursor_size_for(head_id) {
+             Ok(capacity) => capacity,
+             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+-                if let Display::Active(active) = &mut self.display {
+-                    active.cursor = CursorPlane::Hidden;
+-                }
++                self.heads[head_idx].cursor = CursorPlane::Hidden;
+                 return Ok(true);
+             }
+             Err(err) => return Err(err.into()),
+         };
+-        let scale = Scale::from(self.output.current_scale().fractional_scale());
++        let scale = Scale::from(output.current_scale().fractional_scale());
+         let (mut texture, sync, geo) = render_to_encompassing_texture(
+             &mut self.renderer,
+             scale,
+@@ -572,12 +688,8 @@
+             Fourcc::Argb8888,
+             &elements,
+         )?;
+-        let position = niri
+-            .seat
+-            .get_pointer()
+-            .unwrap()
+-            .current_location()
+-            .to_physical_precise_round(scale);
++        let output_pos = output_geo.map(|g| g.loc).unwrap_or_default();
++        let position = (pointer_loc - output_pos.to_f64()).to_physical_precise_round(scale);
+         let hotspot = position - geo.loc;
+         let size = (geo.size.w as u32, geo.size.h as u32);
+         if size.0 > capacity.0
+@@ -587,19 +699,14 @@
+             || hotspot.x >= geo.size.w
+             || hotspot.y >= geo.size.h
+         {
+-            let needs_hide = match &self.display {
+-                Display::Active(active) => !matches!(active.cursor, CursorPlane::Hidden),
+-                Display::ChangePending => unreachable!("update_cursor requires Active"),
+-            };
++            let needs_hide = !matches!(self.heads[head_idx].cursor, CursorPlane::Hidden);
+             if needs_hide {
+-                match self.native.set_cursor(None, (0, 0), (0, 0)) {
++                match self.native.set_cursor_for(head_id, None, (0, 0), (0, 0)) {
+                     Ok(()) => {}
+                     Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
+                     Err(err) => return Err(err.into()),
+                 }
+-                if let Display::Active(active) = &mut self.display {
+-                    active.cursor = CursorPlane::Hidden;
+-                }
++                self.heads[head_idx].cursor = CursorPlane::Hidden;
+             }
+             return Ok(true);
+         }
+@@ -613,33 +720,28 @@
+         )?;
+         let pixels = self.renderer.map_texture(&mapping)?.to_vec();
+         let next = CursorPlane::Shown(pixels, size, (hotspot.x, hotspot.y));
+-        let changed = match &self.display {
+-            Display::Active(active) => active.cursor != next,
+-            Display::ChangePending => unreachable!("update_cursor requires Active"),
+-        };
+-        if changed {
++        if self.heads[head_idx].cursor != next {
+             if let CursorPlane::Shown(ref bytes, sz, hs) = next {
+-                match self.native.set_cursor(Some(bytes), sz, hs) {
++                match self.native.set_cursor_for(head_id, Some(bytes), sz, hs) {
+                     Ok(()) => {}
+                     Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+-                        if let Display::Active(active) = &mut self.display {
+-                            active.cursor = CursorPlane::Hidden;
+-                        }
++                        self.heads[head_idx].cursor = CursorPlane::Hidden;
+                         return Ok(true);
+                     }
+                     Err(err) => return Err(err.into()),
+                 }
+             }
+-            if let Display::Active(active) = &mut self.display {
+-                active.cursor = next;
+-            }
++            self.heads[head_idx].cursor = next;
+         }
+         Ok(false)
+     }
+ 
+     pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
++        let Some(head_idx) = self.head_index(output) else {
++            return RenderResult::Skipped;
++        };
+         assert!(!matches!(
+-            self.pacing,
++            self.heads[head_idx].pacing,
+             Pacing::Armed(_) | Pacing::FlipPending(_)
+         ));
+         {
+@@ -649,19 +751,19 @@
+                 RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+             ));
+         }
+-        if matches!(self.display, Display::ChangePending) {
++        if self.change_pending {
+             let output_state = niri.output_state.get_mut(output).unwrap();
+             output_state.redraw_state = RedrawState::Queued;
+             return RenderResult::Skipped;
+         }
+         let started = Instant::now();
+-        let result = self.render_frame(niri, output, started);
++        let result = self.render_frame(niri, output, head_idx, started);
+         match result {
+             Ok(result) => {
+-                if !matches!(self.pacing, Pacing::FlipPending(_)) {
+-                    self.scheduler.record_render(started.elapsed());
++                if !matches!(self.heads[head_idx].pacing, Pacing::FlipPending(_)) {
++                    self.heads[head_idx].scheduler.record_render(started.elapsed());
+                 }
+-                self.consecutive_flip_busy = 0;
++                self.heads[head_idx].consecutive_flip_busy = 0;
+                 let output_state = niri.output_state.get_mut(output).unwrap();
+                 output_state.redraw_state = if output_state.unfinished_animations_remain {
+                     RedrawState::Queued
+@@ -673,14 +775,15 @@
+                 result
+             }
+             Err(err) if anyhow_is_change_pending(&err) => {
+-                self.transition_display(DisplayEvent::Changed);
++                self.change_pending = true;
+                 let output_state = niri.output_state.get_mut(output).unwrap();
+                 output_state.redraw_state = RedrawState::Queued;
+                 RenderResult::Skipped
+             }
+             Err(err) if anyhow_is_flip_busy(&err) => {
+-                self.consecutive_flip_busy += 1;
+-                if self.consecutive_flip_busy > MAX_CONSECUTIVE_FLIP_BUSY {
++                let head = &mut self.heads[head_idx];
++                head.consecutive_flip_busy += 1;
++                if head.consecutive_flip_busy > MAX_CONSECUTIVE_FLIP_BUSY {
+                     let output_state = niri.output_state.get_mut(output).unwrap();
+                     output_state.redraw_state = RedrawState::Idle;
+                     error!("page flip busy limit exceeded: {err:#}");
+@@ -689,7 +792,7 @@
+                 }
+                 warn!(
+                     "page flip busy ({}/{}), deferring frame",
+-                    self.consecutive_flip_busy, MAX_CONSECUTIVE_FLIP_BUSY
++                    head.consecutive_flip_busy, MAX_CONSECUTIVE_FLIP_BUSY
+                 );
+                 let output_state = niri.output_state.get_mut(output).unwrap();
+                 output_state.redraw_state = RedrawState::Queued;
+@@ -709,10 +812,11 @@
+         &mut self,
+         niri: &mut Niri,
+         output: &Output,
++        head_idx: usize,
+         frame_started: Instant,
+     ) -> anyhow::Result<RenderResult> {
+-        assert!(matches!(self.display, Display::Active(_)));
+-        let software_cursor = self.update_cursor(niri)?;
++        assert!(!self.change_pending);
++        let software_cursor = self.update_cursor(niri, head_idx)?;
+         let composite_started = Instant::now();
+         let elements = niri.render_to_vec(
+             RenderCtx {
+@@ -723,64 +827,70 @@
+             output,
+             software_cursor,
+         );
+-        let Display::Active(active) = &mut self.display else {
+-            unreachable!("render_frame requires Active");
++        let (head_id, width, height, output_name) = {
++            let head = &self.heads[head_idx];
++            (head.id, head.mode.width, head.mode.height, head.output.name())
++        };
++        let (feedbacks, composite_us, sync_wait_us, copy_us) = {
++            let head = &mut self.heads[head_idx];
++            let mut target = self.renderer.bind(&mut head.texture)?;
++            let result = head.damage.render_output(
++                &mut self.renderer,
++                &mut target,
++                usize::from(head.buffer_valid),
++                &elements,
++                [0.; 4],
++            )?;
++            niri.update_primary_scanout_output(output, &result.states);
++            if result.damage.is_none() {
++                self.pending_inputs.clear();
++                return Ok(RenderResult::NoDamage);
++            }
++            let composite_us = composite_started
++                .elapsed()
++                .as_micros()
++                .min(u128::from(u64::MAX)) as u64;
++            let sync_started = Instant::now();
++            result.sync.wait()?;
++            let sync_wait_us = sync_started
++                .elapsed()
++                .as_micros()
++                .min(u128::from(u64::MAX)) as u64;
++            let copy_started = Instant::now();
++            let mapping = self.renderer.copy_framebuffer(
++                &target,
++                Rectangle::from_size((width as i32, height as i32).into()),
++                Fourcc::Argb8888,
++            )?;
++            let pixels = self.renderer.map_texture(&mapping)?;
++            let stride = self.native.stride_for(head_id)? as usize;
++            let buffer = self.native.framebuffer_mut_for(head_id)?;
++            let row_bytes = width as usize * 4;
++            for (row, source) in pixels
++                .chunks_exact(row_bytes)
++                .take(height as usize)
++                .enumerate()
++            {
++                buffer[row * stride..row * stride + row_bytes].copy_from_slice(source);
++            }
++            let copy_us = copy_started
++                .elapsed()
++                .as_micros()
++                .min(u128::from(u64::MAX)) as u64;
++            let feedbacks = niri.take_presentation_feedbacks(output, &result.states);
++            (feedbacks, composite_us, sync_wait_us, copy_us)
+         };
+-        let mut target = self.renderer.bind(&mut active.texture)?;
+-        let result = active.damage.render_output(
+-            &mut self.renderer,
+-            &mut target,
+-            usize::from(active.buffer_valid),
+-            &elements,
+-            [0.; 4],
+-        )?;
+-        niri.update_primary_scanout_output(output, &result.states);
+-        if result.damage.is_none() {
+-            self.pending_inputs.clear();
+-            return Ok(RenderResult::NoDamage);
+-        }
+-        let composite_us = composite_started
+-            .elapsed()
+-            .as_micros()
+-            .min(u128::from(u64::MAX)) as u64;
+-        let sync_started = Instant::now();
+-        result.sync.wait()?;
+-        let sync_wait_us = sync_started
+-            .elapsed()
+-            .as_micros()
+-            .min(u128::from(u64::MAX)) as u64;
+-        let copy_started = Instant::now();
+-        let (width, height) = self.native.dimensions();
+-        let mapping = self.renderer.copy_framebuffer(
+-            &target,
+-            Rectangle::from_size((width as i32, height as i32).into()),
+-            Fourcc::Argb8888,
+-        )?;
+-        let pixels = self.renderer.map_texture(&mapping)?;
+-        let stride = self.native.stride() as usize;
+-        let buffer = self.native.framebuffer_mut();
+-        let row_bytes = width as usize * 4;
+-        for (row, source) in pixels
+-            .chunks_exact(row_bytes)
+-            .take(height as usize)
+-            .enumerate()
+-        {
+-            buffer[row * stride..row * stride + row_bytes].copy_from_slice(source);
+-        }
+-        let copy_us = copy_started
+-            .elapsed()
+-            .as_micros()
+-            .min(u128::from(u64::MAX)) as u64;
+         let readback_us = sync_wait_us.saturating_add(copy_us);
+-        let presented = self.native.present()?;
+-        active.buffer_valid = true;
+-        self.frame += 1;
++        let presented = self.native.present_for(head_id)?;
++        let head = &mut self.heads[head_idx];
++        head.buffer_valid = true;
++        head.frame += 1;
++        let frame_no = head.frame;
+         if presented.pending {
+             assert_eq!(presented.mode, PresentMode::PageFlip);
+             let inputs = self.pending_inputs.drain(..).collect();
+-            let feedbacks = niri.take_presentation_feedbacks(output, &result.states);
+-            self.pacing = Pacing::FlipPending(PendingFlip {
+-                frame: self.frame,
++            head.pacing = Pacing::FlipPending(PendingFlip {
++                frame: frame_no,
+                 started: frame_started,
+                 started_us: presented.started_us,
+                 composite_us,
+@@ -795,8 +905,8 @@
+         let presentation_time = get_monotonic_time();
+         let present_us = presented.completed_us.saturating_sub(presented.started_us);
+         info!(
+-            "FERRION_FRAME frame={} started_us={} completed_us={} mode={} composite_us={} sync_wait_us={} copy_us={} readback_us={} present_us={}",
+-            self.frame,
++            "FERRION_FRAME frame={} started_us={} completed_us={} mode={} composite_us={} sync_wait_us={} copy_us={} readback_us={} present_us={} output={}",
++            frame_no,
+             presented.started_us,
+             presented.completed_us,
+             present_mode_name(presented.mode),
+@@ -804,21 +914,22 @@
+             sync_wait_us,
+             copy_us,
+             readback_us,
+-            present_us
++            present_us,
++            output_name
+         );
+         for read_us in self.pending_inputs.drain(..) {
+             info!(
+                 "FERRION_INPUT frame={} read_us={} presented_us={}",
+-                self.frame, read_us, presented.completed_us
++                frame_no, read_us, presented.completed_us
+             );
+         }
+-        niri.take_presentation_feedbacks(output, &result.states)
+-            .presented::<_, smithay::utils::Monotonic>(
+-                presentation_time,
+-                Refresh::Unknown,
+-                self.frame,
+-                wp_presentation_feedback::Kind::empty(),
+-            );
++        let mut feedbacks = feedbacks;
++        feedbacks.presented::<_, smithay::utils::Monotonic>(
++            presentation_time,
++            Refresh::Unknown,
++            frame_no,
++            wp_presentation_feedback::Kind::empty(),
++        );
+         Ok(RenderResult::Submitted)
+     }
+ }
+--- a/src/backend/select.rs
++++ b/src/backend/select.rs
+@@ -44,10 +44,10 @@
+         }
+     }
+ 
+-    pub fn defer_redraw(&mut self, _niri: &crate::niri::Niri) -> bool {
++    pub fn defer_redraw(&mut self, _niri: &crate::niri::Niri, _output: &Output) -> bool {
+         #[cfg(feature = "ferrion")]
+         if let Self::Ferrion(backend) = self {
+-            return backend.defer_redraw(_niri);
++            return backend.defer_redraw(_niri, _output);
+         }
+         false
+     }
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -4092,16 +4092,24 @@
+     pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
+         let _span = tracy_client::span!("Niri::redraw_queued_outputs");
+ 
+-        while let Some((output, _)) = self.output_state.iter().find(|(_, state)| {
+-            matches!(
+-                state.redraw_state,
+-                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+-            )
+-        }) {
++        let queued: Vec<Output> = self
++            .output_state
++            .iter()
++            .filter(|(_, state)| {
++                matches!(
++                    state.redraw_state,
++                    RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
++                )
++            })
++            .map(|(output, _)| output.clone())
++            .collect();
++        for output in queued {
++            if !self.output_state.contains_key(&output) {
++                continue;
++            }
+             trace!("redrawing output");
+-            let output = output.clone();
+-            if backend.defer_redraw(self) {
+-                break;
++            if backend.defer_redraw(self, &output) {
++                continue;
+             }
+             self.redraw(backend, &output);
+         }
