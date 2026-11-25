@@ -47,6 +47,9 @@ type Interface = Rc<RefCell<SmoltcpInterface>>;
 
 const MAX_DURATION: Duration = Duration::from_micros(u64::MAX);
 const MIN_DURATION: Duration = Duration::from_micros(0);
+const MAX_SCHEME_REQUESTS_PER_BATCH: usize = 64;
+const MAX_SCHEME_BATCHES_PER_EVENT: usize = 16;
+const MAX_PENDING_TIMERS: usize = 32;
 
 fn getcfg(key: &str) -> Result<String> {
     let mut value = String::new();
@@ -62,6 +65,8 @@ pub struct Smolnetd {
 
     socket_set: Rc<RefCell<SocketSet>>,
     timer: ::std::time::Instant,
+    pending_scheme_events: bool,
+    pending_timers: Vec<u128>,
 
     ip_scheme: IpScheme,
     udp_scheme: UdpScheme,
@@ -141,6 +146,8 @@ impl Smolnetd {
             router_device: network_device,
             socket_set: Rc::clone(&socket_set),
             timer,
+            pending_scheme_events: false,
+            pending_timers: Vec::with_capacity(MAX_PENDING_TIMERS),
             time_file: unsafe { File::from_raw_fd(time_file.into_raw() as RawFd) },
             ip_scheme: IpScheme::new(
                 "ip",
@@ -184,34 +191,62 @@ impl Smolnetd {
         Ok(())
     }
 
+    fn run_scheme_batches<F>(&mut self, mut step: F) -> Result<()>
+    where
+        F: FnMut(&mut Self) -> Result<bool>,
+    {
+        for _ in 0..MAX_SCHEME_BATCHES_PER_EVENT {
+            let more = step(self)?;
+            let _ = self.poll()?;
+            if !more {
+                return Ok(());
+            }
+        }
+        self.pending_scheme_events = true;
+        self.arm_timer(Duration::ZERO)
+    }
+
     pub fn on_ip_scheme_event(&mut self) -> Result<()> {
-        self.ip_scheme.on_scheme_event()?;
-        let _ = self.poll()?;
-        Ok(())
+        self.run_scheme_batches(|this| this.ip_scheme.on_scheme_event())
     }
 
     pub fn on_udp_scheme_event(&mut self) -> Result<()> {
-        self.udp_scheme.on_scheme_event()?;
-        let _ = self.poll()?;
-        Ok(())
+        self.run_scheme_batches(|this| this.udp_scheme.on_scheme_event())
     }
 
     pub fn on_tcp_scheme_event(&mut self) -> Result<()> {
-        self.iface.borrow_mut().poll_maintenance(self.now());
-        self.tcp_scheme.on_scheme_event()?;
-        let _ = self.poll()?;
-        Ok(())
+        self.run_scheme_batches(|this| {
+            this.iface.borrow_mut().poll_maintenance(this.now());
+            this.tcp_scheme.on_scheme_event()
+        })
     }
 
     pub fn on_icmp_scheme_event(&mut self) -> Result<()> {
-        self.icmp_scheme.on_scheme_event()?;
-        let _ = self.poll()?;
-        Ok(())
+        self.run_scheme_batches(|this| this.icmp_scheme.on_scheme_event())
     }
 
     pub fn on_time_event(&mut self) -> Result<()> {
+        let now_ns = self.read_time_ns()?;
+        self.pending_timers.retain(|&deadline| deadline > now_ns);
+        if self.pending_scheme_events {
+            self.pending_scheme_events = false;
+            let mut more = false;
+            more |= self.ip_scheme.on_scheme_event()?;
+            more |= self.udp_scheme.on_scheme_event()?;
+            self.iface.borrow_mut().poll_maintenance(self.now());
+            more |= self.tcp_scheme.on_scheme_event()?;
+            more |= self.icmp_scheme.on_scheme_event()?;
+            if more {
+                self.pending_scheme_events = true;
+            }
+        }
         let timeout = self.poll()?;
-        self.schedule_time_event(timeout)?;
+        let next = if self.pending_scheme_events {
+            Duration::ZERO
+        } else {
+            timeout
+        };
+        self.arm_timer(next)?;
         //TODO: Fix network scheme to ensure events are not missed
         self.on_network_scheme_event()
     }
@@ -221,7 +256,7 @@ impl Smolnetd {
         Ok(())
     }
 
-    fn schedule_time_event(&mut self, timeout: Duration) -> Result<()> {
+    fn read_time_ns(&mut self) -> Result<u128> {
         let mut time = TimeSpec::default();
         if self.time_file.read(&mut time)? < size_of::<TimeSpec>() {
             return Err(Error::from_syscall_error(
@@ -229,13 +264,35 @@ impl Smolnetd {
                 "Can't read current time",
             ));
         }
-        let mut time_ms = time.tv_sec * 1000i64 + i64::from(time.tv_nsec) / 1_000_000i64;
-        time_ms += timeout.total_millis() as i64;
-        time.tv_sec = time_ms / 1000;
-        time.tv_nsec = ((time_ms % 1000) * 1_000_000) as i32;
+        let secs = u128::try_from(time.tv_sec.max(0)).unwrap_or(0);
+        let nsecs = u128::try_from(time.tv_nsec.max(0)).unwrap_or(0);
+        Ok(secs.saturating_mul(1_000_000_000).saturating_add(nsecs))
+    }
+
+    fn arm_timer(&mut self, timeout: Duration) -> Result<()> {
+        let now_ns = self.read_time_ns()?;
+        let delta_ns = u128::from(timeout.total_micros()).saturating_mul(1_000);
+        let target_ns = now_ns.saturating_add(delta_ns);
+        if self
+            .pending_timers
+            .first()
+            .is_some_and(|&earliest| earliest <= target_ns)
+        {
+            return Ok(());
+        }
+        if self.pending_timers.len() >= MAX_PENDING_TIMERS {
+            return Ok(());
+        }
+        let time = TimeSpec {
+            tv_sec: i64::try_from(target_ns / 1_000_000_000).unwrap_or(i64::MAX),
+            tv_nsec: (target_ns % 1_000_000_000) as i32,
+        };
         self.time_file
             .write_all(&time)
             .map_err(|e| Error::from_io_error(e, "Failed to write to time file"))?;
+        let pos = self.pending_timers.partition_point(|&d| d < target_ns);
+        self.pending_timers.insert(pos, target_ns);
+        assert!(self.pending_timers.len() <= MAX_PENDING_TIMERS);
         Ok(())
     }
 
@@ -350,21 +407,19 @@ where
             wait_queue: Vec::new(),
         })
     }
-    pub fn on_scheme_event(&mut self) -> Result<Option<()>> {
-        let result = loop {
+    pub fn on_scheme_event(&mut self) -> Result<bool> {
+        for _ in 0..MAX_SCHEME_REQUESTS_PER_BATCH {
             let request = match self
                 .scheme
                 .scheme_file
                 .next_request(SignalBehavior::Restart)
             {
                 Ok(Some(req)) => req,
-                Ok(None) => {
-                    break Some(());
-                }
+                Ok(None) => return Ok(false),
                 Err(error)
                     if error.errno == syscall::EWOULDBLOCK || error.errno == syscall::EAGAIN =>
                 {
-                    break None;
+                    return Ok(false);
                 }
                 Err(other) => {
                     return Err(Error::from_syscall_error(
@@ -473,8 +528,8 @@ where
                 .scheme_file
                 .write_response(resp, SignalBehavior::Restart)
                 .map_err(|e| Error::from_syscall_error(e, "failed to write response"))?;
-        };
-        Ok(result)
+        }
+        Ok(true)
     }
 
     #[expect(clippy::useless_conversion, reason = "cur_time.tv_nsec is i32 on i586")]
