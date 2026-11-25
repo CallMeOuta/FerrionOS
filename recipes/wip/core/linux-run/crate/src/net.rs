@@ -1211,7 +1211,7 @@ pub fn getsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
             raw
         }
         _ if known_option(level, name) => s.options.get(&(level, name)).cloned().unwrap_or_else(|| match (level, name) {
-            (1, 7) => int(1048576),
+            (1, 7) => int(262144),
             (1, 8) => int(1048576),
             (1, 20) | (1, 21) => vec![0; 16],
             (0, 2) => int(64),
