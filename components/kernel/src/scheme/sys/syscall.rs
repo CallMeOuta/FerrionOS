@@ -7,7 +7,7 @@ use crate::{
     syscall::{self, error::Result},
 };
 
-pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
+pub fn resource(caller_uid: u32, token: &mut CleanLockToken) -> Result<Vec<u8>> {
     let mut string = String::new();
 
     {
@@ -17,6 +17,9 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
             let (contexts, mut token) = contexts.token_split();
             for context_ref in contexts.iter() {
                 let context = context_ref.read(token.token());
+                if !super::context_visible_to(&context, caller_uid) {
+                    continue;
+                }
                 rows.push((context.pid, context.name, context.current_syscall()));
             }
         }

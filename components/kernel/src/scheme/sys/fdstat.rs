@@ -30,7 +30,7 @@ struct Descr {
 }
 
 #[cfg_attr(not(feature = "sys_fdstat"), expect(dead_code))]
-pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
+pub fn resource(caller_uid: u32, token: &mut CleanLockToken) -> Result<Vec<u8>> {
     let mut map = HashMap::<Ref<LockedFileDescription>, Descr>::new();
     let mut report = String::new();
     let mut schemes_guard = handles().read(token.token());
@@ -41,6 +41,9 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
     'contexts: for context in contexts.iter() {
         let mut context_guard = context.read(token.token());
         let (context, token) = context_guard.token_split();
+        if !super::context_visible_to(context, caller_uid) {
+            continue 'contexts;
+        }
         let mut files_guard = context.files.read(token);
         let (files, mut token) = files_guard.token_split();
         writeln!(report, "'{}' {{", context.name).unwrap();

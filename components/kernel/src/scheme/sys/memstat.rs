@@ -18,7 +18,11 @@ use crate::{
         usercopy::{UserSlice, UserSliceRw},
     },
 };
-fn inner_maps(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec<u8>> {
+fn inner_maps(
+    caller_uid: u32,
+    fpath_user: UserSliceRw,
+    token: &mut CleanLockToken,
+) -> Result<Vec<u8>> {
     let mut string = format!(
         "{:<6} {:<33} {:<10} {:<10} {:<16} {:<8} {}\n",
         "PID", "BASE", "VIRT_SIZE", "PHYS_RSS", "TYPE", "SCHEME", "PATH"
@@ -44,6 +48,9 @@ fn inner_maps(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec
 
         for context_ref in contexts.iter() {
             let context = context_ref.read(token.token());
+            if !super::context_visible_to(&context, caller_uid) {
+                continue;
+            }
             let pid: usize = context.pid.into();
             let addr_space = context.addr_space().cloned();
             drop(context);
@@ -139,7 +146,7 @@ fn inner_maps(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec
     Ok(string.into_bytes())
 }
 
-pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
+pub fn resource(caller_uid: u32, token: &mut CleanLockToken) -> Result<Vec<u8>> {
     let page_count = NonZeroUsize::new(1).unwrap();
     let fpath_page = {
         let addr_space = AddrSpace::current()?;
@@ -162,7 +169,7 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
     };
 
     let res = UserSlice::rw(fpath_page.start_address().data(), PAGE_SIZE)
-        .and_then(|fpath_user| inner_maps(fpath_user, token));
+        .and_then(|fpath_user| inner_maps(caller_uid, fpath_user, token));
 
     {
         let addr_space = AddrSpace::current()?;

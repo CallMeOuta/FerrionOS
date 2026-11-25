@@ -45,6 +45,7 @@ enum Handle {
     Resource {
         path: &'static str,
         kind: Kind,
+        caller_uid: u32,
         data: Arc<RwLock<L1, Option<Vec<u8>>>>,
     },
     SchemeRoot,
@@ -53,16 +54,25 @@ enum Handle {
 #[derive(Clone, Copy)]
 enum Kind {
     Rd(fn(&mut CleanLockToken) -> Result<Vec<u8>>),
+    RdScoped(fn(u32, &mut CleanLockToken) -> Result<Vec<u8>>),
     Wr(fn(&[u8], &mut CleanLockToken) -> Result<usize>),
 }
-use Kind::{Rd, Wr};
+use Kind::{Rd, RdScoped, Wr};
 impl Kind {
-    fn generate_data(&self, token: &mut CleanLockToken) -> Result<Vec<u8>> {
+    fn generate_data(&self, caller_uid: u32, token: &mut CleanLockToken) -> Result<Vec<u8>> {
         match self {
             Rd(handler) => handler(token),
+            RdScoped(handler) => handler(caller_uid, token),
             Wr(_) => Err(Error::new(EISDIR)),
         }
     }
+}
+
+pub(super) fn context_visible_to(context: &crate::context::Context, caller_uid: u32) -> bool {
+    if caller_uid == 0 {
+        return true;
+    }
+    context.userspace && context.addr_space.is_some() && context.euid == caller_uid
 }
 
 /// System information scheme
@@ -70,21 +80,21 @@ pub struct SysScheme;
 static HANDLES: RwLock<L1, HandleMap<Handle>> = RwLock::new(HandleMap::new());
 
 const FILES: &[(&str, Kind)] = &[
-    ("block", Rd(block::resource)),
-    ("context", Rd(context::resource)),
+    ("block", RdScoped(block::resource)),
+    ("context", RdScoped(context::resource)),
     ("cpu", Rd(cpu::resource)),
     #[cfg(feature = "sys_fdstat")]
-    ("fdstat", Rd(fdstat::resource)),
+    ("fdstat", RdScoped(fdstat::resource)),
     ("exe", Rd(exe::resource)),
     #[cfg(feature = "iommu")]
     ("iommu", Rd(|_| Ok(crate::iommu::status()))),
-    ("iostat", Rd(iostat::resource)),
+    ("iostat", RdScoped(iostat::resource)),
     ("irq", Rd(irq::resource)),
     ("log", Rd(log::resource)),
-    ("memstat", Rd(memstat::resource)),
+    ("memstat", RdScoped(memstat::resource)),
     #[cfg(all(feature = "numa", target_arch = "x86_64"))]
     ("numa", Rd(numa::resource)),
-    ("syscall", Rd(syscall::resource)),
+    ("syscall", RdScoped(syscall::resource)),
     ("uname", Rd(uname::resource)),
     ("env", Rd(|_| Ok(Vec::from(crate::startup::init_env())))),
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -152,6 +162,7 @@ impl KernelScheme for SysScheme {
             let id = HANDLES.write(token.token()).insert(Handle::Resource {
                 path: entry.0,
                 kind: entry.1,
+                caller_uid: ctx.uid,
                 data: Arc::new(RwLock::new(None)),
             });
             Ok(OpenResult::SchemeLocal(id, InternalFlags::POSITIONED))
@@ -159,10 +170,15 @@ impl KernelScheme for SysScheme {
     }
 
     fn fsize(&self, id: usize, token: &mut CleanLockToken) -> Result<u64> {
-        let (kind, data_lock) = {
+        let (kind, caller_uid, data_lock) = {
             match HANDLES.read(token.token()).get(id)? {
                 Handle::TopLevel => return Ok(0),
-                Handle::Resource { kind, data, .. } => (*kind, data.clone()),
+                Handle::Resource {
+                    kind,
+                    caller_uid,
+                    data,
+                    ..
+                } => (*kind, *caller_uid, data.clone()),
                 Handle::SchemeRoot => return Err(Error::new(EBADF)),
             }
         };
@@ -171,7 +187,7 @@ impl KernelScheme for SysScheme {
         }
         let is_data_none = data_lock.read(token.token()).is_none();
         if is_data_none {
-            let new_data = kind.generate_data(token)?;
+            let new_data = kind.generate_data(caller_uid, token)?;
             let mut data_guard = data_lock.write(token.token());
             if data_guard.is_none() {
                 *data_guard = Some(new_data);
@@ -216,15 +232,20 @@ impl KernelScheme for SysScheme {
             return Ok(0);
         };
 
-        let (kind, data_lock) = {
+        let (kind, caller_uid, data_lock) = {
             match HANDLES.read(token.token()).get(id)? {
-                Handle::Resource { kind, data, .. } => (*kind, data.clone()),
+                Handle::Resource {
+                    kind,
+                    caller_uid,
+                    data,
+                    ..
+                } => (*kind, *caller_uid, data.clone()),
                 _ => return Err(Error::new(EBADF)),
             }
         };
         let is_data_none = data_lock.read(token.token()).is_none();
         if is_data_none {
-            let new_data = kind.generate_data(token)?;
+            let new_data = kind.generate_data(caller_uid, token)?;
             let mut data_guard = data_lock.write(token.token());
             if data_guard.is_none() {
                 *data_guard = Some(new_data);
@@ -249,7 +270,8 @@ impl KernelScheme for SysScheme {
         let handler = match *HANDLES.read(token.token()).get(id)? {
             Handle::TopLevel
             | Handle::Resource {
-                kind: Kind::Rd(_), ..
+                kind: Kind::Rd(_) | Kind::RdScoped(_),
+                ..
             } => return Err(Error::new(EISDIR)),
             Handle::Resource {
                 kind: Kind::Wr(handler),
@@ -293,15 +315,20 @@ impl KernelScheme for SysScheme {
         let stat_base = {
             let handles = HANDLES.read(token.token());
             match handles.get(id)? {
-                Handle::Resource { kind, data, .. } => Some((*kind, data.clone())),
+                Handle::Resource {
+                    kind,
+                    caller_uid,
+                    data,
+                    ..
+                } => Some((*kind, *caller_uid, data.clone())),
                 Handle::TopLevel => None,
                 Handle::SchemeRoot => return Err(Error::new(EBADF)),
             }
         };
-        let stat = if let Some((kind, data_lock)) = stat_base {
+        let stat = if let Some((kind, caller_uid, data_lock)) = stat_base {
             let is_data_none = data_lock.read(token.token()).is_none();
             if is_data_none {
-                let new_data = kind.generate_data(token)?;
+                let new_data = kind.generate_data(caller_uid, token)?;
                 let mut data_guard = data_lock.write(token.token());
                 if data_guard.is_none() {
                     *data_guard = Some(new_data);
@@ -310,7 +337,7 @@ impl KernelScheme for SysScheme {
             let data_guard = data_lock.read(token.token());
             let data = data_guard.as_ref().ok_or(Error::new(EIO))?;
             let size = match kind {
-                Kind::Rd(_) => data.len() as u64,
+                Kind::Rd(_) | Kind::RdScoped(_) => data.len() as u64,
                 Kind::Wr(_) => 0,
             };
             Stat {

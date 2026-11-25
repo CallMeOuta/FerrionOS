@@ -15,7 +15,7 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{fmt::Write, num::NonZeroUsize, str};
 
-fn inner(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec<u8>> {
+fn inner(caller_uid: u32, fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec<u8>> {
     let mut string = String::new();
     let mut fpath_kernel = [0; PAGE_SIZE];
 
@@ -27,6 +27,9 @@ fn inner(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec<u8>>
             for context_ref in contexts.iter() {
                 let mut current = context_ref.read(token.token());
                 let (context, mut token) = current.token_split();
+                if !super::context_visible_to(context, caller_uid) {
+                    continue;
+                }
                 rows.push((
                     context.pid,
                     context.name,
@@ -86,7 +89,7 @@ fn inner(fpath_user: UserSliceRw, token: &mut CleanLockToken) -> Result<Vec<u8>>
     Ok(string.into_bytes())
 }
 
-pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
+pub fn resource(caller_uid: u32, token: &mut CleanLockToken) -> Result<Vec<u8>> {
     let page_count = NonZeroUsize::new(1).unwrap();
     let fpath_page = {
         let addr_space = AddrSpace::current()?;
@@ -110,7 +113,7 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
     };
 
     let res = UserSlice::rw(fpath_page.start_address().data(), PAGE_SIZE)
-        .and_then(|fpath_user| inner(fpath_user, token));
+        .and_then(|fpath_user| inner(caller_uid, fpath_user, token));
 
     {
         let addr_space = AddrSpace::current()?;

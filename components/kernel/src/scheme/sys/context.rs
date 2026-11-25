@@ -7,7 +7,7 @@ use core::fmt::Write;
 
 use crate::{context, context::contexts, sync::CleanLockToken, syscall::error::Result};
 
-pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
+pub fn resource(caller_uid: u32, token: &mut CleanLockToken) -> Result<Vec<u8>> {
     let mut string = format!(
         "{:<6}{:<6}{:<6}{:<6}{:<6}{:<11}{:<12}{:<12}{:<8}{:<8}{}\n",
         "PID",
@@ -29,6 +29,9 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
         let (contexts, mut token) = contexts.token_split();
         for context_ref in contexts.iter() {
             let context = context_ref.read(token.token());
+            if !super::context_visible_to(&context, caller_uid) {
+                continue;
+            }
             let addr_space = context.addr_space().cloned();
 
             let affinity = context.sched_affinity.to_string();
@@ -53,6 +56,9 @@ pub fn resource(token: &mut CleanLockToken) -> Result<Vec<u8>> {
                     // TODO: All user programs must have some grant in order for executable memory to even
                     // exist, but is this a good indicator of whether it is user or kernel?
                     let is_kernel = addr_space_guard.grants.is_empty();
+                    if caller_uid != 0 && is_kernel {
+                        continue;
+                    }
                     for (base, info) in addr_space_guard.grants.iter() {
                         match info.provider {
                             context::memory::Provider::Allocated { .. } => {
