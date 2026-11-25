@@ -108,7 +108,9 @@ fn foreign_display_backend(display: *mut std::ffi::c_void) -> Backend {
 }
 
 #[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
-fn foreign_surface_id(surface: *mut std::ffi::c_void) -> Result<ObjectId, CpuPresentError> {
+pub(crate) fn foreign_surface_id(
+    surface: *mut std::ffi::c_void,
+) -> Result<ObjectId, CpuPresentError> {
     assert!(!surface.is_null());
     unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }
         .map_err(|_| CpuPresentError::NotWayland)

@@ -74,6 +74,8 @@ mod tests;
 pub(in crate::window) struct Native {
     pub(in crate::window) activator: Option<crate::platform::activation::Activator>,
     pub(in crate::window) cpu: Option<crate::window::wayland_cpu::WaylandCpu>,
+    #[cfg(not(feature = "x11"))]
+    pub(in crate::window) _drop_target: Option<crate::drag_out::wayland::DropRegistration>,
 }
 
 #[cfg(target_os = "windows")]

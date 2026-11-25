@@ -426,6 +426,8 @@ impl OverlayCore {
     /// Applies requests from other threads: updates, edge, show and hide.
     pub(super) fn sync(&mut self, app: &mut dyn OverlayApp, event_loop: &ActiveEventLoop) {
         self.clipboard_due(app);
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        crate::drag_out::wayland::poll_completed();
         crate::popup_menu::step_active();
         if app.popup_answer(&mut self.popup) {
             self.dirty = true;

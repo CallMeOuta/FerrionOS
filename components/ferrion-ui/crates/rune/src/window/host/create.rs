@@ -306,7 +306,20 @@ impl Host {
         let native = {
             Native { cloak, frame, a11y_start, ..Default::default() }
         };
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        let native = {
+            let handle = self.native_handle.clone();
+            let drop_target = crate::drag_out::wayland::register_window(
+                &window,
+                Arc::new(move || handle.send(WakeEvent::App)),
+            );
+            Native {
+                activator: None,
+                cpu: None,
+                _drop_target: drop_target,
+            }
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), not(feature = "x11")))))]
         let native = Native::default();
         self.win = Some(Win {
             a11y,

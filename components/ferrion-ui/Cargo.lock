@@ -1049,6 +1049,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dnd-demo"
+version = "0.0.1"
+dependencies = [
+ "rune",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

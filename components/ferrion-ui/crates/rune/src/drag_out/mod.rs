@@ -25,11 +25,33 @@ use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+pub(crate) mod wayland;
 #[cfg(target_os = "windows")]
 mod windows;
 
 /// Whether this platform's windows start OS drag sessions.
+#[cfg_attr(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")), allow(dead_code))]
 pub(crate) const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+pub(crate) fn is_supported() -> bool {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        true
+    }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    {
+        wayland::is_attached()
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11"))
+    )))]
+    {
+        false
+    }
+}
 
 /// Pointer travel (points, straight-line) from the press before a drag session starts.
 /// AppKit views commonly use 4; GTK's default is 8; Windows' `SM_CXDRAG` is 4 pixels.
@@ -391,18 +413,20 @@ fn to_straight_rgba(pixels: &mut [u8], bgra: bool, srgb_target: bool) {
 
 /// Starts the OS drag session for `start` from inside the pointer event that crossed the
 /// threshold. `done` runs once with how it ended (also when it couldn't start: `Cancelled`).
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), not(feature = "x11")))), allow(unused_variables))]
 pub(crate) fn begin(window: &winit::window::Window, start: DragOutStart, snapshot: Option<DragImage>, done: Box<dyn FnOnce(DragOutcome)>) {
     #[cfg(target_os = "macos")]
     { let picture = picture(&start.item, snapshot); macos::begin(window, start, picture, done); }
     #[cfg(target_os = "windows")]
     { let picture = picture(&start.item, snapshot); windows::begin(window, start, picture, done); }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    { let picture = picture(&start.item, snapshot); wayland::begin(window, start, picture, done); }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), not(feature = "x11")))))]
     done(DragOutcome::Cancelled);
 }
 
 /// The item's own image, else the snapshot, over the item's backing colour if it has one.
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), not(feature = "x11")))), allow(dead_code))]
 fn picture(item: &DragItem, snapshot: Option<DragImage>) -> Option<DragImage> {
     let picture = item.drag_image().cloned().or(snapshot)?;
     match item.backing() {
@@ -412,7 +436,7 @@ fn picture(item: &DragItem, snapshot: Option<DragImage>) -> Option<DragImage> {
 }
 
 /// The path offered as text when a file drag has no text of its own.
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), not(feature = "x11")))), allow(dead_code))]
 fn path_text(path: &Path) -> String { path.to_string_lossy().into_owned() }
 
 #[cfg(test)]

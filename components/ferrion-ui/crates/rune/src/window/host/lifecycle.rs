@@ -198,6 +198,8 @@ impl Host {
         let shown = self.shown_win().is_some();
         let stale_before = self.app.rt().needs_commit();
         let clipboard = self.clipboard.receive_core(self.app.rt_mut());
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        crate::drag_out::wayland::poll_completed();
         crate::popup_menu::step_active();
         let answered = self.app.popup_answer(&mut self.popup) | self.file_dialog.answer_core(self.app.rt_mut());
         let popup_blur = if self.popup_blurred && !self.popup.is_open() {
@@ -390,6 +392,8 @@ impl Host {
         self.app.popup_cancel(&mut self.popup);
         self.popup_blurred = false;
         assert!(!self.popup.is_open());
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        self.cancel_wayland_drag();
         // Off the screen first: the close looks done at once and `on_close` runs unseen.
         if !ends && let Some(w) = self.shown_win() { w.hide(); }
         crate::marks::mark("window.close.hidden");
@@ -424,6 +428,17 @@ impl Host {
             return;
         }
         self.hide(event_loop);
+    }
+
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    fn cancel_wayland_drag(&mut self) {
+        if let Some(w) = &self.win {
+            crate::drag_out::wayland::cancel_for_window(&w.window);
+            crate::drag_out::wayland::poll_completed();
+            if self.app.rt().drag_ends_pending() {
+                self.app.frame(0.0);
+            }
+        }
     }
 
     /// Whether a close runs `on_close` (`Life::closes`).
@@ -492,6 +507,8 @@ impl Host {
         self.app.popup_cancel(&mut self.popup);
         self.popup_blurred = false;
         assert!(!self.popup.is_open());
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        self.cancel_wayland_drag();
         self.app.file_dialog_cancel(&mut self.file_dialog);
         self.app.rt_mut().cancel_pointer();
         self.files = FileDrop::default();
@@ -507,6 +524,8 @@ impl Host {
         self.app.popup_cancel(&mut self.popup);
         self.popup_blurred = false;
         assert!(!self.popup.is_open());
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        self.cancel_wayland_drag();
         self.win = None;
         self.native_handle.native.ready.store(false, Ordering::Release);
         self.native_handle.native.number.store(0, Ordering::Release);

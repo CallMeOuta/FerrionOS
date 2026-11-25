@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use super::{Backend, ClipboardContent, ClipboardImage, ClipboardWrite, MAX_IMAGE_BYTES, html};
 use crate::time::Instant;
 
-mod io;
+pub(crate) mod io;
 mod state;
 
 use io::{

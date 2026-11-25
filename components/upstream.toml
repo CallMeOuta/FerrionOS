@@ -70,6 +70,7 @@ added = [
     "examples/layer-shell-demo",
     "examples/clipboard-demo",
     "examples/popup-menu-demo",
+    "examples/dnd-demo",
 ]
 
 [ferrion-ui.include]

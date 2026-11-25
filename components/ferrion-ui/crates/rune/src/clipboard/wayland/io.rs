@@ -14,7 +14,7 @@ use super::{
 };
 use crate::time::Instant;
 
-pub(super) const MAX_POLL_FDS: usize = 2 + 1 + MAX_PENDING_SENDS;
+pub(crate) const MAX_POLL_FDS: usize = 2 + 1 + MAX_PENDING_SENDS;
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_DRAIN_WAKE_ITERATIONS: usize = 16;
 
@@ -67,7 +67,7 @@ pub(super) fn set_fd_nonblock(fd: RawFd) -> Result<(), io::Error> {
     set_fd_flags(fd, flags | libc::O_NONBLOCK)
 }
 
-pub(super) fn make_nonblocking_pipe() -> Result<(OwnedFd, OwnedFd), ClipboardWaylandError> {
+pub(crate) fn make_nonblocking_pipe() -> Result<(OwnedFd, OwnedFd), ClipboardWaylandError> {
     let fds = create_pipe().map_err(|e| ClipboardWaylandError::PipeFailed(e.to_string()))?;
     let read_fd = own_fd(fds[0]);
     let write_fd = own_fd(fds[1]);
@@ -91,7 +91,7 @@ pub(super) fn write_fd_nonblocking(fd: RawFd, buf: &[u8]) -> Result<usize, io::E
 }
 
 #[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
-pub(super) fn read_fd_nonblocking(fd: RawFd, buf: &mut [u8]) -> Result<usize, io::Error> {
+pub(crate) fn read_fd_nonblocking(fd: RawFd, buf: &mut [u8]) -> Result<usize, io::Error> {
     assert!(fd >= 0 && !buf.is_empty());
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
@@ -102,7 +102,7 @@ pub(super) fn read_fd_nonblocking(fd: RawFd, buf: &mut [u8]) -> Result<usize, io
 }
 
 #[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
-pub(super) fn poll_fds(pfds: &mut [libc::pollfd], timeout_ms: i32) -> Result<i32, io::Error> {
+pub(crate) fn poll_fds(pfds: &mut [libc::pollfd], timeout_ms: i32) -> Result<i32, io::Error> {
     assert!(!pfds.is_empty() && pfds.len() <= MAX_POLL_FDS);
     for pfd in pfds.iter() {
         assert!(pfd.fd >= 0);
@@ -116,16 +116,16 @@ pub(super) fn poll_fds(pfds: &mut [libc::pollfd], timeout_ms: i32) -> Result<i32
 }
 
 #[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
-pub(super) fn foreign_display_backend(display: NonNull<c_void>) -> Backend {
+pub(crate) fn foreign_display_backend(display: NonNull<c_void>) -> Backend {
     assert!(display.as_ptr().addr() != 0);
     unsafe { Backend::from_foreign_display(display.as_ptr().cast()) }
 }
 
-pub(super) struct WakePipe {
+pub(crate) struct WakePipe {
     read_fd: OwnedFd,
 }
 
-pub(super) struct WakeHandle {
+pub(crate) struct WakeHandle {
     write_fd: Arc<OwnedFd>,
 }
 
@@ -138,14 +138,14 @@ impl Clone for WakeHandle {
 }
 
 impl WakeHandle {
-    pub(super) fn wake(&self) {
+    pub(crate) fn wake(&self) {
         let byte = [1u8; 1];
         write_fd_nonblocking(self.write_fd.as_raw_fd(), &byte).ok();
     }
 }
 
 impl WakePipe {
-    pub(super) fn new() -> Result<(Self, WakeHandle), ClipboardWaylandError> {
+    pub(crate) fn new() -> Result<(Self, WakeHandle), ClipboardWaylandError> {
         let (read_fd, write_fd) = make_nonblocking_pipe()?;
         let handle = WakeHandle {
             write_fd: Arc::new(write_fd),
@@ -153,11 +153,11 @@ impl WakePipe {
         Ok((Self { read_fd }, handle))
     }
 
-    pub(super) fn fd(&self) -> RawFd {
+    pub(crate) fn fd(&self) -> RawFd {
         self.read_fd.as_raw_fd()
     }
 
-    pub(super) fn drain(&self) {
+    pub(crate) fn drain(&self) {
         let mut buf = [0u8; 64];
         for _ in 0..MAX_DRAIN_WAKE_ITERATIONS {
             match read_fd_nonblocking(self.read_fd.as_raw_fd(), &mut buf) {
@@ -171,13 +171,13 @@ impl WakePipe {
     }
 }
 
-pub(super) enum SendBytes {
+pub(crate) enum SendBytes {
     Shared(Arc<[u8]>),
     Secret(Zeroizing<Vec<u8>>),
 }
 
 impl SendBytes {
-    pub(super) fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         match self {
             SendBytes::Shared(bytes) => bytes,
             SendBytes::Secret(bytes) => bytes,
@@ -185,15 +185,15 @@ impl SendBytes {
     }
 }
 
-pub(super) struct PendingSend {
-    pub(super) fd: OwnedFd,
-    pub(super) data: SendBytes,
-    pub(super) offset: usize,
-    pub(super) deadline: Instant,
+pub(crate) struct PendingSend {
+    pub(crate) fd: OwnedFd,
+    pub(crate) data: SendBytes,
+    pub(crate) offset: usize,
+    pub(crate) deadline: Instant,
 }
 
 impl PendingSend {
-    pub(super) fn start(fd: OwnedFd, data: SendBytes, now: Instant) -> Option<Self> {
+    pub(crate) fn start(fd: OwnedFd, data: SendBytes, now: Instant) -> Option<Self> {
         if set_fd_nonblock(fd.as_raw_fd()).is_err() {
             return None;
         }
@@ -210,7 +210,7 @@ impl PendingSend {
         }
     }
 
-    pub(super) fn try_write(&mut self) -> bool {
+    pub(crate) fn try_write(&mut self) -> bool {
         let slice = self.data.as_slice();
         while self.offset < slice.len() {
             match write_fd_nonblocking(self.fd.as_raw_fd(), &slice[self.offset..]) {
@@ -225,12 +225,12 @@ impl PendingSend {
     }
 }
 
-pub(super) struct PendingRead {
-    pub(super) fd: OwnedFd,
-    pub(super) buf: Zeroizing<Vec<u8>>,
-    pub(super) max_bytes: usize,
-    pub(super) deadline: Instant,
-    pub(super) reply: mpsc::Sender<Result<Zeroizing<Vec<u8>>, ClipboardWaylandError>>,
+pub(crate) struct PendingRead {
+    pub(crate) fd: OwnedFd,
+    pub(crate) buf: Zeroizing<Vec<u8>>,
+    pub(crate) max_bytes: usize,
+    pub(crate) deadline: Instant,
+    pub(crate) reply: mpsc::Sender<Result<Zeroizing<Vec<u8>>, ClipboardWaylandError>>,
 }
 
 fn append_zeroizing(buf: &mut Zeroizing<Vec<u8>>, src: &[u8]) {
@@ -250,7 +250,7 @@ fn append_zeroizing(buf: &mut Zeroizing<Vec<u8>>, src: &[u8]) {
 }
 
 impl PendingRead {
-    pub(super) fn new(
+    pub(crate) fn new(
         fd: OwnedFd,
         max_bytes: usize,
         now: Instant,
@@ -265,7 +265,7 @@ impl PendingRead {
         }
     }
 
-    pub(super) fn step(&mut self) -> Option<Result<Zeroizing<Vec<u8>>, ClipboardWaylandError>> {
+    pub(crate) fn step(&mut self) -> Option<Result<Zeroizing<Vec<u8>>, ClipboardWaylandError>> {
         let mut chunk = Zeroizing::new([0u8; READ_CHUNK_BYTES]);
         loop {
             match read_fd_nonblocking(self.fd.as_raw_fd(), &mut *chunk) {
@@ -293,7 +293,7 @@ impl PendingRead {
     }
 }
 
-pub(super) fn poll_timeout_ms(deadlines: impl Iterator<Item = Instant>, now: Instant) -> i32 {
+pub(crate) fn poll_timeout_ms(deadlines: impl Iterator<Item = Instant>, now: Instant) -> i32 {
     let mut soonest: Option<Duration> = None;
     for deadline in deadlines {
         let rem = deadline.saturating_duration_since(now);
@@ -308,7 +308,7 @@ pub(super) fn poll_timeout_ms(deadlines: impl Iterator<Item = Instant>, now: Ins
     }
 }
 
-pub(super) fn format_uri_list(files: &[PathBuf]) -> Result<Vec<u8>, ClipboardWaylandError> {
+pub(crate) fn format_uri_list(files: &[PathBuf]) -> Result<Vec<u8>, ClipboardWaylandError> {
     if files.len() > MAX_URI_FILES {
         return Err(ClipboardWaylandError::TooManyUris);
     }
@@ -343,7 +343,7 @@ fn path_to_file_uri(path: &Path) -> Option<String> {
     Some(out)
 }
 
-pub(super) fn parse_uri_list(bytes: &[u8]) -> Result<Vec<PathBuf>, ClipboardWaylandError> {
+pub(crate) fn parse_uri_list(bytes: &[u8]) -> Result<Vec<PathBuf>, ClipboardWaylandError> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Ok(Vec::new());
     };

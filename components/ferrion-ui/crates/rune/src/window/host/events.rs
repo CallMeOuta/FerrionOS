@@ -73,7 +73,9 @@ impl Host {
         let native = self.win.as_ref().map(|l| crate::platform::macos::drop::take(&l.window)).unwrap_or_default();
         #[cfg(target_os = "windows")]
         let native = self.win.as_ref().map(|l| crate::platform::win32::drop_target::take(&l.window)).unwrap_or_default();
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        let native = self.win.as_ref().map(|l| crate::drag_out::wayland::take_drop_steps(&l.window)).unwrap_or_default();
+        #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), not(feature = "x11")))))]
         let native: Vec<FileStep> = Vec::new();
         let Some(l) = self.win.as_ref().filter(|_| self.life.shown()) else {
             self.files = FileDrop::default();
@@ -310,9 +312,24 @@ impl Host {
                 self.close(event_loop);
                 return;
             }
-            WindowEvent::HoveredFile(path) => { self.files.file(path, false); return; }
-            WindowEvent::DroppedFile(path) => { self.files.file(path, true); return; }
-            WindowEvent::HoveredFileCancelled => { self.files.steps.push(FileStep::Leave); return; }
+            WindowEvent::HoveredFile(path) => {
+                if !wayland_drop_active() {
+                    self.files.file(path, false);
+                }
+                return;
+            }
+            WindowEvent::DroppedFile(path) => {
+                if !wayland_drop_active() {
+                    self.files.file(path, true);
+                }
+                return;
+            }
+            WindowEvent::HoveredFileCancelled => {
+                if !wayland_drop_active() {
+                    self.files.steps.push(FileStep::Leave);
+                }
+                return;
+            }
             WindowEvent::RedrawRequested => {
                 self.paint(event_loop);
                 return;
@@ -637,6 +654,17 @@ impl Host {
 /// Applies a pointer move in view points, returning whether the host must request a redraw and
 /// any OS drag-out session the move armed. Leaves `timer_frame` quiet and `loop_frame` untouched
 /// when the move changed nothing the next frame would run or paint.
+fn wayland_drop_active() -> bool {
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+    {
+        crate::drag_out::wayland::is_attached()
+    }
+    #[cfg(not(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11"))))]
+    {
+        false
+    }
+}
+
 pub(super) fn cursor_moved_core(
     app: &mut dyn WindowApp,
     timer_frame: &mut crate::window::surface::TimerFrame,

@@ -146,6 +146,14 @@ impl Host {
             native_window_number(&window).unwrap_or(0),
             Ordering::Release,
         );
+        #[cfg(not(feature = "x11"))]
+        let drop_target = {
+            let handle = self.native_handle.clone();
+            crate::drag_out::wayland::register_window(
+                &window,
+                Arc::new(move || handle.send(WakeEvent::App)),
+            )
+        };
         let native = Native {
             activator: None,
             cpu: Some(WaylandCpu {
@@ -153,6 +161,8 @@ impl Host {
                 painter,
                 logged_refusals: 0,
             }),
+            #[cfg(not(feature = "x11"))]
+            _drop_target: drop_target,
         };
         self.win = Some(Win {
             a11y,
@@ -452,6 +462,10 @@ impl FrameHost for WaylandCpuFrame<'_> {
             }
             if !l.first_frame.ready() {
                 l.first_frame.gpu_done();
+                let now = *self.now.get_or_insert_with(crate::time::now);
+                if let Some(script) = &mut self.host.window_script {
+                    script.start(now);
+                }
             }
         }
         crate::window::frame_presented();

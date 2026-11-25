@@ -20,7 +20,7 @@ pub(super) struct FileDrop {
 #[derive(Debug, PartialEq)]
 pub(crate) enum FileStep {
     Enter(Vec<PathBuf>, Option<(f32, f32)>),
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")), not(feature = "x11")))), allow(dead_code))]
     Move((f32, f32)),
     Drop(Vec<PathBuf>, Option<(f32, f32)>),
     Leave,

@@ -494,7 +494,7 @@ impl OverlayCore {
         rt.set_system_scroll_bars_state(crate::platform::scroll_bars::current());
         rt.wall_start = Some(crate::time::now());
         rt.host.native_overlay = true;
-        rt.set_os_drag(crate::drag_out::SUPPORTED);
+        rt.set_os_drag(crate::drag_out::is_supported());
         rt.host.surface_stats = Some(meter.shared());
         OverlayCore {
             on_created,
