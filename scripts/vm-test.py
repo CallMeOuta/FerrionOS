@@ -10875,11 +10875,30 @@ def test_net_perf(args, out):
     )
 
 
+def test_net_no_lease(args, out):
+    """Lab check without dnsmasq: a probe connect gets an error and netstack keeps its PID."""
+    import net_lab
+    return net_lab.run_net_no_lease(
+        args,
+        out,
+        {
+            "VM": VM,
+            "Blocked": Blocked,
+            "NET_CARDS": NET_CARDS,
+            "net_card": net_card,
+            "root_shell": root_shell,
+            "run_status": run_status,
+            "dns_reply": dns_reply,
+        },
+    )
+
+
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
 OWN_IMAGE["net-hardening"] = test_net_hardening
 OWN_IMAGE["net-calls"] = test_net_calls
 OWN_IMAGE["net-basics"] = test_net_basics
 OWN_IMAGE["net-perf"] = test_net_perf
+OWN_IMAGE["net-no-lease"] = test_net_no_lease
 # These boot with their own sound device, recorded by QEMU's wav backend.
 OWN_IMAGE["audio-baseline"] = test_audio_baseline
 OWN_IMAGE["audio-ring"] = test_audio_ring
@@ -10923,7 +10942,7 @@ def main():
                         help="run inside an unprivileged user and network namespace with no route out")
     parser.add_argument("--in-lab", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--compare-net-perf", action="store_true",
-                        help="compare two net-perf.json pass files against the within-noise rule without booting")
+                        help="compare two net-perf.json pass files (PASS1 PASS2 as the positional arguments) against the within-noise rule without booting")
     parser.add_argument("--legacy-unrecorded-nice", action="store_true",
                         help="--compare-net-perf: permit comparing pre-guard passes whose QEMU nice was not recorded")
     parser.add_argument("--window-deadline", default=None, metavar="TIME",

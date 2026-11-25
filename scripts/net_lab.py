@@ -25,7 +25,10 @@ LAB_DHCP_RANGE = "10.77.0.50,10.77.0.99,255.255.255.0,2m"
 HTTP_PORT = 8080
 TCP_ECHO_PORT = 9000
 UDP_ECHO_PORT = 9001
+TCP_FIN_PORT = 9002
 IPERF_PORT = 5201
+ACCEPT_PROBE_PORT = 5210
+FIXED_ISN_SPORT = 45000
 CLOSED_PORT = 9
 LOAD_LIMIT = 12.0
 NOISE_REL_LIMIT = 0.10
@@ -34,6 +37,9 @@ MAX_ECHO_CONNS = 256
 MAX_ECHO_STEPS = 200_000
 MAX_DHCP_POLLS = 60
 MAX_IPERF_ATTEMPTS = 5
+MAX_ACCEPT_PROBES = 200
+MAX_ACCEPT_MEM_GROWTH_BYTES = 2 * 1024 * 1024
+MAX_FIN_PROBES = 20
 MAX_PROC_ENTRIES = 65_536
 MAX_ANCESTOR_HOPS = 64
 MAX_TASK_ENTRIES = 1024
@@ -63,7 +69,7 @@ def format_foreign_qemus(entries):
 
 LAB_BASE_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping")
 LAB_PERF_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping", "iperf3")
-LAB_TESTS = ("net-basics", "net-perf")
+LAB_TESTS = ("net-basics", "net-perf", "net-no-lease")
 
 
 def bring_up_loopback(blocked_cls):
@@ -197,20 +203,23 @@ def parse_json_line(text):
     return None
 
 
-def parse_pcap_syns(pcap_path, dst_ip, dst_port):
+def parse_pcap_syns_all(pcap_path, dst_ip, dst_port, sport_filter=None):
     raw = pcap_path.read_bytes()
     if len(raw) < 24:
         return []
     magic = struct.unpack("<I", raw[:4])[0]
-    if magic not in (0xA1B2C3D4, 0xA1B23C4D):
+    if magic == 0xA1B2C3D4:
+        sub_scale = 1e-6
+    elif magic == 0xA1B23C4D:
+        sub_scale = 1e-9
+    else:
         return []
     syns = []
     pos = 24
-    seen_ports = set()
     for _ in range(MAX_PCAP_PACKETS):
         if pos + 16 > len(raw):
             break
-        _, _, caplen, _ = struct.unpack("<IIII", raw[pos : pos + 16])
+        ts_sec, ts_sub, caplen, _ = struct.unpack("<IIII", raw[pos : pos + 16])
         pos += 16
         frame = raw[pos : pos + caplen]
         pos += caplen
@@ -228,9 +237,24 @@ def parse_pcap_syns(pcap_path, dst_ip, dst_port):
         tcp = ip[ihl:]
         sport, dport, seq = struct.unpack("!HHI", tcp[:8])
         flags = tcp[13]
-        if dport == dst_port and (flags & 0x12) == 0x02 and sport not in seen_ports:
+        if dport != dst_port or (flags & 0x12) != 0x02:
+            continue
+        if sport_filter is not None and sport != sport_filter:
+            continue
+        syns.append({"ts": ts_sec + ts_sub * sub_scale, "sport": sport, "isn": seq})
+    return syns
+
+
+def parse_pcap_syns(pcap_path, dst_ip, dst_port, exclude_sport=None):
+    syns = []
+    seen_ports = set()
+    for entry in parse_pcap_syns_all(pcap_path, dst_ip, dst_port):
+        sport = entry["sport"]
+        if exclude_sport is not None and sport == exclude_sport:
+            continue
+        if sport not in seen_ports:
             seen_ports.add(sport)
-            syns.append({"sport": sport, "isn": seq})
+            syns.append({"sport": sport, "isn": entry["isn"]})
     return syns
 
 
@@ -374,6 +398,67 @@ class _UdpEchoServer:
         self.thread.join(timeout=2)
 
 
+class _TcpFinCheckServer:
+    def __init__(self, host, port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((host, port))
+        self.sock.listen(32)
+        self.sock.settimeout(0.5)
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.outcomes = []
+        self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.thread.start()
+
+    def _accept_loop(self):
+        accepted = 0
+        for _ in range(MAX_ECHO_STEPS):
+            if self.stop.is_set() or accepted >= MAX_ECHO_CONNS:
+                return
+            try:
+                conn, _ = self.sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            accepted += 1
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn):
+        outcome = "error"
+        try:
+            conn.settimeout(3.0)
+            got = 0
+            for _ in range(64):
+                data = conn.recv(64)
+                if not data:
+                    outcome = "eof" if got > 0 else "empty_eof"
+                    break
+                got += len(data)
+        except ConnectionResetError:
+            outcome = "reset"
+        except TimeoutError:
+            outcome = "timeout"
+        except OSError:
+            outcome = "error"
+        finally:
+            with self.lock:
+                self.outcomes.append(outcome)
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def close(self):
+        self.stop.set()
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.thread.join(timeout=2)
+
+
 class _ScriptedDnsServer:
     def __init__(self, host, alt_host, dns_reply_fn):
         self.host = host
@@ -382,6 +467,11 @@ class _ScriptedDnsServer:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((host, 53))
         self.sock.settimeout(0.5)
+        self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.tcp_sock.bind((host, 53))
+        self.tcp_sock.listen(16)
+        self.tcp_sock.settimeout(0.5)
         self.wrong_port_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.wrong_port_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.wrong_port_sock.bind((host, 5353))
@@ -390,9 +480,30 @@ class _ScriptedDnsServer:
         self.wrong_src_sock.bind((alt_host, 53))
         self.stop = threading.Event()
         self.queries = []
+        self.retry_queries = []
+        self.tcp_queries = []
+        self.dropped_retry = False
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.tcp_thread = threading.Thread(target=self._tcp_loop, daemon=True)
         self.thread.start()
+        self.tcp_thread.start()
+
+    @staticmethod
+    def _parse_query(data):
+        if len(data) < 17:
+            return None
+        qid = int.from_bytes(data[:2], "big")
+        cursor = 12
+        labels = []
+        while cursor < len(data) and data[cursor]:
+            ln = data[cursor]
+            labels.append(data[cursor + 1 : cursor + 1 + ln].decode("ascii", "replace"))
+            cursor += 1 + ln
+        qend = cursor + 5
+        if qend > len(data):
+            return None
+        return qid, ".".join(labels), data[12:qend]
 
     def _loop(self):
         for _ in range(MAX_ECHO_STEPS):
@@ -404,24 +515,28 @@ class _ScriptedDnsServer:
                 continue
             except OSError:
                 return
-            if len(data) < 17:
+            parsed = self._parse_query(data)
+            if parsed is None:
                 continue
-            qid = int.from_bytes(data[:2], "big")
-            cursor = 12
-            labels = []
-            while cursor < len(data) and data[cursor]:
-                ln = data[cursor]
-                labels.append(data[cursor + 1 : cursor + 1 + ln].decode("ascii", "replace"))
-                cursor += 1 + ln
-            qend = cursor + 5
-            if qend > len(data):
-                continue
-            question = data[12:qend]
+            qid, name, question = parsed
             other = b"\x05other\x07invalid\x00" + question[-4:]
-            name = ".".join(labels)
+            drop_now = False
             with self.lock:
-                self.queries.append({"id": qid, "sport": addr[1], "name": name})
+                entry = {"id": qid, "sport": addr[1], "name": name}
+                if name == "retry.lab.invalid":
+                    self.retry_queries.append(entry)
+                    if not self.dropped_retry:
+                        self.dropped_retry = True
+                        drop_now = True
+                elif name != "tcp.lab.invalid":
+                    self.queries.append(entry)
+            if drop_now:
+                continue
             try:
+                if name == "tcp.lab.invalid":
+                    tc_reply = struct.pack("!HHHHHH", qid, 0x8380, 1, 0, 0, 0) + question
+                    self.sock.sendto(tc_reply, addr)
+                    continue
                 self.sock.sendto(self.dns_reply(qid ^ 0x5A5A, question, "192.0.2.66"), addr)
                 self.sock.sendto(self.dns_reply(qid, other, "192.0.2.67"), addr)
                 self.wrong_port_sock.sendto(self.dns_reply(qid, question, "192.0.2.68"), addr)
@@ -430,30 +545,92 @@ class _ScriptedDnsServer:
             except OSError:
                 pass
 
+    def _tcp_loop(self):
+        for _ in range(MAX_ECHO_STEPS):
+            if self.stop.is_set():
+                return
+            try:
+                conn, _ = self.tcp_sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            try:
+                conn.settimeout(5.0)
+                hdr = b""
+                while len(hdr) < 2:
+                    chunk = conn.recv(2 - len(hdr))
+                    if not chunk:
+                        break
+                    hdr += chunk
+                if len(hdr) < 2:
+                    continue
+                msg_len = int.from_bytes(hdr, "big")
+                if msg_len == 0 or msg_len > 4096:
+                    continue
+                body = b""
+                while len(body) < msg_len:
+                    chunk = conn.recv(msg_len - len(body))
+                    if not chunk:
+                        break
+                    body += chunk
+                if len(body) < msg_len:
+                    continue
+                parsed = self._parse_query(body)
+                if parsed is None:
+                    continue
+                qid, name, question = parsed
+                with self.lock:
+                    self.tcp_queries.append({"id": qid, "name": name})
+                reply = self.dns_reply(qid, question, self.host)
+                conn.sendall(struct.pack("!H", len(reply)) + reply)
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
     def close(self):
         self.stop.set()
-        for s in (self.sock, self.wrong_port_sock, self.wrong_src_sock):
+        for s in (self.sock, self.tcp_sock, self.wrong_port_sock, self.wrong_src_sock):
             try:
                 s.close()
             except OSError:
                 pass
         self.thread.join(timeout=2)
+        self.tcp_thread.join(timeout=2)
 
 
 class NetLab:
-    def __init__(self, out, blocked_cls, dns_reply_fn, *, enable_dns=True, enable_iperf=False, enable_lo_helpers=False):
+    def __init__(
+        self,
+        out,
+        blocked_cls,
+        dns_reply_fn,
+        *,
+        enable_dnsmasq=True,
+        enable_dns=True,
+        enable_iperf=False,
+        enable_lo_helpers=False,
+        enable_fin_check=False,
+    ):
         self.out = Path(out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.blocked_cls = blocked_cls
         self.dns_reply_fn = dns_reply_fn
+        self.enable_dnsmasq = enable_dnsmasq
         self.enable_dns = enable_dns
         self.enable_iperf = enable_iperf
         self.enable_lo_helpers = enable_lo_helpers
+        self.enable_fin_check = enable_fin_check
         self.procs = []
         self.iperf_servers = {}
         self.servers = []
         self.httpds = []
         self.dns = None
+        self.fin_server = None
         self.tap_ready = False
 
     def start(self):
@@ -472,31 +649,32 @@ class NetLab:
             raise self.blocked_cls(f"tc netem unavailable (sch_netem module): {(netem.stderr or netem.stdout).strip()}")
         run_cmd(["tc", "qdisc", "del", "dev", "tap0", "root"], check=False)
 
-        dnsmasq_log = open(self.out / "dnsmasq.log", "w")
-        dnsmasq = subprocess.Popen(
-            [
-                "dnsmasq",
-                "--no-daemon",
-                "--conf-file=/dev/null",
-                "--user=root",
-                "--group=root",
-                "--port=0",
-                "--bind-interfaces",
-                "--interface=tap0",
-                f"--dhcp-range={LAB_DHCP_RANGE}",
-                f"--dhcp-option=3,{LAB_HOST}",
-                f"--dhcp-option=6,{LAB_HOST}",
-                f"--dhcp-leasefile={self.out / 'leases'}",
-                "--pid-file=",
-                "--log-dhcp",
-            ],
-            stdout=dnsmasq_log,
-            stderr=subprocess.STDOUT,
-        )
-        self.procs.append((dnsmasq, dnsmasq_log))
-        time.sleep(0.2)
-        if dnsmasq.poll() is not None:
-            raise RuntimeError(f"dnsmasq exited early with {dnsmasq.returncode}; see {self.out / 'dnsmasq.log'}")
+        if self.enable_dnsmasq:
+            dnsmasq_log = open(self.out / "dnsmasq.log", "w")
+            dnsmasq = subprocess.Popen(
+                [
+                    "dnsmasq",
+                    "--no-daemon",
+                    "--conf-file=/dev/null",
+                    "--user=root",
+                    "--group=root",
+                    "--port=0",
+                    "--bind-interfaces",
+                    "--interface=tap0",
+                    f"--dhcp-range={LAB_DHCP_RANGE}",
+                    f"--dhcp-option=3,{LAB_HOST}",
+                    f"--dhcp-option=6,{LAB_HOST}",
+                    f"--dhcp-leasefile={self.out / 'leases'}",
+                    "--pid-file=",
+                    "--log-dhcp",
+                ],
+                stdout=dnsmasq_log,
+                stderr=subprocess.STDOUT,
+            )
+            self.procs.append((dnsmasq, dnsmasq_log))
+            time.sleep(0.2)
+            if dnsmasq.poll() is not None:
+                raise RuntimeError(f"dnsmasq exited early with {dnsmasq.returncode}; see {self.out / 'dnsmasq.log'}")
 
         hosts = [LAB_HOST]
         if self.enable_lo_helpers:
@@ -510,6 +688,10 @@ class NetLab:
             self.servers.append(_UdpEchoServer(host, UDP_ECHO_PORT))
             if self.enable_iperf:
                 self._spawn_iperf(host)
+
+        if self.enable_fin_check:
+            self.fin_server = _TcpFinCheckServer(LAB_HOST, TCP_FIN_PORT)
+            self.servers.append(self.fin_server)
 
         if self.enable_dns:
             self.dns = _ScriptedDnsServer(LAB_HOST, LAB_ALT_HOST, self.dns_reply_fn)
@@ -673,11 +855,20 @@ def run_net_basics(args, out, ctx):
             "host_limited": bool(reasons),
         }
 
+    boot1_pcap = None
     for boot in (1, 2):
         boot_out = out / f"boot-{boot}"
         boot_out.mkdir(parents=True, exist_ok=True)
         pcap_path = boot_out / "net.pcap"
-        lab = NetLab(boot_out, ctx["Blocked"], ctx["dns_reply"], enable_dns=(boot == 1))
+        if boot == 1:
+            boot1_pcap = pcap_path
+        lab = NetLab(
+            boot_out,
+            ctx["Blocked"],
+            ctx["dns_reply"],
+            enable_dns=(boot == 1),
+            enable_fin_check=(boot == 1),
+        )
         vm = None
         try:
             lab.start()
@@ -778,15 +969,36 @@ def run_net_basics(args, out, ctx):
                     ljson = parse_json_line(lout) or {"ok": False, "addrs": []}
                     lookup_answers.append(ljson.get("addrs", []))
                 good_lookups = sum(1 for a in lookup_answers if a == [LAB_HOST])
+                _, retry_out = ctx["run_status"](vm, "net-probe lookup retry.lab.invalid", 30)
+                retry_json = parse_json_line(retry_out) or {"ok": False, "addrs": []}
+                _, tcp_out = ctx["run_status"](vm, "net-probe lookup tcp.lab.invalid", 30)
+                tcp_json = parse_json_line(tcp_out) or {"ok": False, "addrs": []}
                 with lab.dns.lock:
                     dns_queries = list(lab.dns.queries)
+                    retry_queries = list(lab.dns.retry_queries)
+                    tcp_queries = list(lab.dns.tcp_queries)
+                retry_ok = (
+                    retry_json.get("addrs") == [LAB_HOST]
+                    and len(retry_queries) >= 2
+                    and retry_queries[0]["id"] != retry_queries[1]["id"]
+                    and retry_queries[0]["sport"] != retry_queries[1]["sport"]
+                )
+                tcp_ok = tcp_json.get("addrs") == [LAB_HOST] and any(
+                    q["name"] == "tcp.lab.invalid" for q in tcp_queries
+                )
                 items["5_dns_reply_match"] = {
                     "pass": good_lookups == 20
                     and ctx["consecutive_run"]([q["sport"] for q in dns_queries]) < 3
-                    and len({q["id"] for q in dns_queries}) == len(dns_queries),
+                    and len({q["id"] for q in dns_queries}) == len(dns_queries)
+                    and retry_ok
+                    and tcp_ok,
                     "matched": good_lookups,
                     "total": 20,
                     "queries_seen": len(dns_queries),
+                    "retry_ok": retry_ok,
+                    "retry_queries": retry_queries,
+                    "tcp_ok": tcp_ok,
+                    "tcp_queries": tcp_queries,
                 }
 
                 ping_100 = host_ping(guest_ip, count=100, interval=0.05, timeout=30)
@@ -833,14 +1045,150 @@ def run_net_basics(args, out, ctx):
                     "pass": so_json.get("so_error_name") == "ECONNREFUSED",
                     "result": so_json,
                 }
+
+                install_iperf_watchdog(vm, ctx["run_status"])
+                ctx["run_status"](
+                    vm,
+                    "bash -c 'iperf3 -s -4 -B 127.0.0.1 -p 5202 -1 </dev/null >/tmp/nb-lo-srv.log 2>&1 & echo $! > /tmp/nb-lo.pid'; sleep 1",
+                    30,
+                )
+                lo_rc, lo_out = ctx["run_status"](
+                    vm,
+                    "bash /tmp/ip.sh 20 iperf3 -4 -c 127.0.0.1 -p 5202 -t 2 -J",
+                    45,
+                )
+                ctx["run_status"](vm, "bash -c 'kill $(cat /tmp/nb-lo.pid) 2>/dev/null || true'", 15)
+                lo_data = parse_iperf_json(lo_out)
+                lo_bps = (
+                    (lo_data or {}).get("end", {}).get("sum_received", {}).get("bits_per_second")
+                    or (lo_data or {}).get("end", {}).get("sum_sent", {}).get("bits_per_second")
+                )
+                lo_mbps = round(lo_bps / 8e6, 4) if lo_bps is not None else None
+                items["10_tcp_loopback_2s"] = {
+                    "pass": lo_rc == 0
+                    and lo_data is not None
+                    and not lo_data.get("error")
+                    and lo_mbps is not None
+                    and lo_mbps > 0.0,
+                    "rc": lo_rc,
+                    "mb_per_s": lo_mbps,
+                    "error": (lo_data or {}).get("error") if isinstance(lo_data, dict) else lo_out.strip()[-160:],
+                }
+
+                ctx["run_status"](
+                    vm,
+                    f"bash -c 'exec 3<>/scheme/tcp/{LAB_HOST}:{HTTP_PORT}/0.0.0.0:{FIXED_ISN_SPORT}; printf \"GET /ping HTTP/1.1\\r\\nHost: {LAB_HOST}\\r\\nConnection: close\\r\\n\\r\\n\" >&3; sleep 0.3; exec 3<&-; sleep 2.5; exec 3<>/scheme/tcp/{LAB_HOST}:{HTTP_PORT}/0.0.0.0:{FIXED_ISN_SPORT}; sleep 0.3; exec 3<&-'",
+                    30,
+                )
+
+                serial_path = boot_out / "serial.log"
+                serial_before_len = serial_path.stat().st_size if serial_path.exists() else 0
+                ns_before_rows = context_snapshot(vm, ctx["run_status"])
+                ns_before = next((r for r in ns_before_rows if r["name"] == "netstack"), None)
+                ctx["run_status"](
+                    vm,
+                    f"bash -c 'rm -f /tmp/nw-acc-ready /tmp/nw-acc.log; net-probe bind tcp 0.0.0.0:{ACCEPT_PROBE_PORT} --echo --max-conns {MAX_ACCEPT_PROBES} --timeout-ms 15000 --ready-file /tmp/nw-acc-ready >/tmp/nw-acc.log 2>&1 & echo $! > /tmp/nw-acc.pid; for i in $(seq 50); do [ -f /tmp/nw-acc-ready ] && break; sleep 0.1; done; cat /tmp/nw-acc-ready'",
+                    30,
+                )
+                acc_ok = 0
+                acc_errs = []
+                for _ in range(MAX_ACCEPT_PROBES):
+                    try:
+                        with socket.create_connection((guest_ip, ACCEPT_PROBE_PORT), timeout=5.0) as sock:
+                            sock.settimeout(5.0)
+                            sock.sendall(b"a")
+                            got = sock.recv(1)
+                            if got == b"a":
+                                acc_ok += 1
+                            else:
+                                acc_errs.append(f"short recv {got!r}")
+                                break
+                    except OSError as exc:
+                        acc_errs.append(str(exc))
+                        break
+                _, acc_wait_out = ctx["run_status"](
+                    vm,
+                    "bash -c 'p=$(cat /tmp/nw-acc.pid 2>/dev/null); for i in $(seq 50); do kill -0 \"$p\" 2>/dev/null || break; sleep 0.1; done; kill \"$p\" 2>/dev/null || true; cat /tmp/nw-acc.log'",
+                    30,
+                )
+                ns_after_rows = context_snapshot(vm, ctx["run_status"])
+                ns_after = next((r for r in ns_after_rows if r["name"] == "netstack"), None)
+                serial_tail = serial_path.read_bytes()[serial_before_len:] if serial_path.exists() else b""
+                no_ref_warn = b"Closing a socket_handle with no ref" in serial_tail
+                mem_growth = (
+                    (ns_after["private_bytes"] - ns_before["private_bytes"])
+                    if (ns_before is not None and ns_after is not None)
+                    else None
+                )
+                ns_pid_same = (
+                    ns_before is not None
+                    and ns_after is not None
+                    and ns_before["pid"] == ns_after["pid"]
+                )
+                items["12_accept_memory_bound"] = {
+                    "pass": acc_ok == MAX_ACCEPT_PROBES
+                    and ns_pid_same
+                    and mem_growth is not None
+                    and mem_growth < MAX_ACCEPT_MEM_GROWTH_BYTES
+                    and not no_ref_warn,
+                    "conns_ok": acc_ok,
+                    "conns_target": MAX_ACCEPT_PROBES,
+                    "mem_before_bytes": ns_before["private_bytes"] if ns_before else None,
+                    "mem_after_bytes": ns_after["private_bytes"] if ns_after else None,
+                    "mem_growth_bytes": mem_growth,
+                    "mem_bound_bytes": MAX_ACCEPT_MEM_GROWTH_BYTES,
+                    "no_ref_warning": no_ref_warn,
+                    "netstack_pid_before": ns_before["pid"] if ns_before else None,
+                    "netstack_pid_after": ns_after["pid"] if ns_after else None,
+                    "errors": acc_errs,
+                    "guest_log": acc_wait_out.strip()[-200:],
+                }
+
+                ctx["run_status"](
+                    vm,
+                    f"bash -c 'for i in $(seq {MAX_FIN_PROBES}); do exec 3<>/scheme/tcp/{LAB_HOST}:{TCP_FIN_PORT}; printf fin >&3; sleep 0.05; exec 3<&-; done'",
+                    60,
+                )
+                time.sleep(3.5)
+                with lab.fin_server.lock:
+                    fin_outcomes = list(lab.fin_server.outcomes)
+                fin_eof = sum(1 for o in fin_outcomes if o == "eof")
+                items["13_tcp_close_fin"] = {
+                    "pass": len(fin_outcomes) == MAX_FIN_PROBES and fin_eof == MAX_FIN_PROBES,
+                    "eof": fin_eof,
+                    "total": len(fin_outcomes),
+                    "target": MAX_FIN_PROBES,
+                    "outcomes": fin_outcomes,
+                }
             vm.kill()
         finally:
             if vm is not None:
                 vm.close()
             lab.close()
 
-        syns = parse_pcap_syns(pcap_path, LAB_HOST, CLOSED_PORT)
+        syns = parse_pcap_syns(pcap_path, LAB_HOST, CLOSED_PORT, exclude_sport=FIXED_ISN_SPORT)
         boots_syns.append(syns)
+
+    fixed_syns = (
+        parse_pcap_syns_all(boot1_pcap, LAB_HOST, HTTP_PORT, sport_filter=FIXED_ISN_SPORT)
+        if boot1_pcap is not None and boot1_pcap.exists()
+        else []
+    )
+    if len(fixed_syns) >= 2:
+        dt = fixed_syns[-1]["ts"] - fixed_syns[0]["ts"]
+        delta = (fixed_syns[-1]["isn"] - fixed_syns[0]["isn"]) & 0xFFFFFFFF
+        expected_ticks = dt * 1_000_000.0 / 4.0
+        isn_clock_ok = dt >= 1.5 and 0.5 * expected_ticks <= delta <= 2.0 * expected_ticks
+    else:
+        dt, delta, expected_ticks, isn_clock_ok = 0.0, None, None, False
+    items["11_isn_clock_advance"] = {
+        "pass": isn_clock_ok,
+        "syns_seen": len(fixed_syns),
+        "elapsed_s": round(dt, 3),
+        "isn_delta": delta,
+        "expected_ticks": round(expected_ticks, 1) if expected_ticks is not None else None,
+        "syns": fixed_syns,
+    }
 
     isn_ok = True
     isn_notes = []
@@ -903,7 +1251,7 @@ def run_net_basics(args, out, ctx):
         "net_hardening": arp_verdict,
     }
 
-    ordered_keys = sorted(items.keys())
+    ordered_keys = sorted(items.keys(), key=lambda k: int(k.split("_", 1)[0]))
     blocked_items = [k for k in ordered_keys if items[k].get("blocked")]
     report = {
         "card": card,
@@ -931,6 +1279,68 @@ def run_net_basics(args, out, ctx):
     if blocked_items and not failed:
         raise ctx["Blocked"](summary)
     return not failed and not blocked_items, summary
+
+
+def run_net_no_lease(args, out, ctx):
+    card = ctx["net_card"](args)
+    if card not in ctx["NET_CARDS"]:
+        return False, f"net-no-lease runs with net=e1000 or net=virtio, not net={card}"
+    require_tools(LAB_BASE_TOOLS, ctx["Blocked"])
+    boot_out = out / "boot-1"
+    boot_out.mkdir(parents=True, exist_ok=True)
+    lab = NetLab(boot_out, ctx["Blocked"], ctx["dns_reply"], enable_dnsmasq=False, enable_dns=False)
+    vm = None
+    try:
+        lab.start()
+        vm = ctx["VM"](
+            args,
+            boot_out,
+            qemu_flags=lab.qemu_flags(ctx["NET_CARDS"][card], pcap_path=None),
+            make=("net=no",),
+        )
+        if not ctx["root_shell"](vm, args.timeout):
+            return False, f"no root shell on serial console; see {boot_out}"
+        _, addr_out = ctx["run_status"](
+            vm,
+            "bash -c 'for i in $(seq 80); do grep -q dhcpd /scheme/sys/context || break; sleep 0.2; done; cat /scheme/netcfg/ifaces/eth0/addr/list'",
+            45,
+        )
+        rows_before = context_snapshot(vm, ctx["run_status"])
+        ns_before = next((r for r in rows_before if r["name"] == "netstack"), None)
+        _, conn_out = ctx["run_status"](
+            vm,
+            f"net-probe connect {LAB_HOST}:{HTTP_PORT} --timeout-ms 3000",
+            30,
+        )
+        conn_json = parse_json_line(conn_out) or {"ok": False, "raw": conn_out.strip()}
+        rows_after = context_snapshot(vm, ctx["run_status"])
+        ns_after = next((r for r in rows_after if r["name"] == "netstack"), None)
+        vm.kill()
+    finally:
+        if vm is not None:
+            vm.close()
+        lab.close()
+
+    unconfigured = "Not configured" in addr_out
+    pid_same = ns_before is not None and ns_after is not None and ns_before["pid"] == ns_after["pid"]
+    conn_errored = not bool(conn_json.get("ok"))
+    report = {
+        "card": card,
+        "addr_list": addr_out.strip(),
+        "unconfigured": unconfigured,
+        "connect": conn_json,
+        "netstack_before": ns_before,
+        "netstack_after": ns_after,
+        "netstack_survived": pid_same,
+        "pass": unconfigured and conn_errored and pid_same,
+    }
+    (out / "net-no-lease.json").write_text(json.dumps(report, indent=2) + "\n")
+    summary = (
+        f"card {card}: unconfigured={unconfigured} conn_err={conn_json.get('error')} "
+        f"netstack_pid={ns_before['pid'] if ns_before else None}->{ns_after['pid'] if ns_after else None}; "
+        f"see {out / 'net-no-lease.json'}"
+    )
+    return report["pass"], summary
 
 
 def parse_iperf_json(text):
