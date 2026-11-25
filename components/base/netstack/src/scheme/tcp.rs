@@ -26,7 +26,9 @@ const MIN_TCP_KEEPIDLE_SECS: i32 = 1;
 const MAX_TCP_KEEPIDLE_SECS: i32 = 86_400;
 const TCP_CONNECT_TIMEOUT_SECS: u64 = 30;
 const MAX_LISTEN_BACKLOG: usize = 64;
-const TCP_DEFAULT_BUF_BYTES: usize = 1048576;
+const MAX_LISTEN_POOL_BYTES: usize = 8 * 1024 * 1024;
+const TCP_DEFAULT_RX_BUF_BYTES: usize = 1024 * 1024;
+const TCP_DEFAULT_TX_BUF_BYTES: usize = 256 * 1024;
 const TCP_MIN_BUF_BYTES: usize = 16 * 1024;
 const TCP_MAX_BUF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LINGERING_SOCKETS: usize = 64;
@@ -139,7 +141,15 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     }
 
     fn default_buf_bytes() -> usize {
-        TCP_DEFAULT_BUF_BYTES
+        TCP_DEFAULT_RX_BUF_BYTES
+    }
+
+    fn default_rx_buf_bytes() -> usize {
+        TCP_DEFAULT_RX_BUF_BYTES
+    }
+
+    fn default_tx_buf_bytes() -> usize {
+        TCP_DEFAULT_TX_BUF_BYTES
     }
 
     fn clamp_buf_bytes(requested: usize) -> usize {
@@ -166,11 +176,11 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         let rx_buf_bytes = opts
             .rcvbuf
             .map(Self::clamp_buf_bytes)
-            .unwrap_or(TCP_DEFAULT_BUF_BYTES);
+            .unwrap_or(TCP_DEFAULT_RX_BUF_BYTES);
         let tx_buf_bytes = opts
             .sndbuf
             .map(Self::clamp_buf_bytes)
-            .unwrap_or(TCP_DEFAULT_BUF_BYTES);
+            .unwrap_or(TCP_DEFAULT_TX_BUF_BYTES);
         assert!(rx_buf_bytes >= TCP_MIN_BUF_BYTES && rx_buf_bytes <= TCP_MAX_BUF_BYTES);
         assert!(tx_buf_bytes >= TCP_MIN_BUF_BYTES && tx_buf_bytes <= TCP_MAX_BUF_BYTES);
         let rx_packets = vec![0; rx_buf_bytes];
@@ -764,7 +774,9 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         let TcpRole::Listening(ref mut pool) = file.data else {
             return Err(SyscallError::new(syscall::EINVAL));
         };
-        let target = backlog.clamp(1, MAX_LISTEN_BACKLOG);
+        let per_socket_bytes = pool.rx_buf_bytes.saturating_add(pool.tx_buf_bytes).max(1);
+        let budget_cap = (MAX_LISTEN_POOL_BYTES / per_socket_bytes).clamp(1, MAX_LISTEN_BACKLOG);
+        let target = backlog.clamp(1, budget_cap);
         let desired_extra = target.saturating_sub(1);
         while pool.extra_handles.len() < desired_extra {
             let rx_buffer = TcpSocketBuffer::new(vec![0; pool.rx_buf_bytes]);
@@ -791,7 +803,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             sockets.remove(h);
             scheme_data.port_set.release_port(pool.endpoint.port);
         }
-        assert!(1 + pool.extra_handles.len() <= MAX_LISTEN_BACKLOG);
+        assert!(1 + pool.extra_handles.len() <= budget_cap);
         Ok(0)
     }
 

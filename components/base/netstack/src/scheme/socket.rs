@@ -361,6 +361,14 @@ where
         Router::MTU * Smolnetd::SOCKET_BUFFER_SIZE
     }
 
+    fn default_rx_buf_bytes() -> usize {
+        Self::default_buf_bytes()
+    }
+
+    fn default_tx_buf_bytes() -> usize {
+        Self::default_buf_bytes()
+    }
+
     fn clamp_buf_bytes(requested: usize) -> usize {
         requested.clamp(Router::MTU, Router::MTU * Smolnetd::SOCKET_BUFFER_SIZE)
     }
@@ -836,11 +844,11 @@ where
                     Handle::Null(ref null) => match (level, name) {
                         (SOL_SOCKET, SO_RCVBUF) => write_i32_opt(
                             payload,
-                            null.opts.rcvbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32,
+                            null.opts.rcvbuf.unwrap_or_else(SocketT::default_rx_buf_bytes) as i32,
                         ),
                         (SOL_SOCKET, SO_SNDBUF) => write_i32_opt(
                             payload,
-                            null.opts.sndbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32,
+                            null.opts.sndbuf.unwrap_or_else(SocketT::default_tx_buf_bytes) as i32,
                         ),
                         (SOL_SOCKET, SO_REUSEADDR) => {
                             write_i32_opt(payload, i32::from(null.opts.reuseaddr))
