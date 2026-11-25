@@ -64,6 +64,8 @@ pub const STATE_DIR: &str = ".local/state/ferrion-run";
 
 pub const MAX_GRANTS: usize = 32;
 
+pub const NESTED_LIVENESS_POLL_MS: u64 = 100;
+
 pub const EXIT_REFUSED: i32 = 125;
 
 pub const USAGE: &str = "\
@@ -145,6 +147,20 @@ and read only when no manifest matches:
                       # get a namespace with the network, every other scheme and
                       # the whole file system, so the session no longer holds.
 Apart from allow_sudo in legacy profiles, flags only take access away.
+
+Nested sessions: when started inside an existing ferrion-run session (where
+/scheme/file-scope/new is absent), ferrion-run asks the session's file proxy
+at /.ferrion-scope/new for a strictly narrower sub-scope (up to depth 4 and
+16 direct children; past either fails with EMLINK). Every child grant is
+validated in the proxy against the parent's scope and refused with exit 125
+(wider-than-parent) if it exceeds the parent's grants or schemes; the child
+also gets a private shm sub-prefix under the parent's shm handle; --pass-fd
+stays allowed for nested ad-hoc launches. v1 limits: child grants inside a
+parent --clone grant are refused; when the parent ends, the child's process
+group is killed within 100 ms (NESTED_LIVENESS_POLL_MS), while deeper
+descendants that left the process group keep running with dead file handles
+until procmgr's session tag lands.
+
 ferrion-run exits with 125 when it refuses to start PROGRAM, and with PROGRAM's
 status otherwise.
 ";

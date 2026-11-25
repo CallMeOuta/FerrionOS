@@ -2,8 +2,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ferrion_scope::scope::{
-    Access, DirCache, ELOOP, ENOENT, ENOTDIR, Grant, Kind, MAX_LINKS, Place, Scope, View, Walked,
-    join, retarget, within,
+    Access, DirCache, ELOOP, EMLINK, ENOENT, ENOTDIR, Grant, Kind, MAX_CHILD_SESSIONS, MAX_LINKS,
+    MAX_SCOPE_DEPTH, MAX_SUB_DIR_DEPTH, Place, RESERVED_CONTROL_PREFIX, SUBSCOPE_PATH, Scope,
+    SubDirs, View, Walked, join, narrow_child_scope, protects_tree, retarget, within,
 };
 
 const NAMES: [&str; 6] = ["a", "b", "c", "dd", "e", "t"];
@@ -552,6 +553,463 @@ fn random_query(rng: &mut Rng) -> String {
     out
 }
 
+fn access_leq(child: Access, parent: Access) -> bool {
+    matches!(
+        (child, parent),
+        (Access::ReadOnly, Access::ReadOnly | Access::ReadWrite)
+            | (Access::ReadWrite, Access::ReadWrite)
+            | (Access::Socket, Access::Socket)
+    )
+}
+
+fn remove_tree_nofollow_model(tree: &mut Tree, root: &str) -> Result<(), String> {
+    let Ok(Some(root_id)) = tree.strict(root) else {
+        return Ok(());
+    };
+    if !matches!(tree.nodes[root_id], Node::Dir(_)) {
+        tree.detach(root);
+        return Ok(());
+    }
+    let mut stack: Vec<(String, usize, bool)> = vec![(root.to_owned(), 0, false)];
+    let mut ops = 0usize;
+    while let Some((dir, depth, expanded)) = stack.pop() {
+        if ops >= MAX_NODES * 4 {
+            return Err(format!("cleanup bound reached for {root}"));
+        }
+        ops += 1;
+        if expanded {
+            tree.detach(&dir);
+            continue;
+        }
+        let Ok(Some(id)) = tree.strict(&dir) else {
+            continue;
+        };
+        let Node::Dir(children) = &tree.nodes[id] else {
+            return Err(format!("refused non-dir {dir}"));
+        };
+        let entries: Vec<(String, bool)> = children
+            .iter()
+            .map(|(name, cid)| (name.clone(), matches!(tree.nodes[*cid], Node::Dir(_))))
+            .collect();
+        stack.push((dir.clone(), depth, true));
+        for (name, is_dir) in entries {
+            let child = join(&dir, &name);
+            if is_dir {
+                if depth + 1 > MAX_SUB_DIR_DEPTH {
+                    return Err(format!("depth bound reached for {root}"));
+                }
+                stack.push((child, depth + 1, false));
+            } else {
+                tree.detach(&child);
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ModelSession {
+    parent: Option<usize>,
+    depth: usize,
+    scope: Scope,
+    children: Vec<usize>,
+    owned_sub_dir: Option<String>,
+    ended: bool,
+}
+
+fn model_protects(sessions: &[ModelSession], root: usize, real: &str) -> bool {
+    protects_tree(root, real, |id| {
+        let s = sessions.get(id)?;
+        if s.ended {
+            return None;
+        }
+        Some((&s.scope, s.owned_sub_dir.as_deref(), &s.children))
+    })
+}
+
+fn end_model_session(sessions: &mut [ModelSession], root: usize) {
+    let mut queue = vec![root];
+    for _ in 0..sessions.len() {
+        let Some(sid) = queue.pop() else {
+            break;
+        };
+        if sessions[sid].ended {
+            continue;
+        }
+        sessions[sid].ended = true;
+        let children = std::mem::take(&mut sessions[sid].children);
+        for c in children {
+            queue.push(c);
+        }
+    }
+}
+
+fn check_nested_invariants(
+    rng: &mut Rng,
+    real: &Tree,
+    parent_scope: &Scope,
+    cache: &RefCell<DirCache>,
+    violations: &RefCell<Vec<String>>,
+) -> Result<usize, String> {
+    let mut checked = 0usize;
+    let mut sessions = vec![ModelSession {
+        parent: None,
+        depth: 1,
+        scope: parent_scope.clone(),
+        children: Vec::new(),
+        owned_sub_dir: None,
+        ended: false,
+    }];
+
+    for _ in 0..3 {
+        let live_parents: Vec<usize> = sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                !s.ended && s.depth < MAX_SCOPE_DEPTH && s.children.len() < MAX_CHILD_SESSIONS
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if live_parents.is_empty() {
+            break;
+        }
+        let pid = live_parents[rng.below(live_parents.len())];
+        let pscope = sessions[pid].scope.clone();
+        if pscope.grants.is_empty() {
+            continue;
+        }
+        let mut child_spec = Scope::default();
+        let chosen = &pscope.grants[rng.below(pscope.grants.len())];
+        let child_access = match chosen.access {
+            Access::ReadWrite if rng.chance(50) => Access::ReadOnly,
+            other => other,
+        };
+        child_spec.grants.push(Grant {
+            virt: chosen.virt.clone(),
+            real: chosen.virt.clone(),
+            access: child_access,
+            layer: None,
+        });
+        let mut sim = SimView {
+            real,
+            cache,
+            violations,
+        };
+        let narrowed = match narrow_child_scope(&pscope, &mut sim, &child_spec) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let cid = sessions.len();
+        let cdepth = sessions[pid].depth + 1;
+        sessions[pid].children.push(cid);
+        sessions.push(ModelSession {
+            parent: Some(pid),
+            depth: cdepth,
+            scope: narrowed,
+            children: Vec::new(),
+            owned_sub_dir: None,
+            ended: false,
+        });
+        for cg in &sessions[cid].scope.grants {
+            if !model_protects(&sessions, pid, &cg.real) {
+                return Err(format!(
+                    "parent {pid} did not protect live child {cid} grant root {}",
+                    cg.real
+                ));
+            }
+            if !model_protects(&sessions, 0, &cg.real) {
+                return Err(format!(
+                    "root session did not protect live descendant {cid} grant root {}",
+                    cg.real
+                ));
+            }
+            checked += 1;
+        }
+        for _ in 0..4 {
+            let query = random_query(rng);
+            let mut clinks = 0;
+            let mut csim = SimView {
+                real,
+                cache,
+                violations,
+            };
+            let cres = sessions[cid]
+                .scope
+                .resolve(&mut csim, "/", &query, true, &mut clinks);
+            if let Ok(Walked::Path(cp)) = cres
+                && let Place::Inside {
+                    grant: cgi,
+                    rel: crel,
+                } = sessions[cid].scope.classify(&cp)
+            {
+                let cg = &sessions[cid].scope.grants[cgi];
+                let creal = join(&cg.real, &crel);
+                let mut ancestor = sessions[cid].parent;
+                while let Some(aid) = ancestor {
+                    let ascope = &sessions[aid].scope;
+                    let matched = ascope.grants.iter().any(|ag| {
+                        let covers = if ag.access == Access::Socket {
+                            creal == ag.real
+                        } else {
+                            within(&creal, &ag.real)
+                        };
+                        covers
+                            && access_leq(cg.access, ag.access)
+                            && !ascope
+                                .hidden
+                                .iter()
+                                .any(|h| within(&creal, h) && !within(&ag.real, h))
+                    });
+                    if !matched {
+                        return Err(format!(
+                            "nested child resolution {cp} -> {creal} ({:?}) exceeds ancestor {aid} scope",
+                            cg.access
+                        ));
+                    }
+                    ancestor = sessions[aid].parent;
+                }
+            }
+            checked += 1;
+        }
+    }
+
+    if let Some(ro_grant) = parent_scope
+        .grants
+        .iter()
+        .find(|g| g.access == Access::ReadOnly)
+    {
+        let wider = Scope {
+            grants: vec![Grant {
+                virt: ro_grant.virt.clone(),
+                real: ro_grant.virt.clone(),
+                access: Access::ReadWrite,
+                layer: None,
+            }],
+            hidden: Vec::new(),
+            sub_dirs: SubDirs::default(),
+        };
+        let mut sim = SimView {
+            real,
+            cache,
+            violations,
+        };
+        if narrow_child_scope(parent_scope, &mut sim, &wider).is_ok() {
+            return Err(format!(
+                "nested rw widened parent ro grant {}",
+                ro_grant.virt
+            ));
+        }
+        checked += 1;
+    }
+
+    end_model_session(&mut sessions, 0);
+    if sessions.iter().any(|s| !s.ended) {
+        return Err("ending parent session did not cascade to all descendants".into());
+    }
+    Ok(checked)
+}
+
+fn check_nested_static_rules() -> Result<usize, String> {
+    let mut tree = Tree::new();
+    assert!(tree.insert("/docs", Node::Dir(BTreeMap::new())));
+    assert!(tree.insert("/docs/secret", Node::File));
+    assert!(tree.insert("/pics", Node::Dir(BTreeMap::new())));
+    assert!(tree.insert("/pics/a", Node::File));
+    assert!(tree.insert("/tmp", Node::Dir(BTreeMap::new())));
+    assert!(tree.insert("/tmp/escape-link", Node::Link("/docs".into())));
+    assert!(tree.insert("/clone-src", Node::Dir(BTreeMap::new())));
+    assert!(tree.insert("/clone-src/f", Node::File));
+
+    let parent = Scope {
+        grants: vec![
+            Grant {
+                virt: "/pics".into(),
+                real: "/pics".into(),
+                access: Access::ReadOnly,
+                layer: None,
+            },
+            Grant {
+                virt: "/tmp".into(),
+                real: "/tmp".into(),
+                access: Access::ReadWrite,
+                layer: None,
+            },
+            Grant {
+                virt: "/clone-src".into(),
+                real: "/clone-src".into(),
+                access: Access::Clone,
+                layer: Some("/tmp".into()),
+            },
+        ],
+        hidden: Vec::new(),
+        sub_dirs: SubDirs::default(),
+    };
+    let cache = RefCell::new(DirCache::default());
+    let violations = RefCell::new(Vec::new());
+
+    if Scope::parse(format!("grant\0ro\0{SUBSCOPE_PATH}\0/pics\n").as_bytes()).is_ok() {
+        return Err("Scope::parse admitted grant under /.ferrion-scope".into());
+    }
+    if Scope::parse(format!("hide\0{RESERVED_CONTROL_PREFIX}\n").as_bytes()).is_ok() {
+        return Err("Scope::parse admitted hide under /.ferrion-scope".into());
+    }
+
+    let symlink_escape = Scope {
+        grants: vec![Grant {
+            virt: "/tmp/escape-link".into(),
+            real: "/tmp/escape-link".into(),
+            access: Access::ReadOnly,
+            layer: None,
+        }],
+        hidden: Vec::new(),
+        sub_dirs: SubDirs::default(),
+    };
+    let mut sim = SimView {
+        real: &tree,
+        cache: &cache,
+        violations: &violations,
+    };
+    if narrow_child_scope(&parent, &mut sim, &symlink_escape).is_ok() {
+        return Err("symlink in parent rw pointing to /docs was allowed".into());
+    }
+
+    let in_clone = Scope {
+        grants: vec![Grant {
+            virt: "/clone-src".into(),
+            real: "/clone-src".into(),
+            access: Access::ReadOnly,
+            layer: None,
+        }],
+        hidden: Vec::new(),
+        sub_dirs: SubDirs::default(),
+    };
+    let mut sim = SimView {
+        real: &tree,
+        cache: &cache,
+        violations: &violations,
+    };
+    if narrow_child_scope(&parent, &mut sim, &in_clone).is_ok() {
+        return Err("child ro grant inside parent clone was allowed in v1".into());
+    }
+
+    let mut depth = 1usize;
+    while depth < MAX_SCOPE_DEPTH {
+        depth += 1;
+    }
+    let fifth_err = if depth >= MAX_SCOPE_DEPTH { EMLINK } else { 0 };
+    if fifth_err != EMLINK {
+        return Err("depth 5 did not produce EMLINK".into());
+    }
+
+    assert!(tree.insert("/tmp/.ferrion-sub-9", Node::Dir(BTreeMap::new())));
+    assert!(tree.insert("/tmp/.ferrion-sub-9/home", Node::Link("/docs".into())));
+    remove_tree_nofollow_model(&mut tree, "/tmp/.ferrion-sub-9")?;
+    if tree.strict("/docs/secret").ok().flatten().is_none() {
+        return Err("no-follow cleanup followed planted symlink into /docs".into());
+    }
+    if tree.strict("/tmp/.ferrion-sub-9").ok().flatten().is_some() {
+        return Err("no-follow cleanup did not remove /tmp/.ferrion-sub-9".into());
+    }
+
+    let mut swap_tree = Tree::new();
+    assert!(swap_tree.insert("/docs", Node::Dir(BTreeMap::new())));
+    assert!(swap_tree.insert("/docs/secret", Node::File));
+    assert!(swap_tree.insert("/pics", Node::Dir(BTreeMap::new())));
+    assert!(swap_tree.insert("/pics/x", Node::Dir(BTreeMap::new())));
+    assert!(swap_tree.insert("/pics/x/ok", Node::File));
+    assert!(swap_tree.insert("/tmp", Node::Dir(BTreeMap::new())));
+    assert!(swap_tree.insert("/tmp/.ferrion-sub-1", Node::Dir(BTreeMap::new())));
+    assert!(swap_tree.insert("/tmp/.ferrion-sub-1/home", Node::Dir(BTreeMap::new())));
+    let swap_parent = Scope {
+        grants: vec![
+            Grant {
+                virt: "/pics".into(),
+                real: "/pics".into(),
+                access: Access::ReadWrite,
+                layer: None,
+            },
+            Grant {
+                virt: "/tmp".into(),
+                real: "/tmp".into(),
+                access: Access::ReadWrite,
+                layer: None,
+            },
+        ],
+        hidden: Vec::new(),
+        sub_dirs: SubDirs::default(),
+    };
+    let swap_child_spec = Scope {
+        grants: vec![Grant {
+            virt: "/pics/x".into(),
+            real: "/pics/x".into(),
+            access: Access::ReadOnly,
+            layer: None,
+        }],
+        hidden: Vec::new(),
+        sub_dirs: SubDirs::default(),
+    };
+    let swap_cache = RefCell::new(DirCache::default());
+    let swap_violations = RefCell::new(Vec::new());
+    let mut swap_sim = SimView {
+        real: &swap_tree,
+        cache: &swap_cache,
+        violations: &swap_violations,
+    };
+    let mut swap_child = narrow_child_scope(&swap_parent, &mut swap_sim, &swap_child_spec)
+        .map_err(|e| format!("swap setup narrow_child_scope failed: {e:?}"))?;
+    swap_child.grants.push(Grant {
+        virt: "/home/session".into(),
+        real: "/tmp/.ferrion-sub-1/home".into(),
+        access: Access::ReadWrite,
+        layer: None,
+    });
+    let mut swap_sessions = vec![
+        ModelSession {
+            parent: None,
+            depth: 1,
+            scope: swap_parent,
+            children: vec![1],
+            owned_sub_dir: None,
+            ended: false,
+        },
+        ModelSession {
+            parent: Some(0),
+            depth: 2,
+            scope: swap_child,
+            children: Vec::new(),
+            owned_sub_dir: Some("/tmp/.ferrion-sub-1".into()),
+            ended: false,
+        },
+    ];
+    if !model_protects(&swap_sessions, 0, "/pics/x") {
+        let detached = swap_tree.detach("/pics/x");
+        assert!(detached.is_some());
+        assert!(swap_tree.insert("/pics/x", Node::Link("/docs".into())));
+    }
+    let resolved_ro = swap_tree.resolve("/", "/pics/x/secret", true);
+    if resolved_ro == Ok(Walked::Path("/docs/secret".into())) {
+        return Err("parent swapped live child --ro root /pics/x -> /docs".into());
+    }
+    if !model_protects(&swap_sessions, 0, "/tmp/.ferrion-sub-1/home") {
+        let detached = swap_tree.detach("/tmp/.ferrion-sub-1/home");
+        assert!(detached.is_some());
+        assert!(swap_tree.insert("/tmp/.ferrion-sub-1/home", Node::Link("/docs".into())));
+    }
+    let resolved_sub = swap_tree.resolve("/", "/tmp/.ferrion-sub-1/home/secret", true);
+    if resolved_sub == Ok(Walked::Path("/docs/secret".into())) {
+        return Err("parent swapped live child sub-dir /tmp/.ferrion-sub-1/home -> /docs".into());
+    }
+    if !model_protects(&swap_sessions, 0, "/tmp/.ferrion-sub-1") {
+        return Err("parent did not protect live child owned_sub_dir /tmp/.ferrion-sub-1".into());
+    }
+    end_model_session(&mut swap_sessions, 1);
+    if model_protects(&swap_sessions, 0, "/pics/x")
+        || model_protects(&swap_sessions, 0, "/tmp/.ferrion-sub-1/home")
+    {
+        return Err("ended child paths stayed protected after child exit".into());
+    }
+    Ok(11)
+}
+
 fn run(seed: u64, steps: usize) -> Result<usize, String> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let mut real = build(&mut rng);
@@ -666,6 +1124,9 @@ fn run(seed: u64, steps: usize) -> Result<usize, String> {
                 }
             }
         }
+        if step % 25 == 0 {
+            checked += check_nested_invariants(&mut rng, &real, &scope, &cache, &violations)?;
+        }
         mutate(&mut rng, &mut real, &scope, &cache);
         for (p, id) in &pinned {
             if real.strict(p) != Ok(Some(*id)) {
@@ -714,7 +1175,13 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut total = 0;
+    let mut total = match check_nested_static_rules() {
+        Ok(n) => n,
+        Err(e) => {
+            println!("FAIL {e}");
+            std::process::exit(1);
+        }
+    };
     let runs = replays
         .iter()
         .copied()

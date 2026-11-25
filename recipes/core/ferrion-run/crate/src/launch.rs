@@ -10,25 +10,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ferrion_scope::links::link_leads_outside;
 use ferrion_scope::overlay::{LAYER, LOWER, Session};
 use ferrion_scope::proxy::END_SESSION;
-use ferrion_scope::scope::{Access, Grant, Scope, within};
+use ferrion_scope::scope::{Access, Grant, SUBSCOPE_PATH, Scope, SubDirs, within};
 use libredox::call;
 use libredox::flag::{F_SETFD, O_CLOEXEC, O_DIRECTORY, O_RDONLY, O_RDWR};
 
 use crate::sessions::{CLONE_PREFIX, PID, clone_dirs, state_root};
 use crate::{
-    FOLDER_CAPABILITIES, GrantKind, LaunchPolicy, ManifestPolicy, Options, PASSED_VARIABLES,
-    SYSTEM_PATHS, check_pass_fd, check_stdio, child_schemes, format_user_dirs,
+    FOLDER_CAPABILITIES, GrantKind, LaunchPolicy, ManifestPolicy, NESTED_LIVENESS_POLL_MS, Options,
+    PASSED_VARIABLES, SYSTEM_PATHS, check_pass_fd, check_stdio, child_schemes, format_user_dirs,
     is_valid_wayland_display, new_handles, parse_snapshot, to_close,
 };
 
 const SCOPE_SERVICE: &str = "/scheme/file-scope/new";
 const SHM_RAND_BYTES: usize = 16;
 const MAX_RAND_READS: usize = 16;
+const NESTED_HOME_VIRT: &str = "/home/session";
+const NESTED_RUN_VIRT: &str = "/run/ferrion";
 const MAX_REPORT: usize = 16 << 20;
 const REPORT_CHUNK: usize = 4096;
 const MAX_TABLE_BYTES: usize = 1 << 20;
 const TABLE_CHUNK: usize = 4096;
 const MAX_WAIT_INTERRUPTS: usize = 1 << 16;
+const MAX_NESTED_WAIT_POLLS: usize = 86_400 * 10;
 
 unsafe extern "C" {
     fn redox_cur_procfd_v0() -> usize;
@@ -390,7 +393,7 @@ impl Drop for SessionDir {
 }
 
 struct Prepared {
-    dir: SessionDir,
+    dir: Option<SessionDir>,
     home: String,
     run_dir: Option<String>,
     scope: Scope,
@@ -431,6 +434,7 @@ fn prepare_manifest_session(policy: &ManifestPolicy) -> Result<Prepared, String>
     let mut scope = Scope {
         grants: Vec::new(),
         hidden: vec![root_text.clone(), apps_root_text.clone()],
+        sub_dirs: SubDirs::default(),
     };
     if policy.allow_home {
         scope.grants.push(Grant {
@@ -500,7 +504,7 @@ fn prepare_manifest_session(policy: &ManifestPolicy) -> Result<Prepared, String>
     };
     let user_dirs = Some(format_user_dirs(&xdg_entries));
     Ok(Prepared {
-        dir,
+        dir: Some(dir),
         home: app_home_text,
         run_dir,
         scope,
@@ -551,6 +555,7 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
     let mut scope = Scope {
         grants: Vec::new(),
         hidden: vec![root_text],
+        sub_dirs: SubDirs::default(),
     };
     let mut clones = 0;
     for (kind, real_text, mode) in validated {
@@ -605,7 +610,7 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
         None => None,
     };
     Ok(Prepared {
-        dir,
+        dir: Some(dir),
         home,
         run_dir,
         scope,
@@ -615,21 +620,271 @@ fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
     })
 }
 
-struct ProxySession {
-    session: Option<usize>,
-    root: Option<usize>,
+fn normalize_lexical(cwd: &Path, path: &Path) -> Result<String, String> {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::RootDir => parts.clear(),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::Normal(seg) => {
+                let s = seg
+                    .to_str()
+                    .ok_or_else(|| format!("{} is not UTF-8", path.display()))?;
+                if s.contains(['\n', '\0']) {
+                    return Err(format!("{s:?} holds a newline"));
+                }
+                parts.push(s.to_owned());
+            }
+            std::path::Component::Prefix(_) => {}
+        }
+    }
+    if parts.is_empty() {
+        Ok("/".to_owned())
+    } else {
+        Ok(format!("/{}", parts.join("/")))
+    }
 }
 
-impl ProxySession {
-    fn open(scope: &Scope) -> Result<Self, String> {
-        let ctl = call::open(SCOPE_SERVICE, O_RDWR | O_CLOEXEC, 0)
-            .map_err(|e| format!("cannot reach ferrion-scoped at {SCOPE_SERVICE}: {e}"))?;
-        let session = call::openat(ctl, "session", O_RDWR | O_CLOEXEC, 0);
-        let _ = call::close(ctl);
-        let session = session.map_err(|e| format!("ferrion-scoped refused a session: {e}"))?;
-        let mut guard = Self {
+fn prepare_nested_session(
+    options: &Options,
+    policy: &LaunchPolicy,
+    cwd: &Path,
+    caller: &[String],
+) -> Result<Prepared, String> {
+    let display_socket = match policy {
+        LaunchPolicy::Manifest(p) => {
+            if p.allow_network && !caller.iter().any(|s| s == "tcp") {
+                return Err("wider-than-parent: network".to_owned());
+            }
+            if p.allow_audio && !caller.iter().any(|s| s == "audio") {
+                return Err("wider-than-parent: audio".to_owned());
+            }
+            if p.allow_display && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                Some(
+                    validate_display_socket()
+                        .map_err(|_| "wider-than-parent: display".to_owned())?,
+                )
+            } else {
+                None
+            }
+        }
+        LaunchPolicy::Legacy { allow_sudo, .. } => {
+            if options.pty && !caller.iter().any(|s| s == "pty") {
+                return Err("wider-than-parent: pty".to_owned());
+            }
+            if *allow_sudo && !caller.iter().any(|s| s == "sudo") {
+                return Err("wider-than-parent: sudo".to_owned());
+            }
+            if options.display {
+                Some(
+                    validate_display_socket()
+                        .map_err(|_| "wider-than-parent: display".to_owned())?,
+                )
+            } else {
+                None
+            }
+        }
+    };
+
+    let run_dir = display_socket.as_ref().map(|_| NESTED_RUN_VIRT.to_owned());
+    let mut scope = Scope {
+        grants: Vec::new(),
+        hidden: Vec::new(),
+        sub_dirs: SubDirs {
+            home: Some(NESTED_HOME_VIRT.to_owned()),
+            tmp: None,
+            run: run_dir.clone(),
+        },
+    };
+    let mut xdg_entries = Vec::new();
+    let mut user_dirs = None;
+
+    match policy {
+        LaunchPolicy::Manifest(p) => {
+            let uid = unsafe { libc::geteuid() };
+            if let Some(caller_home_raw) = std::env::var_os("HOME")
+                && let Ok(caller_home) = fs::canonicalize(&caller_home_raw)
+            {
+                let caller_home_text = text(&caller_home)?;
+                if p.allow_home {
+                    scope.grants.push(Grant {
+                        virt: caller_home_text.clone(),
+                        real: caller_home_text.clone(),
+                        access: Access::ReadWrite,
+                        layer: None,
+                    });
+                }
+                for &(_cap, folder_name, xdg_var) in &p.granted_folders {
+                    let candidate = caller_home.join(folder_name);
+                    let Ok(meta) = fs::symlink_metadata(&candidate) else {
+                        continue;
+                    };
+                    if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != uid {
+                        continue;
+                    }
+                    let Ok(real) = fs::canonicalize(&candidate) else {
+                        continue;
+                    };
+                    if real != candidate {
+                        continue;
+                    }
+                    let real_text = text(&real)?;
+                    if !scope.grants.iter().any(|g| g.virt == real_text) {
+                        scope.grants.push(Grant {
+                            virt: real_text.clone(),
+                            real: real_text.clone(),
+                            access: Access::ReadWrite,
+                            layer: None,
+                        });
+                    }
+                    xdg_entries.push((xdg_var, real_text));
+                }
+            }
+            user_dirs = Some(format_user_dirs(&xdg_entries));
+        }
+        LaunchPolicy::Legacy { .. } => {
+            for (kind, path) in &options.grants {
+                if *kind == GrantKind::Clone {
+                    return Err(format!("wider-than-parent: {} clone", path.display()));
+                }
+                let access = match kind {
+                    GrantKind::Files => Access::ReadWrite,
+                    GrantKind::ReadOnly => Access::ReadOnly,
+                    GrantKind::Clone => unreachable!(),
+                };
+                let is_link = fs::symlink_metadata(path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                let resolved = if is_link {
+                    normalize_lexical(cwd, path)?
+                } else {
+                    match fs::canonicalize(path) {
+                        Ok(real) => {
+                            if *kind == GrantKind::Files {
+                                let meta = fs::metadata(&real)
+                                    .map_err(|e| format!("{}: {e}", real.display()))?;
+                                if !meta.is_dir() {
+                                    return Err(format!("{} is not a folder", real.display()));
+                                }
+                            }
+                            text(&real)?
+                        }
+                        Err(_) => normalize_lexical(cwd, path)?,
+                    }
+                };
+                if scope.grants.iter().any(|g| g.virt == resolved) {
+                    return Err(format!("{resolved} is given twice"));
+                }
+                scope.grants.push(Grant {
+                    virt: resolved.clone(),
+                    real: resolved,
+                    access,
+                    layer: None,
+                });
+            }
+        }
+    }
+
+    for system in SYSTEM_PATHS {
+        if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
+            scope.grants.push(Grant {
+                virt: system.into(),
+                real: system.into(),
+                access: Access::ReadOnly,
+                layer: None,
+            });
+        }
+    }
+    if !scope.grants.iter().any(|g| g.virt == "/tmp") {
+        scope.sub_dirs.tmp = Some("/tmp".to_owned());
+    }
+    if let Some(real_socket) = display_socket {
+        scope.grants.push(Grant {
+            virt: format!("{NESTED_RUN_VIRT}/wayland-0"),
+            real: real_socket,
+            access: Access::Socket,
+            layer: None,
+        });
+    }
+    Ok(Prepared {
+        dir: None,
+        home: NESTED_HOME_VIRT.to_owned(),
+        run_dir,
+        scope,
+        clones: 0,
+        xdg_entries,
+        user_dirs,
+    })
+}
+
+struct PendingSession {
+    fd: Option<usize>,
+    nested: bool,
+}
+
+impl PendingSession {
+    fn open() -> Result<Self, String> {
+        match call::open(SCOPE_SERVICE, O_RDWR | O_CLOEXEC, 0) {
+            Ok(ctl) => {
+                let session = call::openat(ctl, "session", O_RDWR | O_CLOEXEC, 0);
+                let _ = call::close(ctl);
+                let session =
+                    session.map_err(|e| format!("ferrion-scoped refused a session: {e}"))?;
+                Ok(Self {
+                    fd: Some(session),
+                    nested: false,
+                })
+            }
+            Err(e)
+                if e.errno() == syscall::error::ENODEV || e.errno() == syscall::error::ENOENT =>
+            {
+                let root_fd = call::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)
+                    .map_err(|err| format!("no-scope-service: cannot open /: {err}"))?;
+                let root_path = path_of(root_fd);
+                let _ = call::close(root_fd);
+                let root_path = root_path.map_err(|err| format!("no-scope-service: {err}"))?;
+                if root_path != "/scheme/file" && !root_path.starts_with("/scheme/file/") {
+                    return Err(format!(
+                        "no-scope-service: file root {root_path:?} is not a ferrion-scope session"
+                    ));
+                }
+                match call::open(SUBSCOPE_PATH, O_RDWR | O_CLOEXEC, 0) {
+                    Ok(session) => Ok(Self {
+                        fd: Some(session),
+                        nested: true,
+                    }),
+                    Err(err) if err.errno() == syscall::error::EMLINK => Err(format!(
+                        "nested scope depth or child limit reached (EMLINK): {err}"
+                    )),
+                    Err(err) => Err(format!(
+                        "no-scope-service: cannot open {SUBSCOPE_PATH}: {err}"
+                    )),
+                }
+            }
+            Err(e) => Err(format!(
+                "cannot reach ferrion-scoped at {SCOPE_SERVICE}: {e}"
+            )),
+        }
+    }
+
+    fn is_nested(&self) -> bool {
+        self.nested
+    }
+
+    fn configure(mut self, scope: &Scope) -> Result<ProxySession, String> {
+        let session = self.fd.take().expect("pending session is open");
+        let mut guard = ProxySession {
             session: Some(session),
             root: None,
+            nested: self.nested,
         };
         let spec = scope.encode();
         let written = call::write(session, &spec)
@@ -637,14 +892,56 @@ impl ProxySession {
         if written != spec.len() {
             return Err("the proxy took part of the scope".into());
         }
-        let root = call::openat(session, "root", O_CLOEXEC, 0)
-            .map_err(|e| format!("the proxy refused the scope: {e}"))?;
+        let root = match call::openat(session, "root", O_CLOEXEC, 0) {
+            Ok(root) => root,
+            Err(e) if e.errno() == syscall::error::EACCES => {
+                let detail = String::from_utf8_lossy(&read_report(session))
+                    .trim()
+                    .to_owned();
+                if !detail.is_empty() {
+                    return Err(detail);
+                }
+                return Err(format!(
+                    "wider-than-parent: the proxy refused the scope: {e}"
+                ));
+            }
+            Err(e) if e.errno() == syscall::error::EMLINK => {
+                return Err(format!(
+                    "nested scope depth or child limit reached (EMLINK): {e}"
+                ));
+            }
+            Err(e) => return Err(format!("the proxy refused the scope: {e}")),
+        };
         guard.root = Some(root);
         Ok(guard)
     }
+}
 
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd.take() {
+            let _ = call::close(fd);
+        }
+    }
+}
+
+struct ProxySession {
+    session: Option<usize>,
+    root: Option<usize>,
+    nested: bool,
+}
+
+impl ProxySession {
     fn root(&self) -> usize {
         self.root.expect("proxy session root is open")
+    }
+
+    fn ctl_fd(&self) -> usize {
+        self.session.expect("proxy session is open")
+    }
+
+    fn is_nested(&self) -> bool {
+        self.nested
     }
 
     fn close_root(&mut self) {
@@ -800,7 +1097,10 @@ fn read_report(session: usize) -> Vec<u8> {
 }
 
 fn report_links(report: &[u8], prepared: &Prepared) {
-    let own = prepared.dir.path().to_string_lossy();
+    let own = prepared
+        .dir
+        .as_ref()
+        .map(|d| d.path().to_string_lossy().into_owned());
     for line in String::from_utf8_lossy(report).lines() {
         if let Some(more) = line.strip_prefix('+') {
             eprintln!(
@@ -808,7 +1108,9 @@ fn report_links(report: &[u8], prepared: &Prepared) {
             );
             continue;
         }
-        if within(line, &own) {
+        if let Some(own) = &own
+            && within(line, own)
+        {
             continue;
         }
         let root = prepared
@@ -870,6 +1172,46 @@ fn wait(pid: libc::pid_t) -> Result<i32, String> {
     ))
 }
 
+fn wait_nested(pid: libc::pid_t, ctl_fd: usize) -> Result<i32, String> {
+    let mut status = 0;
+    for _ in 0..MAX_NESTED_WAIT_POLLS {
+        let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if r == pid {
+            return Ok(if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                128 + libc::WTERMSIG(status)
+            } else {
+                EXIT_UNKNOWN
+            });
+        }
+        if r < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EINTR) {
+                return Err(format!("cannot wait for the program: {e}"));
+            }
+            continue;
+        }
+        if call::fstat(ctl_fd).is_err() {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+            let _ = wait(pid);
+            return Ok(128 + libc::SIGKILL);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(NESTED_LIVENESS_POLL_MS));
+    }
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let _ = wait(pid);
+    Err(format!(
+        "nested session exceeded {MAX_NESTED_WAIT_POLLS} liveness polls"
+    ))
+}
+
 const EXIT_UNKNOWN: i32 = 126;
 
 pub enum Outcome {
@@ -903,42 +1245,61 @@ pub fn run(options: &Options, policy: &LaunchPolicy) -> Outcome {
         Ok(cwd) => cwd,
         Err(e) => return Outcome::Refused(format!("cannot read the working directory: {e}")),
     };
-    let mut prepared = match policy {
-        LaunchPolicy::Manifest(manifest_policy) => {
-            match prepare_manifest_session(manifest_policy) {
-                Ok(prepared) => prepared,
-                Err(reason) => return Outcome::Refused(reason),
-            }
-        }
-        LaunchPolicy::Legacy { .. } => match prepare_legacy_session(options) {
+    let caller = match caller_schemes() {
+        Ok(caller) => caller,
+        Err(reason) => return Outcome::Refused(reason),
+    };
+    let pending = match PendingSession::open() {
+        Ok(pending) => pending,
+        Err(reason) => return Outcome::Refused(reason),
+    };
+    let mut prepared = if pending.is_nested() {
+        match prepare_nested_session(options, policy, &cwd, &caller) {
             Ok(prepared) => prepared,
             Err(reason) => return Outcome::Refused(reason),
-        },
+        }
+    } else {
+        match policy {
+            LaunchPolicy::Manifest(manifest_policy) => {
+                match prepare_manifest_session(manifest_policy) {
+                    Ok(prepared) => prepared,
+                    Err(reason) => return Outcome::Refused(reason),
+                }
+            }
+            LaunchPolicy::Legacy { .. } => match prepare_legacy_session(options) {
+                Ok(prepared) => prepared,
+                Err(reason) => return Outcome::Refused(reason),
+            },
+        }
     };
-    assert!(prepared.dir.path().join(PID).is_file());
-    let outcome = launch(options, policy, &cwd, &mut prepared);
-    if prepared.dir.has_run() {
-        match clone_dirs(prepared.dir.path()) {
+    if let Some(dir) = &prepared.dir {
+        assert!(dir.path().join(PID).is_file());
+    }
+    let outcome = launch(options, policy, &cwd, &caller, pending, &mut prepared);
+    if let Some(dir) = &prepared.dir
+        && dir.has_run()
+    {
+        match clone_dirs(dir.path()) {
             Ok(actual) if actual.len() != prepared.clones => {
                 eprintln!(
                     "ferrion-run: expected {} clone layers in {}, found {}",
                     prepared.clones,
-                    prepared.dir.path().display(),
+                    dir.path().display(),
                     actual.len()
                 );
             }
             Err(e) => {
                 eprintln!(
                     "ferrion-run: cannot inspect clone layers in {}: {e}",
-                    prepared.dir.path().display()
+                    dir.path().display()
                 );
             }
             Ok(_) => {}
         }
         if prepared.clones > 0
-            && let Some(id) = prepared.dir.path().file_name()
+            && let Some(id) = dir.path().file_name()
         {
-            report_layer_links(prepared.dir.path(), prepared.clones);
+            report_layer_links(dir.path(), prepared.clones);
             let id = id.to_string_lossy();
             eprintln!(
                 "ferrion-run: session {id} keeps its changes in its layer; see `ferrion-run diff {id}`, then `ferrion-run apply {id}` or `ferrion-run discard {id}`"
@@ -995,6 +1356,8 @@ fn launch(
     options: &Options,
     policy: &LaunchPolicy,
     cwd: &Path,
+    caller: &[String],
+    pending: PendingSession,
     prepared: &mut Prepared,
 ) -> Outcome {
     let (withhold_network, allow_sudo, pty, allow_audio, manifest_mode) = match policy {
@@ -1004,12 +1367,8 @@ fn launch(
             allow_sudo,
         } => (*withhold_network, *allow_sudo, options.pty, false, false),
     };
-    let caller = match caller_schemes() {
-        Ok(caller) => caller,
-        Err(reason) => return Outcome::Refused(reason),
-    };
-    let schemes = child_schemes(&caller, withhold_network, allow_sudo, pty, allow_audio);
-    let mut proxy = match ProxySession::open(&prepared.scope) {
+    let schemes = child_schemes(caller, withhold_network, allow_sudo, pty, allow_audio);
+    let mut proxy = match pending.configure(&prepared.scope) {
         Ok(proxy) => proxy,
         Err(reason) => return Outcome::Refused(reason),
     };
@@ -1025,8 +1384,13 @@ fn launch(
         let _ = call::close(namespace);
         return Outcome::Refused(format!("cannot give the session its file scheme: {e}"));
     }
+    let shm_tag = if proxy.is_nested() {
+        "n"
+    } else {
+        "ferrion-run-"
+    };
     let shm_root = if caller.iter().any(|s| s == "shm") {
-        match open_shm_prefix("ferrion-run-") {
+        match open_shm_prefix(shm_tag) {
             Ok(fd) => Some(fd),
             Err(reason) => {
                 let _ = call::close(namespace);
@@ -1078,6 +1442,11 @@ fn launch(
         LaunchPolicy::Legacy { .. } => options.program.as_os_str(),
     };
     if pid == 0 {
+        if proxy.is_nested() {
+            unsafe {
+                libc::setpgid(0, 0);
+            }
+        }
         let reason = enter(
             options,
             exec_path,
@@ -1090,7 +1459,9 @@ fn launch(
         eprintln!("ferrion-run: {reason}");
         unsafe { libc::_exit(crate::EXIT_REFUSED) };
     }
-    prepared.dir.mark_ran(prepared.clones);
+    if let Some(dir) = &mut prepared.dir {
+        dir.mark_ran(prepared.clones);
+    }
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
@@ -1100,12 +1471,18 @@ fn launch(
         let _ = call::close(fd);
     }
     proxy.close_root();
-    let status = wait(pid);
+    let status = if proxy.is_nested() {
+        wait_nested(pid, proxy.ctl_fd())
+    } else {
+        wait(pid)
+    };
     let (ended, report) = proxy.end();
     if let Err(e) = ended {
         eprintln!("ferrion-run: the proxy did not end the session: {e}");
     }
-    report_links(&report, prepared);
+    if prepared.dir.is_some() {
+        report_links(&report, prepared);
+    }
     match status {
         Ok(code) => Outcome::Exited(code),
         Err(reason) => Outcome::Refused(reason),

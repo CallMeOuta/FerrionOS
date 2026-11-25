@@ -2,7 +2,13 @@ use std::collections::VecDeque;
 
 pub const MAX_GRANTS: usize = 64;
 pub const MAX_SOCKET_GRANTS: usize = 4;
-pub const MAX_HIDDEN: usize = 8;
+pub const MAX_HIDDEN: usize = 32;
+pub const MAX_SCOPE_DEPTH: usize = 4;
+pub const MAX_CHILD_SESSIONS: usize = 16;
+pub const MAX_DESCENDANT_WALK: usize = 64;
+pub const MAX_SUB_DIR_DEPTH: usize = 64;
+pub const RESERVED_CONTROL_PREFIX: &str = "/.ferrion-scope";
+pub const SUBSCOPE_PATH: &str = "/.ferrion-scope/new";
 pub const MAX_PATH: usize = 4096;
 pub const MAX_NAME: usize = 255;
 pub const MAX_COMPONENTS: usize = 512;
@@ -19,6 +25,7 @@ pub const ENOTDIR: i32 = 20;
 pub const EISDIR: i32 = 21;
 pub const EINVAL: i32 = 22;
 pub const EROFS: i32 = 30;
+pub const EMLINK: i32 = 31;
 pub const ENAMETOOLONG: i32 = 36;
 pub const ENOTEMPTY: i32 = 39;
 pub const ELOOP: i32 = 40;
@@ -40,9 +47,35 @@ pub struct Grant {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubDirs {
+    pub home: Option<String>,
+    pub tmp: Option<String>,
+    pub run: Option<String>,
+}
+
+impl SubDirs {
+    pub fn is_empty(&self) -> bool {
+        self.home.is_none() && self.tmp.is_none() && self.run.is_none()
+    }
+
+    pub fn count(&self) -> usize {
+        usize::from(self.home.is_some())
+            + usize::from(self.tmp.is_some())
+            + usize::from(self.run.is_some())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WiderError {
+    pub path: String,
+    pub access: &'static str,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Scope {
     pub grants: Vec<Grant>,
     pub hidden: Vec<String>,
+    pub sub_dirs: SubDirs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,10 +238,45 @@ impl Scope {
             let fields: Vec<&str> = line.split('\0').collect();
             match fields[..] {
                 ["hide", path] => {
-                    if !is_canonical(path) || scope.hidden.len() >= MAX_HIDDEN {
+                    if !is_canonical(path)
+                        || within(path, RESERVED_CONTROL_PREFIX)
+                        || scope.hidden.len() >= MAX_HIDDEN
+                    {
                         return Err(format!("bad hidden path {path:?}"));
                     }
-                    scope.hidden.push(path.to_owned());
+                    if !scope.hidden.iter().any(|h| h == path) {
+                        scope.hidden.push(path.to_owned());
+                    }
+                }
+                ["sub-home", virt] => {
+                    if !is_canonical(virt)
+                        || virt == "/"
+                        || within(virt, RESERVED_CONTROL_PREFIX)
+                        || scope.sub_dirs.home.is_some()
+                    {
+                        return Err(format!("bad sub-home path {virt:?}"));
+                    }
+                    scope.sub_dirs.home = Some(virt.to_owned());
+                }
+                ["sub-tmp", virt] => {
+                    if !is_canonical(virt)
+                        || virt == "/"
+                        || within(virt, RESERVED_CONTROL_PREFIX)
+                        || scope.sub_dirs.tmp.is_some()
+                    {
+                        return Err(format!("bad sub-tmp path {virt:?}"));
+                    }
+                    scope.sub_dirs.tmp = Some(virt.to_owned());
+                }
+                ["sub-run", virt] => {
+                    if !is_canonical(virt)
+                        || virt == "/"
+                        || within(virt, RESERVED_CONTROL_PREFIX)
+                        || scope.sub_dirs.run.is_some()
+                    {
+                        return Err(format!("bad sub-run path {virt:?}"));
+                    }
+                    scope.sub_dirs.run = Some(virt.to_owned());
                 }
                 ["grant", access, virt, real, ref layer @ ..] => {
                     let access = match access {
@@ -228,8 +296,12 @@ impl Scope {
                         (_, []) => None,
                         _ => return Err(format!("grant {virt:?} has extra fields")),
                     };
-                    if !is_canonical(virt) || !is_canonical(real) {
-                        return Err(format!("grant {virt:?} -> {real:?} is not canonical"));
+                    if !is_canonical(virt)
+                        || !is_canonical(real)
+                        || virt == "/"
+                        || within(virt, RESERVED_CONTROL_PREFIX)
+                    {
+                        return Err(format!("grant {virt:?} -> {real:?} is not valid"));
                     }
                     if scope.grants.len() >= MAX_GRANTS {
                         return Err(format!("more than {MAX_GRANTS} grants"));
@@ -256,6 +328,22 @@ impl Scope {
                 _ => return Err(format!("bad scope line {line:?}")),
             }
         }
+        let sub_paths: Vec<&str> = [
+            scope.sub_dirs.home.as_deref(),
+            scope.sub_dirs.tmp.as_deref(),
+            scope.sub_dirs.run.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if scope.grants.len() + sub_paths.len() > MAX_GRANTS {
+            return Err(format!("more than {MAX_GRANTS} grants"));
+        }
+        for (idx, p) in sub_paths.iter().enumerate() {
+            if sub_paths[..idx].contains(p) || scope.grants.iter().any(|g| g.virt == *p) {
+                return Err(format!("sub-dir {p:?} collides with another grant"));
+            }
+        }
         assert!(socket_grants <= MAX_SOCKET_GRANTS);
         Ok(scope)
     }
@@ -264,6 +352,15 @@ impl Scope {
         let mut out = String::new();
         for hidden in &self.hidden {
             out.push_str(&format!("hide\0{hidden}\n"));
+        }
+        if let Some(home) = &self.sub_dirs.home {
+            out.push_str(&format!("sub-home\0{home}\n"));
+        }
+        if let Some(tmp) = &self.sub_dirs.tmp {
+            out.push_str(&format!("sub-tmp\0{tmp}\n"));
+        }
+        if let Some(run) = &self.sub_dirs.run {
+            out.push_str(&format!("sub-run\0{run}\n"));
         }
         for g in &self.grants {
             let access = match g.access {
@@ -346,7 +443,52 @@ impl Scope {
                 within(&g.real, real) || g.layer.as_deref().is_some_and(|l| within(l, real))
             })
     }
+}
 
+pub fn protects_tree<'a, Id, F>(root: Id, real: &str, get: F) -> bool
+where
+    Id: Copy + 'a,
+    F: Fn(Id) -> Option<(&'a Scope, Option<&'a str>, &'a [Id])>,
+{
+    debug_assert!(is_canonical(real));
+    let Some((root_scope, root_sub, root_children)) = get(root) else {
+        return false;
+    };
+    if root_scope.protects(real) || root_sub.is_some_and(|s| within(s, real)) {
+        return true;
+    }
+    if root_children.len() > MAX_CHILD_SESSIONS {
+        return true;
+    }
+    let mut stack: Vec<(Id, usize)> = Vec::new();
+    for &child in root_children {
+        stack.push((child, 1));
+    }
+    let mut visited = 0usize;
+    while let Some((id, depth)) = stack.pop() {
+        if depth > MAX_SCOPE_DEPTH || visited >= MAX_DESCENDANT_WALK {
+            return true;
+        }
+        visited += 1;
+        let Some((scope, sub_dir, children)) = get(id) else {
+            continue;
+        };
+        if scope.protects(real) || sub_dir.is_some_and(|s| within(s, real)) {
+            return true;
+        }
+        if children.len() > MAX_CHILD_SESSIONS {
+            return true;
+        }
+        if depth < MAX_SCOPE_DEPTH {
+            for &child in children {
+                stack.push((child, depth + 1));
+            }
+        }
+    }
+    false
+}
+
+impl Scope {
     pub fn resolve<V: View>(
         &self,
         view: &mut V,
@@ -438,4 +580,104 @@ impl Scope {
         debug_assert!(is_canonical(&out));
         Ok(Walked::Path(out))
     }
+}
+
+pub fn access_label(access: Access) -> &'static str {
+    match access {
+        Access::ReadOnly => "ro",
+        Access::ReadWrite => "rw",
+        Access::Clone => "clone",
+        Access::Socket => "socket",
+    }
+}
+
+pub fn narrow_child_scope<V: View>(
+    parent: &Scope,
+    view: &mut V,
+    child: &Scope,
+) -> Result<Scope, WiderError> {
+    let mut narrowed = Scope {
+        grants: Vec::with_capacity(child.grants.len()),
+        hidden: Vec::with_capacity(parent.hidden.len() + child.hidden.len()),
+        sub_dirs: child.sub_dirs.clone(),
+    };
+    for h in &parent.hidden {
+        if !narrowed.hidden.contains(h) {
+            if narrowed.hidden.len() >= MAX_HIDDEN {
+                return Err(WiderError {
+                    path: h.clone(),
+                    access: "hide",
+                });
+            }
+            narrowed.hidden.push(h.clone());
+        }
+    }
+    for h in &child.hidden {
+        let mut links = 0;
+        if let Ok(Walked::Path(pv)) = parent.resolve(view, "/", h, true, &mut links)
+            && let Place::Inside { grant, rel } = parent.classify(&pv)
+        {
+            let real_h = parent.real_path(grant, &rel);
+            if !narrowed.hidden.contains(&real_h) {
+                if narrowed.hidden.len() >= MAX_HIDDEN {
+                    return Err(WiderError {
+                        path: h.clone(),
+                        access: "hide",
+                    });
+                }
+                narrowed.hidden.push(real_h);
+            }
+        }
+    }
+    for g in &child.grants {
+        if g.access == Access::Clone {
+            return Err(WiderError {
+                path: g.real.clone(),
+                access: "clone",
+            });
+        }
+        let mut links = 0;
+        let pv = match parent.resolve(view, "/", &g.real, true, &mut links) {
+            Ok(Walked::Path(p)) => p,
+            _ => {
+                return Err(WiderError {
+                    path: g.real.clone(),
+                    access: access_label(g.access),
+                });
+            }
+        };
+        let Place::Inside { grant: pgi, rel } = parent.classify(&pv) else {
+            return Err(WiderError {
+                path: g.real.clone(),
+                access: access_label(g.access),
+            });
+        };
+        if view.kind(parent, pgi, &rel).is_err() {
+            return Err(WiderError {
+                path: g.real.clone(),
+                access: access_label(g.access),
+            });
+        }
+        let pg = &parent.grants[pgi];
+        let real = match (g.access, pg.access) {
+            (Access::ReadOnly, Access::ReadOnly | Access::ReadWrite) => join(&pg.real, &rel),
+            (Access::ReadWrite, Access::ReadWrite) => join(&pg.real, &rel),
+            (Access::Socket, Access::Socket) if rel.is_empty() => pg.real.clone(),
+            _ => {
+                return Err(WiderError {
+                    path: g.real.clone(),
+                    access: access_label(g.access),
+                });
+            }
+        };
+        narrowed.grants.push(Grant {
+            virt: g.virt.clone(),
+            real,
+            access: g.access,
+            layer: None,
+        });
+    }
+    assert!(narrowed.grants.len() + narrowed.sub_dirs.count() <= MAX_GRANTS);
+    assert!(narrowed.hidden.len() <= MAX_HIDDEN);
+    Ok(narrowed)
 }

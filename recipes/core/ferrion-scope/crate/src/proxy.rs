@@ -10,8 +10,8 @@ use redox_scheme::{CallerCtx, OpenResult, RequestKind, Response, SignalBehavior,
 use syscall::data::{Stat, StatVfs, StdFsCallMeta, TimeSpec};
 use syscall::dirent::{DirEntry, DirentBuf, DirentHeader, DirentIter, DirentKind};
 use syscall::error::{
-    EBADF, EBUSY, EINVAL, EIO, EISDIR, EMFILE, ENOENT, ENOTDIR, ENOTEMPTY, EOPNOTSUPP, EPERM,
-    EROFS, ESTALE, EXDEV, Error, Result,
+    EACCES, EBADF, EBUSY, EINVAL, EIO, EISDIR, EMFILE, EMLINK, ENOENT, ENOTDIR, ENOTEMPTY,
+    EOPNOTSUPP, EPERM, EROFS, ESTALE, EXDEV, Error, Result,
 };
 use syscall::flag::{
     CallFlags, EventFlags, MODE_DIR, MODE_SYMLINK, MODE_TYPE, MapFlags, MunmapFlags, O_ACCMODE,
@@ -22,7 +22,9 @@ use syscall::schemev2::NewFdFlags;
 
 use crate::overlay::{Lookup, MAX_ENTRIES, Overlay, WHITEOUTS, rel_parent};
 use crate::scope::{
-    Access, DirCache, Kind, MAX_LINKS, MAX_PATH, Place, Scope, View, Walked, join, parent, retarget,
+    Access, DirCache, Grant, Kind, MAX_CHILD_SESSIONS, MAX_GRANTS, MAX_HIDDEN, MAX_LINKS, MAX_PATH,
+    MAX_SCOPE_DEPTH, MAX_SUB_DIR_DEPTH, Place, SUBSCOPE_PATH, Scope, View, Walked, join,
+    narrow_child_scope, parent, protects_tree, retarget,
 };
 
 pub const CONTROL: usize = 1;
@@ -264,6 +266,11 @@ struct Session {
     handles: usize,
     links: BTreeSet<String>,
     links_dropped: usize,
+    parent: Option<u32>,
+    depth: usize,
+    children: Vec<u32>,
+    owned_sub_dir: Option<String>,
+    reject_reason: Option<String>,
 }
 
 impl Session {
@@ -273,6 +280,25 @@ impl Session {
             handles: 0,
             links: BTreeSet::new(),
             links_dropped: 0,
+            parent: None,
+            depth: 1,
+            children: Vec::new(),
+            owned_sub_dir: None,
+            reject_reason: None,
+        }
+    }
+
+    fn new_child(parent: u32, depth: usize) -> Session {
+        Session {
+            phase: Phase::Configuring { spec: Vec::new() },
+            handles: 0,
+            links: BTreeSet::new(),
+            links_dropped: 0,
+            parent: Some(parent),
+            depth,
+            children: Vec::new(),
+            owned_sub_dir: None,
+            reject_reason: None,
         }
     }
 
@@ -291,6 +317,9 @@ impl Session {
     }
 
     fn report_bytes(&self) -> Vec<u8> {
+        if let Some(reason) = &self.reject_reason {
+            return reason.as_bytes().to_vec();
+        }
         match &self.phase {
             Phase::Ended { report } => report.clone(),
             Phase::Configuring { .. } | Phase::Live { .. } => self.links_report(),
@@ -558,6 +587,133 @@ fn remove_path(path: &str) {
     }
 }
 
+fn lstat_raw(path: &str) -> Result<libc::stat> {
+    let c = cpath(path)?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    check(unsafe { libc::lstat(c.as_ptr(), &mut st) })?;
+    Ok(st)
+}
+
+fn mkdir_owned_excl(path: &str, uid: u32) -> Result<()> {
+    let c = cpath(path)?;
+    check(unsafe { libc::mkdir(c.as_ptr(), 0o700) })?;
+    let st = lstat_raw(path)?;
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFDIR || st.st_uid != uid {
+        return Err(err(EACCES));
+    }
+    Ok(())
+}
+
+fn remove_tree_nofollow(root: &str) {
+    let Ok(st) = lstat_raw(root) else {
+        return;
+    };
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+        if let Ok(c) = cpath(root) {
+            let _ = unsafe { libc::unlink(c.as_ptr()) };
+        }
+        return;
+    }
+    let mut stack: Vec<(String, usize, bool)> = vec![(root.to_owned(), 0, false)];
+    let mut ops = 0usize;
+    let mut raw = vec![0u8; 4096];
+    let header = size_of::<DirentHeader>() as u64;
+    while let Some((dir, depth, expanded)) = stack.pop() {
+        if ops >= MAX_LISTING {
+            eprintln!("ferrion-scope-proxy: bounded cleanup limit reached for {root}");
+            return;
+        }
+        ops += 1;
+        if expanded {
+            if let Ok(c) = cpath(&dir)
+                && unsafe { libc::rmdir(c.as_ptr()) } < 0
+            {
+                eprintln!(
+                    "ferrion-scope-proxy: rmdir {dir} failed during cleanup: {}",
+                    last_error()
+                );
+            }
+            continue;
+        }
+        let Ok(fd) = sys_open(&dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) else {
+            eprintln!(
+                "ferrion-scope-proxy: refusing non-directory or link during cleanup of {dir}"
+            );
+            return;
+        };
+        let mut dir_st = Stat::default();
+        if raw_stat(fd.as_raw_fd() as usize, &mut dir_st).is_err()
+            || (dir_st.st_mode & MODE_TYPE) != MODE_DIR
+        {
+            eprintln!("ferrion-scope-proxy: stat mismatch during cleanup of {dir}");
+            return;
+        }
+        let mut names = Vec::new();
+        let mut cursor = 0u64;
+        for _ in 0..MAX_LISTING {
+            let Ok(n) = syscall::std_fs_call(
+                fd.as_raw_fd() as usize,
+                &mut raw,
+                &StdFsCallMeta::new(StdFsCallKind::Getdents, cursor, header),
+            ) else {
+                eprintln!("ferrion-scope-proxy: getdents failed during cleanup of {dir}");
+                return;
+            };
+            if n == 0 {
+                break;
+            }
+            for item in DirentIter::new(&raw[..n]) {
+                let Ok((h, name)) = item else {
+                    eprintln!("ferrion-scope-proxy: corrupt dirent during cleanup of {dir}");
+                    return;
+                };
+                cursor = h.next_opaque_id;
+                let Ok(name) = std::str::from_utf8(name) else {
+                    continue;
+                };
+                let name = name.trim_end_matches('\0');
+                if name.is_empty() || name == "." || name == ".." {
+                    continue;
+                }
+                if names.len() >= MAX_LISTING {
+                    eprintln!("ferrion-scope-proxy: entry bound exceeded during cleanup of {dir}");
+                    return;
+                }
+                names.push(name.to_owned());
+            }
+        }
+        drop(fd);
+        stack.push((dir.clone(), depth, true));
+        for name in names {
+            let child = join(&dir, &name);
+            let Ok(cst) = lstat_raw(&child) else {
+                continue;
+            };
+            if (cst.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                if depth + 1 > MAX_SUB_DIR_DEPTH {
+                    eprintln!("ferrion-scope-proxy: depth bound exceeded during cleanup of {root}");
+                    return;
+                }
+                stack.push((child, depth + 1, false));
+            } else if let Ok(c) = cpath(&child) {
+                let _ = unsafe { libc::unlink(c.as_ptr()) };
+            }
+        }
+    }
+}
+
+fn is_subscope_request(start: &str, path: &str) -> bool {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed == SUBSCOPE_PATH {
+        return true;
+    }
+    if start == "/" && !path.starts_with('/') {
+        let rel = trimmed.trim_start_matches("./");
+        return rel == SUBSCOPE_PATH.trim_start_matches('/');
+    }
+    false
+}
+
 enum Dest {
     Absent,
     LowerFile,
@@ -711,14 +867,53 @@ impl Proxy {
         }
     }
 
+    fn open_subscope(&mut self, parent: u32, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
+        if ctx.uid != self.uid {
+            return Err(err(EACCES));
+        }
+        if (flags & O_ACCMODE) != O_RDWR || (flags & (O_CREAT | O_TRUNC | O_DIRECTORY)) != 0 {
+            return Err(err(EINVAL));
+        }
+        let parent_depth = {
+            let p = self.sessions.get(&parent).ok_or(err(EBADF))?;
+            p.live()?;
+            if p.depth >= MAX_SCOPE_DEPTH || p.children.len() >= MAX_CHILD_SESSIONS {
+                return Err(err(EMLINK));
+            }
+            p.depth
+        };
+        if self.sessions.len() >= MAX_SESSIONS || self.handles.len() >= MAX_HANDLES {
+            return Err(err(EMFILE));
+        }
+        let child = self.next_session;
+        self.next_session += 1;
+        self.sessions
+            .insert(child, Session::new_child(parent, parent_depth + 1));
+        if let Some(p) = self.sessions.get_mut(&parent) {
+            p.children.push(child);
+        }
+        let id = self.insert(Handle::Ctl {
+            session: child,
+            read: 0,
+        })?;
+        Ok(OpenResult::ThisScheme {
+            number: id,
+            flags: NewFdFlags::empty(),
+        })
+    }
+
     fn open_in(
         &mut self,
         session: u32,
         start: &str,
         path: &str,
         flags: usize,
+        ctx: &CallerCtx,
     ) -> Result<OpenResult> {
         self.live(session)?;
+        if is_subscope_request(start, path) {
+            return self.open_subscope(session, flags, ctx);
+        }
         let mode = LinkMode::from_flags(flags);
         let mut links = 0;
         let mut walked = self.walk(session, start, path, &mut links)?;
@@ -824,6 +1019,13 @@ impl Proxy {
                 } else {
                     let real = scope.real_path(grant, &rel);
                     let read_only = access == Access::ReadOnly;
+                    if !read_only
+                        && flags & O_SYMLINK != 0
+                        && accmode_writes(flags)
+                        && self.protects(session, &real)
+                    {
+                        return Err(err(EBUSY));
+                    }
                     let opened = self.open_real(
                         session,
                         vpath,
@@ -1295,6 +1497,14 @@ impl Proxy {
         }
     }
 
+    fn protects(&self, session: u32, real: &str) -> bool {
+        protects_tree(session, real, |id| {
+            let s = self.sessions.get(&id)?;
+            let (scope, _) = s.live().ok()?;
+            Some((scope, s.owned_sub_dir.as_deref(), &s.children))
+        })
+    }
+
     fn writable_place(&self, session: u32, vpath: &str) -> Result<(usize, String, Access)> {
         let (grant, rel) = self.parent_rel_of(session, vpath)?;
         let access = self.scope(session)?.grants[grant].access;
@@ -1308,8 +1518,8 @@ impl Proxy {
             return Err(err(EBUSY));
         }
         if access == Access::ReadWrite {
-            let scope = self.scope(session)?;
-            if scope.protects(&scope.real_path(grant, &rel)) {
+            let real = self.scope(session)?.real_path(grant, &rel);
+            if self.protects(session, &real) {
                 return Err(err(EBUSY));
             }
         }
@@ -1637,20 +1847,121 @@ impl Proxy {
         if self.handles.len() >= MAX_HANDLES {
             return Err(err(EMFILE));
         }
-        let spec = {
+        let (spec, parent_id) = {
             let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
-            match &mut s.phase {
+            let spec = match &mut s.phase {
                 Phase::Configuring { spec } => std::mem::take(spec),
                 Phase::Live { .. } | Phase::Ended { .. } => return Err(err(EBUSY)),
-            }
+            };
+            (spec, s.parent)
         };
-        let scope = Scope::parse(&spec).map_err(|reason| {
+        let parsed = Scope::parse(&spec).map_err(|reason| {
             eprintln!("ferrion-scope-proxy: {reason}");
             err(EINVAL)
         })?;
+        let mut owned_sub_dir: Option<String> = None;
+        let scope = if let Some(parent_id) = parent_id {
+            let narrowed = {
+                let Some(p) = self.sessions.get(&parent_id) else {
+                    return Err(err(EBADF));
+                };
+                let (parent_scope, parent_grants) = p.live()?;
+                let mut view = RealView {
+                    dirs: &mut self.dirs,
+                    grants: parent_grants,
+                };
+                match narrow_child_scope(parent_scope, &mut view, &parsed) {
+                    Ok(n) => n,
+                    Err(wider) => {
+                        let msg = format!("wider-than-parent: {} {}\n", wider.path, wider.access);
+                        if let Some(s) = self.sessions.get_mut(&session) {
+                            s.reject_reason = Some(msg);
+                        }
+                        return Err(err(EACCES));
+                    }
+                }
+            };
+            let mut scope = narrowed;
+            if !scope.sub_dirs.is_empty() {
+                let parent_tmp_real = {
+                    let (parent_scope, _) = self.live(parent_id)?;
+                    parent_scope
+                        .grants
+                        .iter()
+                        .find(|g| g.virt == "/tmp" && g.access == Access::ReadWrite)
+                        .map(|g| g.real.clone())
+                };
+                let Some(parent_tmp_real) = parent_tmp_real else {
+                    if let Some(s) = self.sessions.get_mut(&session) {
+                        s.reject_reason = Some("wider-than-parent: /tmp rw\n".to_owned());
+                    }
+                    return Err(err(EACCES));
+                };
+                let pst = lstat_raw(&parent_tmp_real).map_err(|_| err(EACCES))?;
+                if (pst.st_mode & libc::S_IFMT) != libc::S_IFDIR || pst.st_uid != self.uid {
+                    return Err(err(EACCES));
+                }
+                let base = join(&parent_tmp_real, &format!(".ferrion-sub-{session}"));
+                if let Err(e) = mkdir_owned_excl(&base, self.uid) {
+                    if let Some(s) = self.sessions.get_mut(&session) {
+                        s.reject_reason = Some(format!(
+                            "unsafe-sub-dir: cannot exclusively create {base}: {e}\n"
+                        ));
+                    }
+                    return Err(err(EACCES));
+                }
+                owned_sub_dir = Some(base.clone());
+                let sub_entries = [
+                    ("home", scope.sub_dirs.home.clone()),
+                    ("tmp", scope.sub_dirs.tmp.clone()),
+                    ("run", scope.sub_dirs.run.clone()),
+                ];
+                for (name, virt_opt) in sub_entries {
+                    let Some(virt) = virt_opt else {
+                        continue;
+                    };
+                    let real = join(&base, name);
+                    if let Err(e) = mkdir_owned_excl(&real, self.uid) {
+                        remove_tree_nofollow(&base);
+                        if let Some(s) = self.sessions.get_mut(&session) {
+                            s.reject_reason = Some(format!(
+                                "unsafe-sub-dir: cannot exclusively create {real}: {e}\n"
+                            ));
+                        }
+                        return Err(err(EACCES));
+                    }
+                    if scope.grants.len() >= MAX_GRANTS
+                        || scope.grants.iter().any(|g| g.virt == virt)
+                    {
+                        remove_tree_nofollow(&base);
+                        return Err(err(EINVAL));
+                    }
+                    scope.grants.push(Grant {
+                        virt,
+                        real,
+                        access: Access::ReadWrite,
+                        layer: None,
+                    });
+                }
+                if !scope.hidden.contains(&base) && scope.hidden.len() < MAX_HIDDEN {
+                    scope.hidden.push(base);
+                }
+                scope.sub_dirs = Default::default();
+            }
+            scope
+        } else {
+            if !parsed.sub_dirs.is_empty() {
+                eprintln!("ferrion-scope-proxy: sub-dir directives are child-only");
+                return Err(err(EINVAL));
+            }
+            parsed
+        };
         let mut grants = Vec::with_capacity(scope.grants.len());
         for g in &scope.grants {
             if !exists(&g.real) {
+                if let Some(dir) = &owned_sub_dir {
+                    remove_tree_nofollow(dir);
+                }
                 eprintln!("ferrion-scope-proxy: {} does not exist", g.real);
                 return Err(err(ENOENT));
             }
@@ -1663,10 +1974,18 @@ impl Proxy {
                 },
                 (Access::Clone, Some(layer)) => {
                     if lkind(&g.real)? != Kind::Dir || lkind(layer)? != Kind::Dir {
+                        if let Some(dir) = &owned_sub_dir {
+                            remove_tree_nofollow(dir);
+                        }
                         return Err(err(ENOTDIR));
                     }
                     let overlay = Overlay::default();
-                    save_overlay(layer, &overlay)?;
+                    if let Err(e) = save_overlay(layer, &overlay) {
+                        if let Some(dir) = &owned_sub_dir {
+                            remove_tree_nofollow(dir);
+                        }
+                        return Err(e);
+                    }
                     GrantState::Clone {
                         real: g.real.clone(),
                         layer: layer.clone(),
@@ -1675,6 +1994,9 @@ impl Proxy {
                 }
                 (Access::Socket, None) => {
                     if !is_real_socket(&g.real) {
+                        if let Some(dir) = &owned_sub_dir {
+                            remove_tree_nofollow(dir);
+                        }
                         eprintln!("ferrion-scope-proxy: {} is not a socket", g.real);
                         return Err(err(EINVAL));
                     }
@@ -1682,12 +2004,26 @@ impl Proxy {
                         real: g.real.clone(),
                     }
                 }
-                _ => return Err(err(EINVAL)),
+                _ => {
+                    if let Some(dir) = &owned_sub_dir {
+                        remove_tree_nofollow(dir);
+                    }
+                    return Err(err(EINVAL));
+                }
             };
             grants.push(state);
         }
-        let id = self.insert(Handle::Root { session })?;
+        let id = match self.insert(Handle::Root { session }) {
+            Ok(id) => id,
+            Err(e) => {
+                if let Some(dir) = &owned_sub_dir {
+                    remove_tree_nofollow(dir);
+                }
+                return Err(e);
+            }
+        };
         let s = self.sessions.get_mut(&session).ok_or(err(EBADF))?;
+        s.owned_sub_dir = owned_sub_dir;
         s.phase = Phase::Live { scope, grants };
         Ok(OpenResult::ThisScheme {
             number: id,
@@ -1695,25 +2031,52 @@ impl Proxy {
         })
     }
 
-    fn end_session(&mut self, session: u32) {
-        let Some(s) = self.sessions.get_mut(&session) else {
-            return;
-        };
-        if !matches!(s.phase, Phase::Ended { .. }) {
-            let report = s.links_report();
-            s.links.clear();
-            s.phase = Phase::Ended { report };
-        }
-        let ids: Vec<usize> = self
-            .handles
-            .iter()
-            .filter(|(_, h)| h.session() == Some(session))
-            .map(|(id, _)| *id)
-            .collect();
-        for other in ids {
-            if let Some(Handle::Node(node)) = self.handles.get_mut(&other) {
-                node.state = NodeState::Detached;
-                node.listing = None;
+    fn end_session(&mut self, root_session: u32) {
+        let mut queue: Vec<u32> = vec![root_session];
+        let mut steps = 0usize;
+        while let Some(session) = queue.pop() {
+            if steps >= MAX_SESSIONS {
+                break;
+            }
+            steps += 1;
+            let (parent_id, children, sub_dir) = {
+                let Some(s) = self.sessions.get_mut(&session) else {
+                    continue;
+                };
+                if !matches!(s.phase, Phase::Ended { .. }) {
+                    let report = s.links_report();
+                    s.links.clear();
+                    s.phase = Phase::Ended { report };
+                }
+                let children = std::mem::take(&mut s.children);
+                let sub_dir = s.owned_sub_dir.take();
+                (s.parent, children, sub_dir)
+            };
+            if let Some(pid) = parent_id
+                && let Some(p) = self.sessions.get_mut(&pid)
+            {
+                p.children.retain(|c| *c != session);
+            }
+            for child in children {
+                if queue.len() < MAX_SESSIONS {
+                    queue.push(child);
+                }
+            }
+            let ids: Vec<usize> = self
+                .handles
+                .iter()
+                .filter(|(_, h)| h.session() == Some(session))
+                .map(|(id, _)| *id)
+                .collect();
+            for other in ids {
+                if let Some(Handle::Node(node)) = self.handles.get_mut(&other) {
+                    node.state = NodeState::Detached;
+                    node.listing = None;
+                }
+            }
+            if let Some(dir) = sub_dir {
+                remove_tree_nofollow(&dir);
+                self.dirs.forget(&dir);
             }
         }
     }
@@ -1826,11 +2189,11 @@ impl SchemeSync for Proxy {
                     return Err(err(ENOTDIR));
                 }
                 let (session, start) = self.start_of(dirfd)?;
-                self.open_in(session, &start, path, flags)
+                self.open_in(session, &start, path, flags, ctx)
             }
             Handle::Root { .. } | Handle::Node(_) => {
                 let (session, start) = self.start_of(dirfd)?;
-                self.open_in(session, &start, path, flags)
+                self.open_in(session, &start, path, flags, ctx)
             }
         }
     }
@@ -2001,6 +2364,14 @@ impl SchemeSync for Proxy {
 
     fn fstat(&mut self, id: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
         match self.handles.get(&id).ok_or(err(EBADF))? {
+            Handle::Ctl { session, .. } => {
+                self.live(*session)?;
+                *stat = Stat {
+                    st_size: 1,
+                    ..Stat::default()
+                };
+                Ok(())
+            }
             Handle::Root { .. } => {
                 *stat = Stat {
                     st_mode: MODE_DIR | 0o755,
