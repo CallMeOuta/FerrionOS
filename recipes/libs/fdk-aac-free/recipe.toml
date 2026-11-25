@@ -1,0 +1,24 @@
+[package]
+description = "AAC-LC audio codec library from Fedora's fdk-aac-free tree"
+
+[source]
+tar = "https://src.fedoraproject.org/repo/pkgs/fdk-aac-free/fdk-aac-free-2.0.3.tar.gz/sha512/d5dcb11d95acd3671fe0d92f5a4954b3f25faf0937d7f94a02bec9d7e556b321f4e3205b91fe40b3475f04ee9f879609c6419a6c699f5d854658c9a6f8b524f1/fdk-aac-free-2.0.3.tar.gz"
+blake3 = "571f45e831a0ddabab8798ce880b421a958f7bb270699b076db33becc87a2470"
+script = """
+autotools_recursive_regenerate
+"""
+
+[build]
+template = "custom"
+dependencies = [
+    "libstdcxx",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_configure --disable-static --enable-shared
+find "${COOKBOOK_STAGE}" -name '*.la' -delete
+
+install -Dm644 "${COOKBOOK_SOURCE}/NOTICE" "${COOKBOOK_STAGE}/usr/share/licenses/fdk-aac-free/NOTICE"
+install -Dm644 "${COOKBOOK_SOURCE}/README.fedora" "${COOKBOOK_STAGE}/usr/share/licenses/fdk-aac-free/README.fedora"
+"""
