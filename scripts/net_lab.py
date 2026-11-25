@@ -26,6 +26,7 @@ HTTP_PORT = 8080
 TCP_ECHO_PORT = 9000
 UDP_ECHO_PORT = 9001
 TCP_FIN_PORT = 9002
+TCP_HOLD_PORT = 9003
 IPERF_PORT = 5201
 ACCEPT_PROBE_PORT = 5210
 FIXED_ISN_SPORT = 45000
@@ -69,7 +70,7 @@ def format_foreign_qemus(entries):
 
 LAB_BASE_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping")
 LAB_PERF_TOOLS = ("unshare", "ip", "tc", "dnsmasq", "ping", "iperf3")
-LAB_TESTS = ("net-basics", "net-perf", "net-no-lease")
+LAB_TESTS = ("net-basics", "net-perf", "net-no-lease", "net-lease")
 MAX_TIMEOUT_SUBS_MARGIN = 2
 
 
@@ -2317,3 +2318,1061 @@ def run_net_perf(args, out, ctx):
     if report["conditions"]["host_limited"]:
         raise ctx["Blocked"](summary)
     return True, summary
+
+
+class _TcpHoldServer:
+    def __init__(self, host, port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((host, port))
+        self.sock.listen(16)
+        self.sock.settimeout(0.5)
+        self.stop = threading.Event()
+        self.conns = []
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.thread.start()
+
+    def _accept_loop(self):
+        for _ in range(MAX_ECHO_STEPS):
+            if self.stop.is_set():
+                return
+            try:
+                conn, _ = self.sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with self.lock:
+                self.conns.append(conn)
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn):
+        try:
+            conn.settimeout(5.0)
+            data = conn.recv(64)
+            if data:
+                conn.sendall(data)
+            conn.settimeout(0.5)
+            deadline = time.monotonic() + 180.0
+            while not self.stop.is_set() and time.monotonic() < deadline:
+                try:
+                    more = conn.recv(64)
+                    if not more:
+                        break
+                except TimeoutError:
+                    continue
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def close(self):
+        self.stop.set()
+        with self.lock:
+            for conn in self.conns:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.thread.join(timeout=2)
+
+
+def _iter_pcap_frames(pcap_path):
+    path = Path(pcap_path)
+    if not path.exists():
+        return
+    raw = path.read_bytes()
+    if len(raw) < 24:
+        return
+    magic = struct.unpack("<I", raw[:4])[0]
+    if magic == 0xA1B2C3D4:
+        sub_scale = 1e-6
+    elif magic == 0xA1B23C4D:
+        sub_scale = 1e-9
+    else:
+        return
+    pos = 24
+    for _ in range(MAX_PCAP_PACKETS):
+        if pos + 16 > len(raw):
+            break
+        ts_sec, ts_sub, caplen, _ = struct.unpack("<IIII", raw[pos : pos + 16])
+        pos += 16
+        frame = raw[pos : pos + caplen]
+        pos += caplen
+        if len(frame) < 14:
+            continue
+        yield ts_sec + ts_sub * sub_scale, frame
+
+
+def parse_pcap_dhcp(pcap_path):
+    entries = []
+    for ts, frame in _iter_pcap_frames(pcap_path):
+        if len(frame) < 14 + 20 + 8 + 240 or frame[12:14] != b"\x08\x00":
+            continue
+        ip = frame[14:]
+        ihl = (ip[0] & 0x0F) * 4
+        if (ip[0] >> 4) != 4 or ihl < 20 or ip[9] != 17 or len(ip) < ihl + 8 + 240:
+            continue
+        udp = ip[ihl:]
+        sport, dport, ulen = struct.unpack("!HHH", udp[:6])
+        if not ({sport, dport} <= {67, 68}):
+            continue
+        payload = udp[8 : min(len(udp), ulen)]
+        if len(payload) < 240 or payload[236:240] != b"\x63\x82\x53\x63":
+            continue
+        options = {}
+        cur = 240
+        for _ in range(128):
+            if cur >= len(payload):
+                break
+            code = payload[cur]
+            cur += 1
+            if code == 0:
+                continue
+            if code == 255:
+                break
+            if cur >= len(payload):
+                break
+            olen = payload[cur]
+            cur += 1
+            if cur + olen > len(payload):
+                break
+            options[code] = payload[cur : cur + olen]
+            cur += olen
+        msg_type = options[53][0] if 53 in options and len(options[53]) >= 1 else None
+        entries.append(
+            {
+                "ts": ts,
+                "eth_src": frame[6:12].hex(":"),
+                "eth_dst": frame[0:6].hex(":"),
+                "ip_src": socket.inet_ntoa(ip[12:16]),
+                "ip_dst": socket.inet_ntoa(ip[16:20]),
+                "sport": sport,
+                "dport": dport,
+                "op": payload[0],
+                "xid": payload[4:8].hex(),
+                "ciaddr": socket.inet_ntoa(payload[12:16]),
+                "yiaddr": socket.inet_ntoa(payload[16:20]),
+                "chaddr": payload[28:34].hex(":"),
+                "msg_type": msg_type,
+                "prl": list(options[55]) if 55 in options else None,
+                "has_opt12": 12 in options,
+                "has_opt54": 54 in options,
+                "has_opt61": 61 in options,
+                "opt50": socket.inet_ntoa(options[50]) if 50 in options and len(options[50]) == 4 else None,
+                "opt54": socket.inet_ntoa(options[54]) if 54 in options and len(options[54]) == 4 else None,
+            }
+        )
+    return entries
+
+
+def parse_pcap_syn_mss(pcap_path, dst_ip, dst_port):
+    out = []
+    for ts, frame in _iter_pcap_frames(pcap_path):
+        if len(frame) < 54 or frame[6:12] != LAB_GUEST_MAC_BYTES or frame[12:14] != b"\x08\x00":
+            continue
+        ip = frame[14:]
+        ihl = (ip[0] & 0x0F) * 4
+        if (ip[0] >> 4) != 4 or ihl < 20 or ip[9] != 6 or len(ip) < ihl + 20:
+            continue
+        if socket.inet_ntoa(ip[16:20]) != dst_ip:
+            continue
+        tcp = ip[ihl:]
+        sport, dport = struct.unpack("!HH", tcp[:4])
+        data_off = (tcp[12] >> 4) * 4
+        flags = tcp[13]
+        if dport != dst_port or (flags & 0x12) != 0x02 or data_off < 20 or len(tcp) < data_off:
+            continue
+        mss = None
+        opts = tcp[20:data_off]
+        cur = 0
+        for _ in range(32):
+            if cur >= len(opts):
+                break
+            kind = opts[cur]
+            if kind == 0:
+                break
+            if kind == 1:
+                cur += 1
+                continue
+            if cur + 1 >= len(opts):
+                break
+            olen = opts[cur + 1]
+            if olen < 2 or cur + olen > len(opts):
+                break
+            if kind == 2 and olen == 4:
+                mss = struct.unpack("!H", opts[cur + 2 : cur + 4])[0]
+            cur += olen
+        out.append({"ts": ts, "sport": sport, "mss": mss})
+    return out
+
+
+def parse_pcap_frames_from_ip(pcap_path, src_ip, after_ts):
+    hits = []
+    src_bytes = socket.inet_aton(src_ip)
+    for ts, frame in _iter_pcap_frames(pcap_path):
+        if ts <= after_ts or frame[6:12] != LAB_GUEST_MAC_BYTES:
+            continue
+        ethertype = frame[12:14]
+        if ethertype == b"\x08\x00" and len(frame) >= 34:
+            ip = frame[14:]
+            if ip[12:16] == src_bytes:
+                hits.append({"ts": ts, "proto": ip[9], "dst": socket.inet_ntoa(ip[16:20])})
+        elif ethertype == b"\x08\x06" and len(frame) >= 42:
+            arp = frame[14:42]
+            if arp[14:18] == src_bytes:
+                hits.append({"ts": ts, "proto": "arp", "tpa": socket.inet_ntoa(arp[24:28])})
+    return hits
+
+
+def _ip_checksum(data):
+    if len(data) & 1:
+        data += b"\x00"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def _build_dhcp_reply_frame(dst_mac, src_mac, src_ip, dst_ip, xid, chaddr, msg_type, yiaddr, server_ip, dns_ip=None):
+    bootp = bytearray(240)
+    bootp[0] = 2
+    bootp[1] = 1
+    bootp[2] = 6
+    bootp[4:8] = xid
+    bootp[16:20] = socket.inet_aton(yiaddr)
+    bootp[28:34] = chaddr
+    bootp[236:240] = b"\x63\x82\x53\x63"
+    opts = bytearray()
+    opts.extend([53, 1, msg_type])
+    opts.extend([54, 4])
+    opts.extend(socket.inet_aton(server_ip))
+    if msg_type in (2, 5):
+        opts.extend([1, 4, 255, 255, 255, 0])
+        opts.extend([3, 4])
+        opts.extend(socket.inet_aton(server_ip))
+        opts.extend([51, 4])
+        opts.extend(struct.pack("!I", 120))
+        if dns_ip is not None:
+            opts.extend([6, 4])
+            opts.extend(socket.inet_aton(dns_ip))
+    opts.append(255)
+    payload = bytes(bootp) + bytes(opts)
+    if len(payload) < 300:
+        payload += b"\x00" * (300 - len(payload))
+    udp_len = 8 + len(payload)
+    udp_hdr = struct.pack("!HHHH", 67, 68, udp_len, 0)
+    pseudo = socket.inet_aton(src_ip) + socket.inet_aton(dst_ip) + struct.pack("!BBH", 0, 17, udp_len)
+    udp_csum = _ip_checksum(pseudo + udp_hdr + payload) or 0xFFFF
+    udp_hdr = struct.pack("!HHHH", 67, 68, udp_len, udp_csum)
+    ip_len = 20 + udp_len
+    ip_hdr = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45,
+        0,
+        ip_len,
+        0,
+        0,
+        64,
+        17,
+        0,
+        socket.inet_aton(src_ip),
+        socket.inet_aton(dst_ip),
+    )
+    csum = _ip_checksum(ip_hdr)
+    ip_hdr = ip_hdr[:10] + struct.pack("!H", csum) + ip_hdr[12:]
+    return dst_mac + src_mac + b"\x08\x00" + ip_hdr + udp_hdr + payload
+
+
+def _iface_mac_bytes(ifname):
+    import fcntl
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        info = fcntl.ioctl(sock.fileno(), 0x8927, struct.pack("256s", ifname.encode("ascii")[:15]))
+        return info[18:24]
+    finally:
+        sock.close()
+
+
+def _send_raw_on_tap(frame):
+    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+    try:
+        sock.bind(("tap0", 0))
+        sock.send(frame)
+    finally:
+        sock.close()
+
+
+def _spawn_dnsmasq(out, name, leasefile, dhcp_range, extra_args=()):
+    logf = open(out / f"{name}.log", "w")
+    cmd = [
+        "dnsmasq",
+        "--no-daemon",
+        "--conf-file=/dev/null",
+        "--user=root",
+        "--group=root",
+        "--port=0",
+        "--bind-interfaces",
+        "--interface=tap0",
+        f"--dhcp-range={dhcp_range}",
+        f"--dhcp-leasefile={leasefile}",
+        "--pid-file=",
+        "--log-dhcp",
+        *extra_args,
+    ]
+    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT)
+    time.sleep(0.25)
+    if proc.poll() is not None:
+        logf.close()
+        raise RuntimeError(f"{name} exited early with {proc.returncode}; see {out / (name + '.log')}")
+    return proc, logf
+
+
+def _stop_proc(pair):
+    if pair is None:
+        return
+    proc, logf = pair
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        logf.close()
+    except OSError:
+        pass
+
+
+def _guest_net_status(vm, run_status):
+    rc, text = run_status(vm, "ferrion network status --json", 20)
+    parsed = parse_json_line(text) if rc == 0 else None
+    if parsed and parsed.get("ok") and isinstance(parsed.get("data"), dict):
+        ifaces = parsed["data"].get("interfaces", [])
+        eth0 = next((i for i in ifaces if i.get("name") == "eth0"), None)
+        return rc, eth0, parsed
+    return rc, None, parsed
+
+
+def _guest_eth0_ip(vm, run_status):
+    rc, eth0, _ = _guest_net_status(vm, run_status)
+    if rc == 0 and eth0 is not None:
+        ipv4 = eth0.get("ipv4")
+        if isinstance(ipv4, str) and "/" in ipv4:
+            return ipv4.split("/", 1)[0], eth0
+        return None, eth0
+    _, out = run_status(vm, "bash -c 'cat /scheme/netcfg/ifaces/eth0/addr/list 2>/dev/null'", 15)
+    m = re.search(r"(\d+\.\d+\.\d+\.\d+)/\d+", out)
+    return (m.group(1) if m else None), None
+
+
+def _wait_eth0_prefix(vm, run_status, prefix, max_polls=50):
+    for _ in range(max_polls):
+        ip, eth0 = _guest_eth0_ip(vm, run_status)
+        if ip and ip.startswith(prefix):
+            return ip, eth0
+        time.sleep(0.5)
+    return None, None
+
+
+def run_net_lease(args, out, ctx):
+    card = ctx["net_card"](args)
+    if card not in ctx["NET_CARDS"]:
+        return False, f"net-lease runs with net=e1000 or net=virtio, not net={card}"
+    require_tools(LAB_BASE_TOOLS, ctx["Blocked"])
+    cases = {}
+    notes = []
+
+    b1_out = out / "boot-1-lifecycle"
+    b1_out.mkdir(parents=True, exist_ok=True)
+    b1_pcap = b1_out / "boot1.pcap"
+    leases1 = b1_out / "leases1"
+    leases2 = b1_out / "leases2"
+    lab1 = NetLab(b1_out, ctx["Blocked"], ctx["dns_reply"], enable_dnsmasq=False, enable_dns=False)
+    hold_srv = None
+    dns1 = None
+    dns2 = None
+    vm = None
+    try:
+        lab1.start()
+        hold_srv = _TcpHoldServer(LAB_HOST, TCP_HOLD_PORT)
+        dns1 = _spawn_dnsmasq(
+            b1_out,
+            "dnsmasq-1",
+            leases1,
+            "10.77.0.50,10.77.0.99,255.255.255.0,2m",
+            (
+                "--dhcp-option=3,10.77.0.99",
+                "--dhcp-option=121,0.0.0.0/0,10.77.0.1,198.51.100.0/24,0.0.0.0",
+                f"--dhcp-option=6,{LAB_HOST}",
+                "--dhcp-option=26,1400",
+                "--dhcp-option=42,10.77.0.99",
+            ),
+        )
+        vm = ctx["VM"](
+            args,
+            b1_out,
+            qemu_flags=lab1.qemu_flags(ctx["NET_CARDS"][card], pcap_path=b1_pcap),
+            make=("net=no",),
+        )
+        if not vm.wait_serial(r"login: ", args.timeout):
+            return False, f"boot 1: no login prompt on serial console; see {b1_out}"
+
+        user_uid = None
+        user_ctl_rc = None
+        user_ctl_out = ""
+        time.sleep(0.5)
+        vm.type("user\n")
+        time.sleep(3.0)
+        user_lease_ip = None
+        for _ in range(40):
+            ltxt = leases1.read_text() if leases1.exists() else ""
+            m_ip = re.search(r"\b(10\.77\.0\.\d+)\b", ltxt)
+            if m_ip:
+                user_lease_ip = m_ip.group(1)
+                break
+            time.sleep(0.5)
+        pre_user_ctl_n = len(parse_pcap_dhcp(b1_pcap))
+        leases_before_user = leases1.read_text() if leases1.exists() else ""
+        umark = vm.mark()
+        vm.type("bash -c 'uid=$(id -u); echo netctl-uid-$uid; printf \"release\\n\" > /scheme/netctl/ctl 2>&1; echo netctl-usr-$?'\n")
+        ufound = vm.wait_serial(r"(?s)netctl-uid-(\d+)\r?\n(.*)netctl-usr-(\d+)", 25, umark)
+        if ufound:
+            user_uid = int(ufound.group(1))
+            user_ctl_out = ufound.group(2).strip()[-160:]
+            user_ctl_rc = int(ufound.group(3))
+        time.sleep(1.0)
+        leases_after_user = leases1.read_text() if leases1.exists() else ""
+        user_rel = [
+            d for d in parse_pcap_dhcp(b1_pcap)[pre_user_ctl_n:] if d["op"] == 1 and d["msg_type"] == 7
+        ]
+        user_lease_kept = bool(user_lease_ip) and user_lease_ip in leases_before_user and user_lease_ip in leases_after_user
+
+        since_rexit = vm.mark()
+        vm.type("exit\n")
+        if not vm.wait_serial(r"login: ", 25, since_rexit):
+            return False, f"boot 1: no login prompt after user exit; see {b1_out}"
+        time.sleep(0.5)
+        since_pw = vm.mark()
+        vm.type("root\n")
+        if not vm.wait_serial(r"(?i)password: ", 20, since_pw):
+            return False, f"boot 1: no root password prompt; see {b1_out}"
+        since_sh = vm.mark()
+        vm.type("password\n")
+        if not vm.wait_serial(r"root:.*# ", 20, since_sh):
+            return False, f"boot 1: no root shell on serial console; see {b1_out}"
+
+        _, root_schemes_out = ctx["run_status"](vm, "bash -c 'ls /scheme 2>/dev/null'", 15)
+        root_has_netctl = "netctl" in re.findall(r"[\w.-]+", root_schemes_out)
+        cases["case9_user_netctl_denied"] = {
+            "pass": (
+                root_has_netctl
+                and user_uid is not None
+                and user_uid != 0
+                and user_ctl_rc is not None
+                and user_ctl_rc != 0
+                and len(user_rel) == 0
+                and user_lease_kept
+            ),
+            "root_has_netctl": root_has_netctl,
+            "uid": user_uid,
+            "write_rc": user_ctl_rc,
+            "write_out": user_ctl_out,
+            "release_packets": len(user_rel),
+            "lease_kept": user_lease_kept,
+        }
+
+        ip1, eth1 = _wait_eth0_prefix(vm, ctx["run_status"], "10.77.0.", max_polls=60)
+        rows_b1 = context_snapshot(vm, ctx["run_status"])
+        proc_names = [r["name"] for r in rows_b1]
+        has_netd = "ferrion-netd" in proc_names
+        has_dhcpd = "dhcpd" in proc_names
+        cases["no_dhcpd"] = {
+            "pass": has_netd and not has_dhcpd,
+            "has_netd": has_netd,
+            "has_dhcpd": has_dhcpd,
+        }
+
+        status_rc, eth_status, full_status = _guest_net_status(vm, ctx["run_status"])
+        netstatus_raw_rc, netstatus_raw = ctx["run_status"](vm, "bash -c 'cat /scheme/netstatus/status 2>/dev/null'", 15)
+        mac_omitted = (
+            netstatus_raw_rc == 0
+            and len(netstatus_raw.strip()) > 0
+            and LAB_GUEST_MAC.lower() not in netstatus_raw.lower()
+            and '"mac"' not in netstatus_raw.lower()
+        )
+        cases["status_no_mac"] = {
+            "pass": status_rc == 0 and eth_status is not None and mac_omitted,
+            "rc": status_rc,
+            "mac_omitted": mac_omitted,
+        }
+
+        _, route_out = ctx["run_status"](vm, "bash -c 'cat /scheme/netcfg/route/list 2>/dev/null'", 15)
+        has_default_121 = "default via 10.77.0.1" in route_out or "0.0.0.0/0 via 10.77.0.1" in route_out
+        has_onlink_121 = "198.51.100.0/24" in route_out and "198.51.100.0/24 via" not in route_out
+        ignored_opt3 = "10.77.0.99" not in route_out
+        cases["option121_routes"] = {
+            "pass": has_default_121 and has_onlink_121 and ignored_opt3,
+            "routes": route_out.strip(),
+            "has_default_121": has_default_121,
+            "has_onlink_121": has_onlink_121,
+            "ignored_opt3": ignored_opt3,
+        }
+
+        ctx["run_status"](vm, f"net-probe connect {LAB_HOST}:{HTTP_PORT} --timeout-ms 4000", 20)
+        time.sleep(0.5)
+        syns_mtu = parse_pcap_syn_mss(b1_pcap, LAB_HOST, HTTP_PORT)
+        mss_values = [s["mss"] for s in syns_mtu if s["mss"] is not None]
+        cases["option26_mtu"] = {
+            "pass": 1360 in mss_values,
+            "mss_values": mss_values,
+        }
+
+        dhcp_init = parse_pcap_dhcp(b1_pcap)
+        guest_reqs_init = [d for d in dhcp_init if d["op"] == 1 and d["msg_type"] in (1, 3)]
+        expected_prl = [1, 3, 6, 26, 121]
+        prl_ok = bool(guest_reqs_init) and all(
+            d["prl"] == expected_prl and not d["has_opt12"] and not d["has_opt61"]
+            for d in guest_reqs_init
+        )
+        cases["rfc7844_privacy"] = {
+            "pass": prl_ok,
+            "requests_checked": len(guest_reqs_init),
+            "prls": [d["prl"] for d in guest_reqs_init[:4]],
+            "any_opt12": any(d["has_opt12"] for d in guest_reqs_init),
+            "any_opt61": any(d["has_opt61"] for d in guest_reqs_init),
+        }
+
+        acks0 = [d for d in dhcp_init if d["op"] == 2 and d["msg_type"] == 5 and d["yiaddr"] == ip1]
+        t0_ack = acks0[-1]["ts"] if acks0 else 0.0
+        t1_deadline = time.monotonic() + 75.0
+        while time.monotonic() < t1_deadline and ip1 is not None:
+            dnow_t1 = parse_pcap_dhcp(b1_pcap)
+            t1_acks_now = [
+                d
+                for d in dnow_t1
+                if d["op"] == 2 and d["msg_type"] == 5 and d["ts"] > t0_ack + 45.0 and d["yiaddr"] == ip1
+            ]
+            if t1_acks_now:
+                time.sleep(1.5)
+                break
+            time.sleep(1.0)
+        t1_mono = time.monotonic()
+
+        dhcp_after_t1 = parse_pcap_dhcp(b1_pcap)
+        t1_renews = [
+            d
+            for d in dhcp_after_t1
+            if d["op"] == 1
+            and d["msg_type"] == 3
+            and d["ts"] > t0_ack + 1.0
+            and d["ip_dst"] == LAB_HOST
+            and d["ciaddr"] == ip1
+            and not d["has_opt54"]
+        ]
+        t1_acks = [
+            d
+            for d in dhcp_after_t1
+            if d["op"] == 2 and d["msg_type"] == 5 and d["ts"] > t0_ack + 45.0 and d["yiaddr"] == ip1
+        ]
+        ip_after_t1, _ = _guest_eth0_ip(vm, ctx["run_status"])
+        t1_dt = round(t1_renews[0]["ts"] - t0_ack, 2) if t1_renews else None
+        cases["case1_t1_renew"] = {
+            "pass": (
+                ip1 is not None
+                and bool(t1_renews)
+                and 48.0 <= (t1_renews[0]["ts"] - t0_ack) <= 70.0
+                and bool(t1_acks)
+                and ip_after_t1 == ip1
+            ),
+            "ip1": ip1,
+            "ip_after_t1": ip_after_t1,
+            "renew_delay_s": t1_dt,
+            "renew_count": len(t1_renews),
+            "ack_count": len(t1_acks),
+        }
+
+        ctx["run_status"](
+            vm,
+            f"bash -c 'rm -f /tmp/hold.out; net-probe hold {LAB_HOST}:{TCP_HOLD_PORT} --timeout-ms 150000 > /tmp/hold.out 2>&1 &'",
+            15,
+        )
+        hold_ready = False
+        for _ in range(30):
+            _, hout = ctx["run_status"](vm, "bash -c 'cat /tmp/hold.out 2>/dev/null'", 10)
+            if '"ready":true' in hout:
+                hold_ready = True
+                break
+            time.sleep(0.3)
+
+        _stop_proc(dns1)
+        dns1 = None
+        dhcp_at_stop = parse_pcap_dhcp(b1_pcap)
+        acks_before_stop = [d for d in dhcp_at_stop if d["op"] == 2 and d["msg_type"] == 5 and d["yiaddr"] == ip1]
+        t1_base = acks_before_stop[-1]["ts"] if acks_before_stop else t0_ack
+
+        elapsed_since_ack = max(0.0, time.monotonic() - t1_mono)
+        wait_exp = max(0.0, 127.0 - elapsed_since_ack)
+        if wait_exp > 0:
+            time.sleep(min(wait_exp, 130.0))
+
+        dhcp_after_exp = parse_pcap_dhcp(b1_pcap)
+        t2_rebinds = [
+            d
+            for d in dhcp_after_exp
+            if d["op"] == 1
+            and d["msg_type"] == 3
+            and d["ts"] >= t1_base + 95.0
+            and d["ts"] <= t1_base + 123.0
+            and d["ip_dst"] == "255.255.255.255"
+            and d["ciaddr"] == ip1
+            and not d["has_opt54"]
+        ]
+        cases["case2_t2_rebind"] = {
+            "pass": bool(t2_rebinds),
+            "rebind_delays_s": [round(d["ts"] - t1_base, 2) for d in t2_rebinds[:4]],
+        }
+
+        rediscovers = [
+            d
+            for d in dhcp_after_exp
+            if d["op"] == 1 and d["msg_type"] == 1 and d["ts"] >= t1_base + 118.0
+        ]
+        ip_after_exp, eth_after_exp = _guest_eth0_ip(vm, ctx["run_status"])
+        _, conn_exp_out = ctx["run_status"](
+            vm, f"net-probe connect {LAB_HOST}:{HTTP_PORT} --timeout-ms 3000", 20
+        )
+        conn_exp = parse_json_line(conn_exp_out) or {"raw": conn_exp_out.strip()}
+        _, hold_final_out = ctx["run_status"](vm, "bash -c 'cat /tmp/hold.out 2>/dev/null'", 15)
+        hold_final = parse_json_line(hold_final_out) or {"raw": hold_final_out.strip()}
+        t_exp_check = rediscovers[0]["ts"] if rediscovers else (t1_base + 121.0)
+        leaked_frames = (
+            parse_pcap_frames_from_ip(b1_pcap, ip1, t_exp_check)
+            if ip1 is not None
+            else []
+        )
+        cases["case3_expiry_abort"] = {
+            "pass": (
+                ip_after_exp is None
+                and conn_exp.get("error") == "ENETUNREACH"
+                and hold_ready
+                and hold_final.get("event") == "error"
+                and hold_final.get("error") == "ECONNABORTED"
+                and bool(rediscovers)
+                and len(leaked_frames) == 0
+            ),
+            "ip_after_exp": ip_after_exp,
+            "connect": conn_exp,
+            "hold_ready": hold_ready,
+            "hold_result": hold_final,
+            "rediscover_count": len(rediscovers),
+            "leaked_frames_from_expired_ip": leaked_frames[:5],
+        }
+
+        dns2 = _spawn_dnsmasq(
+            b1_out,
+            "dnsmasq-2",
+            leases2,
+            "10.77.0.150,10.77.0.199,255.255.255.0,2m",
+            (f"--dhcp-option=3,{LAB_HOST}", f"--dhcp-option=6,{LAB_HOST}"),
+        )
+        ip2, _ = _wait_eth0_prefix(vm, ctx["run_status"], "10.77.0.1", max_polls=70)
+        in_range2 = ip2 is not None and 150 <= int(ip2.split(".")[3]) <= 199
+        cases["case4_new_range"] = {
+            "pass": in_range2,
+            "ip2": ip2,
+        }
+
+        vm.command("set_link net0 off")
+        link_down_seen = False
+        for _ in range(16):
+            _, est, _ = _guest_net_status(vm, ctx["run_status"])
+            if est is not None and est.get("link") == "down":
+                link_down_seen = True
+                break
+            time.sleep(0.5)
+        pre_link_up_n = len(parse_pcap_dhcp(b1_pcap))
+        vm.command("set_link net0 on")
+        link_up_ip = None
+        link_up_state = None
+        for _ in range(30):
+            ip_now, est = _guest_eth0_ip(vm, ctx["run_status"])
+            if est is not None and est.get("link") == "up" and ip_now and ip_now.startswith("10.77.0."):
+                link_up_ip = ip_now
+                link_up_state = est.get("link")
+                break
+            time.sleep(0.5)
+        dhcp_after_carrier = parse_pcap_dhcp(b1_pcap)[pre_link_up_n:]
+        carrier_discovers = [
+            d for d in dhcp_after_carrier if d["op"] == 1 and d["msg_type"] == 1
+        ]
+        cases["case8_carrier"] = {
+            "pass": link_down_seen and link_up_state == "up" and link_up_ip is not None and bool(carrier_discovers),
+            "link_down_seen": link_down_seen,
+            "link_up_state": link_up_state,
+            "link_up_ip": link_up_ip,
+            "carrier_discovers": len(carrier_discovers),
+        }
+
+        pre_down_n = len(parse_pcap_dhcp(b1_pcap))
+        leases_before_down = leases2.read_text() if leases2.exists() else ""
+        down_rc, down_out = ctx["run_status"](vm, "ferrion network down --yes", 20)
+        time.sleep(1.0)
+        ip_after_down, est_down = _guest_eth0_ip(vm, ctx["run_status"])
+        leases_after_down = leases2.read_text() if leases2.exists() else ""
+        dhcp_after_down = parse_pcap_dhcp(b1_pcap)[pre_down_n:]
+        rel_down = [
+            d for d in dhcp_after_down if d["op"] == 1 and d["msg_type"] == 7
+        ]
+
+        up_rc, _ = ctx["run_status"](vm, "ferrion network up --yes", 20)
+        ip3, _ = _wait_eth0_prefix(vm, ctx["run_status"], "10.77.0.1", max_polls=40)
+        time.sleep(0.5)
+
+        leases_before_shut = leases2.read_text() if leases2.exists() else ""
+        pre_shut_n = len(parse_pcap_dhcp(b1_pcap))
+        vm.type("shutdown\n")
+        shut_exited = False
+        for _ in range(40):
+            if vm.proc.poll() is not None:
+                shut_exited = True
+                break
+            time.sleep(0.5)
+        if not shut_exited:
+            vm.kill()
+        time.sleep(0.5)
+        leases_after_shut = leases2.read_text() if leases2.exists() else ""
+        dhcp_final = parse_pcap_dhcp(b1_pcap)[pre_shut_n:]
+        rel_shut = [
+            d for d in dhcp_final if d["op"] == 1 and d["msg_type"] == 7
+        ]
+        down_cleared = bool(link_up_ip) and link_up_ip in leases_before_down and link_up_ip not in leases_after_down
+        shut_cleared = bool(ip3) and ip3 in leases_before_shut and ip3 not in leases_after_shut
+        cases["case5_release"] = {
+            "pass": (
+                down_rc == 0
+                and ip_after_down is None
+                and bool(rel_down)
+                and down_cleared
+                and up_rc == 0
+                and ip3 is not None
+                and shut_exited
+                and bool(rel_shut)
+                and shut_cleared
+            ),
+            "down_rc": down_rc,
+            "ip_after_down": ip_after_down,
+            "rel_down_count": len(rel_down),
+            "down_cleared_lease": down_cleared,
+            "up_rc": up_rc,
+            "ip3": ip3,
+            "shut_exited": shut_exited,
+            "rel_shut_count": len(rel_shut),
+            "shut_cleared_lease": shut_cleared,
+        }
+    finally:
+        if vm is not None:
+            vm.close()
+        _stop_proc(dns1)
+        _stop_proc(dns2)
+        if hold_srv is not None:
+            hold_srv.close()
+        lab1.close()
+
+    b2_out = out / "boot-2-conflict-spoof"
+    b2_out.mkdir(parents=True, exist_ok=True)
+    b2_pcap = b2_out / "boot2.pcap"
+    leases_b2 = b2_out / "leases"
+    lab2 = NetLab(b2_out, ctx["Blocked"], ctx["dns_reply"], enable_dnsmasq=False, enable_dns=False)
+    dns_b2 = None
+    vm2 = None
+    conflict_ip = "10.77.0.88"
+    try:
+        lab2.start()
+        run_cmd(["ip", "addr", "add", f"{conflict_ip}/24", "dev", "tap0"])
+        dns_b2 = _spawn_dnsmasq(
+            b2_out,
+            "dnsmasq-conflict",
+            leases_b2,
+            "10.77.0.80,10.77.0.95,255.255.255.0,2m",
+            (
+                "--no-ping",
+                f"--dhcp-host={LAB_GUEST_MAC},{conflict_ip}",
+                f"--dhcp-option=3,{LAB_HOST}",
+                f"--dhcp-option=6,{LAB_HOST}",
+            ),
+        )
+        vm2 = ctx["VM"](
+            args,
+            b2_out,
+            qemu_flags=lab2.qemu_flags(ctx["NET_CARDS"][card], pcap_path=b2_pcap),
+            make=("net=no",),
+        )
+        if not ctx["root_shell"](vm2, args.timeout):
+            return False, f"boot 2: no root shell on serial console; see {b2_out}"
+
+        decline_ts = None
+        saw_conflict_configured = False
+        for _ in range(40):
+            ip_now, _ = _guest_eth0_ip(vm2, ctx["run_status"])
+            if ip_now == conflict_ip:
+                saw_conflict_configured = True
+            dlist = parse_pcap_dhcp(b2_pcap)
+            declines = [d for d in dlist if d["op"] == 1 and d["msg_type"] == 4]
+            if declines:
+                decline_ts = declines[0]["ts"]
+                break
+            time.sleep(0.5)
+
+        _stop_proc(dns_b2)
+        dns_b2 = None
+        run_cmd(["ip", "addr", "del", f"{conflict_ip}/24", "dev", "tap0"], check=False)
+        dns_b2 = _spawn_dnsmasq(
+            b2_out,
+            "dnsmasq-clean",
+            b2_out / "leases-clean",
+            "10.77.0.80,10.77.0.95,255.255.255.0,2m",
+            (f"--dhcp-option=3,{LAB_HOST}", f"--dhcp-option=6,{LAB_HOST}"),
+        )
+
+        clean_ip = None
+        if decline_ts is not None:
+            clean_ip, _ = _wait_eth0_prefix(vm2, ctx["run_status"], "10.77.0.", max_polls=60)
+        dlist_b2 = parse_pcap_dhcp(b2_pcap)
+        post_decline_discovers = (
+            [d for d in dlist_b2 if d["op"] == 1 and d["msg_type"] == 1 and d["ts"] > decline_ts + 0.1]
+            if decline_ts is not None
+            else []
+        )
+        decline_wait_s = (
+            round(post_decline_discovers[0]["ts"] - decline_ts, 2)
+            if decline_ts is not None and post_decline_discovers
+            else None
+        )
+        cases["case7_arp_conflict"] = {
+            "pass": (
+                decline_ts is not None
+                and not saw_conflict_configured
+                and decline_wait_s is not None
+                and decline_wait_s >= 9.5
+                and clean_ip is not None
+            ),
+            "saw_decline": decline_ts is not None,
+            "saw_conflict_configured": saw_conflict_configured,
+            "decline_wait_s": decline_wait_s,
+            "clean_ip_after": clean_ip,
+        }
+
+        _stop_proc(dns_b2)
+        dns_b2 = None
+        b2_acks = [
+            d for d in dlist_b2 if d["op"] == 2 and d["msg_type"] == 5 and d["yiaddr"] == clean_ip
+        ]
+        b2_ack_ts = b2_acks[-1]["ts"] if b2_acks else 0.0
+        renew_req_for_spoof = None
+        spoof_deadline = time.monotonic() + 85.0
+        while time.monotonic() < spoof_deadline and clean_ip is not None:
+            dnow = parse_pcap_dhcp(b2_pcap)
+            renews_now = [
+                d
+                for d in dnow
+                if d["op"] == 1
+                and d["msg_type"] == 3
+                and d["ts"] > b2_ack_ts + 1.0
+                and d["ip_dst"] == LAB_HOST
+                and d["ciaddr"] == clean_ip
+            ]
+            if renews_now:
+                renew_req_for_spoof = renews_now[-1]
+                break
+            time.sleep(0.5)
+
+        if renew_req_for_spoof is not None and clean_ip is not None:
+            tap_mac = _iface_mac_bytes("tap0")
+            live_xid = bytes.fromhex(renew_req_for_spoof["xid"])
+            spoof_frames = [
+                _build_dhcp_reply_frame(
+                    LAB_GUEST_MAC_BYTES, tap_mac, LAB_HOST, clean_ip,
+                    live_xid, LAB_GUEST_MAC_BYTES, 5, "10.77.0.98", LAB_HOST, "192.0.2.92"
+                ),
+                _build_dhcp_reply_frame(
+                    LAB_GUEST_MAC_BYTES, tap_mac, LAB_HOST, clean_ip,
+                    live_xid, LAB_GUEST_MAC_BYTES, 6, "0.0.0.0", "10.77.0.99", None
+                ),
+                _build_dhcp_reply_frame(
+                    LAB_GUEST_MAC_BYTES, tap_mac, LAB_HOST, clean_ip,
+                    live_xid, LAB_GUEST_MAC_BYTES, 5, clean_ip, "10.77.0.99", "192.0.2.93"
+                ),
+                _build_dhcp_reply_frame(
+                    LAB_GUEST_MAC_BYTES, tap_mac, LAB_HOST, clean_ip,
+                    b"\xde\xad\xbe\xef", LAB_GUEST_MAC_BYTES, 5, clean_ip, LAB_HOST, "192.0.2.94"
+                ),
+            ]
+            for frame in spoof_frames:
+                _send_raw_on_tap(frame)
+                time.sleep(0.15)
+            time.sleep(1.5)
+            ip_after_spoof, est_after_spoof = _guest_eth0_ip(vm2, ctx["run_status"])
+            _, dns_after_spoof = ctx["run_status"](vm2, "bash -c 'cat /etc/net/dns 2>/dev/null'", 15)
+            spoof_state = est_after_spoof.get("state") if est_after_spoof else None
+            bad_dns = ("192.0.2.92", "192.0.2.93", "192.0.2.94")
+            neg_dns_clean = all(ip_b not in dns_after_spoof for ip_b in bad_dns)
+
+            ctrl_frame = _build_dhcp_reply_frame(
+                LAB_GUEST_MAC_BYTES, tap_mac, LAB_HOST, clean_ip,
+                live_xid, LAB_GUEST_MAC_BYTES, 5, clean_ip, LAB_HOST, "192.0.2.95"
+            )
+            _send_raw_on_tap(ctrl_frame)
+            time.sleep(1.5)
+            ip_after_ctrl, est_after_ctrl = _guest_eth0_ip(vm2, ctx["run_status"])
+            _, dns_after_ctrl = ctx["run_status"](vm2, "bash -c 'cat /etc/net/dns 2>/dev/null'", 15)
+            ctrl_state = est_after_ctrl.get("state") if est_after_ctrl else None
+            ctrl_dns_lines = [
+                ln.strip()
+                for ln in dns_after_ctrl.splitlines()
+                if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", ln.strip())
+            ]
+            ctrl_dns_ok = "192.0.2.95" in ctrl_dns_lines and all(
+                ip_b not in dns_after_ctrl for ip_b in bad_dns
+            )
+            cases["case6_spoof_ignored"] = {
+                "pass": (
+                    ip_after_spoof == clean_ip
+                    and spoof_state == "renewing"
+                    and neg_dns_clean
+                    and ip_after_ctrl == clean_ip
+                    and ctrl_state == "bound"
+                    and ctrl_dns_ok
+                ),
+                "tested_in_renewing": True,
+                "live_xid": renew_req_for_spoof["xid"],
+                "ip_before": clean_ip,
+                "ip_after_spoof": ip_after_spoof,
+                "state_after_spoof": spoof_state,
+                "neg_dns_clean": neg_dns_clean,
+                "ip_after_ctrl": ip_after_ctrl,
+                "state_after_ctrl": ctrl_state,
+                "ctrl_dns_lines": ctrl_dns_lines,
+                "ctrl_dns_ok": ctrl_dns_ok,
+            }
+        else:
+            cases["case6_spoof_ignored"] = {
+                "pass": False,
+                "tested_in_renewing": False,
+                "ip_before": clean_ip,
+            }
+        vm2.kill()
+    finally:
+        if vm2 is not None:
+            vm2.close()
+        _stop_proc(dns_b2)
+        lab2.close()
+
+    for mode_name, cfg_body, expect_ip in (
+        (
+            "mode_static",
+            r'mode = \"static\"\naddress = \"10.77.0.66/24\"\ngateway = \"10.77.0.1\"\ndns = [\"10.77.0.1\"]\n',
+            "10.77.0.66",
+        ),
+        (
+            "mode_off",
+            r'mode = \"off\"\n',
+            None,
+        ),
+    ):
+        bm_out = out / f"boot-{mode_name}"
+        bm_out.mkdir(parents=True, exist_ok=True)
+        bm_pcap = bm_out / f"{mode_name}.pcap"
+        labm = NetLab(bm_out, ctx["Blocked"], ctx["dns_reply"], enable_dnsmasq=False, enable_dns=False)
+        vmm = None
+        try:
+            labm.start()
+            vmm = ctx["VM"](
+                args,
+                bm_out,
+                qemu_flags=labm.qemu_flags(ctx["NET_CARDS"][card], pcap_path=bm_pcap),
+                make=("net=no",),
+            )
+            if not ctx["root_shell"](vmm, args.timeout):
+                return False, f"{mode_name}: no root shell before reboot; see {bm_out}"
+            ctx["run_status"](
+                vmm,
+                f"bash -c 'mkdir -p /etc/net && printf \"{cfg_body}\" > /etc/net/config.toml && sleep 2'",
+                20,
+            )
+            since_rb = vmm.mark()
+            vmm.type("shutdown -r\n")
+            if not vmm.wait_serial(r"init: switchroot to /usr /etc", args.timeout * 2, since_rb):
+                return False, f"{mode_name}: did not reach switchroot after reboot; see {bm_out}"
+            pre_reboot_n = len(parse_pcap_dhcp(bm_pcap))
+            if not vmm.wait_serial(r"login: ", args.timeout * 2, vmm.mark()):
+                return False, f"{mode_name}: no login prompt after reboot; see {bm_out}"
+            time.sleep(0.5)
+            vmm.type("root\n")
+            if not vmm.wait_serial(r"(?i)password: ", 20, vmm.mark()):
+                return False, f"{mode_name}: no password prompt after reboot; see {bm_out}"
+            vmm.type("password\n")
+            if not vmm.wait_serial(r"root:.*# ", 20, vmm.mark()):
+                return False, f"{mode_name}: no root shell after reboot; see {bm_out}"
+            time.sleep(3.0)
+            ip_mode, est_mode = _guest_eth0_ip(vmm, ctx["run_status"])
+            _, conn_m_out = ctx["run_status"](
+                vmm, f"net-probe connect {LAB_HOST}:{HTTP_PORT} --timeout-ms 3000", 20
+            )
+            conn_m = parse_json_line(conn_m_out) or {"raw": conn_m_out.strip()}
+            vmm.kill()
+            dhcp_m = parse_pcap_dhcp(bm_pcap)[pre_reboot_n:]
+            if expect_ip is not None:
+                ok_m = (
+                    est_mode is not None
+                    and est_mode.get("mode") == "static"
+                    and ip_mode == expect_ip
+                    and bool(conn_m.get("ok"))
+                    and len(dhcp_m) == 0
+                )
+            else:
+                ok_m = (
+                    est_mode is not None
+                    and est_mode.get("mode") == "off"
+                    and ip_mode is None
+                    and not bool(conn_m.get("ok"))
+                    and len(dhcp_m) == 0
+                )
+            cases[mode_name] = {
+                "pass": ok_m,
+                "mode": est_mode.get("mode") if est_mode else None,
+                "ip": ip_mode,
+                "connect": conn_m,
+                "dhcp_packets_after_reboot": len(dhcp_m),
+            }
+        finally:
+            if vmm is not None:
+                vmm.close()
+            labm.close()
+
+    report = {
+        "card": card,
+        "cases": cases,
+        "pass": all(c["pass"] for c in cases.values()),
+    }
+    (out / "net-lease.json").write_text(json.dumps(report, indent=2) + "\n")
+    passed = [k for k, v in cases.items() if v["pass"]]
+    failed = [k for k, v in cases.items() if not v["pass"]]
+    summary = (
+        f"card {card}: {len(passed)}/{len(cases)} green "
+        f"(green: {', '.join(passed) or 'none'}; red: {', '.join(failed) or 'none'}); "
+        f"see {out / 'net-lease.json'}"
+    )
+    return report["pass"], summary

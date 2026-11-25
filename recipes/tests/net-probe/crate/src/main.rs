@@ -18,6 +18,9 @@ const MAX_ECHO_STEPS: usize = 4096;
 const MAX_CONNS: usize = 1024;
 const MAX_INTERVAL_MS: u64 = 10_000;
 const MAX_TIMEOUT_MS: u64 = 60_000;
+const MAX_HOLD_TIMEOUT_MS: u64 = 180_000;
+const MAX_HOLD_POLLS: usize = 2048;
+const HOLD_TICK_MS: u64 = 200;
 const MAX_ADDRS: usize = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 
@@ -68,6 +71,7 @@ fn errno_name(code: i32) -> &'static str {
         libc::EAFNOSUPPORT => "EAFNOSUPPORT",
         libc::EAGAIN => "EAGAIN",
         libc::EBADF => "EBADF",
+        libc::ECONNABORTED => "ECONNABORTED",
         libc::ECONNREFUSED => "ECONNREFUSED",
         libc::ECONNRESET => "ECONNRESET",
         libc::EHOSTUNREACH => "EHOSTUNREACH",
@@ -76,6 +80,7 @@ fn errno_name(code: i32) -> &'static str {
         libc::EINVAL => "EINVAL",
         libc::EMSGSIZE => "EMSGSIZE",
         libc::ENETDOWN => "ENETDOWN",
+        libc::ENETRESET => "ENETRESET",
         libc::ENETUNREACH => "ENETUNREACH",
         libc::ENOBUFS => "ENOBUFS",
         libc::ENODEV => "ENODEV",
@@ -1475,11 +1480,171 @@ fn cmd_udp_send(args: &[String]) -> ExitCode {
     }
 }
 
+fn cmd_hold(args: &[String]) -> ExitCode {
+    let Some(target) = args.first() else {
+        eprintln!("usage: net-probe hold <host:port> [--timeout-ms N]");
+        return ExitCode::from(2);
+    };
+    let addr = match parse_addr(target) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("net-probe: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut timeout_ms = MAX_HOLD_TIMEOUT_MS;
+    let mut i = 1usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--timeout-ms" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("net-probe: --timeout-ms requires a value");
+                    return ExitCode::from(2);
+                };
+                match parse_u64_bounded(v, "--timeout-ms", 1, MAX_HOLD_TIMEOUT_MS) {
+                    Ok(ms) => timeout_ms = ms,
+                    Err(e) => {
+                        eprintln!("net-probe: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 2;
+            }
+            other => {
+                eprintln!("net-probe: unknown option {other:?}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    let raw_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    if raw_fd < 0 {
+        print_call_error("hold", "socket", last_errno());
+        return ExitCode::FAILURE;
+    }
+    let fd = OwnedFd(raw_fd);
+    let sa = to_sockaddr(addr);
+    if unsafe {
+        libc::connect(
+            fd.0,
+            (&sa as *const libc::sockaddr_in).cast(),
+            mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    } < 0
+    {
+        print_call_error("hold", "connect", last_errno());
+        return ExitCode::FAILURE;
+    }
+    let hello = b"hi\n";
+    if let Err(err) = write_all_fd(fd.0, hello, DEFAULT_TIMEOUT_MS) {
+        print_call_error("hold", "send", err);
+        return ExitCode::FAILURE;
+    }
+    let mut ack = [0u8; 3];
+    if let Err(err) = read_exact_fd(fd.0, &mut ack, DEFAULT_TIMEOUT_MS) {
+        print_call_error("hold", "recv", err);
+        return ExitCode::FAILURE;
+    }
+    if &ack != hello {
+        eprintln!("net-probe: unexpected handshake bytes");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{{\"ready\":true,\"op\":\"hold\",\"target\":{}}}",
+        json_escape(&addr.to_string())
+    );
+    let _ = io::Write::flush(&mut io::stdout());
+
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+    let start = Instant::now();
+    let limit = Duration::from_millis(timeout_ms);
+    let mut buf = [0u8; 64];
+    let ping = [b'.'];
+    for _ in 0..MAX_HOLD_POLLS {
+        let elapsed = start.elapsed();
+        if elapsed >= limit {
+            break;
+        }
+        let rem_ms = limit.saturating_sub(elapsed).as_millis() as u64;
+        let slice_ms = rem_ms.min(HOLD_TICK_MS).max(1);
+        let mut pfd = libc::pollfd {
+            fd: fd.0,
+            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, slice_ms as i32) };
+        if rc < 0 {
+            let err = last_errno();
+            if err == libc::EINTR {
+                continue;
+            }
+            print_call_error("hold", "poll", err);
+            return ExitCode::FAILURE;
+        }
+        if rc == 0 {
+            let sent = unsafe { libc::send(fd.0, ping.as_ptr().cast(), ping.len(), 0) };
+            if sent < 0 {
+                let err = last_errno();
+                if err == libc::EINTR || err == libc::EAGAIN {
+                    continue;
+                }
+                println!(
+                    "{{\"ok\":true,\"op\":\"hold\",\"event\":\"error\",\"errno\":{err},\"error\":{},\"text\":{},\"elapsed_ms\":{}}}",
+                    json_escape(errno_name(err)),
+                    json_escape(&errno_text(err)),
+                    start.elapsed().as_millis(),
+                );
+                return ExitCode::SUCCESS;
+            }
+            continue;
+        }
+        let n = unsafe { libc::recv(fd.0, buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if n < 0 {
+            let err = last_errno();
+            if err == libc::EINTR || err == libc::EAGAIN {
+                continue;
+            }
+            println!(
+                "{{\"ok\":true,\"op\":\"hold\",\"event\":\"error\",\"errno\":{err},\"error\":{},\"text\":{},\"elapsed_ms\":{}}}",
+                json_escape(errno_name(err)),
+                json_escape(&errno_text(err)),
+                start.elapsed().as_millis(),
+            );
+            return ExitCode::SUCCESS;
+        }
+        if n == 0 {
+            let so_err = get_sockopt_int(fd.0, libc::SOL_SOCKET, libc::SO_ERROR).unwrap_or(0);
+            let event = if so_err != 0 { "error" } else { "eof" };
+            println!(
+                "{{\"ok\":{},\"op\":\"hold\",\"event\":{},\"errno\":{so_err},\"error\":{},\"text\":{},\"elapsed_ms\":{}}}",
+                so_err != 0,
+                json_escape(event),
+                json_escape(errno_name(so_err)),
+                json_escape(&errno_text(so_err)),
+                start.elapsed().as_millis(),
+            );
+            return if so_err != 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+    }
+    println!(
+        "{{\"ok\":false,\"op\":\"hold\",\"event\":\"timeout\",\"errno\":{},\"error\":\"ETIMEDOUT\",\"elapsed_ms\":{}}}",
+        libc::ETIMEDOUT,
+        start.elapsed().as_millis(),
+    );
+    ExitCode::FAILURE
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).take(MAX_ARGS).collect();
     let Some((cmd, rest)) = args.split_first() else {
         eprintln!(
-            "usage: net-probe <connect|bind|echo-bench|http-bench|lookup|sockopts|udp-send> ..."
+            "usage: net-probe <connect|bind|echo-bench|http-bench|lookup|sockopts|udp-send|hold> ..."
         );
         return ExitCode::from(2);
     };
@@ -1491,6 +1656,7 @@ fn main() -> ExitCode {
         "lookup" => cmd_lookup(rest),
         "sockopts" => cmd_sockopts(rest),
         "udp-send" => cmd_udp_send(rest),
+        "hold" => cmd_hold(rest),
         other => {
             eprintln!("net-probe: unknown subcommand {other:?}");
             ExitCode::from(2)

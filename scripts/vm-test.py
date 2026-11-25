@@ -13955,12 +13955,31 @@ def test_net_no_lease(args, out):
     )
 
 
+def test_net_lease(args, out):
+    """Lab DHCP lease lifecycle, renewal, rebinding, expiry abort, ARP conflict decline, carrier, option 121/26, RFC 7844 privacy, release, and static/off modes."""
+    import net_lab
+    return net_lab.run_net_lease(
+        args,
+        out,
+        {
+            "VM": VM,
+            "Blocked": Blocked,
+            "NET_CARDS": NET_CARDS,
+            "net_card": net_card,
+            "root_shell": root_shell,
+            "run_status": run_status,
+            "dns_reply": dns_reply,
+        },
+    )
+
+
 # These start their own boots of the shared image, with a peer on QEMU's network hub.
 OWN_IMAGE["net-hardening"] = test_net_hardening
 OWN_IMAGE["net-calls"] = test_net_calls
 OWN_IMAGE["net-basics"] = test_net_basics
 OWN_IMAGE["net-perf"] = test_net_perf
 OWN_IMAGE["net-no-lease"] = test_net_no_lease
+OWN_IMAGE["net-lease"] = test_net_lease
 # These boot with their own sound device, recorded by QEMU's wav backend.
 OWN_IMAGE["audio-baseline"] = test_audio_baseline
 OWN_IMAGE["audio-ring"] = test_audio_ring
