@@ -1,0 +1,2077 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d266fe6..f86e6af 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -642,15 +642,6 @@ dependencies = [
+  "thiserror",
+ ]
+ 
+-[[package]]
+-name = "dlib"
+-version = "0.5.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
+-dependencies = [
+- "libloading",
+-]
+-
+ [[package]]
+ name = "either"
+ version = "1.17.0"
+@@ -1113,8 +1104,6 @@ dependencies = [
+ [[package]]
+ name = "glycin"
+ version = "4.0.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7e5b54873fd0e4ea8fe447e4f2b8c670c485862b5d9d0d624dcc886bb3a89ecd"
+ dependencies = [
+  "glycin-builtin",
+  "glycin-external",
+@@ -1152,8 +1141,6 @@ dependencies = [
+ [[package]]
+ name = "glycin-core"
+ version = "4.0.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fdade20eb67ac75b5c306a99c594155e1096ea7aa536741f64158afa1ffdeb36"
+ dependencies = [
+  "async-fs",
+  "async-global-executor",
+@@ -1179,7 +1166,6 @@ dependencies = [
+  "gufo-exif",
+  "half",
+  "libc",
+- "libseccomp",
+  "moxcms",
+  "nix",
+  "static_assertions",
+@@ -1188,7 +1174,6 @@ dependencies = [
+  "tokio-stream",
+  "tracing",
+  "tracing-subscriber",
+- "yeslogic-fontconfig-sys",
+  "zbus",
+ ]
+ 
+@@ -1208,8 +1193,6 @@ dependencies = [
+ [[package]]
+ name = "glycin-external"
+ version = "4.0.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2c9b985c8fe1d1c2cdc91566faa52f5d3226506201a4121580ae8cfcb71992e5"
+ dependencies = [
+  "glycin-core",
+ ]
+@@ -1238,7 +1221,6 @@ dependencies = [
+  "gufo-common",
+  "gufo-exif",
+  "gufo-jpeg",
+- "hayro-jpeg2000",
+  "image",
+  "image-extras",
+  "jpeg-encoder",
+@@ -1336,8 +1318,6 @@ dependencies = [
+ [[package]]
+ name = "glycin-utils"
+ version = "5.0.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "43a93c6dfde7ab29b8e3c9844cb9e59a5bcd58ffdd9b24aab500d3a78a4b4cb0"
+ dependencies = [
+  "async-lock",
+  "bitflags 2.13.1",
+@@ -1352,9 +1332,7 @@ dependencies = [
+  "half",
+  "image",
+  "libc",
+- "libseccomp",
+  "log",
+- "memmap2",
+  "nix",
+  "paste",
+  "rayon",
+@@ -1820,16 +1798,6 @@ dependencies = [
+  "walkdir",
+ ]
+ 
+-[[package]]
+-name = "libloading"
+-version = "0.8.9"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+-dependencies = [
+- "cfg-if",
+- "windows-link",
+-]
+-
+ [[package]]
+ name = "libm"
+ version = "0.2.16"
+@@ -1891,24 +1859,6 @@ dependencies = [
+  "system-deps",
+ ]
+ 
+-[[package]]
+-name = "libseccomp"
+-version = "0.4.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0e5310a2c5b6ffbc094b5f70a2ca7b79ed36ad90e6f90994b166489a1bce3fcc"
+-dependencies = [
+- "bitflags 2.13.1",
+- "libc",
+- "libseccomp-sys",
+- "pkg-config",
+-]
+-
+-[[package]]
+-name = "libseccomp-sys"
+-version = "0.3.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "60276e2d41bbb68b323e566047a1bfbf952050b157d8b5cdc74c07c1bf4ca3b6"
+-
+ [[package]]
+ name = "linux-raw-sys"
+ version = "0.12.1"
+@@ -3285,17 +3235,6 @@ version = "1.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
+ 
+-[[package]]
+-name = "yeslogic-fontconfig-sys"
+-version = "6.0.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1d8b8abf912b9a29ff112e1671c97c33636903d13a69712037190e6805af4f76"
+-dependencies = [
+- "dlib",
+- "once_cell",
+- "pkg-config",
+-]
+-
+ [[package]]
+ name = "zbus"
+ version = "5.18.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index 9bbf3ff..a6d7f62 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -84,11 +84,9 @@ image-extras = { version = "0.1.1", default-features = false, features = [
+     "xpm",
+ ] }
+ libc = "0.2.152"
+-libseccomp = "0.4.0"
+ log = "0.4.0"
+-memmap = { package = "memmap2", version = "0.9.0" }
+ moxcms = "0.8.1"
+-nix = { version = "0.31.0", features = ["fs", "resource", "signal"] }
++nix = { version = "0.31.0", features = ["fs", "signal"] }
+ paste = "1.0.0"
+ png = "0.18.0"
+ rayon = "1.10.0"
+@@ -119,3 +117,9 @@ dockerfile = "build-aux/cross/Dockerfile.windows"
+ 
+ [workspace.metadata.cross.build.env]
+ passthrough = ["GLYCIN_TEST_SKIP_EXT"]
++
++[patch.crates-io]
++glycin = { path = "vendor/glycin-4.0.5" }
++glycin-core = { path = "vendor/glycin-core-4.0.5" }
++glycin-external = { path = "vendor/glycin-external-4.0.5" }
++glycin-utils = { path = "vendor/glycin-utils-5.0.1" }
+diff --git a/vendor/glycin-4.0.5/Cargo.toml b/vendor/glycin-4.0.5/Cargo.toml
+index 95f4b02..cc106ba 100644
+--- a/vendor/glycin-4.0.5/Cargo.toml
++++ b/vendor/glycin-4.0.5/Cargo.toml
+@@ -61,11 +61,11 @@ version = "4.0.5"
+ optional = true
+ default-features = false
+ 
+-[target.'cfg(not(target_os = "linux"))'.dependencies.glycin-builtin]
++[target.'cfg(not(any(target_os = "linux", target_os = "redox")))'.dependencies.glycin-builtin]
+ version = "4.0.5"
+ default-features = false
+ 
+-[target.'cfg(target_os = "linux")'.dependencies.glycin-external]
++[target.'cfg(any(target_os = "linux", target_os = "redox"))'.dependencies.glycin-external]
+ version = "4.0.5"
+ default-features = false
+ 
+diff --git a/vendor/glycin-4.0.5/src/lib.rs b/vendor/glycin-4.0.5/src/lib.rs
+index 5991d93..ce06b39 100644
+--- a/vendor/glycin-4.0.5/src/lib.rs
++++ b/vendor/glycin-4.0.5/src/lib.rs
+@@ -52,7 +52,7 @@
+ //! [`gtk4::Image::from_paintable()`]: https://gtk-rs.org/gtk4-rs/git/docs/gtk4/struct.Image.html#method.from_paintable
+ //! [loaders]: https://gitlab.gnome.org/GNOME/glycin#supported-image-formats
+ 
+-#[cfg(not(target_os = "linux"))]
++#[cfg(not(any(target_os = "linux", target_os = "redox")))]
+ pub use glycin_builtin::*;
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "redox"))]
+ pub use glycin_external::*;
+diff --git a/vendor/glycin-core-4.0.5/Cargo.toml b/vendor/glycin-core-4.0.5/Cargo.toml
+index a94407f..d583d84 100644
+--- a/vendor/glycin-core-4.0.5/Cargo.toml
++++ b/vendor/glycin-core-4.0.5/Cargo.toml
+@@ -62,10 +62,8 @@ builtin-test = [
+ ]
+ default = ["async-io"]
+ external = [
+-    "dep:libseccomp",
+     "dep:gio-unix",
+     "dep:zbus",
+-    "dep:yeslogic-fontconfig-sys",
+     "dep:nix",
+     "glycin-utils/external",
+ ]
+@@ -182,10 +180,6 @@ version = "2.4.1"
+ [dependencies.libc]
+ version = "0.2.152"
+ 
+-[dependencies.libseccomp]
+-version = "0.4.0"
+-optional = true
+-
+ [dependencies.moxcms]
+ version = "0.8.1"
+ features = ["in_place"]
+@@ -194,10 +188,6 @@ features = ["in_place"]
+ version = "0.31.0"
+ features = [
+     "fs",
+-    "resource",
+-    "signal",
+-    "fs",
+-    "resource",
+     "signal",
+ ]
+ optional = true
+@@ -234,10 +224,6 @@ features = [
+ ]
+ optional = true
+ 
+-[dependencies.yeslogic-fontconfig-sys]
+-version = "6.0.0"
+-optional = true
+-
+ [dependencies.zbus]
+ version = "5.15.0"
+ features = [
+diff --git a/vendor/glycin-core-4.0.5/src/api/common.rs b/vendor/glycin-core-4.0.5/src/api/common.rs
+index 3aee642..7218741 100644
+--- a/vendor/glycin-core-4.0.5/src/api/common.rs
++++ b/vendor/glycin-core-4.0.5/src/api/common.rs
+@@ -19,29 +19,20 @@ use crate::util::RunEnvironment;
+ use crate::{Error, MimeType, Pool, config};
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+-/// Sandboxing mechanism for image loading and editing
+ pub enum SandboxMechanism {
+-    Bwrap,
+-    FlatpakSpawn,
+-    NotSandboxed,
++    FerrionRun,
+ }
+ 
+ impl SandboxMechanism {
+     pub async fn detect() -> Self {
+         match RunEnvironment::cached().await {
+-            RunEnvironment::SandboxForceDisabled => Self::NotSandboxed,
+-            RunEnvironment::FlatpakDevel => Self::NotSandboxed,
+-            RunEnvironment::Flatpak => Self::FlatpakSpawn,
+-            RunEnvironment::Host => Self::Bwrap,
+-            RunEnvironment::HostBwrapSyscallsBlocked => Self::NotSandboxed,
++            RunEnvironment::Host => Self::FerrionRun,
+         }
+     }
+ 
+     pub fn into_selector(self) -> SandboxSelector {
+         match self {
+-            Self::Bwrap => SandboxSelector::Bwrap,
+-            Self::FlatpakSpawn => SandboxSelector::FlatpakSpawn,
+-            Self::NotSandboxed => SandboxSelector::NotSandboxed,
++            Self::FerrionRun => SandboxSelector::Auto,
+         }
+     }
+ }
+@@ -50,20 +41,8 @@ impl SandboxMechanism {
+ #[cfg_attr(feature = "gobject", derive(gio::glib::Enum))]
+ #[cfg_attr(feature = "gobject", enum_type(name = "GlySandboxSelector"))]
+ #[repr(i32)]
+-/// Method by which the [`SandboxMechanism`] is selected
+ pub enum SandboxSelector {
+     #[default]
+-    /// This mode selects `bwrap` outside of Flatpaks and usually
+-    /// `flatpak-spawn` inside of Flatpaks. The sandbox is disabled
+-    /// automatically inside of Flatpak development environments. See
+-    /// details below.
+-    ///
+-    /// Inside of Flatpaks, `flatpak-spawn` is used to create the sandbox. This
+-    /// mechanism starts an installed Flatpak with the same app id. For
+-    /// development, Flatpak are usually not installed and the sandbox can
+-    /// therefore not be used. If the sandbox has been started via
+-    /// `flatpak-builder --run` (i.e. without installed Flatpak) and the app id
+-    /// ends with `Devel`, the sandbox is disabled.
+     Auto,
+     Bwrap,
+     FlatpakSpawn,
+@@ -72,12 +51,8 @@ pub enum SandboxSelector {
+ 
+ impl SandboxSelector {
+     pub async fn determine_sandbox_mechanism(self) -> SandboxMechanism {
+-        match self {
+-            Self::Auto => SandboxMechanism::detect().await,
+-            Self::Bwrap => SandboxMechanism::Bwrap,
+-            Self::FlatpakSpawn => SandboxMechanism::FlatpakSpawn,
+-            Self::NotSandboxed => SandboxMechanism::NotSandboxed,
+-        }
++        let _ = self;
++        SandboxMechanism::detect().await
+     }
+ }
+ 
+diff --git a/vendor/glycin-core-4.0.5/src/api/loader.rs b/vendor/glycin-core-4.0.5/src/api/loader.rs
+index 5741598..d765009 100644
+--- a/vendor/glycin-core-4.0.5/src/api/loader.rs
++++ b/vendor/glycin-core-4.0.5/src/api/loader.rs
+@@ -539,7 +539,7 @@ impl Image {
+             #[cfg(feature = "external")]
+             ImageLoader::Binary(image_loader) => image_loader.active_sandbox_mechanism,
+             #[cfg(feature = "builtin")]
+-            ImageLoader::Builtin(_) => SandboxMechanism::NotSandboxed,
++            ImageLoader::Builtin(_) => SandboxMechanism::FerrionRun,
+         }
+     }
+ 
+@@ -772,6 +772,8 @@ impl Frame {
+         mut frame: glycin_utils::Frame<B>,
+         image: &Image,
+     ) -> Result<Self, Error> {
++        validate_frame_header(&frame, &image.loader.limits)?;
++
+         frame.initial_seal().await?;
+ 
+         validate_frame(&frame, &image.loader.limits)?;
+@@ -867,20 +869,10 @@ impl Default for FrameRequest {
+     }
+ }
+ 
+-fn validate_frame<B: ByteData>(
++fn validate_frame_header<B: ByteData>(
+     frame: &glycin_utils::Frame<B>,
+     limits: &Limits,
+ ) -> Result<(), Error> {
+-    let img_buf = &frame.texture;
+-
+-    if img_buf.len() < frame.n_bytes()? {
+-        return Err(ErrorKind::TextureWrongSize {
+-            texture_size: img_buf.len(),
+-            frame: format!("{:?}", frame.desc()),
+-        }
+-        .err());
+-    }
+-
+     if frame.stride < frame.width.smul(frame.memory_format.n_bytes().u32())? {
+         return Err(ErrorKind::StrideTooSmall(format!("{:?}", frame.desc())).err());
+     }
+@@ -889,7 +881,8 @@ fn validate_frame<B: ByteData>(
+         return Err(ErrorKind::WidgthOrHeightZero(format!("{:?}", frame.desc())).err());
+     }
+ 
+-    if (frame.stride as u64).smul(frame.height as u64)? > MAX_TEXTURE_SIZE {
++    let n_bytes = (frame.stride as u64).smul(frame.height as u64)?;
++    if n_bytes > MAX_TEXTURE_SIZE || n_bytes > glycin_utils::MAX_SHARED_BYTES as u64 {
+         return Err(ErrorKind::TextureTooLarge.err());
+     }
+ 
+@@ -901,7 +894,6 @@ fn validate_frame<B: ByteData>(
+         return Err(ErrorKind::TextureTooLarge.err());
+     }
+ 
+-    // Ensure
+     frame.width.try_i32()?;
+     frame.height.try_i32()?;
+     frame.stride.try_usize()?;
+@@ -909,6 +901,25 @@ fn validate_frame<B: ByteData>(
+     Ok(())
+ }
+ 
++fn validate_frame<B: ByteData>(
++    frame: &glycin_utils::Frame<B>,
++    limits: &Limits,
++) -> Result<(), Error> {
++    validate_frame_header(frame, limits)?;
++
++    let img_buf = &frame.texture;
++
++    if img_buf.len() != frame.n_bytes()? {
++        return Err(ErrorKind::TextureWrongSize {
++            texture_size: img_buf.len(),
++            frame: format!("{:?}", frame.desc()),
++        }
++        .err());
++    }
++
++    Ok(())
++}
++
+ impl FrameRequest {
+     pub fn new() -> Self {
+         let mut request = glycin_utils::FrameRequest::default();
+diff --git a/vendor/glycin-core-4.0.5/src/error.rs b/vendor/glycin-core-4.0.5/src/error.rs
+index d2d2448..2e72821 100644
+--- a/vendor/glycin-core-4.0.5/src/error.rs
++++ b/vendor/glycin-core-4.0.5/src/error.rs
+@@ -203,9 +203,6 @@ pub(crate) enum ErrorKind {
+     StrideTooSmall(String),
+     #[error("Width or height is zero: {0}")]
+     WidgthOrHeightZero(String),
+-    #[cfg(feature = "external")]
+-    #[error("Seccomp: {0}")]
+-    Seccomp(Arc<libseccomp::error::SeccompError>),
+     #[error("ICC profile: {0}")]
+     IccProfile(#[from] moxcms::CmsError),
+     #[error("Memory transformation: {0}")]
+@@ -281,13 +278,6 @@ impl From<Arc<std::io::Error>> for ErrorKind {
+     }
+ }
+ 
+-#[cfg(feature = "external")]
+-impl From<libseccomp::error::SeccompError> for ErrorKind {
+-    fn from(err: libseccomp::error::SeccompError) -> Self {
+-        Self::Seccomp(Arc::new(err))
+-    }
+-}
+-
+ impl From<oneshot::Canceled> for ErrorKind {
+     fn from(_err: oneshot::Canceled) -> Self {
+         Self::InternalCommunicationCanceled
+diff --git a/vendor/glycin-core-4.0.5/src/lib.rs b/vendor/glycin-core-4.0.5/src/lib.rs
+index 61d27dc..da6391d 100644
+--- a/vendor/glycin-core-4.0.5/src/lib.rs
++++ b/vendor/glycin-core-4.0.5/src/lib.rs
+@@ -45,8 +45,6 @@ mod dbus;
+ #[cfg(not(feature = "external"))]
+ mod dbus_shim;
+ mod error;
+-#[cfg(feature = "external")]
+-mod fontconfig;
+ mod icc;
+ mod main_context;
+ mod orientation;
+diff --git a/vendor/glycin-core-4.0.5/src/sandbox.rs b/vendor/glycin-core-4.0.5/src/sandbox.rs
+index c41629f..2d0cfa1 100644
+--- a/vendor/glycin-core-4.0.5/src/sandbox.rs
++++ b/vendor/glycin-core-4.0.5/src/sandbox.rs
+@@ -1,151 +1,21 @@
+ // Copyright (c) 2024 GNOME Foundation Inc.
+ 
+-use std::ffi::{c_int, c_void};
+-use std::fs::{DirEntry, File, canonicalize};
+-use std::io::{self, BufRead, BufReader};
+-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
++use std::os::fd::{AsRawFd, OwnedFd};
+ use std::os::unix::net::UnixStream;
+-use std::os::unix::process::{CommandExt, ExitStatusExt};
++use std::os::unix::process::CommandExt;
+ use std::path::{Path, PathBuf};
+ use std::process::{Command, Stdio};
+-use std::sync::Arc;
+ 
+-use gio::glib;
+-use libseccomp::error::SeccompError;
+-use libseccomp::{
+-    ScmpAction, ScmpArch, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall,
+-};
+-use nix::libc::siginfo_t;
+-use nix::sys::{memfd, resource};
+-use nix::unistd;
+-
+-use crate::config::{ConfigEntry, LoaderConfig, Processor};
++use crate::config::ConfigEntry;
+ use crate::error::ErrorKind;
+-use crate::util::{self, AsyncMutex, new_async_mutex, spawn_blocking};
+ use crate::{Error, SandboxMechanism};
+ 
+-type SystemSetupStore = Arc<Result<SystemSetup, Arc<io::Error>>>;
+-
+-static SYSTEM_SETUP: AsyncMutex<Option<SystemSetupStore>> = new_async_mutex(None);
+-
+-/**** BEGIN NOTE ON CODE SHARING
+- *
+- * This code is copied from Flatpak:
+- *
+- *   https://github.com/flatpak/flatpak/blob/main/common/flatpak-run.c
+- *
+- * It should be routinely updated to account for changes in Flatpak.
+- *
+- * We ought to split this code out of Flatpak into a subproject, to make
+- * make code sharing easier and reduce the need for manual copy/pasting.
+- *
+- * * END NOTE ON CODE SHARING
+- */
+-const BLOCKED_SYSCALLS: &[(&str, ScmpAction, &[ScmpArgCompare])] = &[
+-    /* Block dmesg */
+-    ("syslog", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Useless old syscall */
+-    ("uselib", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Don't allow disabling accounting */
+-    ("acct", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Don't allow reading current quota use */
+-    ("quotactl", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Don't allow access to the kernel keyring */
+-    ("add_key", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("keyctl", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("request_key", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Scary VM/NUMA ops */
+-    ("move_pages", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("mbind", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("get_mempolicy", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("set_mempolicy", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("migrate_pages", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Don't allow subnamespace setups: */
+-    ("unshare", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("setns", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("mount", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("umount", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("umount2", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("pivot_root", ScmpAction::Errno(libc::EPERM), &[]),
+-    ("chroot", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Architectures with CONFIG_CLONE_BACKWARDS2: the child stack
+-     * and flags arguments are reversed so the flags come second */
+-    #[cfg(target_arch = "s390x")]
+-    (
+-        "clone",
+-        ScmpAction::Errno(libc::EPERM),
+-        &[ScmpArgCompare::new(
+-            1,
+-            ScmpCompareOp::MaskedEqual(libc::CLONE_NEWUSER as u64),
+-            libc::CLONE_NEWUSER as u64,
+-        )],
+-    ),
+-    /* Normally the flags come first */
+-    #[cfg(not(target_arch = "s390x"))]
+-    (
+-        "clone",
+-        ScmpAction::Errno(libc::EPERM),
+-        &[ScmpArgCompare::new(
+-            0,
+-            ScmpCompareOp::MaskedEqual(libc::CLONE_NEWUSER as u64),
+-            libc::CLONE_NEWUSER as u64,
+-        )],
+-    ),
+-    /* Don't allow faking input to the controlling tty (CVE-2017-5226) */
+-    (
+-        "ioctl",
+-        ScmpAction::Errno(libc::EPERM),
+-        &[ScmpArgCompare::new(
+-            1,
+-            ScmpCompareOp::MaskedEqual(0xFFFFFFFF),
+-            libc::TIOCSTI as u64,
+-        )],
+-    ),
+-    /* In the unlikely event that the controlling tty is a Linux virtual
+-     * console (/dev/tty2 or similar), copy/paste operations have an effect
+-     * similar to TIOCSTI (CVE-2023-28100) */
+-    (
+-        "ioctl",
+-        ScmpAction::Errno(libc::EPERM),
+-        &[ScmpArgCompare::new(
+-            1,
+-            ScmpCompareOp::MaskedEqual(0xFFFFFFFF),
+-            libc::TIOCLINUX as u64,
+-        )],
+-    ),
+-    /* seccomp can't look into clone3()'s struct clone_args to check whether
+-     * the flags are OK, so we have no choice but to block clone3().
+-     * Return ENOSYS so user-space will fall back to clone().
+-     * (CVE-2021-41133; see also https://github.com/moby/moby/commit/9f6b562d) */
+-    ("clone3", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    /* New mount manipulation APIs can also change our VFS. There's no
+-     * legitimate reason to do these in the sandbox, so block all of them
+-     * rather than thinking about which ones might be dangerous.
+-     * (CVE-2021-41133) */
+-    ("open_tree", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    ("move_mount", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    ("fsopen", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    ("fsconfig", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    ("fsmount", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    ("fspick", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    ("mount_setattr", ScmpAction::Errno(libc::ENOSYS), &[]),
+-    /* Profiling operations; we expect these to be done by tools from outside
+-     * the sandbox.  In particular perf has been the source of many CVEs.
+-     */
+-    ("perf_event_open", ScmpAction::Errno(libc::EPERM), &[]),
+-    /* Don't allow you to switch to bsd emulation or whatnot */
+-    (
+-        "personality",
+-        ScmpAction::Errno(libc::EPERM),
+-        &[ScmpArgCompare::new(0, ScmpCompareOp::NotEqual, 0x0000)],
+-    ),
+-];
+-
+-const INHERITED_ENVIRONMENT_VARIABLES: &[&str] = &["RUST_BACKTRACE", "RUST_LOG", "XDG_RUNTIME_DIR"];
++const FERRION_RUN_BIN: &str = "/usr/bin/ferrion-run";
++const INHERITED_ENVIRONMENT_VARIABLES: &[&str] = &["RUST_BACKTRACE", "RUST_LOG"];
++const MAX_RO_BINDS: usize = 16;
+ 
+ pub struct Sandbox {
+     sandbox_mechanism: SandboxMechanism,
+-    config_entry: ConfigEntry,
+     exec: PathBuf,
+     dbus_socket: UnixStream,
+     ro_bind_extra: Vec<PathBuf>,
+@@ -155,7 +25,6 @@ static_assertions::assert_impl_all!(Sandbox: Send, Sync);
+ 
+ pub struct SpawnedSandbox {
+     pub command: Command,
+-    // Keep seccomp fd alive until process exits
+     pub _seccomp_fd: Option<OwnedFd>,
+     pub _dbus_socket: UnixStream,
+ }
+@@ -174,7 +43,6 @@ impl Sandbox {
+                 .exec()
+                 .map(|x| x.to_path_buf())
+                 .ok_or(ErrorKind::ExpectedBinaryProcessor.err())?,
+-            config_entry,
+             dbus_socket,
+             ro_bind_extra: Vec::new(),
+         })
+@@ -185,33 +53,15 @@ impl Sandbox {
+     }
+ 
+     pub fn add_ro_bind(&mut self, path: PathBuf) {
+-        self.ro_bind_extra.push(path);
++        if self.ro_bind_extra.len() < MAX_RO_BINDS {
++            self.ro_bind_extra.push(path);
++        }
+     }
+ 
+     pub async fn spawn(self) -> Result<SpawnedSandbox, Error> {
+         let dbus_fd = self.dbus_socket.as_raw_fd();
+-
+-        let mut shared_fds = Vec::new();
+-
+-        let (mut command, seccomp_fd) = match self.sandbox_mechanism {
+-            SandboxMechanism::Bwrap => {
+-                let seccomp_memfd = Self::seccomp_export_bpf(&self.seccomp_filter()?)?;
+-                let command = self.bwrap_command(&seccomp_memfd).await?;
+-
+-                shared_fds.push(seccomp_memfd.as_raw_fd());
+-
+-                (command, Some(seccomp_memfd))
+-            }
+-            SandboxMechanism::FlatpakSpawn => {
+-                let command = self.flatpak_spawn_command();
+-
+-                (command, None)
+-            }
+-            SandboxMechanism::NotSandboxed => {
+-                let command = self.no_sandbox_command();
+-
+-                (command, None)
+-            }
++        let mut command = match self.sandbox_mechanism {
++            SandboxMechanism::FerrionRun => self.ferrion_run_command(dbus_fd),
+         };
+ 
+         command.arg("--dbus-fd");
+@@ -221,698 +71,46 @@ impl Sandbox {
+         command.stderr(Stdio::piped());
+         command.stdout(Stdio::piped());
+ 
+-        shared_fds.push(self.dbus_socket.as_raw_fd());
+-
+         unsafe {
+             command.pre_exec(move || {
+-                #[cfg(not(all(target_os = "linux", target_env = "musl")))]
+-                {
+-                    libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as i32);
+-                }
+-                #[cfg(all(target_os = "linux", target_env = "musl"))]
+-                {
+-                    libc::syscall(
+-                        libc::SYS_close_range,
+-                        3,
+-                        libc::c_uint::MAX,
+-                        libc::CLOSE_RANGE_CLOEXEC as libc::c_uint,
+-                    );
++                let flags = libc::fcntl(dbus_fd, libc::F_GETFD);
++                if flags < 0 {
++                    return Err(std::io::Error::last_os_error());
+                 }
+-                // Allow FDs to be passed to child process
+-                for raw_fd in &shared_fds {
+-                    let fd = BorrowedFd::borrow_raw(*raw_fd);
+-                    if let Ok(flags) = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFD) {
+-                        let mut flags = nix::fcntl::FdFlag::from_bits_truncate(flags);
+-                        flags.remove(nix::fcntl::FdFlag::FD_CLOEXEC);
+-                        let _ = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_SETFD(flags));
+-                    }
++                if libc::fcntl(dbus_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
++                    return Err(std::io::Error::last_os_error());
+                 }
+-
+                 Ok(())
+             });
+         }
+ 
+         Ok(SpawnedSandbox {
+             command,
+-            _seccomp_fd: seccomp_fd,
++            _seccomp_fd: None,
+             _dbus_socket: self.dbus_socket,
+         })
+     }
+ 
+-    async fn bwrap_command(&self, seccomp_memfd: &OwnedFd) -> Result<Command, Error> {
+-        let mut command = Command::new("bwrap");
+-
+-        command.args([
+-            "--unshare-all",
+-            "--die-with-parent",
+-            // change working directory to something that exists
+-            "--chdir",
+-            "/",
+-            // Make /usr available as read only
+-            "--ro-bind",
+-            "/usr",
+-            "/usr",
+-            // Make tmpfs dev available
+-            "--dev",
+-            "/dev",
+-            // Additional linker configuration via /etc/ld.so.conf if available
+-            "--ro-bind-try",
+-            "/etc/ld.so.cache",
+-            "/etc/ld.so.cache",
+-            // Add /nix/store on systems with Nix
+-            "--ro-bind-try",
+-            "/nix/store",
+-            "/nix/store",
+-            // Create a fake HOME for glib to not throw warnings
+-            "--tmpfs",
+-            "/tmp-home",
+-            // Create a fake runtime dir for glib to not throw warnings
+-            "--tmpfs",
+-            "/tmp-run",
+-            // setup clean environment
+-            "--clearenv",
+-            "--setenv",
+-            "HOME",
+-            "/tmp-home",
+-            "--setenv",
+-            "XDG_RUNTIME_DIR",
+-            "/tmp-run",
+-        ]);
++    fn ferrion_run_command(&self, dbus_fd: libc::c_int) -> Command {
++        let mut command = Command::new(FERRION_RUN_BIN);
++        command.arg("--no-network");
++        command.arg("--pass-fd");
++        command.arg(dbus_fd.to_string());
+ 
+-        // Inherit some environment variables
+         for key in INHERITED_ENVIRONMENT_VARIABLES {
+-            if let Some(val) = std::env::var_os(key) {
+-                command.arg("--setenv");
++            if std::env::var_os(key).is_some() {
++                command.arg("--env");
+                 command.arg(key);
+-                command.arg(val);
+             }
+         }
+ 
+-        let system_setup_arc = SystemSetup::cached().await;
+-
+-        let system = match system_setup_arc.as_ref().as_ref() {
+-            Err(err) => {
+-                return Err(err.clone().into());
+-            }
+-            Ok(system) => system,
+-        };
+-
+-        // Symlink paths like /usr/lib64 to /lib64
+-        for (dest, src) in &system.lib_symlinks {
+-            command.arg("--symlink");
+-            command.arg(src);
+-            command.arg(dest);
+-        }
+-
+-        let mut mounted_paths = Vec::<PathBuf>::new();
+-        let mut mount = |command: &mut Command, way: &str, path: &Path| {
+-            if path.is_symlink() {
+-                if !mounted_paths.iter().any(|x| path.starts_with(x)) {
+-                    match canonicalize(path) {
+-                        Ok(target) => {
+-                            if !mounted_paths.iter().any(|x| path.starts_with(x)) {
+-                                command.arg("--symlink");
+-                                command.arg(&target);
+-                                command.arg(path);
+-                                tracing::trace!("Symlink {path:?} -> {target:?}");
+-                                mounted_paths.push(path.to_owned());
+-                            } else {
+-                                tracing::trace!(
+-                                    "Parent of symlink path {path:?} already mounted. Skipping."
+-                                );
+-                            }
+-                        }
+-                        Err(err) => tracing::debug!("Couldn't canonicalize path {path:?}: {err}"),
+-                    }
+-                } else {
+-                    tracing::trace!("Parent of symlink {path:?} already mounted. Skipping.");
+-                }
+-            }
+-
+-            match canonicalize(path) {
+-                Ok(path) => {
+-                    if !mounted_paths.iter().any(|x| path.starts_with(x)) {
+-                        command.arg(way);
+-                        command.arg(&path);
+-                        command.arg(&path);
+-                        tracing::trace!("Mounting {path:?}");
+-                        mounted_paths.push(path);
+-                    } else {
+-                        tracing::trace!("Parent of mount path {path:?} already mounted. Skipping.");
+-                    }
+-                }
+-                Err(err) => tracing::debug!("Couldn't canonicalize path {path:?}: {err}"),
+-            }
+-        };
+-
+-        let caps = get_caps();
+-        let mut caps_reset_guard = None;
+-
+-        match caps {
+-            Ok(caps) => {
+-                const CAP_DAC_OVERRIDE_POSITION: u32 = 1_u32;
+-                const CAP_DAC_READ_SEARCH_POSTION: u32 = 2_u32;
+-
+-                if caps[0].effective & (1 << CAP_DAC_OVERRIDE_POSITION) != 0
+-                    || caps[0].effective & (1 << CAP_DAC_READ_SEARCH_POSTION) != 0
+-                {
+-                    let mut new_caps = caps;
+-                    new_caps[0].effective &= !(1 << CAP_DAC_OVERRIDE_POSITION);
+-                    new_caps[0].effective &= !(1 << CAP_DAC_READ_SEARCH_POSTION);
+-
+-                    if let Err(err) = set_caps(new_caps) {
+-                        tracing::error!("Failed to set caps: {err}");
+-                    } else {
+-                        caps_reset_guard = Some(CapsGuard(caps));
+-                    }
+-                } else {
+-                    tracing::trace!("CAP_DAC_OVERRIDE not set. Not touching CAPs");
+-                }
+-            }
+-            Err(ref err) => tracing::error!("Couldn't get Linux caps: {err}"),
+-        }
+-
+-        // Mount paths like /lib64 if they exist
+-        for dir in &system.lib_dirs {
+-            mount(&mut command, "--ro-bind", dir);
+-        }
+-
+-        // Make extra dirs available
+         for dir in &self.ro_bind_extra {
+-            mount(&mut command, "--ro-bind", dir);
+-        }
+-
+-        // Make loader binary available if not in /usr. This is useful for testing and
+-        // adding loaders in user (/home) configurations.
+-        if !self.exec().starts_with("/usr") {
+-            mount(&mut command, "--ro-bind", self.exec());
+-        }
+-
+-        // Fontconfig
+-        if !self.config_entry.fontconfig() {
+-            tracing::trace!("Fontconfig not enabled for loader/editor");
+-        } else if let Some(fc_paths) = crate::fontconfig::cached_paths() {
+-            // Expose paths to fonts, configs, and caches
+-            for path in fc_paths {
+-                mount(&mut command, "--ro-bind-try", path);
+-            }
+-
+-            // Fontconfig needs a writeable cache if the cache is outdated
+-            let cache_dir = PathBuf::from_iter([
+-                glib::user_cache_dir(),
+-                "glycin".into(),
+-                self.exec().iter().skip(1).collect(),
+-            ]);
+-
+-            let fc_cache_dir = PathBuf::from_iter([cache_dir.clone(), "fontconfig".into()]);
+-
+-            // Create cache dir
+-            match util::spawn_blocking(move || {
+-                std::fs::create_dir_all(fc_cache_dir).map_err(|x| x.into())
+-            })
+-            .await
+-            .flatten()
+-            {
+-                Err(err) => tracing::warn!("Failed to create fontconfig cache dir: {err:?}"),
+-                Ok(()) => {
+-                    command.arg("--bind-try");
+-                    command.arg(&cache_dir);
+-                    command.arg(&cache_dir);
+-
+-                    command.arg("--setenv");
+-                    command.arg("XDG_CACHE_HOME");
+-                    command.arg(&cache_dir);
+-                }
+-            }
+-        } else {
+-            tracing::warn!("Failed to load fonftconfig environment");
+-        }
+-
+-        // Reset to original caps
+-        drop(caps_reset_guard);
+-
+-        // Configure seccomp
+-        command.arg("--seccomp");
+-        command.arg(seccomp_memfd.as_raw_fd().to_string());
+-
+-        // Loader binary
+-        command.arg(self.exec());
+-
+-        // Set sandbox memory limit
+-        unsafe {
+-            command.pre_exec(|| {
+-                Self::set_memory_limit();
+-                Ok(())
+-            });
++            command.arg("--ro");
++            command.arg(dir);
+         }
+ 
+-        Ok(command)
+-    }
+-
+-    fn flatpak_spawn_command(&self) -> Command {
+-        let mut command = Command::new("flatpak-spawn");
+-
+-        let memory_limit = Self::memory_limit();
+-        let dbus_fd = self.dbus_socket.as_raw_fd();
+-
+-        tracing::debug!("Setting prlimit to {memory_limit} bytes");
+-
+-        command.args([
+-            "--sandbox",
+-            // die with parent
+-            "--watch-bus",
+-            // change working directory to something that exists
+-            "--directory=/",
+-        ]);
+-
+-        // Start from a clean environment
+-        //
+-        // It's not really cleared due to this issue but nothing we can do about this:
+-        // <https://github.com/flatpak/flatpak/issues/5271>
+-        command.env_clear();
+-
+-        // Inherit some environment variables
+-        for key in INHERITED_ENVIRONMENT_VARIABLES {
+-            if let Some(val) = std::env::var_os(key) {
+-                command.env(key, val);
+-            }
+-        }
+-
+-        // Forward dbus connection
+-        command.arg(format!("--forward-fd={dbus_fd}"));
+-
+-        // Start loader with memory limit
+-        command.arg("prlimit");
+-        command.arg(format!("--as={memory_limit}"));
+-
+-        // Loader binary
++        command.arg("--");
+         command.arg(self.exec());
+-
+-        // Let flatpak-spawn die if the thread calling it exits
+-        unsafe {
+-            command.pre_exec(|| {
+-                nix::sys::prctl::set_pdeathsig(nix::sys::signal::SIGKILL).map_err(Into::into)
+-            });
+-        }
+-
+         command
+     }
+-
+-    fn no_sandbox_command(&self) -> Command {
+-        let mut command = Command::new(self.exec());
+-
+-        command.env_clear();
+-
+-        // Inherit some environment variables
+-        for key in INHERITED_ENVIRONMENT_VARIABLES {
+-            if let Some(val) = std::env::var_os(key) {
+-                command.env(key, val);
+-            }
+-        }
+-
+-        // Set sandbox memory limit
+-        unsafe {
+-            command.pre_exec(|| {
+-                nix::sys::prctl::set_pdeathsig(nix::sys::signal::SIGKILL).map_err(Into::into)
+-            });
+-        }
+-
+-        command
+-    }
+-
+-    /// Memory limit in bytes that should be applied to sandboxes
+-    fn memory_limit() -> resource::rlim_t {
+-        // Lookup free memory
+-        if let Some(mem_available) = Self::mem_available() {
+-            Self::calculate_memory_limit(mem_available)
+-        } else {
+-            tracing::warn!("glycin: Unable to determine available memory via /proc/meminfo");
+-
+-            // Default to 1 GB memory limit
+-            const { (1024 as resource::rlim_t).pow(3) }
+-        }
+-    }
+-
+-    /// Try to determine how much memory is available on the system
+-    fn mem_available() -> Option<resource::rlim_t> {
+-        if let Ok(file) = File::open("/proc/meminfo") {
+-            let meminfo = BufReader::new(file);
+-            let mut total_avail_kb: Option<resource::rlim_t> = None;
+-
+-            for line in meminfo.lines().map_while(Result::ok) {
+-                if line.starts_with("MemAvailable:") || line.starts_with("SwapFree:") {
+-                    tracing::trace!("Using /proc/meminfo: {line}");
+-                    if let Some(mem_avail_kb) = line
+-                        .split(' ')
+-                        .filter(|x| !x.is_empty())
+-                        .nth(1)
+-                        .and_then(|x| x.parse::<resource::rlim_t>().ok())
+-                    {
+-                        total_avail_kb =
+-                            Some(total_avail_kb.unwrap_or(0).saturating_add(mem_avail_kb));
+-                    }
+-                }
+-            }
+-
+-            if let Some(total_avail_kb) = total_avail_kb {
+-                let mem_available = total_avail_kb.saturating_mul(1024);
+-
+-                return Some(mem_available);
+-            }
+-        }
+-
+-        None
+-    }
+-
+-    /// Calculate memory that the sandbox will be allowed to use
+-    fn calculate_memory_limit(mem_available: resource::rlim_t) -> resource::rlim_t {
+-        // Consider max of 20 GB free RAM for use
+-        let mem_considered = resource::rlim_t::min(
+-            mem_available,
+-            const { (1024 as resource::rlim_t).pow(3).saturating_mul(20) },
+-        )
+-        // Keep at least 200 MB free
+-        .saturating_sub(1024 * 1024 * 200);
+-
+-        // Allow usage of 80% of considered memory
+-        (mem_considered as f64 * 0.8) as resource::rlim_t
+-    }
+-
+-    /// Set memory limit for the current process
+-    fn set_memory_limit() {
+-        let limit = Self::memory_limit();
+-
+-        let msg = b"Setting process memory limit\n";
+-        unsafe {
+-            let _ = libc::write(libc::STDERR_FILENO, msg.as_ptr() as *const _, msg.len());
+-        }
+-
+-        if resource::setrlimit(resource::Resource::RLIMIT_AS, limit, limit).is_err() {
+-            let msg = b"Error setrlimit(RLIMIT_AS)\n";
+-            unsafe {
+-                let _ = libc::write(libc::STDERR_FILENO, msg.as_ptr() as *const _, msg.len());
+-            }
+-        }
+-    }
+-
+-    fn seccomp_filter(&self) -> Result<ScmpFilterContext, SeccompError> {
+-        let mut filter = ScmpFilterContext::new(ScmpAction::Allow)?;
+-
+-        #[cfg(target_arch = "x86")]
+-        filter.add_arch(ScmpArch::X8664)?;
+-        #[cfg(target_arch = "x86_64")]
+-        filter.add_arch(ScmpArch::X86)?;
+-        #[cfg(target_arch = "arm")]
+-        filter.add_arch(ScmpArch::Aarch64)?;
+-        #[cfg(target_arch = "aarch64")]
+-        filter.add_arch(ScmpArch::Arm)?;
+-
+-        for (syscall_name, action, conditions) in BLOCKED_SYSCALLS {
+-            let syscall = ScmpSyscall::from_name(syscall_name)?;
+-            filter.add_rule_conditional(*action, syscall, conditions)?;
+-        }
+-
+-        Ok(filter)
+-    }
+-
+-    /// Make seccomp filters available under FD
+-    ///
+-    /// Bubblewrap supports taking an fd to seccomp filters in the BPF format.
+-    fn seccomp_export_bpf(filter: &ScmpFilterContext) -> Result<OwnedFd, Error> {
+-        let memfd = memfd::memfd_create(c"seccomp-bpf-filter", memfd::MFdFlags::empty())?;
+-
+-        filter.export_bpf(&memfd)?;
+-
+-        unistd::lseek64(&memfd, 0, unistd::Whence::SeekSet)?;
+-
+-        Ok(memfd)
+-    }
+-
+-    /// Returns `true` if bwrap syscalls are blocked
+-    pub async fn check_bwrap_syscalls_blocked() -> bool {
+-        match Self::check_bwrap_syscalls_blocked_internal().await {
+-            Err(err) => {
+-                tracing::info!("Can't determine if bwrap syscalls are blocked: {err} ({err:?})");
+-                // For error states we assume that bwrap failed for other reasons than sandbox
+-                // creation being blocked
+-                false
+-            }
+-            Ok(blocked) => {
+-                tracing::debug!("bwrap sandboxing available: {}", !blocked);
+-                blocked
+-            }
+-        }
+-    }
+-
+-    async fn check_bwrap_syscalls_blocked_internal() -> Result<bool, Error> {
+-        let config_entry = ConfigEntry::Loader(LoaderConfig {
+-            // The binary is not really relevant, since sandbox is also assumed to work, if the
+-            // binary does not exist.
+-            processor: Processor::Binary(PathBuf::from("/usr/bin/true")),
+-            expose_base_dir: false,
+-            fontconfig: false,
+-            identifiers: Vec::new(),
+-        });
+-
+-        let (dbus_socket, _) = UnixStream::pair()?;
+-        let sandbox = Self::new(SandboxMechanism::Bwrap, config_entry, dbus_socket)?;
+-
+-        let seccomp_memfd = Self::seccomp_export_bpf(&sandbox.seccomp_filter()?)?;
+-        let mut command = sandbox.bwrap_command(&seccomp_memfd).await?;
+-
+-        unsafe {
+-            command.pre_exec(|| {
+-                setup_sigsys_handler();
+-                Ok(())
+-            })
+-        };
+-
+-        tracing::debug!("Testing bwrap availability with: {command:?}");
+-
+-        let output = spawn_blocking(move || command.output()).await??;
+-
+-        tracing::debug!(
+-            "bwrap availability test returned: {output:?} (Signal: {signal:?}, Code: {code:?})",
+-            signal = output.status.signal(),
+-            code = output.status.code(),
+-        );
+-
+-        if output.status.success() {
+-            Ok(false)
+-        } else if matches!(output.status.signal(), Some(libc::SIGSYS))
+-            || output.status.code() == Some(128 + libc::SIGSYS)
+-        {
+-            tracing::debug!("bwrap syscalls not available: Terminated with SIGSYS");
+-            Ok(true)
+-        } else if std::str::from_utf8(&output.stderr).is_ok_and(|x| {
+-            [
+-                "Creating new namespace failed",
+-                "No permissions to create a new namespace",
+-                // Wrong grammar in older bwrap versions
+-                "No permissions to creating new namespace",
+-                // Wording of an old Debian patch
+-                "No permissions to create new namespace",
+-                "bwrap: setting up uid map: Permission denied",
+-            ]
+-            .iter()
+-            .any(|y| x.contains(y))
+-        }) {
+-            tracing::debug!("bwrap syscalls not available: STDERR contains known string");
+-            Ok(true)
+-        } else {
+-            Ok(false)
+-        }
+-    }
+-}
+-
+-#[derive(Debug, Default)]
+-struct SystemSetup {
+-    // Dirs that need to be symlinked (UsrMerge)
+-    lib_symlinks: Vec<(PathBuf, PathBuf)>,
+-    // Dirs that need mounting (not UsrMerged)
+-    lib_dirs: Vec<PathBuf>,
+-}
+-
+-impl SystemSetup {
+-    async fn cached() -> SystemSetupStore {
+-        let mut system_setup = SYSTEM_SETUP.lock().await;
+-
+-        if let Some(arc) = &*system_setup {
+-            arc.clone()
+-        } else {
+-            let arc = Arc::new(Self::new().await.map_err(Arc::new));
+-
+-            *system_setup = Some(arc.clone());
+-
+-            arc
+-        }
+-    }
+-
+-    async fn new() -> io::Result<SystemSetup> {
+-        let mut system = SystemSetup::default();
+-
+-        system.load_lib_dirs().await?;
+-
+-        Ok(system)
+-    }
+-
+-    async fn load_lib_dirs(&mut self) -> io::Result<()> {
+-        let dir_content = std::fs::read_dir("/");
+-
+-        match dir_content {
+-            Ok(dir_content) => {
+-                for entry in dir_content {
+-                    if let Err(err) = self.add_dir(entry).await {
+-                        tracing::warn!("Unable to access entry in root directory (/): {err}");
+-                    }
+-                }
+-            }
+-            Err(err) => {
+-                tracing::error!("Unable to list root directory (/) entries: {err}");
+-            }
+-        }
+-
+-        Ok(())
+-    }
+-
+-    async fn add_dir(&mut self, entry: io::Result<DirEntry>) -> io::Result<()> {
+-        let entry = entry?;
+-        let path = entry.path();
+-
+-        if let Some(last_segment) = path.file_name()
+-            && last_segment.as_encoded_bytes().starts_with(b"lib")
+-        {
+-            let metadata = entry.metadata()?;
+-            if metadata.is_dir() {
+-                // Lib dirs like /lib
+-                self.lib_dirs.push(entry.path());
+-            } else if metadata.is_symlink() {
+-                // Symlinks like /lib -> /usr/lib
+-                let target = canonicalize(&path)?;
+-                // Only use symlinks that link somewhere into /usr/
+-                if target.starts_with("/usr/") {
+-                    self.lib_symlinks.push((path, target));
+-                }
+-            }
+-        };
+-
+-        Ok(())
+-    }
+-}
+-
+-#[allow(non_camel_case_types)]
+-extern "C" fn sigsys_handler(_: c_int, _info: *mut siginfo_t, _: *mut c_void) {
+-    libc_eprint("glycin sandbox availability test: Blocked syscall used\n");
+-
+-    unsafe {
+-        libc::exit(128 + libc::SIGSYS);
+-    }
+-}
+-
+-fn setup_sigsys_handler() {
+-    let mut mask = nix::sys::signal::SigSet::empty();
+-    mask.add(nix::sys::signal::Signal::SIGSYS);
+-
+-    let sigaction = nix::sys::signal::SigAction::new(
+-        nix::sys::signal::SigHandler::SigAction(sigsys_handler),
+-        nix::sys::signal::SaFlags::SA_SIGINFO,
+-        mask,
+-    );
+-
+-    unsafe {
+-        if nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGSYS, &sigaction).is_err() {
+-            libc_eprint(
+-                "glycin sandbox availability test: Failed to init syscall failure signal handler",
+-            );
+-        }
+-    };
+-}
+-
+-fn libc_eprint(s: &str) {
+-    unsafe {
+-        libc::write(
+-            libc::STDERR_FILENO,
+-            s.as_ptr() as *const libc::c_void,
+-            s.len(),
+-        );
+-    }
+-}
+-
+-#[repr(C)]
+-#[derive(Debug)]
+-struct CapHeader {
+-    version: u32,
+-    pid: i32,
+-}
+-
+-#[repr(C)]
+-#[derive(Debug, Clone, Copy)]
+-struct CapData {
+-    effective: u32,
+-    permitted: u32,
+-    inheritable: u32,
+-}
+-
+-const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
+-
+-fn capget(header: &mut CapHeader, data: &mut [CapData; 2]) -> std::io::Result<()> {
+-    if unsafe {
+-        libc::syscall(
+-            libc::SYS_capget,
+-            header as *mut CapHeader,
+-            data as *mut CapData,
+-        )
+-    } != 0
+-    {
+-        Err(std::io::Error::last_os_error())
+-    } else {
+-        Ok(())
+-    }
+-}
+-
+-fn capset(header: &mut CapHeader, data: &mut [CapData; 2]) -> std::io::Result<()> {
+-    if unsafe {
+-        libc::syscall(
+-            libc::SYS_capset,
+-            header as *mut CapHeader,
+-            data as *mut CapData,
+-        ) as i32
+-    } != 0
+-    {
+-        Err(std::io::Error::last_os_error())
+-    } else {
+-        Ok(())
+-    }
+-}
+-
+-fn get_caps() -> std::io::Result<[CapData; 2]> {
+-    let mut hdr = CapHeader {
+-        version: _LINUX_CAPABILITY_VERSION_3,
+-        pid: 0,
+-    };
+-
+-    let mut data: [CapData; 2] = unsafe { std::mem::zeroed() };
+-
+-    capget(&mut hdr, &mut data)?;
+-
+-    Ok(data)
+-}
+-
+-fn set_caps(mut caps: [CapData; 2]) -> std::io::Result<()> {
+-    let mut hdr = CapHeader {
+-        version: _LINUX_CAPABILITY_VERSION_3,
+-        pid: 0,
+-    };
+-
+-    capset(&mut hdr, &mut caps)
+-}
+-
+-struct CapsGuard([CapData; 2]);
+-
+-impl Drop for CapsGuard {
+-    fn drop(&mut self) {
+-        if let Err(err) = set_caps(self.0) {
+-            tracing::error!("Failed to reset linux caps to original state: {err}")
+-        }
+-    }
+ }
+diff --git a/vendor/glycin-core-4.0.5/src/util.rs b/vendor/glycin-core-4.0.5/src/util.rs
+index f5128bd..1f76114 100644
+--- a/vendor/glycin-core-4.0.5/src/util.rs
++++ b/vendor/glycin-core-4.0.5/src/util.rs
+@@ -9,8 +9,6 @@ use gio::prelude::CancellableExtManual;
+ use glycin_utils::MemoryFormat;
+ 
+ use crate::error::ErrorKind;
+-#[cfg(feature = "external")]
+-use crate::sandbox::Sandbox;
+ #[cfg(feature = "gdk4")]
+ use crate::{ColorState, Error};
+ 
+@@ -125,87 +123,15 @@ pub fn gdk_color_state(format: &ColorState) -> Result<gdk::ColorState, crate::Er
+ 
+ #[derive(Debug, Clone, Copy)]
+ pub enum RunEnvironment {
+-    /// Sandbox force disabled
+-    SandboxForceDisabled,
+-    /// Not inside Flatpak
+     Host,
+-    /// Not inside Flatpak but bwrap doesn't work
+-    HostBwrapSyscallsBlocked,
+-    /// Inside Flatpak
+-    Flatpak,
+-    /// Inside Flatpak and development environment
+-    FlatpakDevel,
+ }
+ 
+ impl RunEnvironment {
+-    #[cfg(feature = "external")]
+-    pub async fn cached() -> Self {
+-        static RUN_ENVIRONMENT: AsyncMutex<Option<RunEnvironment>> = new_async_mutex(None);
+-
+-        let mut run_environment = RUN_ENVIRONMENT.lock().await;
+-
+-        if let Some(result) = *run_environment {
+-            result
+-        } else {
+-            let run_env = if std::env::var("GLYCIN_DISABLE_SANDBOX").as_deref()
+-                == Ok("i-know-the-risks")
+-            {
+-                eprintln!(
+-                    "WARNING: Glycin running without sandbox. Force disabled via environment variable."
+-                );
+-                Self::SandboxForceDisabled
+-            } else if let Some(devel) = flatpak_devel().await {
+-                if devel {
+-                    eprintln!(
+-                        "WARNING: Glycin running without sandbox. Disabled due to Flatpak development environment."
+-                    );
+-                    Self::FlatpakDevel
+-                } else {
+-                    Self::Flatpak
+-                }
+-            } else if Sandbox::check_bwrap_syscalls_blocked().await {
+-                eprintln!(
+-                    "WARNING: Glycin running without sandbox. Bubblewrap (bwrap) doesn't work in the environment."
+-                );
+-                Self::HostBwrapSyscallsBlocked
+-            } else {
+-                Self::Host
+-            };
+-
+-            *run_environment = Some(run_env);
+-            run_env
+-        }
+-    }
+-
+-    #[cfg(not(feature = "external"))]
+     pub async fn cached() -> Self {
+         Self::Host
+     }
+ }
+ 
+-/// Returns None if not in Flatpak environment, otherwise true if development
+-#[cfg(feature = "external")]
+-async fn flatpak_devel() -> Option<bool> {
+-    let data = read("/.flatpak-info").await.ok()?;
+-    let bytes = glib::Bytes::from_owned(data);
+-
+-    let keyfile = glib::KeyFile::new();
+-    keyfile
+-        .load_from_bytes(&bytes, glib::KeyFileFlags::NONE)
+-        .ok()?;
+-
+-    // App is not installed but instead started with `flatpak-builder --run`
+-    let Ok(flatpak_builder) = keyfile.boolean("Instance", "build") else {
+-        return Some(false);
+-    };
+-
+-    let Ok(name) = keyfile.string("Application", "name") else {
+-        return Some(false);
+-    };
+-
+-    Some(flatpak_builder && name.ends_with("Devel"))
+-}
+-
+ #[cfg(feature = "async-io")]
+ pub use async_io_utils::*;
+ #[cfg(feature = "tokio")]
+diff --git a/vendor/glycin-utils-5.0.1/Cargo.toml b/vendor/glycin-utils-5.0.1/Cargo.toml
+index 7d0d3dc..2213c3b 100644
+--- a/vendor/glycin-utils-5.0.1/Cargo.toml
++++ b/vendor/glycin-utils-5.0.1/Cargo.toml
+@@ -38,8 +38,6 @@ async-io = ["zbus?/async-io"]
+ builtin = []
+ default = ["async-io"]
+ external = [
+-    "dep:libseccomp",
+-    "dep:memmap",
+     "dep:nix",
+     "dep:zbus",
+     "dep:serde",
+@@ -110,24 +108,12 @@ default-features = false
+ [dependencies.libc]
+ version = "0.2.152"
+ 
+-[dependencies.libseccomp]
+-version = "0.4.0"
+-optional = true
+-
+ [dependencies.log]
+ version = "0.4.0"
+ 
+-[dependencies.memmap]
+-version = "0.9.0"
+-optional = true
+-package = "memmap2"
+-
+ [dependencies.nix]
+ version = "0.31.0"
+ features = [
+-    "fs",
+-    "resource",
+-    "signal",
+     "fs",
+     "signal",
+ ]
+diff --git a/vendor/glycin-utils-5.0.1/src/instruction_handler.rs b/vendor/glycin-utils-5.0.1/src/instruction_handler.rs
+index 5b57540..2f6110b 100644
+--- a/vendor/glycin-utils-5.0.1/src/instruction_handler.rs
++++ b/vendor/glycin-utils-5.0.1/src/instruction_handler.rs
+@@ -1,12 +1,9 @@
+ // Copyright (c) 2024 GNOME Foundation Inc.
+ 
+-use std::ffi::{c_int, c_void};
+ use std::os::fd::FromRawFd;
+ use std::os::unix::net::UnixStream;
+ use std::sync::Mutex;
+ 
+-use nix::libc::{c_uint, siginfo_t};
+-
+ use crate::{Editor, Loader, VoidEditorImplementation, api};
+ 
+ pub struct DbusServer {
+@@ -58,7 +55,7 @@ impl DbusServer {
+         };
+ 
+         let Ok(dbus_fd) = dbus_fd_str.parse::<i32>() else {
+-            log::error!("FD specified via --dbus-fd is not a valid number: {dbus_fd_str:?}",);
++            log::error!("FD specified via --dbus-fd is not a valid number: {dbus_fd_str:?}");
+             std::process::exit(2);
+         };
+ 
+@@ -105,69 +102,9 @@ impl DbusServer {
+     }
+ }
+ 
+-#[allow(non_camel_case_types)]
+-extern "C" fn sigsys_handler(_: c_int, info: *mut siginfo_t, _: *mut c_void) {
+-    // Reimplement siginfo_t since the libc crate doesn't support _sigsys
+-    // information
+-    #[repr(C)]
+-    struct siginfo_t {
+-        si_signo: c_int,
+-        si_errno: c_int,
+-        si_code: c_int,
+-        _sifields: _sigsys,
+-    }
+-
+-    #[repr(C)]
+-    struct _sigsys {
+-        _call_addr: *const c_void,
+-        _syscall: c_int,
+-        _arch: c_uint,
+-    }
+-
+-    let info: *mut siginfo_t = info.cast();
+-    let syscall = unsafe { info.as_ref().unwrap()._sifields._syscall };
+-
+-    let name = libseccomp::ScmpSyscall::from(syscall).get_name().ok();
+-
+-    libc_eprint("glycin sandbox: Blocked syscall used: ");
+-    libc_eprint(&name.unwrap_or_else(|| String::from("Unknown Syscall")));
+-    libc_eprint(" (");
+-    libc_eprint(&syscall.to_string());
+-    libc_eprint(")\n");
+-
+-    unsafe {
+-        libc::exit(128 + libc::SIGSYS);
+-    }
+-}
+-
+-fn setup_sigsys_handler() {
+-    let mut mask = nix::sys::signal::SigSet::empty();
+-    mask.add(nix::sys::signal::Signal::SIGSYS);
+-
+-    let sigaction = nix::sys::signal::SigAction::new(
+-        nix::sys::signal::SigHandler::SigAction(sigsys_handler),
+-        nix::sys::signal::SaFlags::SA_SIGINFO,
+-        mask,
+-    );
+-
+-    unsafe {
+-        if nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGSYS, &sigaction).is_err() {
+-            libc_eprint("glycin sandbox: Failed to init syscall failure signal handler");
+-        }
+-    };
+-}
+-
+-#[allow(dead_code)]
+-pub extern "C" fn pre_main() {
+-    setup_sigsys_handler();
+-}
+-
+ #[macro_export]
+ macro_rules! init_main_loader {
+     ($loader:path) => {
+-        /// Init handler for SIGSYS before main() to catch
+-        static __CTOR: extern "C" fn() = pre_main;
+-
+         fn main() {
+             $crate::DbusServer::spawn_loader::<$loader>(format!(
+                 "{} v{}",
+@@ -181,9 +118,6 @@ macro_rules! init_main_loader {
+ #[macro_export]
+ macro_rules! init_main_loader_editor {
+     ($loader:path, $editor:path) => {
+-        /// Init handler for SIGSYS before main() to catch
+-        static __CTOR: extern "C" fn() = pre_main;
+-
+         fn main() {
+             $crate::DbusServer::spawn_loader_editor::<$loader, $editor>(format!(
+                 "{} v{}",
+@@ -193,13 +127,3 @@ macro_rules! init_main_loader_editor {
+         }
+     };
+ }
+-
+-fn libc_eprint(s: &str) {
+-    unsafe {
+-        libc::write(
+-            libc::STDERR_FILENO,
+-            s.as_ptr() as *const libc::c_void,
+-            s.len(),
+-        );
+-    }
+-}
+diff --git a/vendor/glycin-utils-5.0.1/src/memory/shared.rs b/vendor/glycin-utils-5.0.1/src/memory/shared.rs
+index c9e09de..c508ff6 100644
+--- a/vendor/glycin-utils-5.0.1/src/memory/shared.rs
++++ b/vendor/glycin-utils-5.0.1/src/memory/shared.rs
+@@ -1,44 +1,24 @@
++use std::io::Write;
+ use std::ops::{Deref, DerefMut};
+-use std::os::fd::{AsRawFd, OwnedFd};
++use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
++use std::time::{Duration, Instant};
+ 
+-use log::warn;
+-use nix::fcntl;
+ use serde::{Deserialize, Deserializer, Serialize, Serializer};
+ use zbus::zvariant;
+ 
+ use crate::{ByteData, FungibleMemory, MemoryAllocationError};
+ 
+-#[derive(Debug)]
+-pub struct SharedMemory {
+-    memfd: OwnedFd,
+-    mmap: Option<MMapOptions>,
+-}
++pub const MAX_SHARED_BYTES: usize = 256 << 20;
++const PIPE_CHUNK_BYTES: usize = 65536;
++const MAX_PIPE_ITERS: usize = (MAX_SHARED_BYTES / 512) + 4096;
++const PIPE_POLL_SLICE_MS: libc::c_int = 250;
++const PIPE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+ 
+ #[derive(Debug)]
+-enum MMapOptions {
+-    Mutable(memmap::MmapMut),
+-    ReadOnly(memmap::Mmap),
+-}
+-
+-impl Deref for MMapOptions {
+-    type Target = [u8];
+-    fn deref(&self) -> &Self::Target {
+-        match self {
+-            Self::Mutable(x) => x.deref(),
+-            Self::ReadOnly(x) => x.deref(),
+-        }
+-    }
+-}
+-
+-impl DerefMut for MMapOptions {
+-    fn deref_mut(&mut self) -> &mut Self::Target {
+-        match self {
+-            Self::Mutable(x) => x.deref_mut(),
+-            Self::ReadOnly(_) => {
+-                panic!("Shared memory has been sealed and can't be written to anymore.")
+-            }
+-        }
+-    }
++pub struct SharedMemory {
++    pipe_fd: Option<OwnedFd>,
++    data: Vec<u8>,
++    sealed: bool,
+ }
+ 
+ impl zvariant::Type for SharedMemory {
+@@ -50,7 +30,52 @@ impl Serialize for SharedMemory {
+     where
+         S: Serializer,
+     {
+-        zvariant::OwnedFd::from(self.memfd.try_clone().unwrap()).serialize(serializer)
++        if self.data.len() > MAX_SHARED_BYTES {
++            return Err(serde::ser::Error::custom(format!(
++                "shared frame size {} exceeds bound {}",
++                self.data.len(),
++                MAX_SHARED_BYTES
++            )));
++        }
++        let mut pfds = [-1 as libc::c_int; 2];
++        if unsafe { libc::pipe(pfds.as_mut_ptr()) } != 0 {
++            return Err(serde::ser::Error::custom(format!(
++                "pipe failed: {}",
++                std::io::Error::last_os_error()
++            )));
++        }
++        let read_fd = unsafe { OwnedFd::from_raw_fd(pfds[0]) };
++        let write_fd = unsafe { OwnedFd::from_raw_fd(pfds[1]) };
++        unsafe {
++            let _ = libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
++            let _ = libc::fcntl(write_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
++        }
++        if !self.data.is_empty() {
++            let payload = self.data.clone();
++            std::thread::Builder::new()
++                .name("gly-pipe-tx".into())
++                .spawn(move || {
++                    let mut writer = std::fs::File::from(write_fd);
++                    let mut offset = 0usize;
++                    for _ in 0..MAX_PIPE_ITERS {
++                        if offset >= payload.len() {
++                            break;
++                        }
++                        let end = payload.len().min(offset + PIPE_CHUNK_BYTES);
++                        match writer.write(&payload[offset..end]) {
++                            Ok(0) => break,
++                            Ok(n) => offset += n,
++                            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
++                            Err(_) => break,
++                        }
++                    }
++                    drop(writer);
++                })
++                .map_err(|err| serde::ser::Error::custom(format!("spawn pipe writer: {err}")))?;
++        } else {
++            drop(write_fd);
++        }
++        zvariant::OwnedFd::from(read_fd).serialize(serializer)
+     }
+ }
+ 
+@@ -59,25 +84,39 @@ impl<'de> Deserialize<'de> for SharedMemory {
+     where
+         D: Deserializer<'de>,
+     {
+-        let memfd = zvariant::OwnedFd::deserialize(deserializer)?.into();
+-
+-        Ok(Self { memfd, mmap: None })
++        let pipe_fd: OwnedFd = zvariant::OwnedFd::deserialize(deserializer)?.into();
++        Ok(Self {
++            pipe_fd: Some(pipe_fd),
++            data: Vec::new(),
++            sealed: false,
++        })
+     }
+ }
+ 
+ impl Default for SharedMemory {
+     fn default() -> Self {
+-        todo!()
++        Self {
++            pipe_fd: None,
++            data: Vec::new(),
++            sealed: false,
++        }
+     }
+ }
+ 
+ impl ByteData for SharedMemory {
+     fn new(size: u64) -> std::io::Result<Self> {
+-        let (memfd, mmap) = Self::new_memfd(size)?;
+-
++        let len = usize::try_from(size)
++            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "size overflow"))?;
++        if len > MAX_SHARED_BYTES {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                format!("size {len} exceeds bound {MAX_SHARED_BYTES}"),
++            ));
++        }
+         Ok(Self {
+-            memfd,
+-            mmap: Some(MMapOptions::Mutable(mmap)),
++            pipe_fd: None,
++            data: vec![0u8; len],
++            sealed: false,
+         })
+     }
+ 
+@@ -94,147 +133,124 @@ impl ByteData for SharedMemory {
+     }
+ 
+     fn try_from_vec(value: Vec<u8>) -> Result<Self, MemoryAllocationError> {
+-        Self::try_from_slice(&value)
++        if value.len() > MAX_SHARED_BYTES {
++            return Err(MemoryAllocationError(format!(
++                "buffer size {} exceeds bound {}",
++                value.len(),
++                MAX_SHARED_BYTES
++            )));
++        }
++        Ok(Self {
++            pipe_fd: None,
++            data: value,
++            sealed: false,
++        })
+     }
+ 
+     fn try_from_slice(value: &[u8]) -> Result<Self, MemoryAllocationError> {
+-        let (memfd, mut mmap) = Self::new_memfd(
+-            u64::try_from(value.len()).map_err(|err| MemoryAllocationError(err.to_string()))?,
+-        )
+-        .map_err(|err| MemoryAllocationError(err.to_string()))?;
+-
+-        mmap.copy_from_slice(value.as_ref());
+-
+-        Ok(Self {
+-            memfd,
+-            mmap: Some(MMapOptions::Mutable(mmap)),
+-        })
++        Self::try_from_vec(value.to_vec())
+     }
+ 
+     async fn initial_seal(&mut self) -> Result<(), MemoryAllocationError> {
+-        if self.mmap.is_some() {
+-            warn!("SharedMemory already got inital seal.");
+-            return Ok(());
+-        }
+-
+-        self.seal(fcntl::SealFlag::F_SEAL_GROW | fcntl::SealFlag::F_SEAL_SHRINK)
+-            .await?;
+-
+-        self.add_mut_memmap()?;
+-
+-        Ok(())
++        self.drain_pipe().await
+     }
+ 
+     async fn final_seal(&mut self) -> Result<(), MemoryAllocationError> {
+-        self.mmap = None;
+-
+-        self.seal(
+-            fcntl::SealFlag::F_SEAL_GROW
+-                | fcntl::SealFlag::F_SEAL_SHRINK
+-                | fcntl::SealFlag::F_SEAL_WRITE
+-                | fcntl::SealFlag::F_SEAL_SEAL,
+-        )
+-        .await?;
+-
+-        self.add_memmap()?;
+-
++        self.drain_pipe().await?;
++        self.sealed = true;
+         Ok(())
+     }
+ 
+     #[cfg(feature = "glib")]
+     fn into_gbytes(self) -> Result<glib::Bytes, MemoryAllocationError> {
+-        if !matches!(self.mmap, Some(MMapOptions::ReadOnly(_))) {
+-            panic!("SharedMemory is lacking final seal.");
++        if !self.sealed {
++            return Err(MemoryAllocationError(
++                "SharedMemory is lacking final seal.".into(),
++            ));
+         }
+-
+-        use std::os::fd::RawFd;
+-
+-        pub unsafe fn gbytes_from_mmap(
+-            raw_fd: RawFd,
+-        ) -> Result<glib::Bytes, MemoryAllocationError> {
+-            unsafe {
+-                let mut error = std::ptr::null_mut();
+-
+-                let mapped_file =
+-                    glib::ffi::g_mapped_file_new_from_fd(raw_fd, glib::ffi::GFALSE, &mut error);
+-
+-                if !error.is_null() {
+-                    let err: glib::Error = glib::translate::from_glib_full(error);
+-                    return Err(MemoryAllocationError(err.to_string()));
+-                };
+-
+-                let bytes = glib::translate::from_glib_full(glib::ffi::g_mapped_file_get_bytes(
+-                    mapped_file,
+-                ));
+-
+-                glib::ffi::g_mapped_file_unref(mapped_file);
+-
+-                Ok(bytes)
+-            }
+-        }
+-
+-        unsafe { gbytes_from_mmap(self.memfd.as_raw_fd()) }
++        Ok(glib::Bytes::from_owned(self.data))
+     }
+ }
+ 
+ impl SharedMemory {
+-    fn new_memfd(size: u64) -> std::io::Result<(OwnedFd, memmap::MmapMut)> {
+-        let memfd = nix::sys::memfd::memfd_create(
+-            c"glycin-frame",
+-            nix::sys::memfd::MFdFlags::MFD_CLOEXEC | nix::sys::memfd::MFdFlags::MFD_ALLOW_SEALING,
+-        )?;
+-
+-        nix::unistd::ftruncate(&memfd, size.try_into().expect("Required memory too large"))?;
+-
+-        let raw_fd = memfd.as_raw_fd();
+-        let mmap = unsafe { memmap::MmapMut::map_mut(raw_fd) }?;
+-
+-        Ok((memfd, mmap))
+-    }
+-
+-    fn add_mut_memmap(&mut self) -> Result<(), MemoryAllocationError> {
+-        let mmap: memmap::MmapMut = unsafe { memmap::MmapMut::map_mut(&self.memfd) }
+-            .map_err(|err| MemoryAllocationError(err.to_string()))?;
+-
+-        self.mmap = Some(MMapOptions::Mutable(mmap));
+-
+-        Ok(())
+-    }
+-
+-    fn add_memmap(&mut self) -> Result<(), MemoryAllocationError> {
+-        let mmap = unsafe { memmap::MmapOptions::new().map_copy_read_only(&self.memfd) }
+-            .map_err(|err| MemoryAllocationError(err.to_string()))?;
+-
+-        self.mmap = Some(MMapOptions::ReadOnly(mmap));
+-
++    async fn drain_pipe(&mut self) -> Result<(), MemoryAllocationError> {
++        let Some(fd) = self.pipe_fd.take() else {
++            return Ok(());
++        };
++        let bytes = blocking::unblock(move || read_pipe_bounded(fd)).await?;
++        self.data = bytes;
+         Ok(())
+     }
++}
+ 
+-    async fn seal(&self, seals: fcntl::SealFlag) -> Result<(), MemoryAllocationError> {
+-        let start = std::time::Instant::now();
+-
+-        // Sealing returns a ResourceBusy for SealWrite until no readable maps exist
+-        // anymore. Practically, we are waiting for the loader to close it's
+-        // mmap to the memfd.
+-        loop {
+-            // 🦭
+-            let seal = fcntl::fcntl(&self.memfd, fcntl::FcntlArg::F_ADD_SEALS(seals));
+-
+-            match seal {
+-                Ok(_) => break,
+-                Err(err) if start.elapsed() > std::time::Duration::from_secs(10) => {
+-                    // Give up after some time and return the error
+-                    return Err(MemoryAllocationError(err.to_string()));
+-                }
+-                Err(_) => {
+-                    // Try again after short waiting time
+-                    futures_timer::Delay::new(std::time::Duration::from_millis(1)).await
+-                }
++fn read_pipe_bounded(fd: OwnedFd) -> Result<Vec<u8>, MemoryAllocationError> {
++    let raw = fd.as_raw_fd();
++    let deadline = Instant::now() + PIPE_READ_TIMEOUT;
++    let mut out = Vec::new();
++    let mut chunk = vec![0u8; PIPE_CHUNK_BYTES];
++    let mut saw_eof = false;
++
++    for _ in 0..MAX_PIPE_ITERS {
++        let now = Instant::now();
++        if now >= deadline {
++            return Err(MemoryAllocationError(
++                "timed out waiting for loader frame pipe".into(),
++            ));
++        }
++        let rem_ms = deadline
++            .saturating_duration_since(now)
++            .as_millis()
++            .min(PIPE_POLL_SLICE_MS as u128) as libc::c_int;
++        let mut pfd = libc::pollfd {
++            fd: raw,
++            events: libc::POLLIN,
++            revents: 0,
++        };
++        let prc = unsafe { libc::poll(&mut pfd, 1, rem_ms) };
++        if prc < 0 {
++            let err = std::io::Error::last_os_error();
++            if err.kind() == std::io::ErrorKind::Interrupted {
++                continue;
++            }
++            return Err(MemoryAllocationError(format!("poll frame pipe: {err}")));
++        }
++        if prc == 0 {
++            continue;
++        }
++        if (pfd.revents & (libc::POLLERR | libc::POLLNVAL)) != 0 {
++            return Err(MemoryAllocationError(format!(
++                "frame pipe poll error revents={:#x}",
++                pfd.revents
++            )));
++        }
++        let n = unsafe { libc::read(raw, chunk.as_mut_ptr().cast(), chunk.len()) };
++        if n < 0 {
++            let err = std::io::Error::last_os_error();
++            if err.kind() == std::io::ErrorKind::Interrupted {
++                continue;
+             }
++            return Err(MemoryAllocationError(format!("read frame pipe: {err}")));
+         }
++        if n == 0 {
++            saw_eof = true;
++            break;
++        }
++        let got = n as usize;
++        let next_len = out.len().saturating_add(got);
++        if next_len > MAX_SHARED_BYTES {
++            return Err(MemoryAllocationError(format!(
++                "frame pipe exceeded bound {MAX_SHARED_BYTES}"
++            )));
++        }
++        out.extend_from_slice(&chunk[..got]);
++    }
+ 
+-        Ok(())
++    if !saw_eof {
++        return Err(MemoryAllocationError(
++            "frame pipe did not reach EOF within iteration bound".into(),
++        ));
+     }
++    Ok(out)
+ }
+ 
+ impl Deref for SharedMemory {
+@@ -242,17 +258,17 @@ impl Deref for SharedMemory {
+ 
+     #[inline]
+     fn deref(&self) -> &[u8] {
+-        self.mmap
+-            .as_ref()
+-            .expect("SharedMemory haven't been sealed before use.")
++        &self.data
+     }
+ }
+ 
+ impl DerefMut for SharedMemory {
+     #[inline]
+     fn deref_mut(&mut self) -> &mut [u8] {
+-        self.mmap
+-            .as_mut()
+-            .expect("SharedMemory haven't been sealed before use.")
++        assert!(
++            !self.sealed,
++            "SharedMemory has been sealed and can't be written to anymore."
++        );
++        &mut self.data
+     }
+ }
