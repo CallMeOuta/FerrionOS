@@ -484,6 +484,11 @@ impl ApplicationHandler<WakeEvent> for Windows {
         self.hosts.clear();
         crate::marks::mark("windows.dropped");
         crate::clipboard::shutdown();
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
+        {
+            crate::drag_out::wayland::detach_display();
+            crate::popup_menu::wayland::detach_display();
+        }
         if self.startup_error.is_none()
             && crate::quit::send(crate::quit::Event::Exited).contains(&crate::quit::Effect::Relaunch)
         {

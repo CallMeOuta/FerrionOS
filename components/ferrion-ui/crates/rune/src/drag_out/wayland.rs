@@ -39,6 +39,7 @@ use payload::{ActiveDrag, DragPayload, PendingDropRead, map_clip_err};
 use state::{DndState, MAX_REGISTERED_WINDOWS, RegisteredWindow};
 
 const CMD_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING_DONE: usize = 64;
 
 static ATTACHED: AtomicBool = AtomicBool::new(false);
@@ -68,6 +69,7 @@ pub(crate) enum DndWaylandError {
     PipeFailed(String),
     ConnectionClosed,
     IoTimeout,
+    ShutdownTimeout,
 }
 
 impl fmt::Display for DndWaylandError {
@@ -124,6 +126,13 @@ impl fmt::Display for DndWaylandError {
                     MAX_IO_TIMEOUT.as_millis()
                 )
             }
+            DndWaylandError::ShutdownTimeout => {
+                write!(
+                    f,
+                    "Wayland drag-and-drop thread did not stop within {} ms",
+                    SHUTDOWN_JOIN_TIMEOUT.as_millis()
+                )
+            }
         }
     }
 }
@@ -148,6 +157,7 @@ struct WaylandDnd {
     wake: WakeHandle,
     windows: Arc<Mutex<HashMap<ObjectId, RegisteredWindow>>>,
     completed: Arc<Mutex<Vec<(u64, DragOutcome)>>>,
+    done_rx: mpsc::Receiver<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -155,6 +165,7 @@ impl WaylandDnd {
     fn connect(display: NonNull<c_void>) -> Result<Self, DndWaylandError> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
         let (wake_pipe, wake) = WakePipe::new().map_err(map_clip_err)?;
         let windows = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(Vec::new()));
@@ -166,6 +177,7 @@ impl WaylandDnd {
             .spawn(move || {
                 let Some(ptr) = NonNull::new(display_addr as *mut c_void) else {
                     ready_tx.send(Err(DndWaylandError::NoDisplay)).ok();
+                    done_tx.send(()).ok();
                     return;
                 };
                 run_dnd_thread(
@@ -176,6 +188,7 @@ impl WaylandDnd {
                     thread_completed,
                     ready_tx,
                 );
+                done_tx.send(()).ok();
             })
             .map_err(|e| DndWaylandError::PipeFailed(e.to_string()))?;
         match ready_rx.recv_timeout(CMD_REPLY_TIMEOUT) {
@@ -184,21 +197,38 @@ impl WaylandDnd {
                 wake,
                 windows,
                 completed,
+                done_rx,
                 thread: Some(thread),
             }),
             Ok(Err(err)) => {
-                thread.join().ok();
+                if done_rx.recv_timeout(SHUTDOWN_JOIN_TIMEOUT).is_ok() {
+                    thread.join().ok();
+                }
                 Err(err)
             }
-            Err(_) => Err(DndWaylandError::IoTimeout),
+            Err(_) => {
+                cmd_tx.send(DndCmd::Shutdown).ok();
+                wake.wake();
+                if done_rx.recv_timeout(SHUTDOWN_JOIN_TIMEOUT).is_ok() {
+                    thread.join().ok();
+                }
+                Err(DndWaylandError::IoTimeout)
+            }
         }
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self) -> Result<(), DndWaylandError> {
         self.cmd_tx.send(DndCmd::Shutdown).ok();
         self.wake.wake();
-        if let Some(handle) = self.thread.take() {
-            handle.join().ok();
+        let Some(handle) = self.thread.take() else {
+            return Ok(());
+        };
+        match self.done_rx.recv_timeout(SHUTDOWN_JOIN_TIMEOUT) {
+            Ok(()) => {
+                handle.join().ok();
+                Ok(())
+            }
+            Err(_) => Err(DndWaylandError::ShutdownTimeout),
         }
     }
 }
@@ -230,8 +260,10 @@ pub(crate) fn attach_display(display: NonNull<c_void>) {
 pub(crate) fn detach_display() {
     ATTACHED.store(false, Ordering::Release);
     let engine = ENGINE.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(mut engine) = engine {
-        engine.shutdown();
+    if let Some(mut engine) = engine
+        && let Err(err) = engine.shutdown()
+    {
+        eprintln!("rune: drag-and-drop shutdown: {err}");
     }
     PENDING_DONE.with(|pending| {
         for (_, done) in pending.borrow_mut().drain(..) {
