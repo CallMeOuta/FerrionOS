@@ -66,6 +66,9 @@ exclude = ["tools/rune-dev-guard", "tools/ratex-math-wasm", "tools/ratex-math-wa
 # `scripts/vendor-wgpu-hal.sh <version>` when wgpu is bumped. An app that builds Rune patches it too:
 # a dependency's `[patch]` doesn't apply to the workspace that depends on it.
 [patch.crates-io]
+wgpu = { path = "../wgpu/wgpu" }
+wgpu-core = { path = "../wgpu/wgpu-core" }
+wgpu-core-deps-windows-linux-android = { path = "../wgpu/wgpu-core-deps-windows-linux-android" }
 wgpu-hal = { path = "vendor/wgpu-hal" }
 # winit as published plus `vendor/winit.patch`: on Windows a new window isn't added again to the
 # taskbar it's already on (that took CoInitializeEx and a TaskbarList COM object, about 7,800 µs
