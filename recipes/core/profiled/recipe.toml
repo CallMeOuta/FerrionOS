@@ -3,6 +3,7 @@ description = "Daemon used for profiling kernel (requires profiling-kernel recip
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/profiled.git"
+rev = "1c3a42e197fe504d761b427c120c103e102c7eac"
 
 [build]
 template = "custom"

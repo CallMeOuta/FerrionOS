@@ -3,6 +3,7 @@ description = "Standard package manager for FerrionOS"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/pkgutils.git"
+rev = "00cee5027f8dbcf66773fb66e6caa378b44c06bb"
 
 [build]
 template = "cargo"

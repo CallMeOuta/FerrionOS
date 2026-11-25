@@ -5,7 +5,7 @@ description = "General, useful command-line UNIX shell utilities (GNU Coreutils 
 # TODO 0.12.0 requires rustix symlink_at
 [source]
 git = "https://github.com/uutils/coreutils"
-rev = "0.11.0"
+rev = "bf65901e1ed82963436844c2cf8e796ba9158c65"
 patches = [
   "redox.patch"
 ]

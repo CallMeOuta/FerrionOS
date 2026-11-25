@@ -3,6 +3,7 @@ description = "Utilities for processing, manipulating, and inspecting binary fil
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/binutils.git"
+rev = "d26234f8841c23c6c284f2892dfab5fde1c731ef"
 
 [build]
 template = "cargo"

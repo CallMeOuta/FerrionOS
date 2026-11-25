@@ -3,6 +3,7 @@ description = "Containers and chroots for FerrionOS"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/contain.git"
+rev = "d04331ec8badc56be7616f08121659ec1fd39201"
 
 [build]
 template = "cargo"

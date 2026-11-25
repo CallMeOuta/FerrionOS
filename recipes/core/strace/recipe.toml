@@ -3,6 +3,7 @@ description = "Command-line utility for debugging the system"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/strace-redox.git"
+rev = "d77fdb0e393590ac11b0e6045647d87d1b51ae07"
 
 [build]
 template = "cargo"

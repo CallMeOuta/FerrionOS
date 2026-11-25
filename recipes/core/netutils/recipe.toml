@@ -3,6 +3,7 @@ description = "Basic command-line networking utilities"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/netutils.git"
+rev = "4900bdc333e291abc61ac8790908a295ec92cd0b"
 
 [build]
 template = "cargo"
