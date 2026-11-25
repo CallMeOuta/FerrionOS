@@ -11854,6 +11854,140 @@ def test_fortify_chk_aborts(vm, args):
         summary.append(f"{label}({len(sigs)}/{len(FORTIFY_CASES)} aborted)")
     return True, "; ".join(summary)
 
+
+ASLR_SAMPLE_RUNS = 8
+ASLR_BENCH_RUNS = 256
+ASLR_PROBES = (
+    ("pie", "/usr/bin/aslr-probe-pie", True, True),
+    ("static", "/usr/bin/aslr-probe-static", False, False),
+)
+
+
+def parse_aslr_bench(text):
+    match = re.search(r"aslr-bench:[^\r\n]*", text)
+    if not match:
+        return {}
+    out = {}
+    for key, val in re.findall(r"([a-z0-9_]+)=([0-9]+)", match.group(0)):
+        out[key] = int(val)
+    return out
+
+
+def validate_aslr_stack_bounds(label, run_tag, fields):
+    stack = fields.get("stack", 0)
+    sbase = fields.get("stack_base", 0)
+    ssize = fields.get("stack_size", 0)
+    if sbase == 0 or ssize == 0:
+        return f"{label} {run_tag} missing pthread stack bounds (base=0x{sbase:x}, size=0x{ssize:x})"
+    if not (sbase <= stack < sbase + ssize):
+        return (
+            f"{label} {run_tag} stack 0x{stack:016x} outside pthread bounds "
+            f"[0x{sbase:016x}, 0x{sbase + ssize:016x})"
+        )
+    return None
+
+
+def test_aslr(vm, args):
+    """Eight fresh runs, direct same-process execve, fork layout inheritance, dlopen DSO randomization, pthread stack bounds, and static/dynamic true exec latency (use --config aslr)."""
+    if not root_shell(vm, args.timeout):
+        return False, f"no root serial login within {args.timeout}s"
+    report = {"runs": {}, "reexec": {}, "fork": {}, "bench": {}}
+    problems = []
+    summary = []
+
+    for label, binary, is_pie, has_dso in ASLR_PROBES:
+        samples = []
+        for idx in range(1, ASLR_SAMPLE_RUNS + 1):
+            status, out = run_status(vm, f"{binary} sample", 30)
+            (vm.out / f"aslr-{label}-sample-{idx}.txt").write_text(f"exit {status}\n{out}\n")
+            if status != 0:
+                return False, f"{label} sample {idx} failed (exit {status})"
+            fields = parse_hex_fields(out, "aslr-probe:")
+            if not fields:
+                return False, f"{label} sample {idx} produced no fields"
+            bound_err = validate_aslr_stack_bounds(label, f"sample {idx}", fields)
+            if bound_err:
+                problems.append(bound_err)
+            samples.append(fields)
+        report["runs"][label] = samples
+
+        check_keys = ["stack", "stack_base", "malloc", "mmap", "at_random_ptr", "at_random_val"]
+        if is_pie:
+            check_keys.insert(0, "main")
+        if has_dso:
+            check_keys.append("dso")
+
+        if not is_pie:
+            mains = {s.get("main", 0) for s in samples}
+            if len(mains) != 1 or 0 in mains:
+                problems.append(f"{label} expected fixed non-PIE main across {ASLR_SAMPLE_RUNS} runs, got {len(mains)}")
+
+        distinct_counts = {}
+        for key in check_keys:
+            vals = [s.get(key, 0) for s in samples]
+            if any(v == 0 for v in vals):
+                problems.append(f"{label} {key} had zero value")
+            uniq = len(set(vals))
+            distinct_counts[key] = uniq
+            if uniq != ASLR_SAMPLE_RUNS:
+                problems.append(f"{label} {key} had {uniq}/{ASLR_SAMPLE_RUNS} distinct values")
+
+        status, out = run_status(vm, f"{binary} reexec", 30)
+        (vm.out / f"aslr-{label}-reexec.txt").write_text(f"exit {status}\n{out}\n")
+        if status != 0:
+            return False, f"{label} reexec failed (exit {status})"
+        parent = parse_hex_fields(out, "aslr-probe-parent:")
+        child = parse_hex_fields(out, "aslr-probe-reexec:")
+        if not parent or not child:
+            return False, f"{label} reexec missing parent/child fields"
+        report["reexec"][label] = {"parent": parent, "reexec": child}
+        for run_tag, flds in (("reexec-parent", parent), ("reexec-child", child)):
+            bound_err = validate_aslr_stack_bounds(label, run_tag, flds)
+            if bound_err:
+                problems.append(bound_err)
+        if not is_pie and parent.get("main") != child.get("main"):
+            problems.append(f"{label} non-PIE reexec changed main")
+        for key in check_keys:
+            if parent.get(key, 0) == 0 or child.get(key, 0) == 0:
+                problems.append(f"{label} reexec {key} zero")
+            elif parent.get(key) == child.get(key):
+                problems.append(f"{label} reexec {key} did not change (0x{parent.get(key, 0):016x})")
+
+        summary.append(
+            f"{label}(" + ", ".join(f"{k}={distinct_counts[k]}/{ASLR_SAMPLE_RUNS}" for k in check_keys) + ")"
+        )
+
+    status, out = run_status(vm, "/usr/bin/aslr-probe-pie fork", 30)
+    (vm.out / "aslr-pie-fork.txt").write_text(f"exit {status}\n{out}\n")
+    if status != 0:
+        return False, f"pie fork failed (exit {status})"
+    f_parent = parse_hex_fields(out, "aslr-probe-fork-parent:")
+    f_child = parse_hex_fields(out, "aslr-probe-fork-child:")
+    if not f_parent or not f_child:
+        return False, "pie fork missing parent/child fields"
+    report["fork"]["pie"] = {"parent": f_parent, "child": f_child}
+    for key in ("main", "stack_base", "dso", "at_random_ptr", "at_random_val"):
+        if f_parent.get(key, 0) == 0 or f_parent.get(key) != f_child.get(key):
+            problems.append(
+                f"pie fork {key} differed (parent=0x{f_parent.get(key, 0):016x}, child=0x{f_child.get(key, 0):016x})"
+            )
+
+    for b_label, b_bin in (("static_true", "/usr/bin/aslr-true-static"), ("dynamic_true", "/usr/bin/aslr-true-dynamic")):
+        status, out = run_status(vm, f"/usr/bin/aslr-probe-pie bench {b_bin} {ASLR_BENCH_RUNS}", 60)
+        (vm.out / f"aslr-bench-{b_label}.txt").write_text(f"exit {status}\n{out}\n")
+        if status == 0:
+            parsed = parse_aslr_bench(out)
+            report["bench"][b_label] = parsed
+            if parsed:
+                summary.append(
+                    f"{b_label}(med={parsed.get('median_us')}us p95={parsed.get('p95_us')}us p99={parsed.get('p99_us')}us)"
+                )
+
+    (vm.out / "aslr-results.json").write_text(json.dumps(report, indent=2) + "\n")
+    if problems:
+        return False, "; ".join(problems[:8]) + (f" (+{len(problems) - 8} more)" if len(problems) > 8 else "")
+    return True, "; ".join(summary)
+
 IOMMU_TRACE = ["vtd_reg_dmar_root", "vtd_dmar_enable", "vtd_reg_write_gcmd", "vtd_ir_enable",
                "vtd_dmar_translate", "vtd_dmar_fault", "iommu_testdev_dma_result"]
 IOMMU_TESTDEV = "1b36:0005"
@@ -12687,6 +12821,7 @@ TESTS["hardened-malloc-discard"] = test_hardened_malloc_discard
 TESTS["canary-random"] = test_canary_random
 TESTS["stack-smash-aborts"] = test_stack_smash_aborts
 TESTS["fortify-chk-aborts"] = test_fortify_chk_aborts
+TESTS["aslr"] = test_aslr
 TESTS["iommu"] = test_iommu
 def parse_ifaddrs_probe(text):
     ifaces = {}
