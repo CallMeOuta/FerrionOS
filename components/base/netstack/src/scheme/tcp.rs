@@ -79,6 +79,10 @@ fn apply_tcp_opts(socket: &mut TcpSocket<'_>, nodelay: bool, keepalive: bool, ke
     }
 }
 
+fn is_accept_ready(socket: &TcpSocket<'_>) -> bool {
+    socket.is_active() && socket.state() != TcpState::SynReceived
+}
+
 pub type TcpScheme = SchemeWrapper<TcpSocket<'static>>;
 
 impl<'a> SchemeSocket for TcpSocket<'a> {
@@ -101,7 +105,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
 
     fn can_recv(&mut self, data: &Self::DataT) -> bool {
         if matches!(data, TcpRole::Listening(_)) {
-            self.is_active()
+            is_accept_ready(self)
         } else {
             smoltcp::socket::tcp::Socket::can_recv(self)
         }
@@ -448,7 +452,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             } else {
                 Err(SyscallError::new(syscall::ENOTCONN))
             }
-        } else if !self.may_recv() {
+        } else if !<Self as SchemeSocket>::may_recv(self) {
             Ok(0)
         } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
             Err(SyscallError::new(syscall::EAGAIN))
@@ -465,9 +469,9 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     ) -> SyscallResult<DupResult<Self>> {
         let socket_handle = file.socket_handle();
 
-        let (is_active, local_endpoint) = {
+        let (is_ready, local_endpoint) = {
             let socket = socket_set.get::<TcpSocket>(socket_handle);
-            (socket.is_active(), socket.local_endpoint())
+            (is_accept_ready(socket), socket.local_endpoint())
         };
 
         let file = match path {
@@ -477,15 +481,15 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                         return Err(SyscallError::new(syscall::EINVAL));
                     };
 
-                    let ready_extra_idx = if is_active {
+                    let ready_extra_idx = if is_ready {
                         None
                     } else {
                         pool.extra_handles
                             .iter()
-                            .position(|&h| socket_set.get::<TcpSocket>(h).is_active())
+                            .position(|&h| is_accept_ready(socket_set.get::<TcpSocket>(h)))
                     };
 
-                    if !is_active && ready_extra_idx.is_none() {
+                    if !is_ready && ready_extra_idx.is_none() {
                         if tcp_handle.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
                             return Err(SyscallError::new(syscall::EAGAIN));
                         } else {
@@ -750,17 +754,18 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     fn is_readable(sockets: &mut SocketSet, handle: SocketHandle, data: &Self::DataT) -> bool {
         match data {
             TcpRole::Listening(pool) => {
-                if sockets.get::<TcpSocket>(handle).is_active() {
+                if is_accept_ready(sockets.get::<TcpSocket>(handle)) {
                     return true;
                 }
                 pool.extra_handles
                     .iter()
-                    .any(|&h| sockets.get::<TcpSocket>(h).is_active())
+                    .any(|&h| is_accept_ready(sockets.get::<TcpSocket>(h)))
             }
             TcpRole::Connecting { .. } => false,
             TcpRole::Connected { .. } => {
                 let socket = sockets.get_mut::<TcpSocket>(handle);
-                smoltcp::socket::tcp::Socket::can_recv(socket) || !socket.may_recv()
+                smoltcp::socket::tcp::Socket::can_recv(socket)
+                    || !<TcpSocket as SchemeSocket>::may_recv(socket)
             }
         }
     }
