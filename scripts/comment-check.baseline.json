@@ -3699,7 +3699,7 @@
   "podman/redox-gdb-containerfile": 0,
   "podman/redox-toolchain-containerfile": 0,
   "podman/redox-toolchain.toml": 0,
-  "podman/rustinstall.sh": 1,
+  "podman/rustinstall.sh": 0,
   "podman_bootstrap.sh": 0,
   "recipes/archives/bzip2/recipe.toml": 0,
   "recipes/archives/libzip/recipe.toml": 0,

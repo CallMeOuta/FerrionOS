@@ -1,6 +1,14 @@
 # Configuration file to install the recipe dependencies inside the Podman container
 
-FROM docker.io/library/debian:trixie
+FROM docker.io/library/debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+
+ARG APT_SNAPSHOT=20261104T212339Z
+RUN printf '%s\n' \
+        "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${APT_SNAPSHOT}/ trixie main" \
+        "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${APT_SNAPSHOT}/ trixie-updates main" \
+        "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${APT_SNAPSHOT}/ trixie-security main" \
+        > /etc/apt/sources.list \
+    && rm /etc/apt/sources.list.d/debian.sources
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

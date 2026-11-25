@@ -20,7 +20,6 @@ export PODMAN_VOLUME_FLAG
 PODMAN_CACHE=
 PODMAN_CACHE_PATH?=docker.io/redoxos/$(IMAGE_TAG)-$(HOST_ARCH)
 
-PODMAN_CACHE_PULL?=1
 ifeq ($(PODMAN_CACHE_PULL),1)
 PODMAN_CACHE+=--cache-from=$(PODMAN_CACHE_PATH)
 endif
@@ -78,10 +77,9 @@ container_kill: FORCE
 	podman kill --latest --signal SIGKILL
 
 ## Must match the value of CONTAINER_TAG in config.mk
-build/container.tag: $(CONTAINERFILE)
+build/container.tag: $(CONTAINERFILE) podman/rustinstall.sh
 ifeq ($(PODMAN_BUILD),1)
 	rm -f $@ $(FSTOOLS_TAG)
-	-podman image rm --force $(IMAGE_TAG) || true
 	mkdir -p $(PODMAN_HOME)
 	@echo "Building Podman image. This may take some time."
 	cat $(CONTAINERFILE) | podman build --file - $(PODMAN_VOLUMES) $(PODMAN_CACHE) --tag $(IMAGE_TAG)

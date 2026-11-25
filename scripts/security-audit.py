@@ -218,14 +218,6 @@ DOWNLOADS = [
      'wget -O $@.partial "https://static.redox-os.org/pkg/id_ed25519.pub.toml"',
      "the key that verifies prebuilt packages is downloaded with no pinned hash",
      "check the key in to the repository or pin its sha256 with ch_download"),
-    ("build container base", "podman/redox-base-containerfile",
-     "FROM docker.io/library/debian:trixie",
-     "container starts from a tag, not a digest",
-     "pin the base image as debian:trixie@sha256:<digest>"),
-    ("rustup install", "podman/rustinstall.sh",
-     'curl "https://sh.rustup.rs" -sSf | sh',
-     "Rust is installed from a script piped to sh",
-     "download rustup-init with a pinned sha256 and run it"),
     ("upstream Rust archives", "mk/prefix.mk",
      'wget -O $@.partial "https://static.rust-lang.org/dist/',
      "optional upstream compiler archives lack checksums",
@@ -241,11 +233,34 @@ DOWNLOADS = [
 ]
 
 DOWNLOAD_PINS = [
+    ("build container base", "podman/redox-base-containerfile",
+     [r"^FROM docker\.io/library/debian:trixie@sha256:[0-9a-f]{64}$"]),
+    ("container apt snapshot", "podman/redox-base-containerfile",
+     [r"^ARG APT_SNAPSHOT=\d{8}T\d{6}Z$",
+      r"archive/debian/\$\{APT_SNAPSHOT\}/",
+      r"archive/debian-security/\$\{APT_SNAPSHOT\}/",
+      r"check-valid-until=no",
+      r"rm /etc/apt/sources\.list\.d/debian\.sources"]),
+    ("container layer cache", "mk/config.mk",
+     [r"^PODMAN_CACHE_PULL\?=0$"]),
     ("prebuilt toolchain", "mk/prefix.mk",
      [rf"^PREFIX_SHA256_{name}-install\.tar\.gz=[0-9a-f]{{64}}$"
       for name in ("clang", "gcc", "rust")] +
      [r"sha256sum --check --quiet", r"\$\(call prefix_verify,\$@,\$@\.partial,1\)",
       r"\$\(call prefix_verify,\$<,\$<\)"]),
+    ("rustup install", "podman/rustinstall.sh",
+     [r"^RUSTUP_VERSION=\d+\.\d+\.\d+$", r"^RUST_TOOLCHAIN=\d+\.\d+\.\d+$",
+      r"RUSTUP_SHA256=[0-9a-f]{64}", r"rustup/archive/",
+      r'sha256sum --check', r'--default-toolchain "\$RUST_TOOLCHAIN"']),
+    ("sccache", "podman/rustinstall.sh",
+     [r"^SCCACHE_VERSION=\d+\.\d+\.\d+$", r"SCCACHE_SHA256=[0-9a-f]{64}",
+      r"mozilla/sccache/", r"sha256sum --check"]),
+    ("just", "podman/rustinstall.sh",
+     [r"^JUST_VERSION=\d+\.\d+\.\d+$", r"JUST_SHA256=[0-9a-f]{64}",
+      r"casey/just/", r"sha256sum --check"]),
+    ("cbindgen", "podman/rustinstall.sh",
+     [r"^CBINDGEN_VERSION=\d+\.\d+\.\d+$", r"CBINDGEN_SHA256=[0-9a-f]{64}",
+      r"mozilla/cbindgen/", r"sha256sum --check"]),
 ]
 
 
