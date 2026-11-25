@@ -1,0 +1,219 @@
+Source: https://download.gnome.org/sources/loupe/51/loupe-51.2.tar.xz
+License: GPL-3.0-or-later
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 1ed812e..35365c9 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -9,9 +9,6 @@ license = "GPL-3.0-or-later"
+ lto = true
+ codegen-units = 1
+ 
+-[features]
+-x11 = ["ashpd/gtk4_x11"]
+-
+ [lints.clippy]
+ dbg_macro = "warn"
+ 
+@@ -19,11 +16,6 @@ dbg_macro = "warn"
+ adw = { package = "libadwaita", version = "0.9.0", features = ["v1_8"] }
+ anyhow = { version = "1.0.66" }
+ arc-swap = "1.6.0"
+-ashpd = { version = "0.13.0", default-features = false, features = [
+-    "gtk4_wayland",
+-    "async-io",
+-    "wallpaper",
+-] }
+ async-channel = "2.1.0"
+ async-lock = "3.4.0"
+ cairo-rs = { version = "0.22.0", features = ["pdf"] }
+diff --git a/data/resources/shortcuts-dialog.ui b/data/resources/shortcuts-dialog.ui
+index ee0cfe2..225f89b 100644
+--- a/data/resources/shortcuts-dialog.ui
++++ b/data/resources/shortcuts-dialog.ui
+@@ -28,12 +28,6 @@
+             <property name="accelerator">&lt;Ctrl&gt;&lt;Shift&gt;O</property>
+           </object>
+         </child>
+-        <child>
+-          <object class="AdwShortcutsItem">
+-            <property name="title" translatable="yes" context="shortcut window">Set as Background</property>
+-            <property name="accelerator">&lt;Ctrl&gt;F8</property>
+-          </object>
+-        </child>
+         <child>
+           <object class="AdwShortcutsItem">
+             <property name="title" translatable="yes" context="shortcut window">New Window</property>
+diff --git a/src/about.rs b/src/about.rs
+index bc2bbf4..27c95b8 100644
+--- a/src/about.rs
++++ b/src/about.rs
+@@ -50,11 +50,7 @@ pub async fn dialog() -> adw::AboutDialog {
+ }
+ 
+ fn etc() -> std::path::PathBuf {
+-    if ashpd::is_sandboxed() {
+-        std::path::PathBuf::from("/run/host/etc")
+-    } else {
+-        std::path::PathBuf::from("/etc")
+-    }
++    std::path::PathBuf::from("/etc")
+ }
+ 
+ fn os_release() -> String {
+@@ -67,8 +63,7 @@ async fn debug_info() -> String {
+         format!("- Version: {}", config::VERSION),
+         format!("- App ID: {}", config::APP_ID),
+         format!(
+-            "- Sandboxed: {} {}",
+-            ashpd::is_sandboxed(),
++            "- Sandboxed: false {}",
+             std::env::var("container").unwrap_or_default()
+         ),
+         format!("\n##### OS Information\n```\n{}\n```", os_release()),
+diff --git a/src/widgets/image_page.ui b/src/widgets/image_page.ui
+index 1a97ede..5da85f4 100644
+--- a/src/widgets/image_page.ui
++++ b/src/widgets/image_page.ui
+@@ -22,10 +22,6 @@
+       </item>
+     </section>
+     <section>
+-      <item>
+-        <attribute name="label" translatable="yes">_Set as Background…</attribute>
+-        <attribute name="action">win.set-background</attribute>
+-      </item>
+       <item>
+         <attribute name="label" translatable="yes">_Delete</attribute>
+         <attribute name="action">win.trash</attribute>
+diff --git a/src/widgets/image_view.rs b/src/widgets/image_view.rs
+index b16a599..3c7c9f1 100644
+--- a/src/widgets/image_view.rs
++++ b/src/widgets/image_view.rs
+@@ -34,8 +34,6 @@ use std::marker::PhantomData;
+ use adw::prelude::*;
+ use adw::subclass::prelude::*;
+ use anyhow::Context;
+-use ashpd::desktop::{ResponseError, wallpaper};
+-use ashpd::{Error, WindowIdentifier};
+ use glib::{Properties, clone};
+ use gtk::CompositeTemplate;
+ 
+@@ -848,41 +846,6 @@ impl LpImageView {
+         }
+     }
+ 
+-    pub async fn set_background(&self) -> anyhow::Result<()> {
+-        let uri = self
+-            .current_uri()
+-            .and_then(|x| ashpd::Uri::parse(x.as_str()).ok())
+-            .context("Invalid URL for background image")?;
+-        let native = self.native().context("View should have a GtkNative")?;
+-        let id = WindowIdentifier::from_native(&native).await;
+-
+-        match wallpaper::WallpaperRequest::default()
+-            .set_on(wallpaper::SetOn::Background)
+-            .show_preview(true)
+-            .identifier(id)
+-            .build_uri(&uri)
+-            .await
+-            .and_then(|req| req.response())
+-        {
+-            Ok(_) => self.window_show_toast(
+-                // Translators: This is a toast notification, informing the user that
+-                // an image has been set as background.
+-                &gettext("Set as background."),
+-                adw::ToastPriority::High,
+-            ),
+-            Err(err) => {
+-                if !matches!(err, Error::Response(ResponseError::Cancelled)) {
+-                    self.window_show_toast(
+-                        &gettext("Could not set background."),
+-                        adw::ToastPriority::High,
+-                    );
+-                }
+-            }
+-        };
+-
+-        Ok(())
+-    }
+-
+     pub fn print(&self) -> anyhow::Result<()> {
+         let image = self
+             .current_image()
+diff --git a/src/widgets/image_window.rs b/src/widgets/image_window.rs
+index 6e07913..044d5e8 100644
+--- a/src/widgets/image_window.rs
++++ b/src/widgets/image_window.rs
+@@ -571,14 +571,6 @@ impl LpImageWindow {
+         self.imp().image_view.rotate_image(angle)
+     }
+ 
+-    async fn set_background(&self) {
+-        let imp = self.imp();
+-
+-        if let Err(e) = imp.image_view.set_background().await {
+-            tracing::error!("Failed to set background: {}", e);
+-        }
+-    }
+-
+     fn print(&self) {
+         let imp = self.imp();
+ 
+@@ -728,7 +720,6 @@ impl LpImageWindow {
+     fn update_image_actions_status(&self) {
+         // Actions that are enabled if the image is shown
+         const ACTIONS_SHOWN: &[Action] = &[
+-            Action::SetBackground,
+             Action::Print,
+             Action::RotateCw,
+             Action::RotateCcw,
+diff --git a/src/widgets/image_window.ui b/src/widgets/image_window.ui
+index 50a1677..c841c2f 100644
+--- a/src/widgets/image_window.ui
++++ b/src/widgets/image_window.ui
+@@ -32,10 +32,6 @@
+       </item>
+     </section>
+     <section>
+-      <item>
+-        <attribute name="label" translatable="yes">_Set as Background…</attribute>
+-        <attribute name="action">win.set-background</attribute>
+-      </item>
+       <item>
+         <attribute name="label" translatable="yes">_Delete</attribute>
+         <attribute name="action">win.trash</attribute>
+diff --git a/src/widgets/image_window/actions.rs b/src/widgets/image_window/actions.rs
+index 8f742a2..9c97568 100644
+--- a/src/widgets/image_window/actions.rs
++++ b/src/widgets/image_window/actions.rs
+@@ -73,8 +73,6 @@ pub enum Action {
+     Print,
+     #[strum(to_string = "win.copy-image")]
+     CopyImage,
+-    #[strum(to_string = "win.set-background")]
+-    SetBackground,
+     #[strum(to_string = "win.toggle-fullscreen")]
+     ToggleFullscreen,
+     #[strum(to_string = "win.leave-fullscreen")]
+@@ -232,12 +230,6 @@ impl Action {
+                     win.copy_image();
+                 }),
+ 
+-                Action::SetBackground => {
+-                    klass.install_action_async(&action, None, |win, _, _| async move {
+-                        win.set_background().await;
+-                    });
+-                }
+-
+                 Action::ToggleFullscreen => {
+                     klass.install_action(&action, None, move |obj, _, _| {
+                         obj.window_inspect(|w| w.toggle_fullscreen(!w.is_fullscreen()));
+@@ -356,7 +348,6 @@ impl Action {
+                 &[ModifierType::CONTROL_MASK, gdk::ModifierType::SHIFT_MASK],
+             )],
+             Action::Print => &[(Key::p, &[ModifierType::CONTROL_MASK])],
+-            Action::SetBackground => &[(Key::F8, &[ModifierType::CONTROL_MASK])],
+             Action::ToggleFullscreen => &[(Key::F11, &[])],
+             Action::LeaveFullscreen => &[(Key::Escape, &[])],
+             Action::Trash => &[
