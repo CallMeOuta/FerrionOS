@@ -1386,22 +1386,176 @@ def test_fdtable_race(vm, args):
     return ok, note or "dup2 and F_DUPFD raced open, dup and close without a deadlock"
 
 
+ROOT_CONTEXT_MAX_ATTEMPTS = 3
+ROOT_CONTEXT_MAX_ROWS = 4096
+POSITIVE_CONTROL_MAX_POLLS = 10
+FORK_FILETABLE_WAIT_LIMIT_S = 240
+LINUX_RUN_NAME_RE = re.compile(r"/usr/bin/linux-run|/runtime/linux-")
+FORK_FILETABLE_NAME_RE = re.compile(r"fork-filetable-(probe|checker)")
+ROOT_CONTEXT_ROW_RE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+"
+    r"[\d.]+\s+[KMG]?B\s+[\d.]+\s+[KMG]?B\s+(\S.*?)\s*$"
+)
+
+
+@dataclass(frozen=True)
+class ContextRow:
+    pid: int
+    euid: int
+    egid: int
+    stat: str
+    name: str
+    line: str
+
+
+def read_user_uid(vm, tag="uid", timeout=30):
+    reply = guest_run(vm, tag, "id -u", timeout)
+    if isinstance(reply, NoAnswer) or reply.status != 0:
+        return None
+    found = re.search(r"(?m)^\s*(\d+)\s*$", reply.out)
+    return int(found.group(1)) if found else None
+
+
+def read_root_contexts(vm, tag="root-ctx", timeout=60):
+    """Reads /scheme/sys/context through sudo from a user shell and returns bounded ContextRow entries."""
+    for attempt in range(ROOT_CONTEXT_MAX_ATTEMPTS):
+        seq = vm._next_cmd_seq()
+        begin_mark = f"RCTX-BEGIN-{tag}-{seq}"
+        end_mark = f"RCTX-END-{tag}-{seq}"
+        rc_mark = f"RCTX-RC-{tag}-{seq}"
+        tmp_path = f"/tmp/rctx-{tag}.txt"
+        since = vm.mark()
+        vm.type(
+            f"bash -c 'sudo sh -c \"cat /scheme/sys/context > {tmp_path} "
+            f"&& echo {begin_mark} && cat {tmp_path} && echo {end_mark}\"; "
+            f"echo {rc_mark}-$?'\n"
+        )
+        if vm.wait_serial(rf"\[sudo\] password|{re.escape(rc_mark)}-\d", timeout, since):
+            if not re.search(rf"{re.escape(rc_mark)}-\d", vm.text(since)):
+                vm.type("\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){re.escape(rc_mark)}-(\d+)\s", timeout, since)
+        if not found or int(found.group(2)) != 0:
+            continue
+        raw = found.group(1)
+        block = re.search(
+            rf"(?ms)^{re.escape(begin_mark)}\r?\n(.*?)^{re.escape(end_mark)}\r?\n",
+            raw,
+        )
+        if not block:
+            continue
+        body = block.group(1)
+        rows = []
+        overflow = False
+        for line in body.splitlines():
+            clean = line.rstrip("\r")
+            match = ROOT_CONTEXT_ROW_RE.match(clean)
+            if not match:
+                continue
+            if len(rows) >= ROOT_CONTEXT_MAX_ROWS:
+                overflow = True
+                break
+            rows.append(
+                ContextRow(
+                    pid=int(match.group(1)),
+                    euid=int(match.group(2)),
+                    egid=int(match.group(3)),
+                    stat=match.group(4),
+                    name=match.group(5),
+                    line=clean.strip(),
+                )
+            )
+        if overflow or not rows:
+            continue
+        has_root = any(row.euid == 0 for row in rows)
+        has_kernel = any(row.stat.startswith(("K", "R")) for row in rows)
+        if not (has_root and has_kernel):
+            continue
+        return rows, body
+    return None
+
+
 def test_fork_filetable(vm, args):
-    """Five threads churn open, close, pipe2, F_DUPFD_CLOEXEC, dup2, MAP_SHARED mmap, SCM_RIGHTS and malloc while the main thread runs fork+exec and posix_spawn against a descriptor checker, then verifies no probe or checker context remains in KB (use --config desktop)."""
-    ok, note = user_probe(vm, args, "fork-filetable-probe", ("fork-exec-churn", "spawn-churn"), timeout=240)
-    since = vm.mark()
-    vm.type("bash -c 'grep -E \"fork-filetable-(probe|checker)\" /scheme/sys/context || true; echo kb-check-done'\n")
-    found = vm.wait_serial(r"(?s)\n(.*?)kb-check-done\s", 30, since)
-    ctx_out = found.group(1) if found else vm.text(since)
+    """Five threads churn open, close, pipe2, F_DUPFD_CLOEXEC, dup2, MAP_SHARED mmap, SCM_RIGHTS and malloc while the main thread runs fork+exec and posix_spawn against a descriptor checker, then verifies via root context reads that the probe was seen while live and no probe or checker context remains after exit (use --config desktop)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    user_uid = read_user_uid(vm, "fft-uid")
+    if user_uid is None:
+        return False, f"could not read user uid; see {vm.out / 'serial.log'}"
+    start = guest_run(
+        vm,
+        "fft-start",
+        "rm -f /tmp/fft.pid /tmp/fft.rc /tmp/fft.out; "
+        "(fork-filetable-probe >/tmp/fft.out 2>&1 & p=$!; echo $p >/tmp/fft.pid; wait $p; echo $? >/tmp/fft.rc) "
+        "</dev/null >/dev/null 2>&1 & "
+        "for i in $(seq 20); do [ -s /tmp/fft.pid ] && break; sleep 0.2; done; cat /tmp/fft.pid",
+        30,
+    )
+    pid_match = re.search(r"(?m)^\s*(\d+)\s*$", start.out) if not isinstance(start, NoAnswer) else None
+    if not pid_match:
+        return False, f"fork-filetable-probe did not record its pid; see {vm.out / 'serial.log'}"
+    probe_pid = int(pid_match.group(1))
+    seen_live = False
+    for poll in range(POSITIVE_CONTROL_MAX_POLLS):
+        ctrl = read_root_contexts(vm, f"fft-ctrl-{poll}", timeout=60)
+        if ctrl is not None:
+            ctrl_rows, _ = ctrl
+            if any(
+                row.pid == probe_pid
+                and row.euid == user_uid
+                and "fork-filetable-probe" in row.name
+                for row in ctrl_rows
+            ):
+                seen_live = True
+                break
+        rc_check = guest_run(vm, f"fft-done-{poll}", "test -f /tmp/fft.rc && echo DONE || echo LIVE", 15)
+        if not isinstance(rc_check, NoAnswer) and "DONE" in rc_check.out:
+            break
+        time.sleep(0.5)
+    wait_res = guest_run(
+        vm,
+        "fft-wait",
+        f"for i in $(seq {FORK_FILETABLE_WAIT_LIMIT_S}); do [ -f /tmp/fft.rc ] && break; sleep 1; done; "
+        "cat /tmp/fft.rc 2>/dev/null || echo TIMEOUT",
+        FORK_FILETABLE_WAIT_LIMIT_S + 30,
+    )
+    out_res = guest_run(vm, "fft-out", "cat /tmp/fft.out 2>/dev/null || true", 30)
+    output = out_res.out if not isinstance(out_res, NoAnswer) else ""
+    rc_match = re.search(r"(?m)^\s*(\d+)\s*$", wait_res.out) if not isinstance(wait_res, NoAnswer) else None
+    status = int(rc_match.group(1)) if rc_match else None
+    log = vm.out / "fork-filetable-probe.txt"
+    log.write_text(f"exit {status}\n{output}\n")
+    passes = ("fork-exec-churn", "spawn-churn")
+    missing = [name for name in passes if f"fork-filetable-probe: pass {name}" not in output]
+    ok = (
+        status == 0
+        and "fork-filetable-probe: FAIL" not in output
+        and not missing
+        and bool(re.search(r"fork-filetable-probe: PASS\r?\n", output))
+    )
+    note = None if ok else f"fork-filetable-probe failed (exit {status}, missing {missing}); see {log}"
+    after = read_root_contexts(vm, "fft-after", timeout=60)
+    if after is None:
+        return False, f"root context read failed after fork-filetable-probe; see {vm.out / 'serial.log'}"
+    after_rows, ctx_out = after
     (vm.out / "fork-filetable-context.txt").write_text(ctx_out)
-    kb_lines = [line.strip() for line in ctx_out.splitlines() if re.search(r"fork-filetable-(probe|checker)", line) and re.search(r"\bKB\b", line)]
+    leftover_rows = [
+        row for row in after_rows if FORK_FILETABLE_NAME_RE.search(row.name)
+    ]
+    leftover_lines = [row.line for row in leftover_rows]
+    kb_lines = [row.line for row in leftover_rows if row.stat == "KB"]
     if not ok:
         if kb_lines:
             return False, f"{note}; stuck KB contexts: {kb_lines}"
+        if leftover_lines:
+            return False, f"{note}; leftover contexts: {leftover_lines}"
         return False, note
-    if kb_lines:
-        return False, f"probe or checker left in KB after exit: {kb_lines}; see {vm.out / 'fork-filetable-context.txt'}"
-    return True, "multithreaded fork+exec and posix_spawn under descriptor, mmap and malloc churn passed with zero leaks, errors or KB contexts"
+    if not seen_live:
+        return False, f"positive control failed: root context read did not observe fork-filetable-probe pid {probe_pid}; see {vm.out / 'serial.log'}"
+    if leftover_lines:
+        return False, f"probe or checker contexts remained after exit ({len(leftover_lines)}, kb={len(kb_lines)}): {leftover_lines}; see {vm.out / 'fork-filetable-context.txt'}"
+    return True, "multithreaded fork+exec and posix_spawn under descriptor, mmap and malloc churn passed with positive control and zero leftover or KB contexts"
 
 
 def test_exec_handles(vm, args):
@@ -1441,25 +1595,17 @@ def test_exec_handles(vm, args):
             problems.append(f"{label} failed (exit {rc})")
     (vm.out / "exec-handles-launchers.txt").write_text("".join(launcher_log))
 
-    context_text = None
-    for attempt in range(3):
-        rc, out = run_cmd(
-            f"context-{attempt}",
-            "sudo sh -c \"sleep 12 && cat /scheme/sys/context > /tmp/eh-context.txt && cat /tmp/eh-context.txt\"",
-            timeout=90,
-            sudo=True,
-        )
-        if rc == 0 and re.search(r"(?m)^\s*\d+\s+", out):
-            context_text = out
-            break
-    if context_text is None:
+    time.sleep(12)
+    ctx_res = read_root_contexts(vm, "eh-context", timeout=90)
+    if ctx_res is None:
         problems.append("exec-handles context read failed")
     else:
+        ctx_rows, context_text = ctx_res
         (vm.out / "exec-handles-context.txt").write_text(context_text)
         lingering = [
-            line.strip()
-            for line in context_text.splitlines()
-            if "exec-handles-probe" in line
+            row.line
+            for row in ctx_rows
+            if "exec-handles-probe" in row.name
         ]
         if lingering:
             problems.append(f"exec-handles-probe contexts lingered after 12s ({len(lingering)}): {lingering[:4]}")
@@ -2773,13 +2919,52 @@ def test_linux_busybox(vm, args):
         problems.append(f"linux-probe lc2 exit {status}: {'; '.join(failed) or 'no FAIL line'}")
     else:
         report.append(f"linux-probe lc2 {len(lines)} passed")
-    status, out = guest_run(vm, "kl", f"linux-run --native {d}/busybox sh -c \"sleep 30 & sleep 31\" & l=$!; sleep 3; "
-                            "echo kl-before $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); kill -9 $l; sleep 3; "
-                            "echo kl-after $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); grep linux- /scheme/sys/context", 120)
-    log.append(f"[kill launcher] exit {status}\n{out}\n")
-    found = re.search(r"kl-before (\d+).*kl-after (\d+)", out, re.S)
-    report.append(f"killed launcher: linux-run processes {found.group(1)} before, {found.group(2)} after" if found
-                  else "killed launcher: no count")
+    user_uid = read_user_uid(vm, "bb-uid")
+    if user_uid is None:
+        problems.append("killed launcher: could not read user uid")
+    else:
+        start = guest_run(
+            vm,
+            "kl-start",
+            f"rm -f /tmp/kl-bb.pid; linux-run --native {d}/busybox sh -c \"sleep 30 & sleep 31\" "
+            "</dev/null >/tmp/kl-bb.log 2>&1 & echo $! >/tmp/kl-bb.pid; sleep 3; cat /tmp/kl-bb.pid",
+            60,
+        )
+        pid_match = re.search(r"(?m)^\s*(\d+)\s*$", start.out) if not isinstance(start, NoAnswer) else None
+        before_res = read_root_contexts(vm, "kl-bb-before", timeout=60) if pid_match else None
+        launcher_pid = int(pid_match.group(1)) if pid_match else None
+        if launcher_pid is not None:
+            guest_run(vm, "kl-kill", f"kill -9 {launcher_pid} 2>/dev/null || true; sleep 3", 60)
+        after_res = read_root_contexts(vm, "kl-bb-after", timeout=60) if pid_match else None
+        if before_res is None or after_res is None:
+            problems.append("killed launcher: root context read failed")
+            log.append(f"[kill launcher] start={start.out if not isinstance(start, NoAnswer) else ''}\n")
+        else:
+            before_rows, before_raw = before_res
+            after_rows, after_raw = after_res
+            before_launcher = [
+                row for row in before_rows
+                if row.pid == launcher_pid and row.euid == user_uid and "/usr/bin/linux-run" in row.name
+            ]
+            before_user = [
+                row for row in before_rows
+                if row.euid == user_uid and LINUX_RUN_NAME_RE.search(row.name)
+            ]
+            before_all = [row for row in before_rows if LINUX_RUN_NAME_RE.search(row.name)]
+            after_all = [row for row in after_rows if LINUX_RUN_NAME_RE.search(row.name)]
+            log.append(
+                f"[kill launcher] pid={launcher_pid} user_uid={user_uid} "
+                f"launcher_seen={len(before_launcher)} user_before={len(before_user)} "
+                f"all_before={len(before_all)} all_after={len(after_all)}\n"
+                f"=== before ===\n{before_raw}\n=== after ===\n{after_raw}\n"
+            )
+            if len(before_launcher) != 1 or len(before_user) != 2:
+                problems.append(
+                    f"killed launcher positive control failed: launcher_seen={len(before_launcher)} "
+                    f"user_before={len(before_user)} (expected 1 and 2)"
+                )
+            else:
+                report.append(f"killed launcher: linux-run processes {len(before_all)} before, {len(after_all)} after")
     (vm.out / "linux-busybox.txt").write_text("".join(log))
     if problems:
         return False, "; ".join(problems) + f"; see {vm.out / 'linux-busybox.txt'}"
@@ -2848,15 +3033,57 @@ def test_linux_python(vm, args):
         problems.append(f"lc4 script: stdout {verdict[0]}, stderr {verdict[1]}, status {verdict[2]}")
     else:
         report.append("python3, venv and pip output equals Linux's")
-    status, out = guest_run(vm, "kl", "linux-run /bin/dash -c \"sleep 30 & sleep 31\" & l=$!; sleep 5; "
-                            "echo kl-before $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); kill -9 $l; sleep 3; "
-                            "echo kl-after $(grep -c -E \"/usr/bin/linux-run|/runtime/linux-\" /scheme/sys/context); grep linux- /scheme/sys/context", 120)
-    log.append(f"[kill launcher] exit {status}\n{out}\n")
-    found = re.search(r"kl-before (\d+).*kl-after (\d+)", out, re.S)
-    if not found or int(found.group(1)) < 2 or int(found.group(2)) != 0:
-        problems.append("killed launcher: " + (f"linux-run processes {found.group(1)} before, {found.group(2)} after" if found else "no count"))
+    user_uid = read_user_uid(vm, "py-uid")
+    if user_uid is None:
+        problems.append("killed launcher: could not read user uid")
     else:
-        report.append(f"killed launcher took its session's {found.group(1)} processes with it")
+        start = guest_run(
+            vm,
+            "kl-start",
+            "rm -f /tmp/kl-py.pid; linux-run /bin/dash -c \"sleep 30 & sleep 31\" "
+            "</dev/null >/tmp/kl-py.log 2>&1 & echo $! >/tmp/kl-py.pid; sleep 5; cat /tmp/kl-py.pid",
+            60,
+        )
+        pid_match = re.search(r"(?m)^\s*(\d+)\s*$", start.out) if not isinstance(start, NoAnswer) else None
+        before_res = read_root_contexts(vm, "kl-py-before", timeout=60) if pid_match else None
+        launcher_pid = int(pid_match.group(1)) if pid_match else None
+        if launcher_pid is not None:
+            guest_run(vm, "kl-kill", f"kill -9 {launcher_pid} 2>/dev/null || true; sleep 3", 60)
+        after_res = read_root_contexts(vm, "kl-py-after", timeout=60) if pid_match else None
+        if before_res is None or after_res is None:
+            problems.append("killed launcher: root context read failed")
+            log.append(f"[kill launcher] start={start.out if not isinstance(start, NoAnswer) else ''}\n")
+        else:
+            before_rows, before_raw = before_res
+            after_rows, after_raw = after_res
+            before_launcher = [
+                row for row in before_rows
+                if row.pid == launcher_pid and row.euid == user_uid and "/usr/bin/linux-run" in row.name
+            ]
+            before_children = [
+                row for row in before_rows
+                if row.euid == user_uid and "/runtime/linux-" in row.name
+            ]
+            after_all = [row for row in after_rows if LINUX_RUN_NAME_RE.search(row.name)]
+            log.append(
+                f"[kill launcher] pid={launcher_pid} user_uid={user_uid} "
+                f"launcher_seen={len(before_launcher)} children_before={len(before_children)} "
+                f"all_after={len(after_all)}\n"
+                f"=== before ===\n{before_raw}\n=== after ===\n{after_raw}\n"
+            )
+            if len(before_launcher) != 1 or len(before_children) != 2:
+                problems.append(
+                    f"killed launcher positive control failed: launcher_seen={len(before_launcher)} "
+                    f"children_before={len(before_children)} (expected 1 and 2)"
+                )
+            elif after_all:
+                problems.append(
+                    f"killed launcher left {len(after_all)} linux-run processes: {[r.line for r in after_all[:4]]}"
+                )
+            else:
+                report.append(
+                    f"killed launcher took its session's {len(before_launcher) + len(before_children)} processes with it"
+                )
     (vm.out / "linux-python.txt").write_text("".join(log))
     if problems:
         return False, "; ".join(problems) + f"; see {vm.out / 'linux-python.txt'}"
