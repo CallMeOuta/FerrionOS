@@ -1,0 +1,48 @@
+[package]
+description = "AppStream metadata library for software components"
+
+[source]
+tar = "https://www.freedesktop.org/software/appstream/releases/AppStream-1.1.2.tar.xz"
+blake3 = "5e4685b2100d861b842665b35f4a84c3f337650cac9c8034b2a7a575ee6ea10a"
+script = """
+mv AppStream-1.1.2/{*,.*} .
+rmdir AppStream-1.1.2
+"""
+patches = [
+    "redox.patch",
+]
+
+[build]
+template = "custom"
+dependencies = [
+    "glib",
+    "libxml2",
+    "curl",
+    "libfyaml",
+    "libxmlb",
+]
+dev-dependencies = [
+    "host:gperf",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_meson \
+    --wrap-mode=nodownload \
+    -Dstemming=false \
+    -Dbash-completion=false \
+    -Dsystemd=false \
+    -Dgir=false \
+    -Dman=false \
+    -Ddocs=false \
+    -Dapidocs=false \
+    -Dinstall-docs=false \
+    -Dvapi=false \
+    -Dcompose=false \
+    -Dqt=false \
+    -Dapt-support=false \
+    -Dsvg-support=false \
+    -Dzstd-support=false
+
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/appstream/COPYING"
+"""
