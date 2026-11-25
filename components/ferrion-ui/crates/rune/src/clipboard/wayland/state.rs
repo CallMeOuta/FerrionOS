@@ -16,7 +16,8 @@ use zeroize::Zeroizing;
 use super::io::{PendingSend, SendBytes, format_uri_list};
 use super::{
     ClipboardWaylandError, MAX_OFFER_MIMES, MAX_PENDING_OFFERS, MAX_PENDING_SENDS, MIME_HTML,
-    MIME_KDE_SECRET, MIME_PNG, MIME_URI_LIST, TEXT_MIMES, overlay_focus_serial, record_input_serial,
+    MIME_KDE_SECRET, MIME_PNG, MIME_URI_LIST, TEXT_MIMES, overlay_focus_serial,
+    record_input_serial,
 };
 use crate::clipboard::ClipboardWrite;
 
@@ -122,6 +123,8 @@ pub(super) struct State {
     pub(super) pointer: Option<WlPointer>,
     pub(super) pending_offers: Vec<(WlDataOffer, Vec<String>)>,
     pub(super) current_offer: Option<(WlDataOffer, Vec<String>)>,
+    pub(super) active_dnd_offer: Option<WlDataOffer>,
+    pub(super) active_dnd_dropped: bool,
     pub(super) active_source: Option<(WlDataSource, WritePayload)>,
     pub(super) pending_sends: Vec<PendingSend>,
     pub(super) logged_send_cap: bool,
@@ -137,6 +140,8 @@ impl State {
             pointer: None,
             pending_offers: Vec::new(),
             current_offer: None,
+            active_dnd_offer: None,
+            active_dnd_dropped: false,
             active_source: None,
             pending_sends: Vec::new(),
             logged_send_cap: false,
@@ -343,17 +348,29 @@ impl Dispatch<WlDataDevice, ()> for State {
                     state.bump_revision();
                 }
             }
-            wl_data_device::Event::Enter {
-                id: Some(offer), ..
-            } => {
-                if let Some(idx) = state
-                    .pending_offers
-                    .iter()
-                    .position(|(pending, _)| pending == &offer)
-                {
-                    let (dnd_offer, _) = state.pending_offers.remove(idx);
-                    dnd_offer.destroy();
-                } else {
+            wl_data_device::Event::Enter { id, .. } => {
+                if let Some(prev) = state.active_dnd_offer.take() {
+                    prev.destroy();
+                }
+                state.active_dnd_dropped = false;
+                if let Some(offer) = id {
+                    if let Some(idx) = state
+                        .pending_offers
+                        .iter()
+                        .position(|(pending, _)| pending == &offer)
+                    {
+                        let (dnd_offer, _) = state.pending_offers.remove(idx);
+                        state.active_dnd_offer = Some(dnd_offer);
+                    } else {
+                        state.active_dnd_offer = Some(offer);
+                    }
+                }
+            }
+            wl_data_device::Event::Drop => {
+                state.active_dnd_dropped = true;
+            }
+            wl_data_device::Event::Leave if !state.active_dnd_dropped => {
+                if let Some(offer) = state.active_dnd_offer.take() {
                     offer.destroy();
                 }
             }

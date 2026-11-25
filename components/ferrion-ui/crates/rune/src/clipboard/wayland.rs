@@ -569,6 +569,9 @@ fn cleanup(
     if let Some((offer, _)) = state.current_offer.take() {
         offer.destroy();
     }
+    if let Some(offer) = state.active_dnd_offer.take() {
+        offer.destroy();
+    }
     if let Some(kb) = state.keyboard.take() {
         if kb.version() >= 3 {
             kb.release();
