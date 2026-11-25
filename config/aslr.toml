@@ -1,0 +1,4 @@
+include = ["minimal.toml"]
+
+[packages]
+aslr-probe = "source"

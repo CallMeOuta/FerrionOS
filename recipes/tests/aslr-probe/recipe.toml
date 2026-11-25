@@ -1,0 +1,25 @@
+[package]
+description = "Checks per-process ASLR layout across spawn, re-exec, fork and dlopen"
+
+[build]
+template = "custom"
+script = """
+mkdir -p "${COOKBOOK_STAGE}/usr/bin" "${COOKBOOK_STAGE}/usr/lib/aslr-probe"
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra \
+    "${COOKBOOK_RECIPE}/probe.c" ${LDFLAGS} \
+    -o "${COOKBOOK_STAGE}/usr/bin/aslr-probe-static"
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra \
+    "${COOKBOOK_RECIPE}/true.c" ${LDFLAGS} \
+    -o "${COOKBOOK_STAGE}/usr/bin/aslr-true-static"
+
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIC -shared \
+    "${COOKBOOK_RECIPE}/dso.c" ${LDFLAGS} -o libaslr-probe.so
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIE -pie -DWITH_DLOPEN \
+    "${COOKBOOK_RECIPE}/probe.c" ${LDFLAGS} -o aslr-probe-pie
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra -fPIE -pie \
+    "${COOKBOOK_RECIPE}/true.c" ${LDFLAGS} -o aslr-true-dynamic
+
+cp libaslr-probe.so "${COOKBOOK_STAGE}/usr/lib/aslr-probe/"
+cp aslr-probe-pie aslr-true-dynamic "${COOKBOOK_STAGE}/usr/bin/"
+"""
