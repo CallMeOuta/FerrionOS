@@ -69,5 +69,7 @@ cookbook_meson \
     -Dbuild-testsuite=false \
     -Dprofile=default
 
+glib-compile-schemas "${COOKBOOK_STAGE}/usr/share/glib-2.0/schemas"
+
 install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/gtk4/COPYING"
 """
