@@ -1140,11 +1140,11 @@ def test_directory_fsync(vm, args):
 
 
 def test_printf_precision(vm, args):
-    """Checks printf bare-dot precision cases in FerrionOS byte-for-byte against host glibc."""
+    """Checks printf bare-dot and NULL string precision cases in FerrionOS byte-for-byte against host glibc."""
     src = ROOT / "recipes" / "tests" / "printf-precision-probe" / "printf-precision-probe.c"
     with tempfile.TemporaryDirectory(prefix="ferrion-printf-ref-") as scratch:
         ref_bin = Path(scratch) / "printf-precision-probe"
-        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", str(src), "-o", str(ref_bin)], check=True)
+        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Wno-format", str(src), "-o", str(ref_bin)], check=True)
         glibc_text = subprocess.check_output([str(ref_bin)], text=True)
     (vm.out / "glibc.txt").write_text(glibc_text)
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -1157,7 +1157,7 @@ def test_printf_precision(vm, args):
     raw = found.group(1) if found else vm.text(since)
     status = int(found.group(2)) if found else None
     guest_lines = [line.rstrip("\r") for line in raw.splitlines()
-                   if line.startswith(("case ", "null-check ", "printf-precision-probe:"))]
+                   if line.startswith(("case ", "printf-precision-probe:"))]
     guest_text = "\n".join(guest_lines) + ("\n" if guest_lines else "")
     (vm.out / "guest.txt").write_text(guest_text)
     if status != 0 or "printf-precision-probe: DONE" not in guest_lines:
@@ -1170,14 +1170,9 @@ def test_printf_precision(vm, args):
     for g_line, r_line in zip(guest_cases, glibc_cases):
         if g_line != r_line:
             diffs.append(f"guest={g_line!r} != glibc={r_line!r}")
-    guest_nulls = dict(line.split(": ", 1) for line in guest_lines if line.startswith("null-check "))
-    dot_s_null = guest_nulls.get("null-check dot-s-null")
-    dot0_s_null = guest_nulls.get("null-check dot0-s-null")
-    if dot_s_null != dot0_s_null:
-        diffs.append(f"null mismatch %.s={dot_s_null!r} != %.0s={dot0_s_null!r}")
     if diffs:
         return False, f"{len(diffs)} diffs ({'; '.join(diffs[:4])}); see {vm.out}"
-    return True, f"{len(guest_cases)}/{len(glibc_cases)} cases match host glibc byte-for-byte (null: {dot_s_null})"
+    return True, f"{len(guest_cases)}/{len(glibc_cases)} cases match host glibc byte-for-byte"
 
 
 def test_math_bessel(vm, args):

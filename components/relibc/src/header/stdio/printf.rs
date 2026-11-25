@@ -1069,7 +1069,14 @@ pub(crate) unsafe fn inner_printf<T: c_str::Kind>(
                 .cast::<c_char>();
 
                 if ptr.is_null() {
-                    w.write_all(b"(null)")?;
+                    let bytes: &[u8] = if precision.is_none_or(|p| p >= b"(null)".len()) {
+                        b"(null)"
+                    } else {
+                        b""
+                    };
+                    pad(w, !left, b' ', bytes.len()..pad_space)?;
+                    w.write_all(bytes)?;
+                    pad(w, left, b' ', bytes.len()..pad_space)?;
                 } else {
                     let max = precision.unwrap_or(usize::MAX);
 
