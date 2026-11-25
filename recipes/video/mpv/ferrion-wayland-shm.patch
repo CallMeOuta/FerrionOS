@@ -1,0 +1,112 @@
+--- a/meson.build
++++ b/meson.build
+@@ -1115,7 +1115,8 @@
+ 
+ features += {'memfd-create': false}
+ if features['wayland']
+-    features += {'memfd-create': cc.has_function('memfd_create',
++    features += {'memfd-create': host_machine.system() == 'redox' or
++                                 cc.has_function('memfd_create',
+                                                  prefix: '#define _GNU_SOURCE\n#include <sys/mman.h>')}
+ endif
+ if features['wayland'] and features['memfd-create']
+--- a/video/out/wayland_common.c
++++ b/video/out/wayland_common.c
+@@ -21,6 +21,14 @@
+ #include <poll.h>
+ #include <time.h>
+ #include <unistd.h>
++#ifdef __redox__
++#include <fcntl.h>
++#include <inttypes.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <sys/mman.h>
++#include <sys/random.h>
++#endif
+ #include <wayland-cursor.h>
+ #include <xkbcommon/xkbcommon.h>
+ 
+@@ -4216,11 +4224,82 @@
+     }
+ }
+ 
++#ifdef __redox__
++#define MPV_WL_SHM_MAX_RETRIES 64
++#define MPV_WL_SHM_MAX_EINTR 16
++
++static bool fill_random_u64(uint64_t *out)
++{
++    uint8_t *dst = (uint8_t *)out;
++    size_t filled = 0;
++    for (int iter = 0; iter < MPV_WL_SHM_MAX_EINTR && filled < sizeof(*out); iter++) {
++        ssize_t n = getrandom(dst + filled, sizeof(*out) - filled, 0);
++        if (n < 0) {
++            if (errno == EINTR)
++                continue;
++            return false;
++        }
++        if (n == 0)
++            return false;
++        filled += (size_t)n;
++    }
++    return filled == sizeof(*out);
++}
++#endif
++
+ /* Non-static */
+ int vo_wayland_allocate_memfd(struct vo *vo, size_t size)
+ {
+ #if !HAVE_MEMFD_CREATE
+     return VO_ERROR;
++#elif defined(__redox__)
++    if (size == 0 || size > (size_t)INT64_MAX) {
++        MP_ERR(vo, "Invalid Wayland shm allocation size: %zu\n", size);
++        return VO_ERROR;
++    }
++
++    char name[48];
++    int fd = -1;
++    for (int attempt = 0; attempt < MPV_WL_SHM_MAX_RETRIES; attempt++) {
++        uint64_t token = 0;
++        if (!fill_random_u64(&token)) {
++            MP_ERR(vo, "Failed to read random bytes for Wayland shm: %s\n", mp_strerror(errno));
++            return VO_ERROR;
++        }
++        int n = snprintf(name, sizeof(name), "/mpv-wlshm-%016" PRIx64, token);
++        if (n <= 0 || (size_t)n >= sizeof(name)) {
++            MP_ERR(vo, "Failed to format Wayland shm name\n");
++            return VO_ERROR;
++        }
++        fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
++        if (fd >= 0)
++            break;
++        if (errno != EEXIST) {
++            MP_ERR(vo, "Failed to open Wayland shm %s: %s\n", name, mp_strerror(errno));
++            return VO_ERROR;
++        }
++    }
++    if (fd < 0) {
++        MP_ERR(vo, "Failed to allocate unique Wayland shm name after %d attempts\n",
++               MPV_WL_SHM_MAX_RETRIES);
++        return VO_ERROR;
++    }
++
++    if (shm_unlink(name) < 0) {
++        MP_WARN(vo, "Failed to unlink Wayland shm %s: %s\n", name, mp_strerror(errno));
++    }
++
++    for (int iter = 0; iter < MPV_WL_SHM_MAX_EINTR; iter++) {
++        if (ftruncate(fd, (off_t)size) == 0)
++            return fd;
++        if (errno != EINTR)
++            break;
++    }
++
++    int saved_errno = errno;
++    close(fd);
++    MP_ERR(vo, "Failed to size Wayland shm to %zu bytes: %s\n", size, mp_strerror(saved_errno));
++    return VO_ERROR;
+ #else
+     int fd = memfd_create("mpv", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+     if (fd < 0) {
