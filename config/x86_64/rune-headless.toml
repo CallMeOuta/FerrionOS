@@ -1,0 +1,9 @@
+include = ["../minimal.toml"]
+
+[general]
+filesystem_size = 1280
+
+[packages]
+bash = {}
+mesa = "source"
+ferrion-ui-headless = "source"

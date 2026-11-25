@@ -9397,6 +9397,319 @@ def test_wgpu_headless(vm, args):
     )
 
 
+RUNE_HEADLESS_APPS = ("hello", "settings", "launcher")
+RUNE_HEADLESS_SCALE = 2
+RUNE_HEADLESS_DIFF_LIMIT = 16
+RUNE_HEADLESS_RUN_TIMEOUT = 180
+RUNE_HEADLESS_FETCH_TIMEOUT = 120
+RUNE_HEADLESS_REF_CONTAINER = "sha256:cd1ecc1907f68548409ebc8d5a82982b4e494b69a7f669424ebdb2e0bacc2690"
+RUNE_HEADLESS_REF_MESA = "Mesa 26.3.1 (LLVM 23.1.5)"
+RUNE_HEADLESS_REF_SHA256 = {
+    "hello": {
+        "png": "f9a74ca448e728c88b78413617e73caeab0d4e0a37da38086653d78a1e3f67f1",
+        "tree": "53559263d4876e61e90dc3ffa0c867f7d967d3e4fd9a9ec0ba82513c0dfe1b35",
+    },
+    "settings": {
+        "png": "3833a7b5752fe9753fb4c5a0e7f3f803a87f93b574ced011843557531b165680",
+        "tree": "588cf8202698a91db41369b9a09fbac6f0236072d82ef6710a4d2aec5c01002d",
+    },
+    "launcher": {
+        "png": "9f3a796c5c08a70c29a858e2f56d2039ad605c6e40d8301a5ae5634d2112bc5c",
+        "tree": "b6cfc9d1d3b9ab2ce106896793141370e549e22725ca5d46dacbc13b1ae599e2",
+    },
+}
+RUNE_TREE_TIMING_KEYS = frozenset({
+    "timings",
+    "timing",
+    "elapsed_ms",
+    "frame_ms",
+    "gpu_init_ms",
+    "first_frame_ms",
+})
+
+
+def test_rune_headless(vm, args):
+    """Runs rune-hello, rune-settings, and rune-launcher headlessly on lavapipe and --cpu-boot, verifying recorded RU1 SHA-256 digests (and optional pixel/probe/tree diagnostics via --rune-ref-dir) plus 0 cpu-boot drift (use --config rune-headless on x86_64)."""
+    explicit_ref = args.rune_ref_dir is not None
+    candidate_ref_dir = args.rune_ref_dir if explicit_ref else ROOT / "build" / "ru1-ref"
+    missing_refs = [
+        f"{app}.{ext}"
+        for app in RUNE_HEADLESS_APPS
+        for ext in ("png", "tree.json")
+        if not (candidate_ref_dir / f"{app}.{ext}").is_file()
+    ]
+    if explicit_ref and missing_refs:
+        raise Blocked(f"missing RU1 reference files in {candidate_ref_dir}: {', '.join(missing_refs)}")
+    ref_dir = None if missing_refs else candidate_ref_dir
+
+    try:
+        import hashlib
+        import io
+        from PIL import Image
+    except ImportError as error:
+        raise Blocked(f"Pillow is required for rune-headless PNG comparison: {error}") from error
+
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+
+    def fetch_bytes(remote_path, tag):
+        since = vm.mark()
+        vm.type(
+            f"bash -c 'echo RUNEDATA-\"\"{tag}-BEGIN; base64 -w 0 {remote_path} 2>/dev/null; "
+            f"echo; echo RUNEDATA-\"\"{tag}-END'\n"
+        )
+        found = vm.wait_serial(
+            rf"RUNEDATA-{tag}-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)RUNEDATA-{tag}-END",
+            RUNE_HEADLESS_FETCH_TIMEOUT,
+            since,
+        )
+        if not found:
+            return None
+        raw = "".join(found.group(1).split())
+        if not raw:
+            return None
+        try:
+            return base64.b64decode(raw, validate=True)
+        except ValueError:
+            return None
+
+    def decode_rgba(data):
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        return img.width, img.height, img.tobytes()
+
+    def compare_rgba(w_a, h_a, bytes_a, w_b, h_b, bytes_b):
+        if (w_a, h_a) != (w_b, h_b):
+            return {
+                "size_match": False,
+                "size_a": [w_a, h_a],
+                "size_b": [w_b, h_b],
+                "differing_pixels": None,
+                "max_channel_diff": None,
+                "samples": [],
+            }
+        differing = 0
+        max_diff = 0
+        samples = []
+        for idx in range(w_a * h_a):
+            off = idx * 4
+            d = max(
+                abs(bytes_a[off] - bytes_b[off]),
+                abs(bytes_a[off + 1] - bytes_b[off + 1]),
+                abs(bytes_a[off + 2] - bytes_b[off + 2]),
+                abs(bytes_a[off + 3] - bytes_b[off + 3]),
+            )
+            if d > 0:
+                differing += 1
+                if d > max_diff:
+                    max_diff = d
+                if len(samples) < RUNE_HEADLESS_DIFF_LIMIT:
+                    samples.append({
+                        "x": idx % w_a,
+                        "y": idx // w_a,
+                        "a": list(bytes_a[off:off + 4]),
+                        "b": list(bytes_b[off:off + 4]),
+                    })
+        return {
+            "size_match": True,
+            "size": [w_a, h_a],
+            "total_pixels": w_a * h_a,
+            "differing_pixels": differing,
+            "max_channel_diff": max_diff,
+            "samples": samples,
+        }
+
+    def strip_timings(obj):
+        if isinstance(obj, dict):
+            return {k: strip_timings(v) for k, v in obj.items() if k not in RUNE_TREE_TIMING_KEYS}
+        if isinstance(obj, list):
+            return [strip_timings(v) for v in obj]
+        return obj
+
+    def check_probes(tree, w_px, h_px, guest_bytes, ref_bytes):
+        scale = float(tree.get("scale", RUNE_HEADLESS_SCALE))
+        total = 0
+        matched = 0
+        mismatches = []
+        for el in tree.get("elements", []):
+            rect = el.get("rect")
+            if not isinstance(rect, list) or len(rect) != 4:
+                continue
+            rx, ry, rw, rh = rect
+            if rw <= 0 or rh <= 0:
+                continue
+            cx = min(w_px - 1, max(0, int((rx + rw / 2.0) * scale)))
+            cy = min(h_px - 1, max(0, int((ry + rh / 2.0) * scale)))
+            off = (cy * w_px + cx) * 4
+            g_px = list(guest_bytes[off:off + 4])
+            r_px = list(ref_bytes[off:off + 4])
+            total += 1
+            if g_px == r_px:
+                matched += 1
+            elif len(mismatches) < RUNE_HEADLESS_DIFF_LIMIT:
+                mismatches.append({
+                    "path": el.get("path"),
+                    "x": cx,
+                    "y": cy,
+                    "guest": g_px,
+                    "ref": r_px,
+                })
+        return {"total": total, "matched": matched, "mismatches": mismatches}
+
+    guest_run(vm, "runeclean", "rm -f /tmp/rune-*.png /tmp/rune-*.tree.json", 30)
+    lvp_icd = f"/usr/share/vulkan/icd.d/lvp_icd.{args.arch}.json"
+    log_sections = []
+    apps_report = {}
+    reasons = []
+
+    for app in RUNE_HEADLESS_APPS:
+        tag = app.upper()
+        gpu_png_path = f"/tmp/rune-{app}.png"
+        tree_path = f"/tmp/rune-{app}.tree.json"
+        cpu_png_path = f"/tmp/rune-{app}-cpu.png"
+        expected_sha = RUNE_HEADLESS_REF_SHA256[app]
+
+        gpu_status, gpu_out = guest_run(
+            vm,
+            f"rune{app}gpu",
+            f"VK_DRIVER_FILES={lvp_icd} rune-{app} --snap {gpu_png_path} --tree {tree_path} "
+            f"--at 0 --scale {RUNE_HEADLESS_SCALE} --theme dark 2>&1",
+            RUNE_HEADLESS_RUN_TIMEOUT,
+        )
+        log_sections.append(f"=== {app} lavapipe (exit {gpu_status}) ===\n{gpu_out}\n")
+        gpu_png = fetch_bytes(gpu_png_path, f"{tag}GPU") if gpu_status == 0 else None
+        tree_bytes = fetch_bytes(tree_path, f"{tag}TREE") if gpu_status == 0 else None
+        if gpu_png:
+            (vm.out / f"{app}.png").write_bytes(gpu_png)
+        if tree_bytes:
+            (vm.out / f"{app}.tree.json").write_bytes(tree_bytes)
+
+        cpu_status, cpu_out = guest_run(
+            vm,
+            f"rune{app}cpu",
+            f"VK_DRIVER_FILES={lvp_icd} rune-{app} --snap {cpu_png_path} --cpu-boot "
+            f"--at 0 --scale {RUNE_HEADLESS_SCALE} --theme dark 2>&1",
+            RUNE_HEADLESS_RUN_TIMEOUT,
+        )
+        log_sections.append(f"=== {app} cpu-boot (exit {cpu_status}) ===\n{cpu_out}\n")
+        cpu_png = fetch_bytes(cpu_png_path, f"{tag}CPU") if cpu_status == 0 else None
+        if cpu_png:
+            (vm.out / f"{app}-cpu.png").write_bytes(cpu_png)
+
+        app_entry = {
+            "gpu_exit": gpu_status,
+            "cpu_boot_exit": cpu_status,
+            "png_sha256": None,
+            "expected_png_sha256": expected_sha["png"],
+            "png_sha256_match": False,
+            "tree_sha256": None,
+            "expected_tree_sha256": expected_sha["tree"],
+            "tree_sha256_match": False,
+            "ref_png": None,
+            "cpu_boot_vs_gpu": None,
+            "tree_equal": None,
+            "probes": None,
+        }
+
+        if gpu_status != 0:
+            reasons.append(f"{app} lavapipe exited {gpu_status}")
+        if not gpu_png:
+            reasons.append(f"{app} missing guest PNG")
+        if not tree_bytes:
+            reasons.append(f"{app} missing guest tree JSON")
+        if cpu_status != 0:
+            reasons.append(f"{app} cpu-boot exited {cpu_status}")
+        if not cpu_png:
+            reasons.append(f"{app} missing cpu-boot PNG")
+
+        ref_png_bytes = (ref_dir / f"{app}.png").read_bytes() if ref_dir is not None else None
+        ref_tree = json.loads((ref_dir / f"{app}.tree.json").read_text()) if ref_dir is not None else None
+
+        if gpu_png:
+            png_sha = hashlib.sha256(gpu_png).hexdigest()
+            app_entry["png_sha256"] = png_sha
+            app_entry["png_sha256_match"] = png_sha == expected_sha["png"]
+            gw, gh, gbytes = decode_rgba(gpu_png)
+
+            ref_diag = ""
+            if ref_png_bytes is not None:
+                rw, rh, rbytes = decode_rgba(ref_png_bytes)
+                ref_cmp = compare_rgba(gw, gh, gbytes, rw, rh, rbytes)
+                app_entry["ref_png"] = ref_cmp
+                if not ref_cmp["size_match"]:
+                    ref_diag = f" (size {gw}x{gh} != ref {rw}x{rh})"
+                else:
+                    probes = check_probes(ref_tree, gw, gh, gbytes, rbytes)
+                    app_entry["probes"] = probes
+                    if ref_cmp["differing_pixels"] != 0:
+                        ref_diag = (
+                            f" (diff {ref_cmp['differing_pixels']}/{ref_cmp['total_pixels']} px, "
+                            f"max_ch={ref_cmp['max_channel_diff']}, probes {probes['matched']}/{probes['total']})"
+                        )
+                    elif probes["matched"] != probes["total"] or probes["total"] == 0:
+                        reasons.append(f"{app} probes {probes['matched']}/{probes['total']}")
+
+            if not app_entry["png_sha256_match"]:
+                reasons.append(
+                    f"{app} PNG sha256 mismatch: got {png_sha} != expected {expected_sha['png']}{ref_diag}"
+                )
+
+            if cpu_png:
+                cw, ch, cbytes = decode_rgba(cpu_png)
+                cpu_cmp = compare_rgba(cw, ch, cbytes, gw, gh, gbytes)
+                app_entry["cpu_boot_vs_gpu"] = cpu_cmp
+                if not cpu_cmp["size_match"]:
+                    reasons.append(f"{app} cpu-boot PNG size {cw}x{ch} != gpu {gw}x{gh}")
+                elif cpu_cmp["differing_pixels"] != 0:
+                    reasons.append(
+                        f"{app} cpu-boot drift {cpu_cmp['differing_pixels']}/{cpu_cmp['total_pixels']} "
+                        f"(max_ch={cpu_cmp['max_channel_diff']})"
+                    )
+
+        if tree_bytes:
+            tree_sha = hashlib.sha256(tree_bytes).hexdigest()
+            app_entry["tree_sha256"] = tree_sha
+            app_entry["tree_sha256_match"] = tree_sha == expected_sha["tree"]
+            try:
+                guest_tree = json.loads(tree_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                reasons.append(f"{app} invalid tree JSON: {error}")
+            else:
+                tree_diag = ""
+                if ref_tree is not None:
+                    equal = strip_timings(guest_tree) == strip_timings(ref_tree)
+                    app_entry["tree_equal"] = equal
+                    if not equal:
+                        tree_diag = " (stripped tree JSON differs from reference)"
+                if not app_entry["tree_sha256_match"]:
+                    reasons.append(
+                        f"{app} tree sha256 mismatch: got {tree_sha} != expected {expected_sha['tree']}{tree_diag}"
+                    )
+
+        apps_report[app] = app_entry
+
+    log = vm.out / "rune-headless.txt"
+    log.write_text("".join(log_sections))
+    report = {
+        "ref_container": RUNE_HEADLESS_REF_CONTAINER,
+        "ref_mesa": RUNE_HEADLESS_REF_MESA,
+        "ref_dir": str(ref_dir) if ref_dir is not None else None,
+        "apps": apps_report,
+        "reasons": reasons,
+    }
+    report_path = vm.out / "rune-headless.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    parts = []
+    for app in RUNE_HEADLESS_APPS:
+        probes = apps_report[app]["probes"]
+        if probes is not None:
+            parts.append(f"{app}(sha256=ok,cpu_drift=0,probes={probes['matched']}/{probes['total']})")
+        else:
+            parts.append(f"{app}(sha256=ok,cpu_drift=0)")
+    return True, f"{' '.join(parts)}; see {report_path}"
+
+
 LOCK_PROBE_CHECKS = (
     "fcntl-conflict", "getlk-holder", "fcntl-shared", "fcntl-split-merge", "seek-cur-and-end",
     "release-on-close", "release-on-close-other-fd", "path-lookups-keep-locks", "release-on-exit", "release-on-kill",
@@ -10836,6 +11149,7 @@ TESTS["gpu-syncobj"] = test_gpu_syncobj
 TESTS["gpu-flip"] = test_gpu_flip
 TESTS["vk-exact"] = test_vk_exact
 TESTS["wgpu-headless"] = test_wgpu_headless
+TESTS["rune-headless"] = test_rune_headless
 TESTS["agent-scope"] = test_agent_scope
 TESTS["agent-clone"] = test_agent_clone
 TESTS["agent-scope-overhead"] = test_agent_scope_overhead
@@ -11213,6 +11527,8 @@ def main():
                         help="gl-exact: select Venus's Vulkan ICD via VK_DRIVER_FILES and expect Zink on Venus")
     parser.add_argument("--venus-icd", default="",
                         help="gl-exact --venus: override VK_DRIVER_FILES path")
+    parser.add_argument("--rune-ref-dir", type=Path, default=None,
+                        help="rune-headless: RU1 reference directory (default: build/ru1-ref)")
     parser.add_argument("--lab", action="store_true",
                         help="run inside an unprivileged user and network namespace with no route out")
     parser.add_argument("--in-lab", action="store_true", help=argparse.SUPPRESS)
@@ -11334,6 +11650,9 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *VK_EXACT_TRACE]})
+            elif name == "rune-headless":
+                if not any(assignment.startswith("gpu=") for assignment in args.make):
+                    make = ("gpu=no",)
             elif name in ("iommu", "dma-outside-grant"):
                 if not any(assignment.startswith("iommu=") for assignment in args.make):
                     make = ("iommu=yes",) if name == "iommu" else ("iommu=test",)

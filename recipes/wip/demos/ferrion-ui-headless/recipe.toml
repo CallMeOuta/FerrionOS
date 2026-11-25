@@ -1,0 +1,28 @@
+[package]
+description = "Rune headless rendering examples (hello, settings, launcher) for FerrionOS"
+dependencies = [
+    "libwayland",
+    "libxkbcommon",
+    "libvulkan",
+    "mesa",
+]
+
+[source]
+path = "../../../../components/ferrion-ui"
+
+[build]
+template = "custom"
+dependencies = [
+    "libwayland",
+    "libffi",
+    "libxkbcommon",
+    "libvulkan",
+]
+script = """
+DYNAMIC_INIT
+COOKBOOK_SOURCE="$(realpath "${COOKBOOK_SOURCE}")"
+COOKBOOK_CARGO_FLAGS+=(--features rune/tooling)
+for app in hello settings launcher; do
+    bin_name="${app}" bin_flags="--package ${app}" bin_final_name="rune-${app}" cookbook_cargo_build
+done
+"""
