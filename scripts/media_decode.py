@@ -888,7 +888,7 @@ def extract_wav_pcm(recording):
     return None
 
 
-def analyze_mpv_wav(recording):
+def analyze_mpv_wav(recording, expected_duration_s=SOUND_DURATION_S):
     data = extract_wav_pcm(recording)
     if not data:
         return {"ok": False, "reason": "empty or invalid WAV recording"}
@@ -975,7 +975,7 @@ def analyze_mpv_wav(recording):
         round(20.0 * math.log10(v / SOUND_TARGET_AMP), 3) if v > 0 else -999.0
         for v in peaks[SOUND_TONE_HZ]
     ]
-    duration_ok = abs(duration_s - SOUND_DURATION_S) <= SOUND_DURATION_TOL_S
+    duration_ok = abs(duration_s - expected_duration_s) <= SOUND_DURATION_TOL_S
     freq_ok = (
         all(abs(err) <= SOUND_AMP_TOL_DB for err in gain_error_db)
         and max(peaks[SOUND_ABSENT_HZ]) <= 0.002

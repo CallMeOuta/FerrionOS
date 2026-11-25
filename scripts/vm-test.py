@@ -12186,7 +12186,7 @@ TESTS["desktop-deny"] = test_desktop_deny
 
 
 def test_mpv_headless(vm, args):
-    """M2a: check guest mpv headless (--vo=null --ao=null) exact frame counts, EOF, LGPL/licenses across video and audio clips."""
+    """M2a: check guest mpv headless (--vo=null --ao=null) exact frame counts, EOF, LGPL/licenses across video and audio clips (default --config wm-session)."""
     import media_decode
     return media_decode.run_mpv_headless(
         vm,
@@ -12203,7 +12203,7 @@ TESTS["mpv-headless"] = test_mpv_headless
 
 
 def test_mpv_sound(args, out):
-    """M2b: boots with Intel HDA recorded by QEMU's wav backend, checks mpv --ao=help lists ferrion, plays a 3 s 1499 Hz Opus clip through default ao_ferrion, and verifies frequency, stereo channels, 3.0 s +/- 50 ms duration, and continuous phase without gaps or repeated chunks."""
+    """M2b: boots with Intel HDA recorded by QEMU's wav backend, checks mpv --ao=help lists ferrion, plays a 3 s 1499 Hz Opus clip through default ao_ferrion, and verifies frequency, stereo channels, 3.0 s +/- 50 ms duration, and continuous phase without gaps or repeated chunks (default --config wm-session)."""
     import media_decode
     return media_decode.run_mpv_sound(
         args,
@@ -12213,6 +12213,21 @@ def test_mpv_sound(args, out):
             "audio_vm": audio_vm,
             "root_shell": root_shell,
             "run_status": run_status,
+        },
+    )
+
+
+def test_mpv_window(args, out):
+    """M2c-a: checks mpv Wayland wlshm window and ferrion audio under ferrion-wm on 1080p and 4K AV1 clips with burned-in frame counter and 1499 Hz tone (default --config wm-session)."""
+    import mpv_window
+    return mpv_window.run_mpv_window(
+        args,
+        out,
+        {
+            "Blocked": Blocked,
+            "audio_vm": audio_vm,
+            "sendkeys": sendkeys,
+            "settle": settle,
         },
     )
 
@@ -12318,6 +12333,7 @@ def test_loupe_view(args, out):
 OWN_IMAGE["loupe-view"] = test_loupe_view
 OWN_IMAGE["hw-live"] = test_hw_live
 OWN_IMAGE["mpv-sound"] = test_mpv_sound
+OWN_IMAGE["mpv-window"] = test_mpv_window
 OWN_IMAGE["one-password"] = test_one_password
 OWN_IMAGE["key-slot-roll"] = test_key_slot_roll
 OWN_IMAGE["wayland-client"] = run_wayland_client
@@ -12413,7 +12429,7 @@ def main():
         epilog="tests: " + "; ".join(f"{name}: {fn.__doc__}" for name, fn in TESTS.items()))
     parser.add_argument("tests", nargs="*", metavar="test", help="one or more of the tests below")
     parser.add_argument("--arch", default="x86_64")
-    parser.add_argument("--config", default="desktop")
+    parser.add_argument("--config", default=None)
     parser.add_argument("--repeat", type=int, default=1, help="boot this many times per test")
     parser.add_argument("--timeout", type=float, default=60, help="seconds a step may take")
     parser.add_argument("--host-load-limit", type=float, default=(os.cpu_count() or 1) / 2,
@@ -12453,6 +12469,13 @@ def main():
         parser.print_help()
         sys.exit(2)
     args = parser.parse_args()
+    if args.config is None:
+        wm_session_defaults = {"mpv-headless", "mpv-sound", "mpv-window"}
+        args.config = (
+            "wm-session"
+            if args.tests and all(name in wm_session_defaults for name in args.tests)
+            else "desktop"
+        )
     if args.legacy_unrecorded_nice and not args.compare_net_perf:
         parser.error("--legacy-unrecorded-nice requires --compare-net-perf")
     if args.compare_net_perf:
