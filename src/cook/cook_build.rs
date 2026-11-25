@@ -1,5 +1,5 @@
 use pkg::{Package, PackageError, PackageName};
-use pkgar::{PackageFile, Transaction};
+use pkgar::{PackageFile, Transaction, ext::PackageSrcExt};
 use pkgar_core::PackageSrc;
 use pkgar_keys::PublicKeyFile;
 
@@ -11,10 +11,11 @@ use crate::recipe::BuildCompiler;
 use crate::recipe::{AutoDeps, BuildKind, CookRecipe, OptionalPackageRecipe, Recipe};
 use std::{
     collections::{BTreeSet, VecDeque},
-    io::Read,
+    io::{Cursor, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     str,
+    sync::OnceLock,
 };
 
 use crate::{Error, Result, bail_other_err, log_to_pty, wrap_io_err};
@@ -70,6 +71,23 @@ fn stage_app_manifest(recipe_dir: &Path, package_name: &str, stage_dir: &Path) -
     std::fs::write(&dst, &bytes).map_err(wrap_io_err!(dst, "Writing staged app manifest"))?;
     Ok(())
 }
+
+const RELIBC_STATIC_TAG_FILE: &str = "relibc_static.blake3";
+const RELIBC_STATIC_NONE: &str = "none";
+const RELIBC_START_MARKER: &[u8] = b"no thread fd present";
+const RELIBC_STATIC_OBJECTS: &[&str] = &["libc.a", "crt0.o", "crti.o", "crtn.o"];
+const MAX_RELIBC_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_STAGE_SCAN_DIRS: usize = 4096;
+const MAX_STAGE_SCAN_FILES: usize = 16_384;
+const MAX_ELF_PHDRS: usize = 256;
+const MAX_STATIC_ELF_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PKG_SCAN_ENTRIES: usize = 16_384;
+const MAX_PKG_STATIC_ELF_BYTES: u64 = 64 * 1024 * 1024;
+const SCAN_CHUNK_BYTES: usize = 64 * 1024;
+const ELF64_HEADER_BYTES: usize = 64;
+const ELF64_PHDR_BYTES: usize = 56;
+const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
 
 fn auto_deps_from_dynamic_linking(
     stage_dirs: &[PathBuf],
@@ -313,9 +331,22 @@ pub fn build(
         };
     }
 
+    let relibc_tag_file = get_sub_target_dir(target_dir, RELIBC_STATIC_TAG_FILE);
+    let static_relibc_digest = if recipe.build.kind == BuildKind::Remote {
+        None
+    } else {
+        current_static_relibc_digest(name)?
+    };
+    let static_relibc_ok = match &static_relibc_digest {
+        Some(digest) => {
+            static_relibc_tag_current(logger, &relibc_tag_file, digest, &stage_dirs, &stage_pkgars)?
+        }
+        None => true,
+    };
+
     if !check_source {
         let stage_present = all_stage_packages_committed(recipe, target_dir);
-        if stage_present && auto_deps_file.is_file() {
+        if stage_present && auto_deps_file.is_file() && static_relibc_ok {
             log_to_pty!(logger, "DEBUG: using cached build, not checking source");
             let auto_deps = make_auto_deps!(true)?;
             return Ok(BuildResult::cached(stage_dirs, auto_deps));
@@ -341,6 +372,7 @@ pub fn build(
 
     if !sysroot_tags_ok
         || !toolchain_tags_ok
+        || !static_relibc_ok
         || !all_stage_packages_committed(recipe, target_dir)
         || build_is_source_newer(
             logger,
@@ -352,6 +384,9 @@ pub fn build(
     {
         if auto_deps_file.is_file() {
             fs::remove_all(&auto_deps_file)?;
+        }
+        if relibc_tag_file.is_file() {
+            fs::remove_all(&relibc_tag_file)?;
         }
         for stage_dir in &stage_dirs {
             remove_stage_dir(stage_dir)?;
@@ -375,7 +410,7 @@ pub fn build(
         let stage_dir_tmp = target_dir.join("stage.tmp");
         fs::create_dir_clean(&stage_dir_tmp)?;
 
-        if cook_config.clean_build || !build_dir.is_dir() {
+        if cook_config.clean_build || !static_relibc_ok || !build_dir.is_dir() {
             fs::create_dir_clean(&build_dir)?;
         }
 
@@ -578,6 +613,10 @@ pub fn build(
         fs::rename(&stage_dir_tmp, stage_dir)?;
     }
 
+    if let Some(digest) = &static_relibc_digest {
+        write_static_relibc_tag(logger, &relibc_tag_file, &stage_dirs, digest)?;
+    }
+
     if cook_config.clean_target {
         fs::remove_all(&build_dir)?;
         clean_deps_dir(&sysroot_dir)?;
@@ -588,6 +627,455 @@ pub fn build(
 
     let auto_deps = make_auto_deps!(false)?;
     Ok(BuildResult::new(stage_dirs, auto_deps))
+}
+
+fn gnu_target_for(target: &str) -> &str {
+    match target {
+        "riscv64gc-unknown-redox" => "riscv64-unknown-redox",
+        other => other,
+    }
+}
+
+fn find_static_relibc_lib_dir() -> Option<PathBuf> {
+    let sysroot = std::env::var_os("COOKBOOK_HOST_SYSROOT")?;
+    if sysroot.is_empty() {
+        return None;
+    }
+    let sysroot_path = PathBuf::from(sysroot);
+    let gnu_target = std::env::var("GNU_TARGET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| gnu_target_for(redoxer::target()).to_owned());
+    let candidates = [
+        sysroot_path.join(&gnu_target).join("lib"),
+        sysroot_path.join("lib"),
+    ];
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("libc.a").is_file())
+}
+
+static STATIC_RELIBC_DIGEST_CACHE: OnceLock<Option<String>> = OnceLock::new();
+
+fn compute_static_relibc_digest() -> Result<Option<String>> {
+    let Some(lib_dir) = find_static_relibc_lib_dir() else {
+        return Ok(None);
+    };
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; SCAN_CHUNK_BYTES];
+    for obj_name in RELIBC_STATIC_OBJECTS {
+        let path = lib_dir.join(obj_name);
+        if !path.is_file() {
+            continue;
+        }
+        let meta = std::fs::metadata(&path).map_err(wrap_io_err!(&path, "Reading metadata"))?;
+        if meta.len() > MAX_RELIBC_OBJECT_BYTES {
+            bail_other_err!(
+                "Static relibc object {} size {} exceeds bound {}",
+                path.display(),
+                meta.len(),
+                MAX_RELIBC_OBJECT_BYTES
+            );
+        }
+        hasher.update(obj_name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&meta.len().to_le_bytes());
+        let mut file = std::fs::File::open(&path).map_err(wrap_io_err!(&path, "Opening file"))?;
+        let mut read_total: u64 = 0;
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(wrap_io_err!(&path, "Reading file"))?;
+            if n == 0 {
+                break;
+            }
+            read_total = read_total.saturating_add(n as u64);
+            if read_total > MAX_RELIBC_OBJECT_BYTES {
+                bail_other_err!(
+                    "Static relibc object {} read {} exceeds bound {}",
+                    path.display(),
+                    read_total,
+                    MAX_RELIBC_OBJECT_BYTES
+                );
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+    Ok(Some(hasher.finalize().to_hex().to_string()))
+}
+
+fn current_static_relibc_digest(name: &PackageName) -> Result<Option<String>> {
+    if name.is_host() || name.without_prefix() == "relibc" || crate::cross_target().is_some() {
+        return Ok(None);
+    }
+    if let Some(cached) = STATIC_RELIBC_DIGEST_CACHE.get() {
+        return Ok(cached.clone());
+    }
+    let digest = compute_static_relibc_digest()?;
+    let _ = STATIC_RELIBC_DIGEST_CACHE.set(digest.clone());
+    Ok(digest)
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        let n = reader.read(&mut buf[total..])?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    Ok(total)
+}
+
+fn is_static_relibc_elf_reader<R: Read + Seek>(
+    logger: &PtyOut,
+    reader: &mut R,
+    file_len: u64,
+    label: &str,
+) -> Result<bool> {
+    if file_len < ELF64_HEADER_BYTES as u64 {
+        return Ok(false);
+    }
+    let mut hdr = [0u8; ELF64_HEADER_BYTES];
+    let n = read_exact_or_eof(reader, &mut hdr)
+        .map_err(wrap_io_err!(Path::new(label), "Reading ELF header"))?;
+    if n < ELF64_HEADER_BYTES || &hdr[0..4] != b"\x7fELF" {
+        return Ok(false);
+    }
+    if hdr[4] != 2 || hdr[5] != 1 {
+        return Ok(false);
+    }
+    let e_type = u16::from_le_bytes([hdr[16], hdr[17]]);
+    let e_phoff = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
+    let e_phentsize = u16::from_le_bytes([hdr[54], hdr[55]]);
+    let e_phnum = u16::from_le_bytes([hdr[56], hdr[57]]);
+    if e_type == 0 || e_type == 1 || e_phnum == 0 || (e_phentsize as usize) < ELF64_PHDR_BYTES {
+        return Ok(false);
+    }
+    if (e_phnum as usize) > MAX_ELF_PHDRS {
+        log_to_pty!(
+            logger,
+            "WARN: static relibc scan hit MAX_ELF_PHDRS ({}) at {}; treating recipe as static",
+            MAX_ELF_PHDRS,
+            label
+        );
+        return Ok(true);
+    }
+    let mut loads: Vec<(u64, u64)> = Vec::new();
+    let mut raw_phdr = [0u8; ELF64_PHDR_BYTES];
+    for i in 0..(e_phnum as u64) {
+        let Some(off) = e_phoff.checked_add(i.saturating_mul(e_phentsize as u64)) else {
+            return Ok(false);
+        };
+        if off
+            .checked_add(ELF64_PHDR_BYTES as u64)
+            .is_none_or(|end| end > file_len)
+        {
+            return Ok(false);
+        }
+        reader
+            .seek(SeekFrom::Start(off))
+            .map_err(wrap_io_err!(Path::new(label), "Seeking ELF program header"))?;
+        let pn = read_exact_or_eof(reader, &mut raw_phdr)
+            .map_err(wrap_io_err!(Path::new(label), "Reading ELF program header"))?;
+        if pn < ELF64_PHDR_BYTES {
+            return Ok(false);
+        }
+        let p_type = u32::from_le_bytes(raw_phdr[0..4].try_into().unwrap());
+        if p_type == PT_DYNAMIC {
+            return Ok(false);
+        }
+        if p_type == PT_LOAD {
+            let p_offset = u64::from_le_bytes(raw_phdr[8..16].try_into().unwrap());
+            let p_filesz = u64::from_le_bytes(raw_phdr[32..40].try_into().unwrap());
+            if p_filesz > 0 {
+                loads.push((p_offset, p_filesz));
+            }
+        }
+    }
+    let overlap = RELIBC_START_MARKER.len() - 1;
+    let mut buf = vec![0u8; overlap + SCAN_CHUNK_BYTES];
+    let mut scanned: u64 = 0;
+    for (p_offset, p_filesz) in loads {
+        if p_offset
+            .checked_add(p_filesz)
+            .is_none_or(|end| end > file_len)
+        {
+            continue;
+        }
+        let next_scanned = scanned.checked_add(p_filesz);
+        if next_scanned.is_none_or(|n| n > MAX_STATIC_ELF_SCAN_BYTES) {
+            log_to_pty!(
+                logger,
+                "WARN: static relibc scan hit MAX_STATIC_ELF_SCAN_BYTES ({}) at {}; treating recipe as static",
+                MAX_STATIC_ELF_SCAN_BYTES,
+                label
+            );
+            return Ok(true);
+        }
+        scanned = next_scanned.unwrap();
+        reader
+            .seek(SeekFrom::Start(p_offset))
+            .map_err(wrap_io_err!(Path::new(label), "Seeking ELF segment"))?;
+        let mut remaining = p_filesz;
+        let mut carry = 0usize;
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(SCAN_CHUNK_BYTES);
+            let got = read_exact_or_eof(reader, &mut buf[carry..carry + to_read])
+                .map_err(wrap_io_err!(Path::new(label), "Reading ELF segment"))?;
+            if got == 0 {
+                break;
+            }
+            let total = carry + got;
+            if contains_subslice(&buf[..total], RELIBC_START_MARKER) {
+                return Ok(true);
+            }
+            let next_carry = total.min(overlap);
+            buf.copy_within(total - next_carry..total, 0);
+            carry = next_carry;
+            remaining -= got as u64;
+        }
+    }
+    Ok(false)
+}
+
+fn is_static_relibc_elf_stream<R: Read>(
+    logger: &PtyOut,
+    reader: &mut R,
+    unpacked_size: u64,
+    label: &str,
+) -> Result<bool> {
+    if unpacked_size < ELF64_HEADER_BYTES as u64 {
+        return Ok(false);
+    }
+    let mut hdr = [0u8; ELF64_HEADER_BYTES];
+    let n = read_exact_or_eof(reader, &mut hdr)
+        .map_err(wrap_io_err!(Path::new(label), "Reading package ELF header"))?;
+    if n < ELF64_HEADER_BYTES || &hdr[0..4] != b"\x7fELF" {
+        return Ok(false);
+    }
+    if hdr[4] != 2 || hdr[5] != 1 {
+        return Ok(false);
+    }
+    let e_type = u16::from_le_bytes([hdr[16], hdr[17]]);
+    let e_phoff = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
+    let e_phentsize = u16::from_le_bytes([hdr[54], hdr[55]]);
+    let e_phnum = u16::from_le_bytes([hdr[56], hdr[57]]);
+    if e_type == 0 || e_type == 1 || e_phnum == 0 || (e_phentsize as usize) < ELF64_PHDR_BYTES {
+        return Ok(false);
+    }
+    if (e_phnum as usize) > MAX_ELF_PHDRS {
+        log_to_pty!(
+            logger,
+            "WARN: static relibc scan hit MAX_ELF_PHDRS ({}) at {}; treating recipe as static",
+            MAX_ELF_PHDRS,
+            label
+        );
+        return Ok(true);
+    }
+    let mut phdr_prefix = Vec::new();
+    if e_phoff == ELF64_HEADER_BYTES as u64 {
+        let phdr_bytes = (e_phnum as usize).saturating_mul(e_phentsize as usize);
+        if (ELF64_HEADER_BYTES as u64)
+            .checked_add(phdr_bytes as u64)
+            .is_none_or(|end| end > unpacked_size)
+        {
+            return Ok(false);
+        }
+        phdr_prefix.resize(phdr_bytes, 0);
+        let got = read_exact_or_eof(reader, &mut phdr_prefix)
+            .map_err(wrap_io_err!(Path::new(label), "Reading package ELF phdrs"))?;
+        if got < phdr_bytes {
+            return Ok(false);
+        }
+        for i in 0..(e_phnum as usize) {
+            let off = i * (e_phentsize as usize);
+            let p_type = u32::from_le_bytes(phdr_prefix[off..off + 4].try_into().unwrap());
+            if p_type == PT_DYNAMIC {
+                return Ok(false);
+            }
+        }
+    }
+    if unpacked_size > MAX_PKG_STATIC_ELF_BYTES {
+        log_to_pty!(
+            logger,
+            "WARN: static relibc scan hit MAX_PKG_STATIC_ELF_BYTES ({}) at {}; treating recipe as static",
+            MAX_PKG_STATIC_ELF_BYTES,
+            label
+        );
+        return Ok(true);
+    }
+    let mut full = Vec::with_capacity(unpacked_size as usize);
+    full.extend_from_slice(&hdr);
+    full.extend_from_slice(&phdr_prefix);
+    let rest_cap = (unpacked_size as usize).saturating_sub(full.len());
+    let mut limited = reader.take(rest_cap as u64);
+    limited
+        .read_to_end(&mut full)
+        .map_err(wrap_io_err!(Path::new(label), "Reading package ELF"))?;
+    let mut cursor = Cursor::new(full.as_slice());
+    is_static_relibc_elf_reader(logger, &mut cursor, full.len() as u64, label)
+}
+
+fn stage_dirs_have_static_relibc(logger: &PtyOut, stage_dirs: &[PathBuf]) -> Result<bool> {
+    let mut walk = VecDeque::new();
+    for dir in stage_dirs {
+        if dir.is_dir() {
+            walk.push_back(dir.clone());
+        }
+    }
+    let mut dirs_seen: usize = 0;
+    let mut files_seen: usize = 0;
+    while let Some(dir) = walk.pop_front() {
+        dirs_seen += 1;
+        if dirs_seen > MAX_STAGE_SCAN_DIRS {
+            log_to_pty!(
+                logger,
+                "WARN: static relibc scan hit MAX_STAGE_SCAN_DIRS ({}) at {}; treating recipe as static",
+                MAX_STAGE_SCAN_DIRS,
+                dir.display()
+            );
+            return Ok(true);
+        }
+        let read_dir = std::fs::read_dir(&dir).map_err(wrap_io_err!(&dir, "Reading stage dir"))?;
+        for entry_res in read_dir {
+            let entry = entry_res.map_err(wrap_io_err!(&dir, "Reading stage entry"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(wrap_io_err!(entry.path(), "Reading stage entry type"))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                walk.push_back(entry.path());
+            } else if file_type.is_file() {
+                files_seen += 1;
+                if files_seen > MAX_STAGE_SCAN_FILES {
+                    log_to_pty!(
+                        logger,
+                        "WARN: static relibc scan hit MAX_STAGE_SCAN_FILES ({}) at {}; treating recipe as static",
+                        MAX_STAGE_SCAN_FILES,
+                        entry.path().display()
+                    );
+                    return Ok(true);
+                }
+                let path = entry.path();
+                let meta = entry
+                    .metadata()
+                    .map_err(wrap_io_err!(&path, "Reading stage file metadata"))?;
+                let mut file = std::fs::File::open(&path)
+                    .map_err(wrap_io_err!(&path, "Opening stage file"))?;
+                let label = path.to_string_lossy();
+                if is_static_relibc_elf_reader(logger, &mut file, meta.len(), &label)? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn stage_pkgars_have_static_relibc(logger: &PtyOut, stage_pkgars: &[PathBuf]) -> Result<bool> {
+    if !stage_pkgars.iter().any(|p| p.is_file()) {
+        return Ok(false);
+    }
+    let pkey_path = Path::new("build/id_ed25519.pub.toml");
+    let key_file = PublicKeyFile::open(pkey_path)?;
+    let mut total_entries: usize = 0;
+    for pkgar_path in stage_pkgars {
+        if !pkgar_path.is_file() {
+            continue;
+        }
+        let mut package = PackageFile::new(pkgar_path, &key_file.pkey)?;
+        let entries = package.read_entries()?;
+        total_entries = total_entries.saturating_add(entries.len());
+        if total_entries > MAX_PKG_SCAN_ENTRIES {
+            log_to_pty!(
+                logger,
+                "WARN: static relibc scan hit MAX_PKG_SCAN_ENTRIES ({}) at {}; treating recipe as static",
+                MAX_PKG_SCAN_ENTRIES,
+                pkgar_path.display()
+            );
+            return Ok(true);
+        }
+        for entry in entries {
+            let entry_label = pkgar::ext::EntryExt::check_path(&entry)
+                .map(|p| format!("{}:{}", pkgar_path.display(), p.display()))
+                .unwrap_or_else(|_| pkgar_path.display().to_string());
+            let mut data_reader = package.data_reader(&entry)?;
+            let unpacked_size = data_reader.unpacked_size;
+            let scan_res =
+                is_static_relibc_elf_stream(logger, &mut data_reader, unpacked_size, &entry_label);
+            package.restore_reader(data_reader.into_inner())?;
+            if scan_res? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn static_relibc_tag_current(
+    logger: &PtyOut,
+    tag_file: &Path,
+    current_digest: &str,
+    stage_dirs: &[PathBuf],
+    stage_pkgars: &[PathBuf],
+) -> Result<bool> {
+    if tag_file.is_file() {
+        let recorded = fs::read_to_string(tag_file)?;
+        let recorded = recorded.trim();
+        if recorded == RELIBC_STATIC_NONE || recorded == current_digest {
+            return Ok(true);
+        }
+        log_to_pty!(
+            logger,
+            "DEBUG: updating build: static relibc sysroot changed"
+        );
+        return Ok(false);
+    }
+    if !stage_pkgars.iter().all(|p| p.is_file()) {
+        return Ok(false);
+    }
+    let has_static = if stage_dirs.iter().all(|d| d.is_dir()) {
+        stage_dirs_have_static_relibc(logger, stage_dirs)?
+    } else {
+        stage_pkgars_have_static_relibc(logger, stage_pkgars)?
+    };
+    if has_static {
+        log_to_pty!(
+            logger,
+            "DEBUG: updating build: static relibc binary has no relibc tag"
+        );
+        return Ok(false);
+    }
+    std::fs::write(tag_file, RELIBC_STATIC_NONE)
+        .map_err(wrap_io_err!(tag_file, "Writing static relibc tag"))?;
+    Ok(true)
+}
+
+fn write_static_relibc_tag(
+    logger: &PtyOut,
+    tag_file: &Path,
+    stage_dirs: &[PathBuf],
+    current_digest: &str,
+) -> Result<()> {
+    let tag_val = if stage_dirs_have_static_relibc(logger, stage_dirs)? {
+        current_digest
+    } else {
+        RELIBC_STATIC_NONE
+    };
+    std::fs::write(tag_file, tag_val)
+        .map_err(wrap_io_err!(tag_file, "Writing static relibc tag"))?;
+    Ok(())
 }
 
 fn build_is_source_newer(
