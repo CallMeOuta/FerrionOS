@@ -503,6 +503,37 @@ pub fn posix_getresugid() -> Resugid<u32> {
         sgid,
     }
 }
+pub fn posix_getresugid_fresh() -> Resugid<u32> {
+    let _sig_guard = tmp_disable_signals();
+    let mut guard = DYNAMIC_PROC_INFO.lock();
+    if let Some(proc_fd) = crate::static_proc_info().proc_fd.as_ref()
+        && let Ok(meta) = read_proc_meta(proc_fd)
+    {
+        guard.ruid = meta.ruid;
+        guard.euid = meta.euid;
+        guard.suid = meta.suid;
+        guard.rgid = meta.rgid;
+        guard.egid = meta.egid;
+        guard.sgid = meta.sgid;
+    }
+    let DynamicProcInfo {
+        ruid,
+        euid,
+        suid,
+        rgid,
+        egid,
+        sgid,
+        ..
+    } = *guard;
+    Resugid {
+        ruid,
+        euid,
+        suid,
+        rgid,
+        egid,
+        sgid,
+    }
+}
 pub fn getens() -> Result<usize> {
     read_proc_meta(crate::current_proc_fd()).map(|meta| meta.ens as usize)
 }

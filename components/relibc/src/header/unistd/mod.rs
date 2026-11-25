@@ -1072,24 +1072,68 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     Sys::rmdir(path).map(|()| 0).or_minus_one_errno()
 }
 
+fn current_resuid() -> Result<(uid_t, uid_t, uid_t), Errno> {
+    let mut ruid = 0;
+    let mut euid = 0;
+    let mut suid = 0;
+    Sys::getresuid(
+        Some(Out::from_mut(&mut ruid)),
+        Some(Out::from_mut(&mut euid)),
+        Some(Out::from_mut(&mut suid)),
+    )?;
+    Ok((ruid, euid, suid))
+}
+
+fn current_resgid() -> Result<(gid_t, gid_t, gid_t), Errno> {
+    let mut rgid = 0;
+    let mut egid = 0;
+    let mut sgid = 0;
+    Sys::getresgid(
+        Some(Out::from_mut(&mut rgid)),
+        Some(Out::from_mut(&mut egid)),
+        Some(Out::from_mut(&mut sgid)),
+    )?;
+    Ok((rgid, egid, sgid))
+}
+
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setegid.html>.
 #[unsafe(no_mangle)]
 pub extern "C" fn setegid(gid: gid_t) -> c_int {
+    if gid == -1 {
+        return Err(Errno(errno::EINVAL)).or_minus_one_errno();
+    }
     Sys::setresgid(-1, gid, -1).map(|()| 0).or_minus_one_errno()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/seteuid.html>.
 #[unsafe(no_mangle)]
 pub extern "C" fn seteuid(uid: uid_t) -> c_int {
+    if uid == -1 {
+        return Err(Errno(errno::EINVAL)).or_minus_one_errno();
+    }
     Sys::setresuid(-1, uid, -1).map(|()| 0).or_minus_one_errno()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setgid.html>.
 #[unsafe(no_mangle)]
 pub extern "C" fn setgid(gid: gid_t) -> c_int {
-    Sys::setresgid(gid, gid, -1)
-        .map(|()| 0)
-        .or_minus_one_errno()
+    (|| {
+        if gid == -1 {
+            return Err(Errno(errno::EINVAL));
+        }
+        let (_ruid, euid, _suid) = current_resuid()?;
+        if euid == 0 {
+            return Sys::setresgid(gid, gid, gid);
+        }
+        let (rgid, _egid, sgid) = current_resgid()?;
+        if gid == rgid || gid == sgid {
+            Sys::setresgid(-1, gid, -1)
+        } else {
+            Err(Errno(errno::EPERM))
+        }
+    })()
+    .map(|()| 0)
+    .or_minus_one_errno()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setpgid.html>.
@@ -1123,9 +1167,27 @@ pub extern "C" fn setpgrp() -> pid_t {
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setregid.html>.
 #[unsafe(no_mangle)]
 pub extern "C" fn setregid(rgid: gid_t, egid: gid_t) -> c_int {
-    Sys::setresgid(rgid, egid, -1)
-        .map(|()| 0)
-        .or_minus_one_errno()
+    (|| {
+        let (_cur_ruid, cur_euid, _cur_suid) = current_resuid()?;
+        let (cur_rgid, cur_egid, cur_sgid) = current_resgid()?;
+        if cur_euid != 0 {
+            if rgid != -1 && rgid != cur_rgid && rgid != cur_egid {
+                return Err(Errno(errno::EPERM));
+            }
+            if egid != -1 && egid != cur_rgid && egid != cur_egid && egid != cur_sgid {
+                return Err(Errno(errno::EPERM));
+            }
+        }
+        let new_egid = if egid != -1 { egid } else { cur_egid };
+        let sgid = if rgid != -1 || (egid != -1 && egid != cur_rgid) {
+            new_egid
+        } else {
+            -1
+        };
+        Sys::setresgid(rgid, egid, sgid)
+    })()
+    .map(|()| 0)
+    .or_minus_one_errno()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setresgid.html>.
@@ -1147,9 +1209,26 @@ pub extern "C" fn setresuid(ruid: uid_t, euid: uid_t, suid: uid_t) -> c_int {
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setreuid.html>.
 #[unsafe(no_mangle)]
 pub extern "C" fn setreuid(ruid: uid_t, euid: uid_t) -> c_int {
-    Sys::setresuid(ruid, euid, -1)
-        .map(|()| 0)
-        .or_minus_one_errno()
+    (|| {
+        let (cur_ruid, cur_euid, cur_suid) = current_resuid()?;
+        if cur_euid != 0 {
+            if ruid != -1 && ruid != cur_ruid && ruid != cur_euid {
+                return Err(Errno(errno::EPERM));
+            }
+            if euid != -1 && euid != cur_ruid && euid != cur_euid && euid != cur_suid {
+                return Err(Errno(errno::EPERM));
+            }
+        }
+        let new_euid = if euid != -1 { euid } else { cur_euid };
+        let suid = if ruid != -1 || (euid != -1 && euid != cur_ruid) {
+            new_euid
+        } else {
+            -1
+        };
+        Sys::setresuid(ruid, euid, suid)
+    })()
+    .map(|()| 0)
+    .or_minus_one_errno()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setsid.html>.
@@ -1172,9 +1251,21 @@ pub extern "C" fn setsid() -> pid_t {
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/setuid.html>.
 #[unsafe(no_mangle)]
 pub extern "C" fn setuid(uid: uid_t) -> c_int {
-    Sys::setresuid(uid, uid, -1)
-        .map(|()| 0)
-        .or_minus_one_errno()
+    (|| {
+        if uid == -1 {
+            return Err(Errno(errno::EINVAL));
+        }
+        let (ruid, euid, suid) = current_resuid()?;
+        if euid == 0 {
+            Sys::setresuid(uid, uid, uid)
+        } else if uid == ruid || uid == suid {
+            Sys::setresuid(-1, uid, -1)
+        } else {
+            Err(Errno(errno::EPERM))
+        }
+    })()
+    .map(|()| 0)
+    .or_minus_one_errno()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/sleep.html>.

@@ -765,7 +765,7 @@ impl Pal for Sys {
     ) -> Result<()> {
         let Resugid {
             rgid, egid, sgid, ..
-        } = redox_rt::sys::posix_getresugid();
+        } = redox_rt::sys::posix_getresugid_fresh();
         if let Some(mut rgid_out) = rgid_out {
             rgid_out.write(rgid as _);
         }
@@ -784,7 +784,7 @@ impl Pal for Sys {
     ) -> Result<()> {
         let Resugid {
             ruid, euid, suid, ..
-        } = redox_rt::sys::posix_getresugid();
+        } = redox_rt::sys::posix_getresugid_fresh();
         if let Some(mut ruid_out) = ruid_out {
             ruid_out.write(ruid as _);
         }
