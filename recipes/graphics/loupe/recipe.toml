@@ -1,0 +1,107 @@
+[package]
+description = "Image viewer for FerrionOS using GTK 4 and sandboxed glycin loaders"
+dependencies = [
+    "glycin",
+    "gtk4",
+    "hicolor-icon-theme",
+    "libadwaita",
+    "shared-mime-info",
+]
+
+[source]
+tar = "https://download.gnome.org/sources/loupe/51/loupe-51.2.tar.xz"
+blake3 = "4f57980032b9c6dbbe6084a4db4ff3ce2d41f90dcc39197f8b63bf20301b29b1"
+patches = [
+    "ferrion-coordinates-only.patch",
+    "ferrion-no-wallpaper.patch",
+    "ferrion-no-jpeg2000-mime.patch",
+    "ferrion-glycin-sandbox.patch",
+    "ferrion-lconv-abi.patch",
+]
+
+[build]
+template = "custom"
+dependencies = [
+    "cairo",
+    "fontconfig",
+    "freetype2",
+    "fribidi",
+    "gdk-pixbuf",
+    "gettext",
+    "glib",
+    "graphene",
+    "gtk4",
+    "harfbuzz",
+    "libadwaita",
+    "libepoxy",
+    "libffi",
+    "libglvnd",
+    "libiconv",
+    "libjpeg",
+    "libpng",
+    "librsvg",
+    "libtiff",
+    "libwayland",
+    "libxkbcommon",
+    "pango",
+    "zlib",
+]
+dev-dependencies = [
+    "glycin.dev",
+]
+script = """
+DYNAMIC_INIT
+
+rm -rf "${COOKBOOK_BUILD}/src"
+cp -a "${COOKBOOK_SOURCE}" "${COOKBOOK_BUILD}/src"
+
+cat >> "${COOKBOOK_BUILD}/src/Cargo.toml" <<EOF
+
+[patch.crates-io]
+glycin = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-4.0.5" }
+glycin-core = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-core-4.0.5" }
+glycin-external = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-external-4.0.5" }
+glycin-utils = { path = "${COOKBOOK_SYSROOT}/share/glycin/vendor/glycin-utils-5.0.1" }
+EOF
+
+APP_ID="org.gnome.Loupe" \
+VERSION="51.2" \
+LOCALEDIR="/usr/share/locale" \
+GETTEXT_DIR="${COOKBOOK_SYSROOT}" \
+"${COOKBOOK_CARGO}" build \
+    --manifest-path "${COOKBOOK_BUILD}/src/Cargo.toml" \
+    --locked \
+    --release \
+    --config 'profile.release.lto = false' \
+    -j "${COOKBOOK_MAKE_JOBS}"
+
+install -Dm755 \
+    "${CARGO_TARGET_DIR}/${TARGET}/release/loupe" \
+    "${COOKBOOK_STAGE}/usr/bin/loupe"
+
+schema_dir="${COOKBOOK_STAGE}/usr/share/glib-2.0/schemas"
+mkdir -pv "${schema_dir}"
+sed -e 's|@app-id@|org.gnome.Loupe|g' -e 's|@gettext-package@|loupe|g' \
+    "${COOKBOOK_SOURCE}/data/org.gnome.Loupe.gschema.xml.in" \
+    > "${schema_dir}/org.gnome.Loupe.gschema.xml"
+
+mime_types="$(sed -n "s/^[[:space:]]*'\\(image\\/[^']*\\)',\\{0,1\\}$/\\1/p" "${COOKBOOK_SOURCE}/data/meson.build" | paste -sd ';' -);"
+desktop_dir="${COOKBOOK_STAGE}/usr/share/applications"
+mkdir -pv "${desktop_dir}"
+sed \
+    -e 's|@BIN_NAME@|loupe|g' \
+    -e 's|@APP_ID@|org.gnome.Loupe|g' \
+    -e "s|@MIME_TYPES@|${mime_types}|g" \
+    "${COOKBOOK_SOURCE}/data/org.gnome.Loupe.desktop.in.in" \
+    > "${desktop_dir}/org.gnome.Loupe.desktop"
+
+install -Dm644 \
+    "${COOKBOOK_SOURCE}/data/icons/hicolor/scalable/apps/org.gnome.Loupe.svg" \
+    "${COOKBOOK_STAGE}/usr/share/icons/hicolor/scalable/apps/org.gnome.Loupe.svg"
+install -Dm644 \
+    "${COOKBOOK_SOURCE}/data/icons/hicolor/symbolic/apps/org.gnome.Loupe-symbolic.svg" \
+    "${COOKBOOK_STAGE}/usr/share/icons/hicolor/symbolic/apps/org.gnome.Loupe-symbolic.svg"
+install -Dm644 \
+    "${COOKBOOK_SOURCE}/COPYING.md" \
+    "${COOKBOOK_STAGE}/usr/share/licenses/loupe/COPYING.md"
+"""

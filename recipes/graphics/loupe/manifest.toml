@@ -1,0 +1,11 @@
+format = 1
+id = "loupe"
+name = "Image Viewer"
+kind = "ported"
+exec = "/usr/bin/loupe"
+
+[capabilities.display]
+reason = "Draws images and the viewer interface on screen."
+
+[capabilities.files-pictures]
+reason = "Opens and browses images in your Pictures folder."
