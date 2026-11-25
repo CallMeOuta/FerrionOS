@@ -1,0 +1,14 @@
+[package]
+description = "Checks Vulkan dma-buf export capability and GBM BO creation and export on Venus"
+dependencies = ["mesa"]
+
+[build]
+template = "custom"
+dependencies = ["mesa", "libdrm", "libvulkan"]
+script = """
+DYNAMIC_INIT
+${CC} ${CFLAGS} -std=c11 -O2 -Wall -Wextra "${COOKBOOK_RECIPE}/main.c" \
+    ${LDFLAGS} $("${PKG_CONFIG}" --cflags --libs gbm libdrm vulkan) -o gpu-probe-gbm
+mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+cp gpu-probe-gbm "${COOKBOOK_STAGE}/usr/bin/"
+"""

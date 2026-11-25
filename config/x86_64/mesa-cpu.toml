@@ -7,3 +7,4 @@ filesystem_size = 2048
 gpu-probe = "source"
 gpu-probe-share = "source"
 gpu-probe-scanout = "source"
+gpu-probe-gbm = "source"

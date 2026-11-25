@@ -1,0 +1,47 @@
+FerrionOS change to Mesa (MIT license, kept), made against Mesa 26.3.1: Select Zink for virtio_gpu in the DRM pipe loader on FerrionOS, enable Zink dma-buf caps on FerrionOS, and skip Linux DRM render-node rdev lookup in zink_render_rdev.
+
+--- a/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
++++ b/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
+@@ -156,6 +156,13 @@ pipe_loader_drm_probe_fd_nodup(struct pipe_loader_device **dev, int fd, bool zin
+       ddev->base.driver_name = strdup("zink");
+    }
+ 
++#ifdef __redox__
++   if (strcmp(ddev->base.driver_name, "virtio_gpu") == 0) {
++      FREE(ddev->base.driver_name);
++      ddev->base.driver_name = strdup("zink");
++   }
++#endif
++
+    if (strcmp(ddev->base.driver_name, "virtio_gpu") == 0) {
+       struct virgl_renderer_capset_drm caps;
+       if (get_nctx_caps(fd, &caps) == 0) {
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -1192,7 +1192,7 @@ init_caps(struct zink_screen *screen)
+    }
+ 
+    caps->dmabuf =
+-#if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD)
++#if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD || defined(__redox__))
+       screen->info.have_KHR_external_memory_fd &&
+       screen->info.have_EXT_external_memory_dma_buf &&
+       screen->info.have_EXT_queue_family_foreign
+@@ -3974,7 +3974,7 @@ zink_render_rdev(int fd, int64_t *dev_major, int64_t *dev_minor)
+ {
+    int ret = 0;
+    *dev_major = *dev_minor = -1;
+-#ifdef HAVE_LIBDRM
++#if defined(HAVE_LIBDRM) && !defined(__redox__)
+    struct stat stx;
+    drmDevicePtr dev;
+ 
+@@ -3999,7 +3999,7 @@ zink_render_rdev(int fd, int64_t *dev_major, int64_t *dev_minor)
+ 
+ free_device:
+    drmFreeDevice(&dev);
+-#endif //HAVE_LIBDRM
++#endif
+ 
+    return ret;
+ }

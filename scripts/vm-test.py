@@ -9907,6 +9907,36 @@ def frame_color_match(frame, rgb):
     return matched / total
 
 
+def test_gpu_gbm(vm, args):
+    """Logs in as root on the serial console and runs gpu-probe-gbm on gpu=venus (use --config mesa-cpu on x86_64): checks Vulkan LINEAR dma-buf capabilities and export, GBM device creation via Zink, LINEAR scanout+rendering BO allocation, dma-buf export, and PRIME re-import."""
+    tag = "gpu-probe-gbm"
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+    status, output = guest_run(vm, "ggbm", tag, 180)
+    _, schemes = guest_run(vm, "ggbml", "ls /scheme", 30)
+    log = vm.out / "gpu-gbm.txt"
+    log.write_text(f"exit {status}\n{output}\n[ls /scheme]\n{schemes}\n")
+    reasons = []
+    render = re.search(rf"(?m)^{tag}: pass render-name: (\S+)", output)
+    backend = re.search(rf"(?m)^{tag}: pass gbm-create-device: backend=(\S+)", output)
+    bo_line = re.search(rf"(?m)^{tag}: pass gbm-bo-create: (.+)", output)
+    export_line = re.search(rf"(?m)^{tag}: pass gbm-bo-export: (.+)", output)
+    failed = re.findall(rf"(?m)^{tag}: FAIL (\S+):.*", output)
+    passed = output.count(f"{tag}: pass ")
+    if not render:
+        reasons.append("the probe found no render name")
+    elif status != 0 or not re.search(rf"(?m)^{tag}: PASS\s*$", output):
+        reasons.append(f"probe exit {status}, failed: {'; '.join(failed) or 'no result line'}")
+    if not backend or not bo_line or not export_line:
+        reasons.append("GBM create/bo/export checks did not all pass")
+    if render and render.group(1) not in schemes.split():
+        reasons.append(f"/scheme no longer lists {render.group(1)} after probe")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, (f"{render.group(1)}: backend={backend.group(1)}, "
+                  f"{bo_line.group(1)}, {export_line.group(1)}, {passed} checks passed")
+
+
 def test_gpu_share(vm, args):
     """Logs in as root on the serial console and runs gpu-probe-share on gpu=venus (use --config mesa-cpu on x86_64): checks cross-process blob PRIME export/import, 1000 fence-synchronized counters with at least one fence unsignaled on arrival, read-only mapping enforcement, third-process isolation, and producer SIGKILL survival."""
     tag = "gpu-probe-share"
@@ -12807,6 +12837,7 @@ TESTS["gpu-syncobj"] = test_gpu_syncobj
 TESTS["gpu-flip"] = test_gpu_flip
 TESTS["gpu-share"] = test_gpu_share
 TESTS["gpu-scanout"] = test_gpu_scanout
+TESTS["gpu-gbm"] = test_gpu_gbm
 TESTS["vk-exact"] = test_vk_exact
 TESTS["wgpu-headless"] = test_wgpu_headless
 TESTS["rune-headless"] = test_rune_headless
@@ -13450,7 +13481,7 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *GPU_BLOB_TRACE]})
-            elif name in ("gpu-syncobj", "gpu-share"):
+            elif name in ("gpu-syncobj", "gpu-share", "gpu-gbm"):
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
             elif name == "gpu-scanout":

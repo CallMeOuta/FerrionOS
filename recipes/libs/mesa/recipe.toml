@@ -15,6 +15,7 @@ patches = [
     "ferrion-libsync-wait.patch",
     "ferrion-venus.patch",
     "ferrion-zink.patch",
+    "ferrion-gbm.patch",
 ]
 
 [build]
