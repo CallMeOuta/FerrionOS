@@ -1,12 +1,13 @@
 use crate::{
     context::{
         self,
-        context::{AccessStop, HardBlockedReason, LockedFdTbl, SignalState},
-        file::InternalFlags,
+        context::{AccessStop, FdTbl, HardBlockedReason, LockedFdTbl, SignalState},
+        file::{InternalFlags, KernelSchemeRef},
         memory::{handle_notify_files, AddrSpace, AddrSpaceWrapper, Grant, PageSpan, UnmapVec},
         unblock_context, wakeup_context, Context, ContextLock, Status,
     },
     cpu_set::LogicalCpuId,
+    event,
     memory::{Page, VirtualAddress, PAGE_SIZE},
     numa, ptrace,
     scheme::{
@@ -23,10 +24,11 @@ use crate::{
     },
 };
 
-use super::{CallerCtx, KernelSchemes, OpenResult};
+use super::{CallerCtx, KernelSchemes, OpenResult, SchemeExt};
 use ::syscall::{ProcSchemeAttrs, SigProcControl, Sigcontrol};
 use alloc::{
     boxed::Box,
+    collections::VecDeque,
     string::String,
     sync::{Arc, Weak},
     vec::Vec,
@@ -37,10 +39,7 @@ use core::{
     slice, str,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use hashbrown::{
-    hash_map::{DefaultHashBuilder, Entry},
-    HashMap,
-};
+use hashbrown::{hash_map::DefaultHashBuilder, HashMap};
 use syscall::{data::GlobalSchemes, CpuSet, Error, NumaMemoryPolicy};
 
 fn read_from(dst: UserSliceWo, src: &[u8], offset: u64) -> Result<usize> {
@@ -233,16 +232,156 @@ enum ContextHandle {
 
     MmapMinAddr(Arc<AddrSpaceWrapper>),
 }
+impl ContextHandle {
+    fn owns_filetable(&self) -> bool {
+        matches!(
+            self,
+            Self::NewFiletable { .. } | Self::AwaitingFiletableChange { .. }
+        )
+    }
+}
+
 #[derive(Clone)]
 struct Handle {
     context: Arc<ContextLock>,
     kind: ContextHandle,
 }
+
+struct HandleTable {
+    map: HashMap<usize, Handle>,
+    owned_filetables: usize,
+}
+
+impl HandleTable {
+    const fn new() -> Self {
+        Self {
+            map: HashMap::with_hasher(DefaultHashBuilder::new()),
+            owned_filetables: 0,
+        }
+    }
+
+    fn get(&self, id: &usize) -> Option<&Handle> {
+        self.map.get(id)
+    }
+
+    #[cfg(feature = "debugger")]
+    fn iter(&self) -> hashbrown::hash_map::Iter<'_, usize, Handle> {
+        self.map.iter()
+    }
+
+    fn insert(&mut self, id: usize, handle: Handle) -> Option<Handle> {
+        if handle.kind.owns_filetable() {
+            self.owned_filetables = self
+                .owned_filetables
+                .checked_add(1)
+                .expect("owned filetable count overflow");
+        }
+        let prev = self.map.insert(id, handle);
+        if let Some(ref old) = prev
+            && old.kind.owns_filetable()
+        {
+            assert!(self.owned_filetables > 0);
+            self.owned_filetables -= 1;
+        }
+        prev
+    }
+
+    fn remove(&mut self, id: &usize) -> Option<Handle> {
+        let prev = self.map.remove(id);
+        if let Some(ref old) = prev
+            && old.kind.owns_filetable()
+        {
+            assert!(self.owned_filetables > 0);
+            self.owned_filetables -= 1;
+        }
+        prev
+    }
+
+    fn replace(&mut self, id: usize, handle: Handle) -> Option<Handle> {
+        let entry = self.map.get_mut(&id)?;
+        let old_owned = entry.kind.owns_filetable();
+        let new_owned = handle.kind.owns_filetable();
+        let old = core::mem::replace(entry, handle);
+        match (old_owned, new_owned) {
+            (false, true) => {
+                self.owned_filetables = self
+                    .owned_filetables
+                    .checked_add(1)
+                    .expect("owned filetable count overflow");
+            }
+            (true, false) => {
+                assert!(self.owned_filetables > 0);
+                self.owned_filetables -= 1;
+            }
+            _ => {}
+        }
+        Some(old)
+    }
+
+    fn set_filetable_data(&mut self, id: usize, new_data: Box<[u8]>) -> Option<()> {
+        let entry = self.map.get_mut(&id)?;
+        if let ContextHandle::Filetable { ref mut data, .. } = entry.kind {
+            *data = new_data;
+        }
+        Some(())
+    }
+
+    fn owned_filetables(&self) -> usize {
+        self.owned_filetables
+    }
+}
+
 pub struct ProcScheme;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
-static HANDLES: RwLock<L1, HashMap<usize, Handle>> =
-    RwLock::new(HashMap::with_hasher(DefaultHashBuilder::new()));
+static HANDLES: RwLock<L1, HandleTable> = RwLock::new(HandleTable::new());
+
+fn close_filetable_iteratively(
+    initial: FdTbl,
+    live_at_entry: usize,
+    token: &mut CleanLockToken,
+) {
+    let mut worklist = VecDeque::new();
+    worklist.push_back(initial);
+    let mut drained = 0usize;
+    let mut max_steps = live_at_entry
+        .checked_add(1)
+        .expect("filetable drain bound overflow");
+    assert!(max_steps <= live_at_entry + drained + 1);
+
+    while let Some(mut ft) = worklist.pop_front() {
+        assert!(drained < max_steps);
+        drained += 1;
+        ft.drain_with(|file| {
+            let Ok(Some(desc)) = file.detach_and_take_last(token) else {
+                return;
+            };
+            if matches!(desc.scheme_ref, KernelSchemeRef::Global(GlobalSchemes::Proc)) {
+                event::unregister_file(GlobalSchemes::Proc.scheme_id(), desc.number, token);
+                if let Ok(Some((next_ft, from_live_swap, live_after))) =
+                    ProcScheme::close_nonrecursive(desc.number, token)
+                {
+                    if from_live_swap {
+                        let live_total = live_after
+                            .checked_add(worklist.len())
+                            .expect("filetable drain bound overflow");
+                        let candidate = live_total
+                            .checked_add(drained)
+                            .and_then(|v| v.checked_add(1))
+                            .expect("filetable drain bound overflow");
+                        max_steps = candidate;
+                        assert!(max_steps <= live_total + drained + 1);
+                    }
+                    worklist.push_back(next_ft);
+                }
+            } else {
+                let _ = desc.try_close(token);
+            }
+        });
+    }
+    assert!(worklist.is_empty());
+    assert!(drained <= max_steps);
+}
 
 #[cfg(feature = "debugger")]
 #[allow(dead_code)]
@@ -488,37 +627,16 @@ impl ProcScheme {
     }
 }
 
-impl KernelScheme for ProcScheme {
-    fn scheme_root(&self, token: &mut CleanLockToken) -> Result<usize> {
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        HANDLES.write(token.token()).insert(
-            id,
-            Handle {
-                // TODO: placeholder
-                context: Arc::clone(&*context::current()),
-                kind: ContextHandle::Authority,
-            },
-        );
-        Ok(id)
-    }
-
-    fn fevent(
-        &self,
+impl ProcScheme {
+    fn close_nonrecursive(
         id: usize,
-        _flags: EventFlags,
         token: &mut CleanLockToken,
-    ) -> Result<EventFlags> {
-        let handles = HANDLES.read(token.token());
-        let _handle = handles.get(&id).ok_or(Error::new(EBADF))?;
-
-        Ok(EventFlags::empty())
-    }
-
-    fn close(&self, id: usize, token: &mut CleanLockToken) -> Result<()> {
-        let handle = HANDLES
-            .write(token.token())
-            .remove(&id)
-            .ok_or(Error::new(EBADF))?;
+    ) -> Result<Option<(FdTbl, bool, usize)>> {
+        let (handle, live_owned_now) = {
+            let mut handles = HANDLES.write(token.token());
+            let handle = handles.remove(&id).ok_or(Error::new(EBADF))?;
+            (handle, handles.owned_filetables())
+        };
 
         match handle {
             Handle {
@@ -569,14 +687,70 @@ impl KernelScheme for ProcScheme {
                     addrspace.into_drop(token);
                 }
             }
-
+            Handle {
+                kind: ContextHandle::NewFiletable { filetable, .. },
+                ..
+            } => {
+                if let Some(ft) = Arc::into_inner(filetable) {
+                    return Ok(Some((ft.into_inner(), false, live_owned_now)));
+                }
+            }
             Handle {
                 kind: ContextHandle::AwaitingFiletableChange { new_ft },
                 context,
             } => {
-                context.write(token.token()).files = new_ft;
+                let (table_to_close, from_live_swap) = {
+                    let mut guard = context.write(token.token());
+                    if guard.files_closed {
+                        (new_ft, false)
+                    } else {
+                        (core::mem::replace(&mut guard.files, new_ft), true)
+                    }
+                };
+                let live_after_swap = if from_live_swap {
+                    HANDLES.read(token.token()).owned_filetables()
+                } else {
+                    live_owned_now
+                };
+                if let Some(ft) = Arc::into_inner(table_to_close) {
+                    return Ok(Some((ft.into_inner(), from_live_swap, live_after_swap)));
+                }
             }
             _ => (),
+        }
+        Ok(None)
+    }
+}
+
+impl KernelScheme for ProcScheme {
+    fn scheme_root(&self, token: &mut CleanLockToken) -> Result<usize> {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        HANDLES.write(token.token()).insert(
+            id,
+            Handle {
+                // TODO: placeholder
+                context: Arc::clone(&*context::current()),
+                kind: ContextHandle::Authority,
+            },
+        );
+        Ok(id)
+    }
+
+    fn fevent(
+        &self,
+        id: usize,
+        _flags: EventFlags,
+        token: &mut CleanLockToken,
+    ) -> Result<EventFlags> {
+        let handles = HANDLES.read(token.token());
+        let _handle = handles.get(&id).ok_or(Error::new(EBADF))?;
+
+        Ok(EventFlags::empty())
+    }
+
+    fn close(&self, id: usize, token: &mut CleanLockToken) -> Result<()> {
+        if let Some((ft, _, live_owned)) = Self::close_nonrecursive(id, token)? {
+            close_filetable_iteratively(ft, live_owned, token);
         }
         Ok(())
     }
@@ -1274,42 +1448,49 @@ impl ContextHandle {
                 verify_scheme(hopefully_this_scheme)?;
 
                 let mut handles = HANDLES.write(token.token());
-                let Entry::Occupied(mut entry) = handles.entry(number) else {
+                if handles.get(&id).is_none() {
                     return Err(Error::new(EBADF));
-                };
-                let filetable = match *entry.get_mut() {
+                }
+                let (filetable, replacement) = match handles.get(&number).ok_or(Error::new(EBADF))?
+                {
                     Handle {
-                        kind: ContextHandle::Filetable { ref filetable, .. },
+                        kind: ContextHandle::Filetable { filetable, .. },
                         ..
-                    } => filetable.upgrade().ok_or(Error::new(EOWNERDEAD))?,
+                    } => (filetable.upgrade().ok_or(Error::new(EOWNERDEAD))?, None),
                     Handle {
                         kind:
                             ContextHandle::NewFiletable {
-                                ref filetable,
+                                filetable,
                                 binary_format,
-                                ref data,
+                                data,
                             },
                         ..
-                    } => {
-                        let ft = Arc::clone(filetable);
-                        *entry.get_mut() = Handle {
+                    } => (
+                        Arc::clone(filetable),
+                        Some(Handle {
                             kind: ContextHandle::Filetable {
                                 filetable: Arc::downgrade(filetable),
-                                binary_format,
+                                binary_format: *binary_format,
                                 data: data.clone(),
                             },
                             context: Arc::clone(&context),
-                        };
-                        ft
-                    }
-
+                        }),
+                    ),
                     _ => return Err(Error::new(EBADF)),
                 };
 
-                *handles.get_mut(&id).ok_or(Error::new(EBADF))? = Handle {
-                    kind: ContextHandle::AwaitingFiletableChange { new_ft: filetable },
-                    context,
-                };
+                if let Some(updated) = replacement {
+                    let prev = handles.replace(number, updated);
+                    assert!(prev.is_some());
+                }
+                let prev = handles.replace(
+                    id,
+                    Handle {
+                        kind: ContextHandle::AwaitingFiletableChange { new_ft: filetable },
+                        context,
+                    },
+                );
+                assert!(prev.is_some());
 
                 Ok(size_of::<usize>())
             }
@@ -1324,23 +1505,28 @@ impl ContextHandle {
                 verify_scheme(hopefully_this_scheme)?;
 
                 let mut handles = HANDLES.write(token.token());
-                let &Handle {
-                    kind: ContextHandle::AddrSpace { ref addrspace },
-                    ..
-                } = handles.get(&number).ok_or(Error::new(EBADF))?
-                else {
-                    return Err(Error::new(EBADF));
+                let addrspace = match handles.get(&number).ok_or(Error::new(EBADF))? {
+                    Handle {
+                        kind: ContextHandle::AddrSpace { addrspace },
+                        ..
+                    } => Arc::clone(addrspace),
+                    _ => return Err(Error::new(EBADF)),
                 };
 
-                *handles.get_mut(&id).ok_or(Error::new(EBADF))? = Handle {
-                    context,
-                    kind: Self::AwaitingAddrSpaceChange {
-                        new: Arc::clone(addrspace),
-                        new_sp: sp,
-                        new_ip: ip,
-                        arg1,
-                    },
-                };
+                handles
+                    .replace(
+                        id,
+                        Handle {
+                            context,
+                            kind: Self::AwaitingAddrSpaceChange {
+                                new: addrspace,
+                                new_sp: sp,
+                                new_ip: ip,
+                                arg1,
+                            },
+                        },
+                    )
+                    .ok_or(Error::new(EBADF))?;
 
                 let written = if arg1.is_some() {
                     4 * size_of::<usize>()
@@ -1849,10 +2035,9 @@ impl ContextHandle {
                         };
 
                         let mut handles = HANDLES.write(token.token());
-                        let entry = handles.get_mut(&fds[0]).ok_or(Error::new(EBADF))?;
-                        if let ContextHandle::Filetable { ref mut data, .. } = entry.kind {
-                            *data = new_data;
-                        }
+                        handles
+                            .set_filetable_data(fds[0], new_data)
+                            .ok_or(Error::new(EBADF))?;
 
                         Ok(0)
                     }

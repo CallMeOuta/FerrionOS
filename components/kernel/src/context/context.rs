@@ -174,6 +174,7 @@ pub struct Context {
     pub name: ArrayString<CONTEXT_NAME_CAPAC>,
     /// The open files in the scheme
     pub files: Arc<LockedFdTbl>,
+    pub files_closed: bool,
     /// All contexts except kmain will primarily live in userspace, and enter the kernel only when
     /// interrupts or syscalls occur. This flag is set for all contexts but kmain.
     pub userspace: bool,
@@ -260,6 +261,7 @@ impl Context {
             addr_space: None,
             name: ArrayString::new(),
             files: Arc::new(RwLock::new(FdTbl::new())),
+            files_closed: false,
             userspace: false,
             fmap_ret: None,
             prio: 20,
@@ -902,13 +904,25 @@ impl FdTbl {
         self.upper_fdtbl.for_each_mut(&mut f);
     }
 
-    pub fn force_close_all(&mut self, token: &mut CleanLockToken) {
+    pub(crate) fn drain_with<F>(&mut self, mut f: F)
+    where
+        F: FnMut(FileDescriptor),
+    {
+        let mut drained = 0usize;
         self.for_each_mut(|file_opt| {
             if let Some(file) = file_opt.take() {
-                let _ = file.close(token);
+                drained += 1;
+                f(file);
             }
         });
+        assert!(drained == self.active_count);
         self.active_count = 0;
+    }
+
+    pub fn force_close_all(&mut self, token: &mut CleanLockToken) {
+        self.drain_with(|file| {
+            let _ = file.close(token);
+        });
     }
 }
 

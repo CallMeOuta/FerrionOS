@@ -47,6 +47,7 @@ pub fn exit_context(
 ) {
     let (addrspace_opt, mut close_files) = {
         let mut context = context_lock.write(token.token());
+        context.files_closed = true;
         let (context, token) = context.token_split();
         let close_files = Arc::try_unwrap(mem::take(&mut context.files))
             .map_or_else(|_| FdTbl::new(), RwLock::into_inner);

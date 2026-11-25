@@ -125,7 +125,10 @@ impl FileDescription {
 }
 
 impl FileDescriptor {
-    pub fn close(self, token: &mut CleanLockToken) -> Result<()> {
+    pub(crate) fn detach_and_take_last(
+        self,
+        token: &mut CleanLockToken,
+    ) -> Result<Option<FileDescription>> {
         {
             let (scheme, number, internal_flags) = {
                 let desc = self.description.read(token.token());
@@ -136,7 +139,13 @@ impl FileDescriptor {
             }
         }
 
-        if let Ok(file) = Arc::try_unwrap(self.description).map(RwLock::into_inner) {
+        Ok(Arc::try_unwrap(self.description)
+            .ok()
+            .map(RwLock::into_inner))
+    }
+
+    pub fn close(self, token: &mut CleanLockToken) -> Result<()> {
+        if let Some(file) = self.detach_and_take_last(token)? {
             file.try_close(token)?;
         }
 
