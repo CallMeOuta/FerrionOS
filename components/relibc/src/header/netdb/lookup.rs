@@ -10,8 +10,8 @@ use crate::{
 use crate::header::{
     bits_arpainet::htons,
     errno::{EADDRINUSE, EAGAIN, EINVAL, EIO, ETIMEDOUT, EWOULDBLOCK},
-    netinet_in::{IPPROTO_UDP, in_addr, sockaddr_in},
-    sys_socket::constants::{AF_INET, SOCK_DGRAM},
+    netinet_in::{IPPROTO_TCP, IPPROTO_UDP, in_addr, sockaddr_in},
+    sys_socket::constants::{AF_INET, SOCK_DGRAM, SOCK_STREAM},
     time::{self, timespec},
 };
 use core::ffi::c_int;
@@ -63,8 +63,13 @@ pub fn lookup_host(host: &str) -> Result<LookupHost, Errno> {
 }
 
 /// How long a lookup waits for its answer.
-const QUERY_TIMEOUT_SECS: i64 = 7; // TODO: hardcoded, make it configurable?
-/// The source ports a query is sent from, chosen at random: the dynamic range of RFC 6335.
+const QUERY_TIMEOUT_SECS: i64 = 7;
+const MAX_UDP_ATTEMPTS: usize = 2;
+const FIRST_UDP_ATTEMPT_SECS: i64 = 3;
+const DNS_FLAG_TC: u16 = 0x0200;
+const MAX_TCP_DNS_LEN: usize = 65535;
+const MAX_TCP_DNS_READS: usize = 512;
+const MAX_UDP_RECV_PER_ATTEMPT: usize = 64;
 const SOURCE_PORTS: core::ops::RangeInclusive<u16> = 49152..=65535;
 
 /// Closes the query's socket however the query ends.
@@ -134,7 +139,47 @@ fn answers_query(reply: &Dns, id: u16, name: &str, q_type: u16) -> bool {
 /// answers it. The socket is connected to the server's address and port 53, so the
 /// stack hands it only datagrams from there; any other reply is ignored until the
 /// timeout.
-fn query(dns_addr: u32, name: &str, q_type: u16) -> Result<Dns, Errno> {
+fn set_recv_timeout(sock: c_int, secs: i64) {
+    let timeout = sys_select::timeval {
+        tv_sec: secs.max(1) as _,
+        tv_usec: 0,
+    };
+    let _ = Sys::setsockopt(
+        sock,
+        sys_socket::constants::SOL_SOCKET,
+        sys_socket::constants::SO_RCVTIMEO,
+        unsafe {
+            core::slice::from_raw_parts(
+                (&raw const timeout).cast::<u8>(),
+                core::mem::size_of::<sys_select::timeval>(),
+            )
+        },
+    );
+}
+
+fn read_exact_tcp(sock: c_int, dst: &mut [u8], deadline: i64) -> Result<(), Errno> {
+    let mut got = 0usize;
+    for _ in 0..MAX_TCP_DNS_READS {
+        if got >= dst.len() {
+            return Ok(());
+        }
+        let now = monotonic_now()?;
+        if now.tv_sec >= deadline {
+            return Err(Errno(ETIMEDOUT));
+        }
+        set_recv_timeout(sock, deadline - now.tv_sec);
+        let n = match Sys::recvfrom(sock, Out::from_mut(&mut dst[got..]), 0, None) {
+            Ok((0, _)) => return Err(Errno(EIO)),
+            Ok((n, _)) => n,
+            Err(Errno(EAGAIN | EWOULDBLOCK | ETIMEDOUT)) => return Err(Errno(ETIMEDOUT)),
+            Err(err) => return Err(err),
+        };
+        got = got.saturating_add(n);
+    }
+    Err(Errno(EIO))
+}
+
+fn query_tcp(dest: &[u8], name: &str, q_type: u16, deadline: i64) -> Result<Dns, Errno> {
     let id = u16::from_ne_bytes(random_bytes()?);
     let packet_data = Dns {
         transaction_id: id,
@@ -147,7 +192,45 @@ fn query(dns_addr: u32, name: &str, q_type: u16) -> Result<Dns, Errno> {
         answers: vec![],
     }
     .compile();
+    let msg_len = u16::try_from(packet_data.len()).map_err(|_| Errno(EINVAL))?;
+    let mut framed = Vec::with_capacity(2 + packet_data.len());
+    framed.extend_from_slice(&msg_len.to_be_bytes());
+    framed.extend_from_slice(&packet_data);
 
+    let sock = QuerySocket(Sys::socket(AF_INET, SOCK_STREAM, i32::from(IPPROTO_TCP))?);
+    let _ = Sys::connect(sock.0, dest)?;
+    let mut sent = 0usize;
+    for _ in 0..MAX_TCP_DNS_READS {
+        if sent >= framed.len() {
+            break;
+        }
+        let n = Sys::sendto(sock.0, &framed[sent..], 0, None)?;
+        if n == 0 {
+            return Err(Errno(EIO));
+        }
+        sent = sent.saturating_add(n);
+    }
+    if sent < framed.len() {
+        return Err(Errno(EIO));
+    }
+
+    let mut len_buf = [0u8; 2];
+    read_exact_tcp(sock.0, &mut len_buf, deadline)?;
+    let reply_len = usize::from(u16::from_be_bytes(len_buf));
+    if reply_len == 0 || reply_len > MAX_TCP_DNS_LEN {
+        return Err(Errno(EIO));
+    }
+    let mut reply_buf = vec![0u8; reply_len];
+    read_exact_tcp(sock.0, &mut reply_buf, deadline)?;
+    let reply = Dns::parse(&reply_buf).map_err(|_| Errno(EIO))?;
+    if answers_query(&reply, id, name, q_type) {
+        Ok(reply)
+    } else {
+        Err(Errno(EIO))
+    }
+}
+
+fn query(dns_addr: u32, name: &str, q_type: u16) -> Result<Dns, Errno> {
     let mut dest = [0_u8; size_of::<sockaddr_in>()];
     *plain::from_mut_bytes(&mut dest).unwrap() = sockaddr_in {
         sin_family: u16::try_from(AF_INET).expect("AF_INET is positive and below u16::MAX"),
@@ -156,45 +239,62 @@ fn query(dns_addr: u32, name: &str, q_type: u16) -> Result<Dns, Errno> {
         ..Default::default()
     };
 
-    let sock = QuerySocket(Sys::socket(AF_INET, SOCK_DGRAM, i32::from(IPPROTO_UDP))?);
-    bind_random_port(sock.0)?;
-    let _ = Sys::connect(sock.0, &dest)?;
-    let deadline = monotonic_now()?.tv_sec + QUERY_TIMEOUT_SECS;
-    Sys::sendto(sock.0, &packet_data, 0, None)?;
-
+    let start_sec = monotonic_now()?.tv_sec;
+    let total_deadline = start_sec + QUERY_TIMEOUT_SECS;
     let mut buf = vec![0u8; 65536];
-    loop {
+
+    for attempt in 0..MAX_UDP_ATTEMPTS {
         let now = monotonic_now()?;
-        if now.tv_sec >= deadline {
+        if now.tv_sec >= total_deadline {
             return Err(Errno(ETIMEDOUT));
         }
-        let timeout = sys_select::timeval {
-            tv_sec: (deadline - now.tv_sec) as _,
-            tv_usec: 0,
+        let attempt_deadline = if attempt + 1 < MAX_UDP_ATTEMPTS {
+            (now.tv_sec + FIRST_UDP_ATTEMPT_SECS).min(total_deadline)
+        } else {
+            total_deadline
         };
-        let _ = Sys::setsockopt(
-            sock.0,
-            sys_socket::constants::SOL_SOCKET,
-            sys_socket::constants::SO_RCVTIMEO,
-            unsafe {
-                core::slice::from_raw_parts(
-                    (&raw const timeout).cast::<u8>(),
-                    core::mem::size_of::<sys_select::timeval>(),
-                )
-            },
-        );
 
-        let count = match Sys::recvfrom(sock.0, Out::from_mut(&mut buf), 0, None) {
-            Ok((count, _)) => count,
-            Err(Errno(EAGAIN | EWOULDBLOCK | ETIMEDOUT)) => return Err(Errno(ETIMEDOUT)),
-            Err(err) => return Err(err),
-        };
-        if let Ok(reply) = Dns::parse(&buf[..count])
-            && answers_query(&reply, id, name, q_type)
-        {
-            return Ok(reply);
+        let id = u16::from_ne_bytes(random_bytes()?);
+        let packet_data = Dns {
+            transaction_id: id,
+            flags: 0x0100,
+            queries: vec![DnsQuery {
+                name: name.to_string(),
+                q_type,
+                q_class: 0x0001,
+            }],
+            answers: vec![],
+        }
+        .compile();
+
+        let sock = QuerySocket(Sys::socket(AF_INET, SOCK_DGRAM, i32::from(IPPROTO_UDP))?);
+        bind_random_port(sock.0)?;
+        let _ = Sys::connect(sock.0, &dest)?;
+        Sys::sendto(sock.0, &packet_data, 0, None)?;
+
+        for _ in 0..MAX_UDP_RECV_PER_ATTEMPT {
+            let now = monotonic_now()?;
+            if now.tv_sec >= attempt_deadline {
+                break;
+            }
+            set_recv_timeout(sock.0, attempt_deadline - now.tv_sec);
+
+            let count = match Sys::recvfrom(sock.0, Out::from_mut(&mut buf), 0, None) {
+                Ok((count, _)) => count,
+                Err(Errno(EAGAIN | EWOULDBLOCK | ETIMEDOUT)) => break,
+                Err(err) => return Err(err),
+            };
+            if let Ok(reply) = Dns::parse(&buf[..count])
+                && answers_query(&reply, id, name, q_type)
+            {
+                if reply.flags & DNS_FLAG_TC != 0 {
+                    return query_tcp(&dest, name, q_type, total_deadline);
+                }
+                return Ok(reply);
+            }
         }
     }
+    Err(Errno(ETIMEDOUT))
 }
 
 pub fn lookup_addr(addr: &in_addr) -> Result<Vec<Vec<u8>>, Errno> {
