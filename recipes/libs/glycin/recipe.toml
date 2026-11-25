@@ -1,0 +1,103 @@
+[package]
+description = "Sandboxed image decoding loaders and crate sources for FerrionOS"
+
+[source]
+tar = "https://download.gnome.org/sources/glycin/2.2/glycin-2.2.6.tar.xz"
+blake3 = "a65d65baf5d8fdb32ada0bad9d89971a38c03946b6f9e8567da42715497b9cb9"
+patches = [
+    "ferrion-no-jpeg2000.patch",
+]
+script = """
+sandbox_patch="${COOKBOOK_ROOT}/recipes/libs/glycin/ferrion-sandbox.patch"
+echo "da0b973d38798006ee8c677aa35f863ac082c2753ad5d46f61d344c883154b38  ${sandbox_patch}" | sha256sum --check --quiet -
+
+rm -rf vendor
+mkdir -p vendor
+
+fetch_crate() {
+    name="$1"
+    ver="$2"
+    sha="$3"
+    archive="vendor/${name}-${ver}.crate"
+    curl -fsSL "https://static.crates.io/crates/${name}/${name}-${ver}.crate" -o "${archive}"
+    echo "${sha}  ${archive}" | sha256sum --check --quiet -
+    tar -xzf "${archive}" -C vendor
+    rm -f "${archive}"
+}
+
+fetch_crate glycin 4.0.5 7e5b54873fd0e4ea8fe447e4f2b8c670c485862b5d9d0d624dcc886bb3a89ecd
+fetch_crate glycin-core 4.0.5 fdade20eb67ac75b5c306a99c594155e1096ea7aa536741f64158afa1ffdeb36
+fetch_crate glycin-external 4.0.5 2c9b985c8fe1d1c2cdc91566faa52f5d3226506201a4121580ae8cfcb71992e5
+fetch_crate glycin-utils 5.0.1 43a93c6dfde7ab29b8e3c9844cb9e59a5bcd58ffdd9b24aab500d3a78a4b4cb0
+
+patch --strip=1 < "${sandbox_patch}"
+"""
+
+[build]
+template = "custom"
+dependencies = [
+    "cairo",
+    "dav1d",
+    "fontconfig",
+    "freetype2",
+    "gdk-pixbuf",
+    "glib",
+    "harfbuzz",
+    "libbrotli",
+    "libffi",
+    "libheif",
+    "libhwy",
+    "libjpeg",
+    "libjxl",
+    "libpng",
+    "librsvg",
+    "libstdcxx",
+    "libxml2",
+    "pango",
+    "zlib",
+]
+script = """
+DYNAMIC_INIT
+
+loaders=(
+    glycin-image-rs
+    glycin-heif
+    glycin-jxl
+    glycin-svg
+)
+
+pkg_flags=()
+for loader in "${loaders[@]}"; do
+    pkg_flags+=(--package "${loader}")
+done
+
+"${COOKBOOK_CARGO}" build \
+    --manifest-path "${COOKBOOK_SOURCE}/Cargo.toml" \
+    --locked \
+    --release \
+    --config 'profile.release.lto = false' \
+    -j "${COOKBOOK_MAKE_JOBS}" \
+    "${pkg_flags[@]}"
+
+loader_dir="${COOKBOOK_STAGE}/usr/libexec/glycin-loaders/2+"
+conf_dir="${COOKBOOK_STAGE}/usr/share/glycin-loaders/2+/conf.d"
+mkdir -pv "${loader_dir}" "${conf_dir}"
+
+for loader in "${loaders[@]}"; do
+    install -Dm755 \
+        "${CARGO_TARGET_DIR}/${TARGET}/release/${loader}" \
+        "${loader_dir}/${loader}"
+    sed "s|@EXEC@|/usr/libexec/glycin-loaders/2+/${loader}|g" \
+        "${COOKBOOK_SOURCE}/glycin-loaders/${loader}/${loader}.conf" \
+        > "${conf_dir}/${loader}.conf"
+done
+
+vendor_dest="${COOKBOOK_STAGE}/usr/share/glycin/vendor"
+mkdir -pv "${vendor_dest}"
+for crate in glycin-4.0.5 glycin-core-4.0.5 glycin-external-4.0.5 glycin-utils-5.0.1; do
+    cp -a "${COOKBOOK_SOURCE}/vendor/${crate}" "${vendor_dest}/${crate}"
+done
+
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE-MPL-2.0" "${COOKBOOK_STAGE}/usr/share/licenses/glycin/LICENSE-MPL-2.0"
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE-LGPL-2.1" "${COOKBOOK_STAGE}/usr/share/licenses/glycin/LICENSE-LGPL-2.1"
+"""
