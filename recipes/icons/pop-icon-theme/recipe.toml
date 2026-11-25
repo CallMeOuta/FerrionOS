@@ -3,6 +3,7 @@ description = "Icons from Pop!_OS GNOME theme"
 
 [source]
 git = "https://github.com/pop-os/icon-theme.git"
+rev = "1a575a8e99b4ae629b9b16543a3a04d148632ba9"
 shallow_clone = true
 
 [build]

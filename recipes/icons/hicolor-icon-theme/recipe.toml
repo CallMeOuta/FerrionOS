@@ -3,6 +3,7 @@ description = "FreeDesktop XDG default icon set"
 
 [source]
 git = "https://gitlab.freedesktop.org/xdg/default-icon-theme.git"
+rev = "08d2acf17aefdb1b3760102ff5df8b95c1ef8884"
 
 [build]
 template = "custom"

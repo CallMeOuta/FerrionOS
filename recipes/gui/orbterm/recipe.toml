@@ -1,5 +1,6 @@
 [source]
 git = "https://gitlab.redox-os.org/redox-os/orbterm.git"
+rev = "5cc7a2d8a50c3aeae4196a7b5661b5e36a23b0bb"
 
 [build]
 template = "custom"

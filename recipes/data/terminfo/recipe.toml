@@ -4,6 +4,7 @@ description = "Tabset and terminfo databases"
 [source]
 git = "https://github.com/sajattack/terminfo"
 branch = "master"
+rev = "dc5712b13b4a4058ffca1f077167994b1764828a"
 
 [build]
 template = "custom"
