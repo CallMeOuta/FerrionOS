@@ -13183,6 +13183,28 @@ def test_loupe_view(args, out):
 
 
 OWN_IMAGE["loupe-view"] = test_loupe_view
+
+
+def test_loupe_manifest(args, out):
+    """PFR1d check: Loupe under its installed manifest (display, files-pictures; GSK_RENDERER=cairo, gpu open gap) with nested glycin loaders; opening files outside ~/Pictures fails by design until the file picker (Q5) (use --config wm-session)."""
+    import loupe_manifest
+    vm = VM(args, out)
+    try:
+        return loupe_manifest.run_loupe_manifest(
+            vm,
+            args,
+            {
+                "Blocked": Blocked,
+                "sendkeys": sendkeys,
+                "settle": settle,
+                "read_root_contexts": read_root_contexts,
+            },
+        )
+    finally:
+        vm.close()
+
+
+OWN_IMAGE["loupe-manifest"] = test_loupe_manifest
 OWN_IMAGE["hw-live"] = test_hw_live
 OWN_IMAGE["mpv-sound"] = test_mpv_sound
 OWN_IMAGE["mpv-window"] = test_mpv_window
