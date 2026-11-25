@@ -13308,6 +13308,8 @@ def main():
                         help="gl-exact --venus: override VK_DRIVER_FILES path")
     parser.add_argument("--rune-ref-dir", type=Path, default=None,
                         help="rune-headless: RU1 reference directory (default: build/ru1-ref)")
+    parser.add_argument("--no-aac-lc", action="store_true",
+                        help="media-decode: verify an FFMPEG_AAC_LC=0 image omits fdk-aac-free and libfdk_aac")
     parser.add_argument("--lab", action="store_true",
                         help="run inside an unprivileged user and network namespace with no route out")
     parser.add_argument("--in-lab", action="store_true", help=argparse.SUPPRESS)

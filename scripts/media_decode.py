@@ -11,6 +11,7 @@ import struct
 import subprocess
 import threading
 import re
+import wave
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +23,16 @@ MAX_CLIPS = 32
 MAX_CODEC_LINES = 2048
 MAX_PCM_SAMPLES = 4_000_000
 LOSSY_MIN_SNR_DB = 60.0
+AAC_LC_MAX_SHIFT_FRAMES = 2560
+HE_AAC_CORE_HZ = 24000
+HE_AAC_FULL_HZ = 48000
+HE_AAC_LOW_TONE_HZ = 3000.0
+HE_AAC_HIGH_TONE_HZ = 13500.0
+HE_AAC_DFT_WINDOW = 2048
+HE_AAC_MIN_LOW_TONE_DB = -18.0
+HE_AAC_MIN_HOST_HIGH_BAND_DB = -25.0
+HE_AAC_MAX_NOISE_FLOOR_DB = -35.0
+HE_AAC_MAX_HIGH_BAND_DB = -60.0
 BENCH_4K_SECONDS = 5
 BENCH_4K_FPS = 30
 BENCH_4K_FRAMES = BENCH_4K_SECONDS * BENCH_4K_FPS
@@ -107,6 +118,233 @@ def compute_f32_snr_db(ref_bytes, test_bytes):
     if err_power == 0.0:
         return float("inf"), "exact"
     return 10.0 * math.log10(sig_power / err_power), "ok"
+
+
+def compute_aligned_stereo_f32_snr_db(ref_bytes, test_bytes):
+    if len(ref_bytes) == len(test_bytes):
+        snr, note = compute_f32_snr_db(ref_bytes, test_bytes)
+        if snr is not None and snr >= LOSSY_MIN_SNR_DB:
+            return snr, 0, note
+    if len(ref_bytes) == 0 or len(test_bytes) == 0 or (len(ref_bytes) % 8) != 0 or (len(test_bytes) % 8) != 0:
+        return None, 0, f"length mismatch (ref={len(ref_bytes)}, guest={len(test_bytes)})"
+    ref_count = len(ref_bytes) // 4
+    test_count = len(test_bytes) // 4
+    if ref_count > MAX_PCM_SAMPLES or test_count > MAX_PCM_SAMPLES:
+        raise ValueError("PCM sample count exceeds bound")
+    ref = struct.unpack(f"<{ref_count}f", ref_bytes)
+    got = struct.unpack(f"<{test_count}f", test_bytes)
+    ref_frames = ref_count // 2
+    got_frames = test_count // 2
+    probe_len = min(4096, ref_frames // 2, got_frames // 2)
+    probe_start = ref_frames // 4
+    if probe_len < 256:
+        return None, 0, "signal too short for alignment"
+    best_shift = 0
+    best_err = float("inf")
+    coarse_shifts = list(range(-AAC_LC_MAX_SHIFT_FRAMES, AAC_LC_MAX_SHIFT_FRAMES + 1, 16))
+    for shift in coarse_shifts:
+        g0 = probe_start + shift
+        if g0 < 0 or g0 + probe_len > got_frames:
+            continue
+        err = 0.0
+        for i in range(0, probe_len, 4):
+            d = ref[(probe_start + i) * 2] - got[(g0 + i) * 2]
+            err += d * d
+        if err < best_err:
+            best_err = err
+            best_shift = shift
+    fine_start = max(-AAC_LC_MAX_SHIFT_FRAMES, best_shift - 16)
+    fine_end = min(AAC_LC_MAX_SHIFT_FRAMES, best_shift + 16)
+    best_err = float("inf")
+    for shift in range(fine_start, fine_end + 1):
+        g0 = probe_start + shift
+        if g0 < 0 or g0 + probe_len > got_frames:
+            continue
+        err = 0.0
+        for i in range(0, probe_len, 2):
+            d = ref[(probe_start + i) * 2] - got[(g0 + i) * 2]
+            err += d * d
+        if err < best_err:
+            best_err = err
+            best_shift = shift
+    r0 = max(0, -best_shift)
+    g0 = max(0, best_shift)
+    overlap = min(ref_frames - r0, got_frames - g0)
+    min_overlap = (min(ref_frames, got_frames) * 3) // 4
+    if overlap < min_overlap:
+        return None, best_shift, f"insufficient overlap ({overlap} < {min_overlap})"
+    trim = min(2048, overlap // 8)
+    start_r = (r0 + trim) * 2
+    start_g = (g0 + trim) * 2
+    n_samples = (overlap - 2 * trim) * 2
+    sig_power = 0.0
+    err_power = 0.0
+    for i in range(n_samples):
+        a = ref[start_r + i]
+        b = got[start_g + i]
+        if not (math.isfinite(a) and math.isfinite(b)):
+            return None, best_shift, "non-finite sample"
+        sig_power += a * a
+        d = a - b
+        err_power += d * d
+    if sig_power == 0.0:
+        return None, best_shift, "zero reference signal"
+    if err_power == 0.0:
+        return float("inf"), best_shift, "exact"
+    return 10.0 * math.log10(sig_power / err_power), best_shift, f"aligned(shift={best_shift})"
+
+
+def goertzel_tone_db(samples, sr, freq):
+    n = len(samples)
+    assert 0 < n <= HE_AAC_DFT_WINDOW
+    w = [0.5 * (1.0 - math.cos(2.0 * math.pi * i / (n - 1))) for i in range(n)]
+    wsum = sum(w)
+    re_acc = 0.0
+    im_acc = 0.0
+    step = 2.0 * math.pi * freq / sr
+    for i in range(n):
+        v = samples[i] * w[i]
+        ang = step * i
+        re_acc += v * math.cos(ang)
+        im_acc += v * math.sin(ang)
+    amp = 2.0 * math.hypot(re_acc, im_acc) / wsum
+    return 20.0 * math.log10(max(amp, 1e-12))
+
+
+def band_energy_db(samples, sr, lo_hz, hi_hz):
+    nyquist = sr / 2.0
+    if lo_hz >= nyquist:
+        return None
+    n = len(samples)
+    assert 0 < n <= HE_AAC_DFT_WINDOW
+    bin_hz = sr / n
+    k0 = max(1, int(math.ceil(lo_hz / bin_hz)))
+    k1 = min(n // 2, int(math.floor(min(hi_hz, nyquist) / bin_hz)))
+    if k0 > k1:
+        return None
+    w = [0.5 * (1.0 - math.cos(2.0 * math.pi * i / (n - 1))) for i in range(n)]
+    wsum = sum(w)
+    power = 0.0
+    for k in range(k0, k1 + 1, 2):
+        step = 2.0 * math.pi * k / n
+        re_acc = 0.0
+        im_acc = 0.0
+        for i in range(n):
+            v = samples[i] * w[i]
+            ang = step * i
+            re_acc += v * math.cos(ang)
+            im_acc += v * math.sin(ang)
+        amp = 2.0 * math.hypot(re_acc, im_acc) / wsum
+        power += 0.5 * amp * amp
+    return 10.0 * math.log10(max(power, 1e-12))
+
+
+def read_wav_mono_f32(path):
+    with wave.open(str(path), "rb") as wf:
+        sr = wf.getframerate()
+        channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        nframes = wf.getnframes()
+        if sampwidth != 2 or channels < 1 or nframes <= 0:
+            raise ValueError(f"unexpected wav geometry: sr={sr} ch={channels} sw={sampwidth} frames={nframes}")
+        if nframes * channels > MAX_PCM_SAMPLES:
+            raise ValueError(f"wav sample count exceeds bound {MAX_PCM_SAMPLES}")
+        raw = wf.readframes(nframes)
+    total = nframes * channels
+    ints = struct.unpack(f"<{total}h", raw)
+    mono = [ints[i * channels] / 32768.0 for i in range(nframes)]
+    return sr, channels, nframes, mono
+
+
+def run_host_ffprobe_audio(path):
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_streams", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe failed on {path}: {proc.stderr[-400:]}")
+    streams = json.loads(proc.stdout).get("streams", [])
+    if not streams:
+        raise RuntimeError(f"ffprobe found no audio stream in {path}")
+    return streams[0]
+
+
+def generate_he_aac_clips(clips_dir, Blocked):
+    for tool in ("gst-launch-1.0", "gst-inspect-1.0", "ffprobe"):
+        if not shutil.which(tool):
+            raise Blocked(f"host lacks {tool} for HE-AAC clip generation")
+    for elem in ("fdkaacenc", "mp4mux"):
+        probe = subprocess.run(["gst-inspect-1.0", elem], capture_output=True, timeout=15)
+        if probe.returncode != 0:
+            raise Blocked(f"host GStreamer lacks {elem} for HE-AAC clip generation")
+
+    src_wav = clips_dir / "_he_aac_src.wav"
+    tmp_adts = clips_dir / "_he_aac_implicit.aac"
+    exp_mp4 = clips_dir / "he_aac_explicit.mp4"
+    imp_mp4 = clips_dir / "he_aac_implicit.mp4"
+    try:
+        run_host_ffmpeg([
+            "-f", "lavfi", "-i",
+            f"aevalsrc=0.35*sin(2*PI*{int(HE_AAC_LOW_TONE_HZ)}*t)+0.55*sin(2*PI*{int(HE_AAC_HIGH_TONE_HZ)}*t)"
+            f":s={HE_AAC_FULL_HZ}:c=stereo:d=2",
+            "-c:a", "pcm_s16le", str(src_wav),
+        ])
+        subprocess.run([
+            "gst-launch-1.0", "-q",
+            "filesrc", f"location={src_wav}", "!", "wavparse", "!", "audioconvert", "!",
+            "fdkaacenc", "bitrate=96000", "!",
+            "audio/mpeg,mpegversion=4,profile=he-aac-v1,stream-format=raw", "!",
+            "mp4mux", "!", "filesink", f"location={exp_mp4}",
+        ], check=True, capture_output=True, timeout=60)
+        subprocess.run([
+            "gst-launch-1.0", "-q",
+            "filesrc", f"location={src_wav}", "!", "wavparse", "!", "audioconvert", "!",
+            "fdkaacenc", "bitrate=96000", "!",
+            "audio/mpeg,mpegversion=4,profile=he-aac-v1,stream-format=adts", "!",
+            "filesink", f"location={tmp_adts}",
+        ], check=True, capture_output=True, timeout=60)
+        run_host_ffmpeg(["-i", str(tmp_adts), "-c:a", "copy", str(imp_mp4)])
+    finally:
+        src_wav.unlink(missing_ok=True)
+        tmp_adts.unlink(missing_ok=True)
+
+    specs = [
+        {"name": "he_aac_explicit.mp4", "signalling": "explicit", "expected_mime": "mp4a.40.5"},
+        {"name": "he_aac_implicit.mp4", "signalling": "implicit", "expected_mime": "mp4a.40.2"},
+    ]
+    for spec in specs:
+        path = clips_dir / spec["name"]
+        info = run_host_ffprobe_audio(path)
+        if info.get("profile") != "HE-AAC":
+            raise RuntimeError(f"host ffprobe expected HE-AAC for {spec['name']}, got {info.get('profile')}")
+        if int(info.get("sample_rate", "0")) != HE_AAC_FULL_HZ:
+            raise RuntimeError(f"host ffprobe expected {HE_AAC_FULL_HZ} Hz for {spec['name']}, got {info.get('sample_rate')}")
+        if info.get("mime_codec_string") != spec["expected_mime"]:
+            raise RuntimeError(
+                f"host ffprobe expected {spec['expected_mime']} for {spec['name']}, got {info.get('mime_codec_string')}"
+            )
+        host_raw = run_host_ffmpeg(
+            ["-c:a", "aac", "-i", str(path), "-map", "0:a:0", "-ac", "1", "-f", "f32le", "-c:a", "pcm_f32le", "-"],
+            capture_stdout=True,
+        )
+        host_samples = struct.unpack(f"<{len(host_raw) // 4}f", host_raw)
+        mid_start = len(host_samples) // 2
+        mid = host_samples[mid_start:mid_start + HE_AAC_DFT_WINDOW]
+        host_low_db = goertzel_tone_db(mid, HE_AAC_FULL_HZ, HE_AAC_LOW_TONE_HZ)
+        host_high_db = band_energy_db(mid, HE_AAC_FULL_HZ, 12000.0, 22000.0)
+        if host_low_db < HE_AAC_MIN_LOW_TONE_DB:
+            raise RuntimeError(f"host decode of {spec['name']} missing 3 kHz tone ({host_low_db:.1f} dBFS)")
+        if host_high_db is None or host_high_db < HE_AAC_MIN_HOST_HIGH_BAND_DB:
+            raise RuntimeError(f"host decode of {spec['name']} missing >12 kHz SBR energy ({host_high_db} dBFS)")
+        spec["sha256"] = sha256_file(path)
+        spec["host_profile"] = info.get("profile")
+        spec["host_mime"] = info.get("mime_codec_string")
+        spec["host_sample_rate"] = int(info.get("sample_rate", "0"))
+        spec["host_3khz_db"] = round(host_low_db, 2)
+        spec["host_above_12khz_db"] = round(host_high_db, 2)
+    return specs
 
 
 def generate_clips(clips_dir, ref_dir):
@@ -198,6 +436,15 @@ def generate_clips(clips_dir, ref_dir):
             "acodec": "mp3float",
             "exact_audio": False,
         },
+        {
+            "name": "aac_lc.mp4",
+            "encode": ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+                       "-ac", "2", "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k"],
+            "acodec": "libfdk_aac",
+            "host_acodec": "aac",
+            "exact_audio": False,
+            "aligned_audio": True,
+        },
     ]
 
     bench_spec = {
@@ -237,8 +484,9 @@ def generate_clips(clips_dir, ref_dir):
         clip_path = clips_dir / spec["name"]
         fmt = "s16le" if spec["exact_audio"] else "f32le"
         enc = "pcm_s16le" if spec["exact_audio"] else "pcm_f32le"
+        host_dec = spec.get("host_acodec", spec["acodec"])
         pcm_out = run_host_ffmpeg(
-            ["-c:a", spec["acodec"], "-i", str(clip_path), "-map", "0:a:0",
+            ["-c:a", host_dec, "-i", str(clip_path), "-map", "0:a:0",
              "-f", fmt, "-c:a", enc, "-"],
             capture_stdout=True,
         )
@@ -297,7 +545,108 @@ def start_clip_server(clips_dir, upload_dir):
     return server
 
 
+def run_media_decode_no_aac_lc(vm, args, helpers):
+    root_shell = helpers["root_shell"]
+    run_status = helpers["run_status"]
+    policy = load_policy()
+    clips_dir = vm.out / "clips"
+    guest_dir = vm.out / "guest-out"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    record = {"mode": "no-aac-lc", "problems": []}
+
+    server = start_clip_server(clips_dir, guest_dir)
+    port = server.server_address[1]
+    try:
+        if not root_shell(vm, args.timeout):
+            return False, f"root serial login failed; see {vm.out}"
+
+        code, net_text = run_status(
+            vm,
+            'bash -c \'deadline=$((SECONDS+60)); server=$(cat /etc/net/dns); '
+            'while [[ -z "$server" || "$server" == 9.9.9.9 ]] && (( SECONDS < deadline )); do '
+            'sleep 0.1; server=$(cat /etc/net/dns); done; '
+            '[[ -n "$server" && "$server" != 9.9.9.9 ]]\'',
+            timeout=70,
+        )
+        if code != 0:
+            return False, f"DHCP did not finish: {net_text.strip()}; see {vm.out}"
+
+        base = f"http://10.0.2.2:{port}"
+        curl_post = "curl --http1.0 -H Expect: -fsS --max-time 30 --retry 2 --data-binary"
+        code, meta_out = run_status(
+            vm,
+            "bash -c '"
+            "mkdir -p /tmp/media && "
+            "ffmpeg -hide_banner -L > /tmp/media/license.txt 2>&1 && "
+            "ffmpeg -hide_banner -buildconf > /tmp/media/buildconf.txt 2>&1 && "
+            "ffmpeg -hide_banner -decoders > /tmp/media/decoders.txt 2>&1 && "
+            "ffmpeg -hide_banner -encoders > /tmp/media/encoders.txt 2>&1 && "
+            "find /usr/lib /usr/share/licenses -maxdepth 3 \\( -name \"libfdk-aac*\" -o -name \"fdk-aac-free\" \\) > /tmp/media/fdk_files.txt 2>&1 && "
+            f"{curl_post} @/tmp/media/license.txt {base}/license.txt && "
+            f"{curl_post} @/tmp/media/buildconf.txt {base}/buildconf.txt && "
+            f"{curl_post} @/tmp/media/decoders.txt {base}/decoders.txt && "
+            f"{curl_post} @/tmp/media/encoders.txt {base}/encoders.txt && "
+            f"{curl_post} @/tmp/media/fdk_files.txt {base}/fdk_files.txt"
+            "'",
+            timeout=60,
+        )
+        if code != 0:
+            return False, f"failed to collect guest metadata (rc={code}): {meta_out.strip()}; see {vm.out}"
+
+        license_text = (guest_dir / "license.txt").read_text(encoding="utf-8", errors="replace")
+        buildconf_text = (guest_dir / "buildconf.txt").read_text(encoding="utf-8", errors="replace")
+        decoders_text = (guest_dir / "decoders.txt").read_text(encoding="utf-8", errors="replace")
+        encoders_text = (guest_dir / "encoders.txt").read_text(encoding="utf-8", errors="replace")
+        fdk_files = [l.strip() for l in (guest_dir / "fdk_files.txt").read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()]
+
+        problems = []
+        if fdk_files:
+            problems.append(f"fdk-aac-free files present in FFMPEG_AAC_LC=0 image: {fdk_files}")
+        if "Lesser General Public License" not in license_text:
+            problems.append("ffmpeg -L does not report LGPL")
+        if "--enable-libfdk-aac" in buildconf_text:
+            problems.append("ffmpeg -buildconf still contains --enable-libfdk-aac")
+        for bad_flag in ("--enable-gpl", "--enable-nonfree", "--enable-sdl2", "--enable-ffplay"):
+            if bad_flag in buildconf_text:
+                problems.append(f"ffmpeg -buildconf contains forbidden {bad_flag}")
+
+        guest_decoders = parse_codec_list(decoders_text)
+        guest_encoders = parse_codec_list(encoders_text)
+        record["fdk_files"] = fdk_files
+        record["guest_decoder_count"] = len(guest_decoders)
+        record["guest_encoder_count"] = len(guest_encoders)
+
+        if "libfdk_aac" in guest_decoders:
+            problems.append("guest ffmpeg -decoders still lists libfdk_aac")
+        if "aac" in guest_decoders:
+            problems.append("guest ffmpeg -decoders lists forbidden aac")
+        if "libfdk_aac" in guest_encoders:
+            problems.append("guest ffmpeg -encoders lists forbidden libfdk_aac")
+        if "libdav1d" not in guest_decoders:
+            problems.append("guest ffmpeg lacks libdav1d decoder")
+        extra_dec = sorted(guest_decoders - policy.ALLOWED_IMAGE_DECODERS)
+        if extra_dec:
+            problems.append(f"guest decoders outside allow-list: {extra_dec}")
+        extra_enc = sorted(guest_encoders - policy.ALLOWED_IMAGE_ENCODERS)
+        if extra_enc:
+            problems.append(f"guest encoders outside allow-list: {extra_enc}")
+
+        record["problems"] = problems
+        (vm.out / "media-decode.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        if problems:
+            return False, "; ".join(problems) + f"; see {vm.out}"
+        return True, (
+            f"FFMPEG_AAC_LC=0 verified: 0 fdk-aac-free files, no libfdk_aac decoder/encoder, "
+            f"decoders={len(guest_decoders)}, encoders={len(guest_encoders)}; see {vm.out}"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def run_media_decode(vm, args, helpers):
+    if getattr(args, "no_aac_lc", False):
+        return run_media_decode_no_aac_lc(vm, args, helpers)
     Blocked = helpers["Blocked"]
     root_shell = helpers["root_shell"]
     run_status = helpers["run_status"]
@@ -311,10 +660,15 @@ def run_media_decode(vm, args, helpers):
     guest_dir = vm.out / "guest-out"
 
     video_specs, audio_specs, bench_spec, clip_hashes = generate_clips(clips_dir, ref_dir)
+    he_aac_specs = generate_he_aac_clips(clips_dir, Blocked)
+    for spec in he_aac_specs:
+        clip_hashes[spec["name"]] = spec["sha256"]
     record = {
+        "mode": "default",
         "clip_sha256": clip_hashes,
         "video": {},
         "audio": {},
+        "he_aac": {},
         "benchmark_4k_av1": {},
     }
 
@@ -343,11 +697,15 @@ def run_media_decode(vm, args, helpers):
 
         code, pat_out = run_status(
             vm,
-            "bash -c 'grep -q \"Alliance for Open Media Patent License 1.0\" /usr/share/licenses/dav1d/PATENTS'",
+            "bash -c '"
+            "grep -q \"Alliance for Open Media Patent License 1.0\" /usr/share/licenses/dav1d/PATENTS && "
+            "test -s /usr/share/licenses/fdk-aac-free/NOTICE && "
+            "test -s /usr/share/licenses/fdk-aac-free/README.fedora"
+            "'",
             timeout=30,
         )
         if code != 0:
-            return False, f"missing or incomplete /usr/share/licenses/dav1d/PATENTS: {pat_out.strip()}; see {vm.out}"
+            return False, f"missing or incomplete codec license files: {pat_out.strip()}; see {vm.out}"
 
         base = f"http://10.0.2.2:{port}"
         curl_post = "curl --http1.0 -H Expect: -fsS --max-time 30 --retry 2 --data-binary"
@@ -382,6 +740,8 @@ def run_media_decode(vm, args, helpers):
             problems.append("ffmpeg -buildconf missing --disable-everything or --disable-autodetect")
         if "--enable-libdav1d" not in buildconf_text:
             problems.append("ffmpeg -buildconf missing --enable-libdav1d")
+        if "--enable-libfdk-aac" not in buildconf_text:
+            problems.append("ffmpeg -buildconf missing --enable-libfdk-aac")
         for bad_flag in ("--enable-gpl", "--enable-nonfree", "--enable-sdl2", "--enable-ffplay"):
             if bad_flag in buildconf_text:
                 problems.append(f"ffmpeg -buildconf contains forbidden {bad_flag}")
@@ -393,6 +753,10 @@ def run_media_decode(vm, args, helpers):
 
         if "libdav1d" not in guest_decoders:
             problems.append("guest ffmpeg lacks libdav1d decoder")
+        if "libfdk_aac" not in guest_decoders:
+            problems.append("guest ffmpeg lacks libfdk_aac decoder")
+        if "libfdk_aac" in guest_encoders:
+            problems.append("guest ffmpeg exposes forbidden libfdk_aac encoder")
         extra_dec = sorted(guest_decoders - policy.ALLOWED_IMAGE_DECODERS)
         if extra_dec:
             problems.append(f"guest decoders outside allow-list: {extra_dec}")
@@ -545,16 +909,122 @@ def run_media_decode(vm, args, helpers):
                 }
                 continue
             got_bytes = (guest_dir / a_out).read_bytes()
-            snr_db, note = compute_f32_snr_db(ref_bytes, got_bytes)
+            if spec.get("aligned_audio"):
+                snr_db, shift, note = compute_aligned_stereo_f32_snr_db(ref_bytes, got_bytes)
+            else:
+                snr_db, note = compute_f32_snr_db(ref_bytes, got_bytes)
+                shift = 0
             ok = snr_db is not None and snr_db >= LOSSY_MIN_SNR_DB
             record["audio"][name] = {
                 "acodec": spec["acodec"],
                 "snr_db": "inf" if snr_db == float("inf") else (round(snr_db, 2) if snr_db is not None else None),
+                "shift_frames": shift,
                 "note": note,
                 "ok": ok,
             }
             if not ok:
                 problems.append(f"audio SNR failed for {name}: {snr_db} dB ({note})")
+
+        for spec in he_aac_specs:
+            name = spec["name"]
+            map_name = f"{name}.aac_map.txt"
+            fixed_name = f"{name}.aac_fixed.txt"
+            wav_name = f"{name}.wav"
+            code, map_out = run_status(
+                vm,
+                f"bash -c 'ffmpeg -hide_banner -nostdin -c:a aac -i /tmp/media/{name} -f null - "
+                f"> /tmp/media/{map_name} 2>&1 && "
+                f"{curl_post} @/tmp/media/{map_name} {base}/{map_name}'",
+                timeout=60,
+            )
+            if code is None:
+                return False, f"timeout checking -c:a aac dispatch on {name}; see {vm.out}"
+            map_text = (guest_dir / map_name).read_text(encoding="utf-8", errors="replace") if (guest_dir / map_name).is_file() else map_out
+            dispatched_fdk = (
+                code == 0
+                and "aac (libfdk_aac)" in map_text
+                and "aac (native)" not in map_text
+                and f"{HE_AAC_CORE_HZ} Hz" in map_text
+                and f"{HE_AAC_FULL_HZ} Hz" not in map_text
+            )
+            if not dispatched_fdk:
+                problems.append(f"-c:a aac did not dispatch exclusively to libfdk_aac at {HE_AAC_CORE_HZ} Hz on {name}: {map_text.strip()[-240:]}")
+
+            code, fixed_out = run_status(
+                vm,
+                f"bash -c 'rc=0; ffmpeg -hide_banner -nostdin -c:a aac_fixed -i /tmp/media/{name} -f null - "
+                f"> /tmp/media/{fixed_name} 2>&1 || rc=$?; "
+                f"{curl_post} @/tmp/media/{fixed_name} {base}/{fixed_name} || true; test $rc -ne 0'",
+                timeout=60,
+            )
+            if code is None:
+                return False, f"timeout checking aac_fixed refusal on {name}; see {vm.out}"
+            fixed_text = (guest_dir / fixed_name).read_text(encoding="utf-8", errors="replace") if (guest_dir / fixed_name).is_file() else fixed_out
+            fixed_rejected = code == 0 and "Unknown decoder" in fixed_text
+            if not fixed_rejected:
+                problems.append(f"expected -c:a aac_fixed Unknown decoder on {name}, got rc={code}: {fixed_text.strip()[-200:]}")
+
+            code, dec_out = run_status(
+                vm,
+                f"bash -c 'ffmpeg -hide_banner -nostdin -c:a libfdk_aac -i /tmp/media/{name} "
+                f"-map 0:a:0 -c:a pcm_s16le -f wav /tmp/media/{wav_name} && "
+                f"rm -f /tmp/media/{wav_name}.part.*; split -b {UPLOAD_CHUNK_BYTES} /tmp/media/{wav_name} /tmp/media/{wav_name}.part. && "
+                f"first=1; for p in /tmp/media/{wav_name}.part.*; do "
+                f"if test $first -eq 1; then {curl_post} \"@$p\" {base}/{wav_name} || exit 1; first=0; "
+                f"else {curl_post} \"@$p\" {base}/append/{wav_name} || exit 1; fi; done'",
+                timeout=120,
+            )
+            if code is None:
+                return False, f"timeout decoding HE-AAC core {name}; see {vm.out}"
+            if code != 0:
+                problems.append(f"HE-AAC core decode failed for {name} (rc={code}): {dec_out.strip()[-300:]}")
+                continue
+
+            sr, channels, nframes, mono = read_wav_mono_f32(guest_dir / wav_name)
+            mid_start = max(0, (nframes - HE_AAC_DFT_WINDOW) // 2)
+            mid = mono[mid_start:mid_start + HE_AAC_DFT_WINDOW]
+            low_db = goertzel_tone_db(mid, sr, HE_AAC_LOW_TONE_HZ)
+            floor_db = band_energy_db(mid, sr, 6000.0, 11000.0)
+            high_db = band_energy_db(mid, sr, 12000.0, 22000.0)
+            ok_sr = sr == HE_AAC_CORE_HZ
+            ok_low = low_db >= HE_AAC_MIN_LOW_TONE_DB
+            ok_floor = floor_db is not None and floor_db <= HE_AAC_MAX_NOISE_FLOOR_DB
+            ok_no_sbr = high_db is None or high_db <= HE_AAC_MAX_HIGH_BAND_DB
+            ok_he = (
+                dispatched_fdk
+                and fixed_rejected
+                and ok_sr
+                and channels == 2
+                and nframes >= HE_AAC_CORE_HZ
+                and ok_low
+                and ok_floor
+                and ok_no_sbr
+            )
+            record["he_aac"][name] = {
+                "signalling": spec["signalling"],
+                "host_profile": spec["host_profile"],
+                "host_mime": spec["host_mime"],
+                "host_sample_rate": spec["host_sample_rate"],
+                "host_3khz_db": spec["host_3khz_db"],
+                "host_above_12khz_db": spec["host_above_12khz_db"],
+                "aac_dispatched_to_libfdk_aac_24khz": dispatched_fdk,
+                "aac_fixed_unknown_decoder": fixed_rejected,
+                "guest_sample_rate": sr,
+                "guest_channels": channels,
+                "guest_frames": nframes,
+                "guest_3khz_db": round(low_db, 2),
+                "guest_6_11khz_floor_db": round(floor_db, 2) if floor_db is not None else None,
+                "guest_above_12khz_db": round(high_db, 2) if high_db is not None else None,
+                "ok": ok_he,
+            }
+            if not ok_sr:
+                problems.append(f"HE-AAC {name} decoded at {sr} Hz, expected core {HE_AAC_CORE_HZ} Hz")
+            if not ok_low:
+                problems.append(f"HE-AAC {name} missing 3 kHz core tone ({low_db:.1f} dBFS)")
+            if not ok_floor:
+                problems.append(f"HE-AAC {name} unexpected 6-11 kHz energy ({floor_db} dBFS)")
+            if not ok_no_sbr:
+                problems.append(f"HE-AAC {name} unexpected >12 kHz SBR energy ({high_db:.1f} dBFS)")
 
         b_name = bench_spec["name"]
         code, bench_out = run_status(
@@ -604,6 +1074,7 @@ def run_media_decode(vm, args, helpers):
         )
         return True, (
             f"{len(video_specs)} video framemd5 exact, {exact_audio} exact audio, {lossy_audio} lossy audio SNR>={LOSSY_MIN_SNR_DB:.0f} dB, "
+            f"{len(he_aac_specs)} HE-AAC core-only ({HE_AAC_CORE_HZ} Hz, no SBR), "
             f"decoders={len(guest_decoders)}, encoders={len(guest_encoders)}, 4K AV1={fps_str} fps; see {vm.out}"
         )
     finally:
