@@ -5,7 +5,6 @@ description = "Media player and library"
 git = "https://github.com/mpv-player/mpv.git"
 rev = "b0841e8c4d156b8403dc1876c4cbd9011eb583f3"
 patches = [
-    "ferrion-j1-decl.patch",
     "ferrion-accept-fallback.patch",
     "ferrion-ao.patch",
 ]
