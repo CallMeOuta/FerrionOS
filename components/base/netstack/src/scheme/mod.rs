@@ -106,7 +106,8 @@ impl Smolnetd {
         // The engine's own random numbers start from this seed; its default is 0.
         config.random_seed = crate::random::u64()
             .map_err(|err| Error::from_io_error(err, "failed to read /scheme/rand"))?;
-        let mut iface = SmoltcpInterface::new(config, &mut network_device, Instant::now());
+        let timer = ::std::time::Instant::now();
+        let mut iface = SmoltcpInterface::new(config, &mut network_device, Instant::ZERO);
         // TCP initial sequence numbers follow RFC 6528 (isn.rs) rather than the engine's
         // random number generator.
         iface.set_tcp_isn_generator(Some(crate::isn::initial_seq_no));
@@ -139,7 +140,7 @@ impl Smolnetd {
             iface: Rc::clone(&iface),
             router_device: network_device,
             socket_set: Rc::clone(&socket_set),
-            timer: ::std::time::Instant::now(),
+            timer,
             time_file: unsafe { File::from_raw_fd(time_file.into_raw() as RawFd) },
             ip_scheme: IpScheme::new(
                 "ip",
@@ -196,6 +197,7 @@ impl Smolnetd {
     }
 
     pub fn on_tcp_scheme_event(&mut self) -> Result<()> {
+        self.iface.borrow_mut().poll_maintenance(self.now());
         self.tcp_scheme.on_scheme_event()?;
         let _ = self.poll()?;
         Ok(())
@@ -237,6 +239,11 @@ impl Smolnetd {
         Ok(())
     }
 
+    fn now(&self) -> Instant {
+        let micros = i64::try_from(self.timer.elapsed().as_micros()).unwrap_or(i64::MAX);
+        Instant::from_micros(micros)
+    }
+
     fn poll(&mut self) -> Result<Duration> {
         let timeout = {
             let mut iter_limit = 10usize;
@@ -244,7 +251,7 @@ impl Smolnetd {
             let mut socket_set = self.socket_set.borrow_mut();
 
             loop {
-                let timestamp = Instant::from(self.timer);
+                let timestamp = self.now();
                 if iter_limit == 0 {
                     break MIN_DURATION;
                 }
