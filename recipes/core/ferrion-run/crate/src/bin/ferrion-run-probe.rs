@@ -13,7 +13,8 @@ fn main() {
 mod probe {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
 
     use libredox::call;
@@ -21,6 +22,10 @@ mod probe {
     use syscall::flag::{F_DUPFD, F_SETFD, StdFsCallKind, UPPER_FDTBL_TAG};
 
     const FDS_VAR: &str = "FERRION_RUN_PROBE_FDS";
+    const EXTRA_FD_VAR: &str = "FERRION_RUN_PROBE_EXTRA_FD";
+    const MAX_PIPE_BYTES: usize = 128 << 20;
+    const PIPE_CHUNK: usize = 65536;
+    const MAX_PIPE_ITERS: usize = (MAX_PIPE_BYTES / 512) + 4096;
 
     fn request(path: &str) -> String {
         format!("GET {path} HTTP/1.0\r\nHost: ferrion-run-probe\r\n\r\n")
@@ -75,6 +80,9 @@ mod probe {
             ["lock-fchmod", path] => lock_fchmod(path),
             ["retarget-link", path, target] => retarget_link(path, target),
             ["create-many", dir, count] => create_many(dir, count.parse().unwrap_or(0)),
+            ["pass-unix", ref rest @ ..] => pass_unix(rest),
+            ["unix-child", fd, pipe_bytes] => unix_child(fd, pipe_bytes),
+            ["pass-bad", kind, ref rest @ ..] => pass_bad(kind, rest),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
@@ -386,5 +394,398 @@ mod probe {
                 1
             }
         }
+    }
+
+    fn send_fd(sock: libc::c_int, fd_to_send: libc::c_int) -> Result<(), String> {
+        let mut byte = [b'P'; 1];
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        let space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize;
+        let mut cbuf = vec![0u8; space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf.as_mut_ptr().cast();
+        msg.msg_controllen = unsafe { libc::CMSG_LEN(size_of::<libc::c_int>() as u32) } as _;
+        let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        if cmsg.is_null() {
+            return Err("CMSG_FIRSTHDR returned null".into());
+        }
+        unsafe {
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = msg.msg_controllen;
+            std::ptr::copy_nonoverlapping(
+                &fd_to_send as *const libc::c_int as *const u8,
+                libc::CMSG_DATA(cmsg),
+                size_of::<libc::c_int>(),
+            );
+        }
+        let n = unsafe { libc::sendmsg(sock, &msg, 0) };
+        if n != 1 {
+            return Err(format!("sendmsg: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn recv_fd(sock: libc::c_int) -> Result<libc::c_int, String> {
+        let mut byte = [0u8; 1];
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        let space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize;
+        let mut cbuf = vec![0u8; space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        let n = unsafe { libc::recvmsg(sock, &mut msg, 0) };
+        if n <= 0 {
+            return Err(format!("recvmsg: {}", std::io::Error::last_os_error()));
+        }
+        let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        if cmsg.is_null() {
+            return Err("recvmsg returned no control message".into());
+        }
+        let (level, ty) = unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type) };
+        if level != libc::SOL_SOCKET || ty != libc::SCM_RIGHTS {
+            return Err(format!("unexpected cmsg {level}/{ty}"));
+        }
+        let mut fd: libc::c_int = -1;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                libc::CMSG_DATA(cmsg),
+                &mut fd as *mut libc::c_int as *mut u8,
+                size_of::<libc::c_int>(),
+            );
+        }
+        if fd < 0 {
+            return Err("received negative descriptor".into());
+        }
+        Ok(fd)
+    }
+
+    fn mix_cksum(cksum: &mut u64, buf: &[u8]) {
+        for &b in buf {
+            *cksum = cksum.wrapping_mul(0x100000001b3).wrapping_add(u64::from(b));
+        }
+    }
+
+    fn pass_unix(rest: &[&str]) -> i32 {
+        let mut extra_file: Option<&str> = None;
+        let mut pipe_bytes: usize = 0;
+        let mut idx = 0;
+        let mut command: &[&str] = &[];
+        while idx < rest.len() {
+            match rest[idx] {
+                "--extra-file" if idx + 1 < rest.len() => {
+                    extra_file = Some(rest[idx + 1]);
+                    idx += 2;
+                }
+                "--pipe-bytes" if idx + 1 < rest.len() => {
+                    pipe_bytes = match rest[idx + 1].parse() {
+                        Ok(n) if n <= MAX_PIPE_BYTES => n,
+                        _ => {
+                            eprintln!("ferrion-run-probe: invalid --pipe-bytes");
+                            return 2;
+                        }
+                    };
+                    idx += 2;
+                }
+                "--" => {
+                    command = &rest[idx + 1..];
+                    break;
+                }
+                other => {
+                    eprintln!("ferrion-run-probe: unexpected pass-unix arg {other}");
+                    return 2;
+                }
+            }
+        }
+        let Some((program, program_args)) = command.split_first() else {
+            eprintln!("ferrion-run-probe: pass-unix needs -- PROGRAM");
+            return 2;
+        };
+        let (mut parent, child_sock) = match UnixStream::pair() {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: UnixStream::pair: {e}");
+                return 2;
+            }
+        };
+        let child_fd = child_sock.into_raw_fd() as usize;
+        if let Err(e) = call::fcntl(child_fd, F_SETFD, 0) {
+            eprintln!("ferrion-run-probe: clear cloexec on {child_fd}: {e}");
+            let _ = call::close(child_fd);
+            return 2;
+        }
+        let extra_fd = match extra_file {
+            Some(path) => match std::fs::File::open(path) {
+                Ok(f) => {
+                    let fd = f.into_raw_fd() as usize;
+                    if let Err(e) = call::fcntl(fd, F_SETFD, 0) {
+                        eprintln!("ferrion-run-probe: clear cloexec on extra {fd}: {e}");
+                        let _ = call::close(fd);
+                        let _ = call::close(child_fd);
+                        return 2;
+                    }
+                    Some(fd)
+                }
+                Err(e) => {
+                    eprintln!("ferrion-run-probe: open extra {path}: {e}");
+                    let _ = call::close(child_fd);
+                    return 2;
+                }
+            },
+            None => None,
+        };
+        let fd_str = child_fd.to_string();
+        let resolved: Vec<String> = program_args
+            .iter()
+            .map(|a| a.replace("{fd}", &fd_str))
+            .collect();
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(&resolved);
+        if let Some(efd) = extra_fd {
+            cmd.env(EXTRA_FD_VAR, efd.to_string());
+        }
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: spawn {program}: {e}");
+                let _ = call::close(child_fd);
+                if let Some(efd) = extra_fd {
+                    let _ = call::close(efd);
+                }
+                return 2;
+            }
+        };
+        let _ = call::close(child_fd);
+        if let Some(efd) = extra_fd {
+            let _ = call::close(efd);
+        }
+
+        let res = if pipe_bytes == 0 {
+            (|| -> Result<String, String> {
+                parent
+                    .write_all(b"ping")
+                    .map_err(|e| format!("write ping: {e}"))?;
+                let mut reply = [0u8; 4];
+                parent
+                    .read_exact(&mut reply)
+                    .map_err(|e| format!("read pong: {e}"))?;
+                if &reply != b"pong" {
+                    return Err(format!("expected pong, got {reply:?}"));
+                }
+                Ok("PASS_UNIX_OK".into())
+            })()
+        } else {
+            (|| -> Result<String, String> {
+                let start = std::time::Instant::now();
+                let rfd = recv_fd(parent.as_raw_fd())?;
+                let mut reader = unsafe { std::fs::File::from_raw_fd(rfd) };
+                let mut buf = vec![0u8; PIPE_CHUNK];
+                let mut total = 0usize;
+                let mut cksum: u64 = 0xcbf29ce484222325;
+                let mut saw_eof = false;
+                for _ in 0..MAX_PIPE_ITERS {
+                    let n = reader
+                        .read(&mut buf)
+                        .map_err(|e| format!("read pipe: {e}"))?;
+                    if n == 0 {
+                        saw_eof = true;
+                        break;
+                    }
+                    total = total.saturating_add(n);
+                    if total > pipe_bytes {
+                        return Err(format!("pipe sent more than {pipe_bytes} bytes"));
+                    }
+                    mix_cksum(&mut cksum, &buf[..n]);
+                }
+                let elapsed_ms = start.elapsed().as_millis();
+                if !saw_eof || total != pipe_bytes {
+                    return Err(format!(
+                        "pipe short read: got {total}/{pipe_bytes} eof={saw_eof}"
+                    ));
+                }
+                let mut child_cksum_bytes = [0u8; 8];
+                parent
+                    .read_exact(&mut child_cksum_bytes)
+                    .map_err(|e| format!("read child cksum: {e}"))?;
+                let child_cksum = u64::from_le_bytes(child_cksum_bytes);
+                if cksum != child_cksum {
+                    return Err(format!(
+                        "pipe cksum mismatch: parent={cksum:016x} child={child_cksum:016x}"
+                    ));
+                }
+                Ok(format!(
+                    "PASS_PIPE_OK bytes={total} ms={elapsed_ms} cksum={cksum:016x}"
+                ))
+            })()
+        };
+
+        let status = match child.wait() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ferrion-run-probe: wait: {e}");
+                return 1;
+            }
+        };
+        match res {
+            Ok(line) if status.success() => {
+                println!("{line}");
+                0
+            }
+            Ok(line) => {
+                eprintln!("ferrion-run-probe: child exited {status} after {line}");
+                status.code().unwrap_or(1)
+            }
+            Err(e) => {
+                eprintln!("ferrion-run-probe: {e} (child {status})");
+                1
+            }
+        }
+    }
+
+    fn unix_child(fd_str: &str, pipe_bytes_str: &str) -> i32 {
+        let fd: libc::c_int = match fd_str.parse() {
+            Ok(n) if n > 2 => n,
+            _ => {
+                eprintln!("ferrion-run-probe: invalid child fd {fd_str}");
+                return 2;
+            }
+        };
+        let pipe_bytes: usize = match pipe_bytes_str.parse() {
+            Ok(n) if n <= MAX_PIPE_BYTES => n,
+            _ => {
+                eprintln!("ferrion-run-probe: invalid pipe_bytes {pipe_bytes_str}");
+                return 2;
+            }
+        };
+        if let Ok(extra_str) = std::env::var(EXTRA_FD_VAR)
+            && let Ok(efd) = extra_str.parse::<libc::c_int>()
+        {
+            if unsafe { libc::fcntl(efd, libc::F_GETFD) } >= 0 {
+                eprintln!("ferrion-run-probe: EXTRA_FD_LEAKED {efd}");
+                return 1;
+            }
+        }
+        let mut sock = unsafe { UnixStream::from_raw_fd(fd) };
+        if pipe_bytes == 0 {
+            let mut req = [0u8; 4];
+            if let Err(e) = sock.read_exact(&mut req) {
+                eprintln!("ferrion-run-probe: child read ping: {e}");
+                return 1;
+            }
+            if &req != b"ping" {
+                eprintln!("ferrion-run-probe: child unexpected {req:?}");
+                return 1;
+            }
+            if let Err(e) = sock.write_all(b"pong") {
+                eprintln!("ferrion-run-probe: child write pong: {e}");
+                return 1;
+            }
+            return 0;
+        }
+        let mut pfds = [-1 as libc::c_int; 2];
+        if unsafe { libc::pipe(pfds.as_mut_ptr()) } != 0 {
+            eprintln!(
+                "ferrion-run-probe: pipe: {}",
+                std::io::Error::last_os_error()
+            );
+            return 1;
+        }
+        if let Err(e) = send_fd(sock.as_raw_fd(), pfds[0]) {
+            eprintln!("ferrion-run-probe: child send_fd: {e}");
+            unsafe {
+                libc::close(pfds[0]);
+                libc::close(pfds[1]);
+            }
+            return 1;
+        }
+        unsafe { libc::close(pfds[0]) };
+        let mut writer = unsafe { std::fs::File::from_raw_fd(pfds[1]) };
+        let mut chunk = vec![0u8; PIPE_CHUNK];
+        let mut rng: u64 = 0x517cc1b727220a95;
+        let mut remaining = pipe_bytes;
+        let mut cksum: u64 = 0xcbf29ce484222325;
+        for _ in 0..MAX_PIPE_ITERS {
+            if remaining == 0 {
+                break;
+            }
+            fill_random_chunk(&mut rng, &mut chunk);
+            let n = remaining.min(chunk.len());
+            mix_cksum(&mut cksum, &chunk[..n]);
+            if let Err(e) = writer.write_all(&chunk[..n]) {
+                eprintln!("ferrion-run-probe: child pipe write: {e}");
+                return 1;
+            }
+            remaining -= n;
+        }
+        if remaining != 0 {
+            eprintln!("ferrion-run-probe: child pipe incomplete {remaining}");
+            return 1;
+        }
+        drop(writer);
+        if let Err(e) = sock.write_all(&cksum.to_le_bytes()) {
+            eprintln!("ferrion-run-probe: child write cksum: {e}");
+            return 1;
+        }
+        0
+    }
+
+    fn pass_bad(kind: &str, rest: &[&str]) -> i32 {
+        let (fd, command) = match (kind, rest) {
+            ("file", ["--", command @ ..]) => match std::fs::File::open("/etc/passwd") {
+                Ok(f) => (f.into_raw_fd() as usize, command),
+                Err(e) => {
+                    eprintln!("ferrion-run-probe: open /etc/passwd: {e}");
+                    return 2;
+                }
+            },
+            ("pipe", ["--", command @ ..]) => {
+                let mut pfds = [-1 as libc::c_int; 2];
+                if unsafe { libc::pipe(pfds.as_mut_ptr()) } != 0 {
+                    eprintln!(
+                        "ferrion-run-probe: pipe: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    return 2;
+                }
+                unsafe { libc::close(pfds[1]) };
+                (pfds[0] as usize, command)
+            }
+            ("tcp", [address, "--", command @ ..]) => match TcpStream::connect(address) {
+                Ok(s) => (s.into_raw_fd() as usize, command),
+                Err(e) => {
+                    eprintln!("ferrion-run-probe: connect {address}: {e}");
+                    return 2;
+                }
+            },
+            _ => {
+                eprintln!("ferrion-run-probe: bad pass-bad args {kind} {rest:?}");
+                return 2;
+            }
+        };
+        let Some((program, program_args)) = command.split_first() else {
+            eprintln!("ferrion-run-probe: pass-bad needs -- PROGRAM");
+            return 2;
+        };
+        if let Err(e) = call::fcntl(fd, F_SETFD, 0) {
+            eprintln!("ferrion-run-probe: clear cloexec on {fd}: {e}");
+            return 2;
+        }
+        let fd_str = fd.to_string();
+        let resolved: Vec<String> = program_args
+            .iter()
+            .map(|a| a.replace("{fd}", &fd_str))
+            .collect();
+        let error = std::process::Command::new(program).args(&resolved).exec();
+        eprintln!("ferrion-run-probe: exec {program}: {error}");
+        2
     }
 }

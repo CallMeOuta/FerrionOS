@@ -5859,6 +5859,47 @@ def ferrion_run_checks(vm, args, port, seen):
     if state_before.split()[-1:] != state_after.split()[-1:]:
         problems.append(f"refused --files launch left a session entry ({state_before.split()[-1:]} -> {state_after.split()[-1:]})")
 
+    status, output = run(
+        "pass-unix",
+        "ferrion-run-probe pass-unix --extra-file /etc/passwd -- "
+        "ferrion-run --no-network --env FERRION_RUN_PROBE_EXTRA_FD --pass-fd {fd} -- "
+        "ferrion-run-probe unix-child {fd} 0",
+    )
+    if status != 0 or "PASS_UNIX_OK" not in output:
+        problems.append(f"--pass-fd Unix socketpair failed (exit {status}): {output!r}")
+    status, output = run(
+        "pass-pipe-scm",
+        "ferrion-run-probe pass-unix --pipe-bytes 1048576 -- "
+        "ferrion-run --no-network --pass-fd {fd} -- "
+        "ferrion-run-probe unix-child {fd} 1048576",
+    )
+    if status != 0 or "PASS_PIPE_OK bytes=1048576" not in output:
+        problems.append(f"--pass-fd pipe over SCM_RIGHTS failed (exit {status}): {output!r}")
+    status, output = run(
+        "pass-bad-file",
+        "ferrion-run-probe pass-bad file -- ferrion-run --no-network --pass-fd {fd} true",
+    )
+    if status != 125 or "not a Unix socket" not in output:
+        problems.append(f"--pass-fd with a disk file was not refused (exit {status})")
+    status, output = run(
+        "pass-bad-pipe",
+        "ferrion-run-probe pass-bad pipe -- ferrion-run --no-network --pass-fd {fd} true",
+    )
+    if status != 125 or "not a Unix socket" not in output:
+        problems.append(f"--pass-fd with a pipe was not refused (exit {status})")
+    status, output = run(
+        "pass-bad-tcp",
+        f"ferrion-run-probe pass-bad tcp {address} -- ferrion-run --no-network --pass-fd {{fd}} true",
+    )
+    if status != 125 or "not a Unix socket" not in output:
+        problems.append(f"--pass-fd with a TCP socket was not refused (exit {status})")
+    status, output = run("pass-bad-stdio", "ferrion-run --no-network --pass-fd 0 true")
+    if status != 125 or "greater than 2" not in output:
+        problems.append(f"--pass-fd 0 was not refused (exit {status})")
+    status, output = run("pass-bad-dup", "ferrion-run --no-network --pass-fd 3 --pass-fd 4 true")
+    if status != 125 or "at most once" not in output:
+        problems.append(f"duplicate --pass-fd was not refused (exit {status})")
+
     (vm.out / "ferrion-run.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
     if controls:
         return False, "control without the launcher failed, so the run proves nothing: " + "; ".join(controls) + f"; see {vm.out}"

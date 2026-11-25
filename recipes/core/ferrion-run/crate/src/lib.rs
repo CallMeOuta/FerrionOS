@@ -61,6 +61,8 @@ system holds only what the session was given. Every path keeps its real name.
   --no-network       PROGRAM gets no ip, icmp, tcp or udp scheme, so it cannot open
                      a socket; a connection fails as on a machine without a network.
   --env NAME         passes the caller's variable NAME on to PROGRAM.
+  --pass-fd FD       passes one pre-opened Unix socket descriptor (FD > 2) to
+                     PROGRAM; at most one may be given.
   --pty              PROGRAM may open new terminals (the pty scheme). WARNING: the
                      pty scheme is not scoped to the session; give it only to
                      programs you trust.
@@ -86,11 +88,11 @@ variables, nothing else. It starts in the caller's folder when that folder is in
 the session, in its home otherwise.
 
 Every launch closes the descriptors PROGRAM would inherit except standard input,
-output and error, so a socket opened before the launch does not reach it. Standard
-input, output and error must be a terminal, a pipe or the null device: ferrion-run
-refuses to start when one is a socket or a file on disk. ferrion-run waits for
-PROGRAM; the session's files close when ferrion-run exits, also for programs
-PROGRAM left running.
+output, error and any single Unix socket passed with --pass-fd, so no other
+socket opened before the launch reaches it. Standard input, output and error
+must be a terminal, a pipe or the null device: ferrion-run refuses to start when
+one is a socket or a file on disk. ferrion-run waits for PROGRAM; the session's
+files close when ferrion-run exits, also for programs PROGRAM left running.
 
 A profile in /etc/ferrion-run/<file name of PROGRAM>.toml applies to every launch
 of that program:
@@ -116,6 +118,7 @@ pub enum GrantKind {
 pub struct Options {
     pub no_network: bool,
     pub pty: bool,
+    pub pass_fd: Option<usize>,
     pub grants: Vec<(GrantKind, PathBuf)>,
     pub env: Vec<OsString>,
     pub program: OsString,
@@ -172,6 +175,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
     }
     let mut no_network = false;
     let mut pty = false;
+    let mut pass_fd = None;
     let mut grants = Vec::new();
     let mut env = Vec::new();
     let program = loop {
@@ -186,6 +190,23 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
             }
             Some("--pty") => {
                 pty = true;
+                continue;
+            }
+            Some("--pass-fd") => {
+                if pass_fd.is_some() {
+                    return Err("--pass-fd may be given at most once".into());
+                }
+                let raw = args.next().ok_or("--pass-fd needs a descriptor number")?;
+                let fd: usize = raw.to_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
+                    format!(
+                        "--pass-fd {} is not a descriptor number",
+                        raw.to_string_lossy()
+                    )
+                })?;
+                if fd <= 2 {
+                    return Err(format!("--pass-fd {fd} must be greater than 2"));
+                }
+                pass_fd = Some(fd);
                 continue;
             }
             Some("--env") => {
@@ -216,6 +237,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
     Ok(Command::Run(Options {
         no_network,
         pty,
+        pass_fd,
         grants,
         env,
         program,
@@ -286,7 +308,25 @@ const SOCKET_SCHEMES: [&str; 7] = [
     "uds_dgram",
     "chan",
 ];
+const UNIX_SOCKET_SCHEMES: [&str; 2] = ["uds_stream", "uds_dgram"];
 const STDIO_SCHEMES: [&str; 5] = ["pty", "pipe", "debug", "null", "zero"];
+
+pub fn check_pass_fd(fd: usize, path: &str) -> Result<(), String> {
+    if fd <= 2 {
+        return Err(format!("--pass-fd {fd} must be greater than 2"));
+    }
+    let Some(scheme) = scheme_of_path(path) else {
+        return Err(format!("descriptor {fd} has an unreadable path {path:?}"));
+    };
+    let scheme = scheme.strip_prefix("kernel.").unwrap_or(scheme);
+    if UNIX_SOCKET_SCHEMES.contains(&scheme) {
+        Ok(())
+    } else {
+        Err(format!(
+            "descriptor {fd} comes from scheme {scheme}, which is not a Unix socket"
+        ))
+    }
+}
 
 pub fn check_stdio(fd: usize, path: &str) -> Result<(), String> {
     let Some(scheme) = scheme_of_path(path) else {

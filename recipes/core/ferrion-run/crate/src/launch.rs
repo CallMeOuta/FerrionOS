@@ -11,12 +11,12 @@ use ferrion_scope::overlay::{LAYER, LOWER, Session};
 use ferrion_scope::proxy::END_SESSION;
 use ferrion_scope::scope::{Access, Grant, Scope, within};
 use libredox::call;
-use libredox::flag::{O_CLOEXEC, O_RDWR};
+use libredox::flag::{F_SETFD, O_CLOEXEC, O_RDWR};
 
 use crate::sessions::{CLONE_PREFIX, PID, clone_dirs, state_root};
 use crate::{
-    GrantKind, Options, PASSED_VARIABLES, SYSTEM_PATHS, check_stdio, child_schemes, new_handles,
-    parse_snapshot, to_close,
+    GrantKind, Options, PASSED_VARIABLES, SYSTEM_PATHS, check_pass_fd, check_stdio, child_schemes,
+    new_handles, parse_snapshot, to_close,
 };
 
 const SCOPE_SERVICE: &str = "/scheme/file-scope/new";
@@ -403,12 +403,19 @@ fn enter(
         };
         let namespace_fd =
             call::getns().map_err(|e| format!("cannot read the namespace handle: {e}"))?;
-        let file_table_fd = runtime_file_table(
-            &table,
-            &[proc_fd, thread_fd, namespace_fd, cwd_fd],
-            thread_fd,
-        )?;
-        let keep = [proc_fd, thread_fd, file_table_fd, namespace_fd, cwd_fd];
+        let mut skip = Vec::with_capacity(5);
+        skip.extend_from_slice(&[proc_fd, thread_fd, namespace_fd, cwd_fd]);
+        if let Some(fd) = options.pass_fd {
+            skip.push(fd);
+        }
+        let file_table_fd = runtime_file_table(&table, &skip, thread_fd)?;
+        let mut keep = Vec::with_capacity(6);
+        keep.extend_from_slice(&[proc_fd, thread_fd, file_table_fd, namespace_fd, cwd_fd]);
+        if let Some(fd) = options.pass_fd {
+            call::fcntl(fd, F_SETFD as usize, 0)
+                .map_err(|e| format!("cannot keep passed descriptor {fd} across exec: {e}"))?;
+            keep.push(fd);
+        }
         for fd in to_close(&table, &keep) {
             call::close(fd).map_err(|e| format!("cannot close inherited descriptor {fd}: {e}"))?;
         }
@@ -529,6 +536,16 @@ pub fn run(options: &Options, withhold_network: bool, allow_sudo: bool) -> Outco
             }
             Err(_) if call::fstat(fd).is_err() => {}
             Err(e) => return Outcome::Refused(e),
+        }
+    }
+    if let Some(fd) = options.pass_fd {
+        match path_of(fd) {
+            Ok(path) => {
+                if let Err(reason) = check_pass_fd(fd, &path) {
+                    return Outcome::Refused(reason);
+                }
+            }
+            Err(e) => return Outcome::Refused(format!("--pass-fd {fd}: {e}")),
         }
     }
     let cwd = match std::env::current_dir() {

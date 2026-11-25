@@ -16,11 +16,12 @@ Status: accepted
 - A profile with an unknown key or version is an error, so a profile written for a later `ferrion-run` is refused instead of half applied.
 - The `sudo` scheme is given back only when asked for; it is never the default.
 - A standard descriptor may pass only when its path is a terminal, a pipe or a null device; a socket, a file on disk or any other scheme is refused. A closed standard descriptor passes nothing and is accepted.
+- At most one pre-opened Unix socket descriptor (`FD > 2`, scheme `uds_stream` or `uds_dgram`) may be passed through `--pass-fd`; non-sockets, network sockets, standard descriptors and duplicate `--pass-fd` flags are refused.
 - A file-table snapshot is a sequence of little-endian `u64` descriptor numbers.
 
 ### The launch
 
-- `run` checks the standard descriptors, moves the process into a new namespace, closes every inherited descriptor except relibc's runtime handles, and executes the program in place; it returns only on failure. It starts no thread, so the file table cannot change while it works.
+- `run` checks the standard descriptors and any `--pass-fd` descriptor, moves the process into a new namespace, closes every inherited descriptor except relibc's runtime handles and any single Unix socket passed with `--pass-fd` (clearing its close-on-exec flag), and executes the program in place; it returns only on failure. It starts no thread, so the file table cannot change while it works.
 - relibc's handle on the process's file table is the one kernel `proc` handle besides the thread's whose size is not zero (only file-table handles carry a snapshot). When more than one handle looks like that, an inherited handle could be mistaken for it, and the launch is refused rather than guessed. exec drops that handle itself.
 - The working directory's handle comes from the caller's namespace, so it is reopened through the new one, and the new handle is found by comparing the file table before and after.
 - Inherited descriptors are closed through libredox's `close`, which goes through relibc, so relibc's runtime table forgets them too; otherwise exec would pass upper (tagged) descriptors on.
@@ -40,7 +41,7 @@ relibc's process and thread handle getters are ABI-unstable, and `mkns`, `setns`
 
 ## Where
 
-- `recipes/core/ferrion-run/crate/src/lib.rs`: `parse_args`, `parse_profile`, `child_schemes`, `check_stdio`, `parse_snapshot`, `new_handles`, `to_close`
+- `recipes/core/ferrion-run/crate/src/lib.rs`: `parse_args`, `parse_profile`, `child_schemes`, `check_stdio`, `check_pass_fd`, `parse_snapshot`, `new_handles`, `to_close`
 - `recipes/core/ferrion-run/crate/src/launch.rs`: `run`, `prepare`, `runtime_file_table`
 - `recipes/core/ferrion-run/crate/src/bin/ferrion-run-probe.rs`
 - `recipes/core/ferrion-run/crate/Cargo.toml`: the `libredox` dependency
