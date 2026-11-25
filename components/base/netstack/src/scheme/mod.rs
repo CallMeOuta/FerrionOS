@@ -477,7 +477,7 @@ where
                     continue;
                 }
                 RequestKind::MsyncMsg | RequestKind::MunmapMsg | RequestKind::MmapMsg => {
-                    unreachable!()
+                    continue;
                 }
                 RequestKind::OnDetach { .. } => {
                     continue;

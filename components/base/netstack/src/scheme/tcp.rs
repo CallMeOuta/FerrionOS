@@ -4,7 +4,8 @@ use libredox::flag;
 use scheme_utils::FpathWriter;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp::{
-    Socket as TcpSocket, SocketBuffer as TcpSocketBuffer, State as TcpState,
+    ConnectError, ListenError, RecvError, Socket as TcpSocket, SocketBuffer as TcpSocketBuffer,
+    State as TcpState,
 };
 use smoltcp::time::Duration as SmolDuration;
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
@@ -205,18 +206,23 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         apply_tcp_opts(tcp_socket, opts.nodelay, opts.keepalive, opts.keepidle_secs);
 
         let role = if remote_endpoint.is_specified() {
+            let Some(remote_addr) = remote_endpoint.addr else {
+                socket_set.remove(socket_handle);
+                port_set.port_set.release_port(local_endpoint.port);
+                return Err(SyscallError::new(syscall::EINVAL));
+            };
             let local_endpoint_addr = match local_endpoint.addr {
                 Some(addr) if !addr.is_unspecified() => Some(addr),
                 _ => {
                     let route_table = context.route_table.borrow();
-                    let addr = route_table
-                        .lookup_src_addr(&remote_endpoint.addr.expect("Checked in is_specified"));
-                    if addr.is_none() {
-                        error!("Opening a TCP connection with a probably invalid source IP as no route have been found for destination: {}", remote_endpoint);
-                    }
-                    addr
+                    route_table.lookup_src_addr(&remote_addr)
                 }
             };
+            if local_endpoint_addr.is_none() {
+                socket_set.remove(socket_handle);
+                port_set.port_set.release_port(local_endpoint.port);
+                return Err(SyscallError::new(syscall::ENETUNREACH));
+            }
             let local_endpoint = IpListenEndpoint {
                 addr: local_endpoint_addr,
                 port: local_endpoint.port,
@@ -224,13 +230,19 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
 
             trace!("Connecting tcp {} {}", local_endpoint, remote_endpoint);
             tcp_socket.set_timeout(Some(SmolDuration::from_secs(TCP_CONNECT_TIMEOUT_SECS)));
-            tcp_socket
-                .connect(
-                    context.iface.borrow_mut().context(),
-                    IpEndpoint::new(remote_endpoint.addr.unwrap(), remote_endpoint.port),
-                    local_endpoint,
-                )
-                .expect("Can't connect tcp socket ");
+            if let Err(err) = tcp_socket.connect(
+                context.iface.borrow_mut().context(),
+                IpEndpoint::new(remote_addr, remote_endpoint.port),
+                local_endpoint,
+            ) {
+                socket_set.remove(socket_handle);
+                port_set.port_set.release_port(local_endpoint.port);
+                let errno = match err {
+                    ConnectError::Unaddressable => syscall::EADDRNOTAVAIL,
+                    ConnectError::InvalidState => syscall::EINVAL,
+                };
+                return Err(SyscallError::new(errno));
+            }
             TcpRole::Connecting {
                 local_port: local_endpoint.port,
                 deadline_us: context
@@ -239,9 +251,15 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             }
         } else {
             trace!("Listening tcp {}", local_endpoint);
-            tcp_socket
-                .listen(local_endpoint)
-                .expect("Can't listen on local endpoint");
+            if let Err(err) = tcp_socket.listen(local_endpoint) {
+                socket_set.remove(socket_handle);
+                port_set.port_set.release_port(local_endpoint.port);
+                let errno = match err {
+                    ListenError::Unaddressable => syscall::EADDRNOTAVAIL,
+                    ListenError::InvalidState => syscall::EINVAL,
+                };
+                return Err(SyscallError::new(errno));
+            }
             TcpRole::Listening(TcpListenPool {
                 endpoint: local_endpoint,
                 rx_buf_bytes,
@@ -379,7 +397,8 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                 Err(SyscallError::new(syscall::ENOTCONN))
             }
         } else if self.can_send() {
-            Ok(self.send_slice(buf).expect("Can't send slice"))
+            self.send_slice(buf)
+                .map_err(|_| SyscallError::new(syscall::ENOTCONN))
         } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
             Err(SyscallError::new(syscall::EAGAIN))
         } else {
@@ -395,8 +414,11 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         if !file.read_enabled {
             Ok(0)
         } else if self.can_recv(&file.data) {
-            let length = self.recv_slice(buf).expect("Can't receive slice");
-            Ok(length)
+            match self.recv_slice(buf) {
+                Ok(length) => Ok(length),
+                Err(RecvError::Finished) => Ok(0),
+                Err(RecvError::InvalidState) => Err(SyscallError::new(syscall::ENOTCONN)),
+            }
         } else if file.reset_pending {
             file.reset_pending = false;
             file.pending_error = None;
@@ -470,9 +492,14 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                     let new_socket_handle = socket_set.add(repl);
                     {
                         let tcp_socket = socket_set.get_mut::<TcpSocket>(new_socket_handle);
-                        tcp_socket
-                            .listen(pool.endpoint)
-                            .expect("Can't listen on local endpoint");
+                        if let Err(err) = tcp_socket.listen(pool.endpoint) {
+                            socket_set.remove(new_socket_handle);
+                            let errno = match err {
+                                ListenError::Unaddressable => syscall::EADDRNOTAVAIL,
+                                ListenError::InvalidState => syscall::EINVAL,
+                            };
+                            return Err(SyscallError::new(errno));
+                        }
                     }
                     let connected_role = TcpRole::Connected {
                         local_port: pool.endpoint.port,
@@ -494,11 +521,9 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                         return Ok(Some((new_handle, None)));
                     }
                     let next_pool = pool.clone();
-                    port_set.port_set.acquire_port(
-                        local_endpoint
-                            .expect("Socket was active so local endpoint must be set")
-                            .port,
-                    );
+                    port_set
+                        .port_set
+                        .acquire_port(local_endpoint.map(|ep| ep.port).unwrap_or(pool.endpoint.port));
                     let new_handle =
                         SchemeFile::Socket(tcp_handle.clone_with_data(connected_role));
                     return Ok(Some((
@@ -586,9 +611,11 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             };
 
             let start = recvmsg::write_name(how, address.as_bytes(), request.payload_len)?;
-            let payload_length = self
-                .recv_slice(&mut how[start..start + request.payload_len])
-                .unwrap();
+            let payload_length = match self.recv_slice(&mut how[start..start + request.payload_len]) {
+                Ok(n) => n,
+                Err(RecvError::Finished) => 0,
+                Err(RecvError::InvalidState) => return Err(SyscallError::new(syscall::ENOTCONN)),
+            };
             recvmsg::write_payload_len(how, start, payload_length);
 
             Ok(start + request.payload_len)
