@@ -1,4 +1,5 @@
 use crate::cook::{
+    crate_patches,
     fetch_repo::{self, PlainPtyCallback},
     fs::*,
     package::{get_package_name, package_source_paths},
@@ -454,10 +455,35 @@ pub fn fetch(recipe: &CookRecipe, check_source: bool, logger: &PtyOut) -> Result
         }
     };
 
+    if !recipe.recipe.build.crate_patches.is_empty() {
+        let cargopath = match &recipe.recipe.build.kind {
+            BuildKind::Cargo { cargopath, .. } => cargopath.as_deref(),
+            _ => None,
+        };
+        let manifest_dir = match cargopath {
+            Some(rel) => result.source_dir.join(rel),
+            None => result.source_dir.clone(),
+        };
+        if manifest_dir.join("Cargo.lock").is_file() {
+            crate_patches::validate_locked_crate_patches(
+                Path::new("."),
+                &result.source_dir,
+                cargopath,
+                &recipe.recipe.build.crate_patches,
+            )?;
+        }
+    }
+
     if let BuildKind::Cargo { cargopath, .. } = &recipe.recipe.build.kind
         && !result.cached
     {
-        fetch_cargo(&result.source_dir, cargopath.as_ref(), logger)?;
+        if !recipe.recipe.build.crate_patches.is_empty() {
+            if !crate::config::get_config().cook.offline {
+                fetch_cargo_locked(recipe_dir, &result.source_dir, cargopath.as_deref(), logger)?;
+            }
+        } else {
+            fetch_cargo(&result.source_dir, cargopath.as_ref(), logger)?;
+        }
     }
 
     result.apply_info(recipe)
@@ -772,6 +798,38 @@ pub(crate) fn fetch_cargo(
     Ok(())
 }
 
+pub(crate) fn fetch_cargo_locked(
+    recipe_dir: &Path,
+    source_dir: &Path,
+    cargopath: Option<&str>,
+    logger: &PtyOut,
+) -> Result<()> {
+    if !check_cargo_available() {
+        return Ok(());
+    }
+
+    let manifest_dir = match cargopath {
+        Some(rel) => source_dir.join(rel),
+        None => source_dir.to_path_buf(),
+    };
+    let manifest_path = manifest_dir.join("Cargo.toml");
+    let lock_path = manifest_dir.join("Cargo.lock");
+
+    let command_path = get_relative_exe("cookbook_redoxer").unwrap_or(PathBuf::from("cargo"));
+    let mut command = Command::new(&command_path);
+    command.arg("fetch");
+    command.arg("--locked");
+    command.arg("--manifest-path");
+    command.arg(manifest_path.as_os_str());
+    run_command(command, logger).map_err(|err| {
+        Error::Other(format!(
+            "cargo fetch --locked failed for recipe {} (lockfile {}): {err}",
+            recipe_dir.display(),
+            lock_path.display()
+        ))
+    })
+}
+
 /// Check if "$REDOXER_TOOLCHAIN/bin/cargo" is available.
 fn check_cargo_available() -> bool {
     let Ok(dir) = std::env::var("REDOXER_TOOLCHAIN") else {
@@ -924,6 +982,7 @@ pub(crate) fn fetch_apply_patches(
             std::env::current_dir()
                 .map_err(wrap_io_err!(Path::new("."), "Finding cookbook root"))?,
         );
+        command.env("COOKBOOK_REPO", get_relative_exe("repo")?);
         command.current_dir(source_dir_tmp);
         run_command_stdin(
             command,
@@ -968,14 +1027,13 @@ pub fn fetch_get_source_info(recipe: &CookRecipe) -> Result<SourceIdentifier> {
     read_toml(&source_toml_path)
 }
 
-
-    #[test]
-    fn zip_source_preserves_root_files_and_directories() {
-        crate::config::init_config();
-        let root = std::env::temp_dir().join(format!("cookbook-zip-test-{}", std::process::id()));
-        fs::create_dir_all(root.join("source")).unwrap();
-        let archive = root.join("source.tar");
-        fs::write(
+#[test]
+fn zip_source_preserves_root_files_and_directories() {
+    crate::config::init_config();
+    let root = std::env::temp_dir().join(format!("cookbook-zip-test-{}", std::process::id()));
+    fs::create_dir_all(root.join("source")).unwrap();
+    let archive = root.join("source.tar");
+    fs::write(
             &archive,
             b"\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x21\x50\x5b\xf9\xf4\x16\x04\x00\x00\x00\x04\x00\x00\x00\x08\x00\x00\x00root.txtroot\
               \x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x21\x50\xe9\xc2\xc9\xaa\x06\x00\x00\x00\x06\x00\x00\x00\x0f\x00\x00\x00nested/file.txtnested\
@@ -984,11 +1042,11 @@ pub fn fetch_get_source_info(recipe: &CookRecipe) -> Result<SourceIdentifier> {
               \x50\x4b\x05\x06\x00\x00\x00\x00\x02\x00\x02\x00\x73\x00\x00\x00\x5d\x00\x00\x00\x00\x00",
         )
         .unwrap();
-        fetch_extract_archive(archive, &root.join("source"), &None).unwrap();
-        assert_eq!(fs::read(root.join("source/root.txt")).unwrap(), b"root");
-        assert_eq!(
-            fs::read(root.join("source/nested/file.txt")).unwrap(),
-            b"nested"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
+    fetch_extract_archive(archive, &root.join("source"), &None).unwrap();
+    assert_eq!(fs::read(root.join("source/root.txt")).unwrap(), b"root");
+    assert_eq!(
+        fs::read(root.join("source/nested/file.txt")).unwrap(),
+        b"nested"
+    );
+    fs::remove_dir_all(root).unwrap();
+}

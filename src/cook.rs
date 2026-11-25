@@ -1,4 +1,5 @@
 pub mod cook_build;
+pub mod crate_patches;
 pub mod fetch;
 pub mod fetch_repo;
 pub mod fs;

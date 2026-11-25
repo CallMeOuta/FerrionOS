@@ -147,6 +147,7 @@ pub struct BuildRecipe {
         deserialize_with = "deserialize_build_env_vars"
     )]
     pub env_vars: Vec<String>,
+    pub crate_patches: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
@@ -204,12 +205,14 @@ impl BuildRecipe {
         }
         self.kind = BuildKind::Remote;
         self.dev_dependencies = Vec::new();
+        self.crate_patches = Vec::new();
     }
 
     pub fn set_as_none(&mut self) {
         self.kind = BuildKind::None;
         self.dependencies = Vec::new();
         self.dev_dependencies = Vec::new();
+        self.crate_patches = Vec::new();
     }
 }
 

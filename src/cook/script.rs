@@ -85,6 +85,10 @@ function GNU_CONFIG_GET {
   wget -O "$1" "https://gitlab.redox-os.org/redox-os/gnu-config/-/raw/master/config.sub?inline=false"
 }
 
+function cookbook_crate_patch {
+    "${COOKBOOK_REPO}" crate-patch "$@"
+}
+
 # This ensure REDOXER_RUSTFLAGS_KEY always available or fallback
 REDOXER_RUSTFLAGS_KEY=${REDOXER_RUSTFLAGS_KEY:-RUSTFLAGS}
 
@@ -165,6 +169,44 @@ COOKBOOK_CARGO="${COOKBOOK_REDOXER}"
 COOKBOOK_CARGO_FLAGS=(
     --locked
 )
+function cookbook_cargo_fetch_locked {
+    local manifest_path="$1"
+    if [ -z "${manifest_path}" ]; then
+        echo "cookbook_cargo_fetch_locked: missing manifest path" >&2
+        return 1
+    fi
+    local shared_home="${COOKBOOK_SHARED_CARGO_HOME:-${CARGO_HOME}}"
+    local fetch_target=()
+    if [ -n "${TARGET:-}" ]; then
+        fetch_target+=(--target "${TARGET}")
+    fi
+    if [ -n "${COOKBOOK_HOST_TARGET:-}" ] && [ "${COOKBOOK_HOST_TARGET}" != "${TARGET:-}" ]; then
+        fetch_target+=(--target "${COOKBOOK_HOST_TARGET}")
+    fi
+    if ! CARGO_HOME="${shared_home}" CARGO_NET_OFFLINE=true \
+        "${COOKBOOK_CARGO}" fetch --locked --offline "${fetch_target[@]}" \
+        --manifest-path "${manifest_path}" >/dev/null 2>&1
+    then
+        if [ -n "${COOKBOOK_OFFLINE:-}" ]; then
+            CARGO_HOME="${shared_home}" CARGO_NET_OFFLINE=true \
+                "${COOKBOOK_CARGO}" fetch --locked --offline "${fetch_target[@]}" \
+                --manifest-path "${manifest_path}"
+            return 1
+        fi
+        CARGO_HOME="${shared_home}" env -u CARGO_NET_OFFLINE \
+            "${COOKBOOK_CARGO}" fetch --locked "${fetch_target[@]}" \
+            --manifest-path "${manifest_path}" || return 1
+    fi
+    if [ -n "${COOKBOOK_CRATE_PATCHES:-}" ]; then
+        "${COOKBOOK_REPO}" crate-patch --prepare-overlay \
+            --manifest-path="${manifest_path}" \
+            --overlay="${COOKBOOK_CRATE_OVERLAY}" \
+            --shared-cargo-home="${shared_home}" \
+            --crates="${COOKBOOK_CRATE_PATCHES}" || return 1
+        export CARGO_HOME="${COOKBOOK_CRATE_OVERLAY}"
+        export CARGO_NET_OFFLINE=true
+    fi
+}
 # cargo template using cargo install
 function cookbook_cargo {
     "${COOKBOOK_CARGO}" install \

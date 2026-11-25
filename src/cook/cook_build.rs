@@ -6,7 +6,7 @@ use pkgar_keys::PublicKeyFile;
 use crate::config::CookConfig;
 use crate::cook::fetch_repo;
 use crate::cook::package::{package_source_paths, package_target};
-use crate::cook::{fetch, fs, pty::PtyOut, script::*};
+use crate::cook::{crate_patches, fetch, fs, pty::PtyOut, script::*};
 use crate::recipe::BuildCompiler;
 use crate::recipe::{AutoDeps, BuildKind, CookRecipe, OptionalPackageRecipe, Recipe};
 use std::{
@@ -395,6 +395,7 @@ pub fn build(
             source_dir,
             &auto_deps_file,
             stage_pkgars,
+            &recipe.build.crate_patches,
         )
     {
         if auto_deps_file.is_file() {
@@ -531,8 +532,46 @@ pub fn build(
             let cookbook_toolchain = toolchain_dir.canonicalize().ok();
             let bash_args = if cook_config.verbose_cmd { "-ex" } else { "-e" };
             let cookbook_redoxer_bin = fs::get_relative_exe("cookbook_redoxer")?;
+            let cookbook_repo_bin = fs::get_relative_exe("repo")?;
+            let is_custom_crate_patches = !recipe.build.crate_patches.is_empty()
+                && matches!(recipe.build.kind, BuildKind::Custom { .. });
+            let cargo_home_overlay = if is_custom_crate_patches {
+                None
+            } else {
+                let cargopath = match &recipe.build.kind {
+                    BuildKind::Cargo { cargopath, .. } => cargopath.as_deref(),
+                    _ => None,
+                };
+                crate_patches::prepare_crate_patches(
+                    &cookbook_root,
+                    &cookbook_source,
+                    &cookbook_build,
+                    cargopath,
+                    &recipe.build.crate_patches,
+                    logger,
+                )?
+            };
+            let shared_cargo_home = if is_custom_crate_patches {
+                Some(crate_patches::resolve_shared_cargo_home()?)
+            } else {
+                None
+            };
             let mut command = Command::new(&cookbook_redoxer_bin);
             command.env("COOKBOOK_REDOXER", &cookbook_redoxer_bin);
+            command.env("COOKBOOK_REPO", &cookbook_repo_bin);
+            if let Some(overlay) = &cargo_home_overlay {
+                command.env("CARGO_HOME", overlay);
+                command.env("CARGO_NET_OFFLINE", "true");
+            } else if let Some(shared) = &shared_cargo_home {
+                command.env("COOKBOOK_SHARED_CARGO_HOME", shared);
+                command.env("COOKBOOK_CRATE_OVERLAY", cookbook_build.join(".cargo-home"));
+                command.env(
+                    "COOKBOOK_CRATE_PATCHES",
+                    recipe.build.crate_patches.join(","),
+                );
+                command.env("CARGO_HOME", cookbook_build.join(".cargo-home-unprepared"));
+                command.env("CARGO_NET_OFFLINE", "true");
+            }
             command.arg("env").arg("bash").arg(bash_args);
             command.current_dir(&cookbook_build);
             command.env("TARGET", package_target(name));
@@ -1160,6 +1199,7 @@ fn build_is_source_newer(
     source_dir: &Path,
     auto_deps_file: &Path,
     stage_pkgars: Vec<PathBuf>,
+    crate_patches: &[String],
 ) -> bool {
     if !auto_deps_file.is_file() {
         return true;
@@ -1181,6 +1221,13 @@ fn build_is_source_newer(
         && manifest_modified > source_modified
     {
         source_modified = manifest_modified;
+        recipe_is_newest = true;
+    }
+    if let Some(patches_modified) =
+        crate_patches::patches_dir_modified(Path::new("."), crate_patches)
+        && patches_modified > source_modified
+    {
+        source_modified = patches_modified;
         recipe_is_newest = true;
     }
     let newer = source_modified > stage_modified;

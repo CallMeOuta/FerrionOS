@@ -46,6 +46,7 @@ const REPO_HELP_STR: &str = r#"
         capture-rev  write lock to git recipes
         change-rule  override rule to recipes
         change-rule-local  override rule to specific recipes
+        crate-patch  apply a pinned crate patch from patches/crates/<crate>/
 
     common flags:
         --cookbook=<cookbook_dir>  the "recipes" folder, default to $PWD/recipes
@@ -80,6 +81,13 @@ const REPO_HELP_STR: &str = r#"
         COOKBOOK_MAKE_JOBS=          override build jobs count from nproc
         COOKBOOK_WEB=false           whether to generate package web files
         (recipe [build] env-vars)    forwarded and hashed into build_env.blake3 to re-cook on change
+
+    crate-patch usage:
+        repo crate-patch <crate> <dir> [--version=<ver>] [--rev=<rev>] [--root=<dir>]
+        repo crate-patch --prepare-overlay --manifest-path=<Cargo.toml> --overlay=<dir> --shared-cargo-home=<dir> --crates=<c1,c2> [--root=<dir>]
+
+    recipe [build] keys:
+        crate_patches = ["<crate>", ...]  patch locked crates in a per-build CARGO_HOME overlay
 "#;
 
 #[derive(Clone)]
@@ -243,11 +251,105 @@ fn main() {
     };
 }
 
+fn handle_crate_patch(args: &[String]) -> Result<()> {
+    let mut prepare_overlay = false;
+    let mut manifest_path: Option<PathBuf> = None;
+    let mut overlay_dir: Option<PathBuf> = None;
+    let mut shared_cargo_home: Option<PathBuf> = None;
+    let mut crates_csv: Option<String> = None;
+    let mut crate_name: Option<String> = None;
+    let mut crate_dir: Option<PathBuf> = None;
+    let mut version: Option<String> = None;
+    let mut rev: Option<String> = None;
+    let mut root: Option<PathBuf> = None;
+    for arg in args {
+        if arg == "--prepare-overlay" {
+            prepare_overlay = true;
+        } else if let Some((key, val)) = arg.split_once('=') {
+            match key {
+                "--version" => version = Some(val.to_string()),
+                "--rev" => rev = Some(val.to_string()),
+                "--root" => root = Some(PathBuf::from(val)),
+                "--manifest-path" => manifest_path = Some(PathBuf::from(val)),
+                "--overlay" => overlay_dir = Some(PathBuf::from(val)),
+                "--shared-cargo-home" => shared_cargo_home = Some(PathBuf::from(val)),
+                "--crates" => crates_csv = Some(val.to_string()),
+                _ => bail_options_err!("Unknown crate-patch flag: {}", arg),
+            }
+        } else if arg.starts_with('-') {
+            bail_options_err!("Unknown crate-patch flag: {}", arg);
+        } else if crate_name.is_none() {
+            crate_name = Some(arg.clone());
+        } else if crate_dir.is_none() {
+            crate_dir = Some(PathBuf::from(arg));
+        } else {
+            bail_options_err!("Unexpected extra crate-patch argument: {}", arg);
+        }
+    }
+    let cookbook_root = match root {
+        Some(r) => r,
+        None => match env::var_os("COOKBOOK_ROOT") {
+            Some(v) if !v.is_empty() => PathBuf::from(v),
+            _ => env::current_dir().map_err(|e| Error::from_io_error(e, "Getting cwd"))?,
+        },
+    };
+    if prepare_overlay {
+        let Some(manifest) = manifest_path else {
+            bail_options_err!("crate-patch --prepare-overlay requires --manifest-path=<path>");
+        };
+        let Some(overlay) = overlay_dir else {
+            bail_options_err!("crate-patch --prepare-overlay requires --overlay=<dir>");
+        };
+        let Some(shared) = shared_cargo_home else {
+            bail_options_err!("crate-patch --prepare-overlay requires --shared-cargo-home=<dir>");
+        };
+        let Some(csv) = crates_csv else {
+            bail_options_err!("crate-patch --prepare-overlay requires --crates=<c1,c2>");
+        };
+        let lock_path = manifest
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("Cargo.lock");
+        let crates: Vec<String> = csv
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        cookbook::cook::crate_patches::prepare_crate_patches_from_lock(
+            &cookbook_root,
+            &lock_path,
+            &overlay,
+            &shared,
+            &crates,
+            &None,
+        )?;
+        return Ok(());
+    }
+    let Some(crate_name) = crate_name else {
+        bail_options_err!("crate-patch requires <crate> and <dir>");
+    };
+    let Some(crate_dir) = crate_dir else {
+        bail_options_err!("crate-patch requires <dir>");
+    };
+    cookbook::cook::crate_patches::apply_crate_patch(
+        &cookbook_root,
+        &crate_name,
+        version.as_deref(),
+        rev.as_deref(),
+        &crate_dir,
+        &None,
+    )
+}
+
 fn main_inner() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() || args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
         bail_options_err!("");
+    }
+
+    if args[0] == "crate-patch" {
+        return handle_crate_patch(&args[1..]);
     }
 
     let (config, command, recipes) = parse_args(args)?;
