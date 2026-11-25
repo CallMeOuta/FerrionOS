@@ -114,6 +114,30 @@ impl Drop for LoaderGuard {
     }
 }
 
+#[cfg(target_os = "redox")]
+fn probe_exec_mapping(fd: i32) -> core::result::Result<(), Errno> {
+    const EXEC_PROBE_SIZE: usize = syscall::PAGE_SIZE;
+    match unsafe {
+        Sys::mmap(
+            ptr::null_mut(),
+            EXEC_PROBE_SIZE,
+            sys_mman::PROT_READ | sys_mman::PROT_EXEC,
+            sys_mman::MAP_PRIVATE,
+            fd,
+            0,
+        )
+    } {
+        Ok(ptr) => {
+            let _ = unsafe { Sys::munmap(ptr, EXEC_PROBE_SIZE) };
+            Ok(())
+        }
+        Err(e) if e.0 == crate::header::errno::EACCES || e.0 == crate::header::errno::EPERM => {
+            Err(e)
+        }
+        Err(_) => Ok(()),
+    }
+}
+
 struct MmapFile {
     fd: i32,
     ptr: *mut c_void,
@@ -124,12 +148,24 @@ impl MmapFile {
     fn open(path: CStr, oflag: c_int) -> core::result::Result<Self, Errno> {
         let fd = Sys::open(path, oflag, 0 /* mode */)?;
         let mut stat = crate::header::sys_stat::stat::default();
-        Sys::fstat(fd, Out::from_mut(&mut stat))?;
+        if let Err(err) = Sys::fstat(fd, Out::from_mut(&mut stat)) {
+            let _ = Sys::close(fd);
+            return Err(err);
+        }
+        #[cfg(target_os = "redox")]
+        if let Err(err) = probe_exec_mapping(fd) {
+            let _ = Sys::close(fd);
+            return Err(err);
+        }
 
-        Self::from_fd(
-            fd,
-            usize::try_from(stat.st_size).expect("st_size should be a positive value"),
-        )
+        let size = usize::try_from(stat.st_size).expect("st_size should be a positive value");
+        match Self::from_fd(fd, size) {
+            Ok(file) => Ok(file),
+            Err(err) => {
+                let _ = Sys::close(fd);
+                Err(err)
+            }
+        }
     }
 
     fn from_fd(fd: i32, size: usize) -> core::result::Result<Self, Errno> {

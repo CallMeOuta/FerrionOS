@@ -58,6 +58,23 @@ fn fexec_impl(
     )
 }
 
+fn probe_exec_mapping(fd: usize) -> Result<()> {
+    let map = syscall::Map {
+        offset: 0,
+        size: syscall::PAGE_SIZE,
+        flags: MapFlags::PROT_READ | MapFlags::PROT_EXEC | MapFlags::MAP_PRIVATE,
+        address: 0,
+    };
+    match unsafe { syscall::fmap(fd, &map) } {
+        Ok(addr) => {
+            let _ = unsafe { syscall::funmap(addr, syscall::PAGE_SIZE) };
+            Ok(())
+        }
+        Err(e) if e.errno == EACCES || e.errno == EPERM => Err(e),
+        Err(_) => Ok(()),
+    }
+}
+
 pub enum ArgEnv<'a> {
     C {
         argv: *const *mut c_char,
@@ -127,6 +144,8 @@ pub fn execve(
         return Err(Error::new(EPERM));
     }
 
+    probe_exec_mapping(exec_fd_guard.as_raw_fd())?;
+
     let cwd = super::path::clone_cwd().unwrap_or_default();
 
     // Path to interpreter binary and args if found
@@ -175,6 +194,7 @@ pub fn execve(
             true,
         )?)
         .to_upper()?;
+        probe_exec_mapping(exec_fd_guard.as_raw_fd())?;
 
         // Push interpreter to arguments
         args.push(interpreter.as_bytes());
