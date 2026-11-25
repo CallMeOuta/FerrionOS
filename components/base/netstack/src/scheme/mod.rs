@@ -556,13 +556,14 @@ where
         let scheme = &mut self.scheme;
         let state = &mut self.state;
 
+        let now_us = scheme.now_us();
         for (&fd, handle) in scheme.handles.iter_mut() {
             let Handle::File(file) = handle else {
                 continue;
             };
             let events = {
                 let mut socket_set = scheme.socket_set.borrow_mut();
-                file.events(&mut socket_set)
+                file.events(&mut socket_set, now_us)
             };
             if events > 0 {
                 post_fevent(&scheme.scheme_file, fd, events)

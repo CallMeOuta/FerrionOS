@@ -56,6 +56,20 @@ impl PortSet {
         }
     }
 
+    pub fn claim_reusable(&mut self, port: u16, lingering_count: usize) -> bool {
+        match self.ports.entry(port) {
+            Entry::Vacant(entry) => {
+                entry.insert(1);
+                true
+            }
+            Entry::Occupied(mut entry) if *entry.get() == lingering_count => {
+                *entry.get_mut() += 1;
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
     pub fn acquire_port(&mut self, port: u16) {
         *self.ports.entry(port).or_insert(0) += 1;
     }

@@ -15,6 +15,7 @@ use super::{parse_endpoint, recvmsg, SchemeWrapper, Smolnetd, SocketSet};
 use crate::port_set::PortSet;
 use crate::router::Router;
 
+const SOL_SOCKET: usize = 1;
 const SO_SNDBUF: usize = 7;
 const SO_RCVBUF: usize = 8;
 
@@ -405,9 +406,13 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
     fn get_sock_opt(
         &self,
         _file: &SchemeFile<Self>,
+        level: usize,
         name: usize,
         buf: &mut [u8],
     ) -> SyscallResult<usize> {
+        if level != SOL_SOCKET {
+            return Err(SyscallError::new(syscall::ENOPROTOOPT));
+        }
         match name {
             SO_RCVBUF => {
                 let val = self.payload_recv_capacity() as i32;

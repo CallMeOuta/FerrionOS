@@ -6,6 +6,7 @@ use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp::{
     Socket as TcpSocket, SocketBuffer as TcpSocketBuffer, State as TcpState,
 };
+use smoltcp::time::Duration as SmolDuration;
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
@@ -13,8 +14,17 @@ use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile, So
 use super::{parse_endpoint, recvmsg, SchemeWrapper, SocketSet};
 use crate::port_set::PortSet;
 
+const SOL_SOCKET: usize = 1;
+const IPPROTO_TCP: usize = 6;
 const SO_SNDBUF: usize = 7;
 const SO_RCVBUF: usize = 8;
+const SO_KEEPALIVE: usize = 9;
+const TCP_NODELAY: usize = 1;
+const TCP_KEEPIDLE: usize = 4;
+const MIN_TCP_KEEPIDLE_SECS: i32 = 1;
+const MAX_TCP_KEEPIDLE_SECS: i32 = 86_400;
+const TCP_CONNECT_TIMEOUT_SECS: u64 = 30;
+const MAX_LISTEN_BACKLOG: usize = 64;
 const TCP_DEFAULT_BUF_BYTES: usize = 1048576;
 const TCP_MIN_BUF_BYTES: usize = 16 * 1024;
 const TCP_MAX_BUF_BYTES: usize = 4 * 1024 * 1024;
@@ -32,18 +42,45 @@ pub struct TcpSchemeData {
     lingering: Vec<LingeringTcp>,
 }
 
-#[derive(Clone, Copy)]
-pub struct TcpListenData {
+#[derive(Clone)]
+pub struct TcpListenPool {
     pub endpoint: IpListenEndpoint,
     pub rx_buf_bytes: usize,
     pub tx_buf_bytes: usize,
+    pub nodelay: bool,
+    pub keepalive: bool,
+    pub keepidle_secs: u32,
+    pub extra_handles: Vec<SocketHandle>,
+}
+
+#[derive(Clone)]
+pub enum TcpRole {
+    Connecting {
+        local_port: u16,
+        deadline_us: i64,
+    },
+    Connected {
+        local_port: u16,
+        saw_established: bool,
+        saw_peer_fin: bool,
+    },
+    Listening(TcpListenPool),
+}
+
+fn apply_tcp_opts(socket: &mut TcpSocket<'_>, nodelay: bool, keepalive: bool, keepidle_secs: u32) {
+    socket.set_nagle_enabled(!nodelay);
+    if keepalive {
+        socket.set_keep_alive(Some(SmolDuration::from_secs(u64::from(keepidle_secs))));
+    } else {
+        socket.set_keep_alive(None);
+    }
 }
 
 pub type TcpScheme = SchemeWrapper<TcpSocket<'static>>;
 
 impl<'a> SchemeSocket for TcpSocket<'a> {
     type SchemeDataT = TcpSchemeData;
-    type DataT = Option<TcpListenData>;
+    type DataT = TcpRole;
     type SettingT = ();
 
     const BASE_PATH: &'static str = "/scheme/tcp/";
@@ -60,7 +97,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     }
 
     fn can_recv(&mut self, data: &Self::DataT) -> bool {
-        if data.is_some() {
+        if matches!(data, TcpRole::Listening(_)) {
             self.is_active()
         } else {
             smoltcp::socket::tcp::Socket::can_recv(self)
@@ -146,6 +183,18 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                 .port_set
                 .get_port()
                 .ok_or_else(|| SyscallError::new(syscall::EINVAL))?;
+        } else if opts.reuseaddr {
+            let lingering_count = port_set
+                .lingering
+                .iter()
+                .filter(|entry| entry.port == local_endpoint.port)
+                .count();
+            if !port_set
+                .port_set
+                .claim_reusable(local_endpoint.port, lingering_count)
+            {
+                return Err(SyscallError::new(syscall::EADDRINUSE));
+            }
         } else if !port_set.port_set.claim_port(local_endpoint.port) {
             return Err(SyscallError::new(syscall::EADDRINUSE));
         }
@@ -153,12 +202,12 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         let socket_handle = socket_set.add(socket);
 
         let tcp_socket = socket_set.get_mut::<TcpSocket>(socket_handle);
+        apply_tcp_opts(tcp_socket, opts.nodelay, opts.keepalive, opts.keepidle_secs);
 
-        let listen_enpoint = if remote_endpoint.is_specified() {
+        let role = if remote_endpoint.is_specified() {
             let local_endpoint_addr = match local_endpoint.addr {
                 Some(addr) if !addr.is_unspecified() => Some(addr),
                 _ => {
-                    // local ip is 0.0.0.0, resolve it
                     let route_table = context.route_table.borrow();
                     let addr = route_table
                         .lookup_src_addr(&remote_endpoint.addr.expect("Checked in is_specified"));
@@ -174,6 +223,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             };
 
             trace!("Connecting tcp {} {}", local_endpoint, remote_endpoint);
+            tcp_socket.set_timeout(Some(SmolDuration::from_secs(TCP_CONNECT_TIMEOUT_SECS)));
             tcp_socket
                 .connect(
                     context.iface.borrow_mut().context(),
@@ -181,20 +231,29 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                     local_endpoint,
                 )
                 .expect("Can't connect tcp socket ");
-            None
+            TcpRole::Connecting {
+                local_port: local_endpoint.port,
+                deadline_us: context
+                    .now_us()
+                    .saturating_add((TCP_CONNECT_TIMEOUT_SECS as i64).saturating_mul(1_000_000)),
+            }
         } else {
             trace!("Listening tcp {}", local_endpoint);
             tcp_socket
                 .listen(local_endpoint)
                 .expect("Can't listen on local endpoint");
-            Some(TcpListenData {
+            TcpRole::Listening(TcpListenPool {
                 endpoint: local_endpoint,
                 rx_buf_bytes,
                 tx_buf_bytes,
+                nodelay: opts.nodelay,
+                keepalive: opts.keepalive,
+                keepidle_secs: opts.keepidle_secs,
+                extra_handles: Vec::new(),
             })
         };
 
-        Ok((socket_handle, listen_enpoint))
+        Ok((socket_handle, role))
     }
 
     fn close_file(
@@ -202,11 +261,22 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         file: &SchemeFile<Self>,
         scheme_data: &mut Self::SchemeDataT,
     ) -> SyscallResult<()> {
-        if let SchemeFile::Socket(SocketFile { data, .. }) = *file {
+        if let SchemeFile::Socket(SocketFile { ref data, .. }) = *file {
             if let Some(endpoint) = self.local_endpoint() {
                 scheme_data.port_set.release_port(endpoint.port);
-            } else if let Some(listen_data) = data {
-                scheme_data.port_set.release_port(listen_data.endpoint.port);
+            } else {
+                match *data {
+                    TcpRole::Listening(ref pool) => {
+                        scheme_data.port_set.release_port(pool.endpoint.port);
+                    }
+                    TcpRole::Connecting { local_port, .. }
+                    | TcpRole::Connected { local_port, .. }
+                        if local_port != 0 =>
+                    {
+                        scheme_data.port_set.release_port(local_port);
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -215,10 +285,26 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     fn on_last_close(
         sockets: &mut SocketSet,
         handle: SocketHandle,
-        _file: &SchemeFile<Self>,
+        file: &SchemeFile<Self>,
         scheme_data: &mut Self::SchemeDataT,
         now_us: i64,
     ) -> bool {
+        if let SchemeFile::Socket(SocketFile {
+            data: TcpRole::Listening(ref pool),
+            ..
+        }) = *file
+        {
+            for &extra in &pool.extra_handles {
+                let extra_sock = sockets.get_mut::<TcpSocket>(extra);
+                if extra_sock.state() != TcpState::Listen {
+                    extra_sock.abort();
+                } else {
+                    extra_sock.close();
+                }
+                sockets.remove(extra);
+                scheme_data.port_set.release_port(pool.endpoint.port);
+            }
+        }
         let (state, port) = {
             let tcp_socket = sockets.get_mut::<TcpSocket>(handle);
             tcp_socket.close();
@@ -282,14 +368,22 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     ) -> SyscallResult<usize> {
         if !file.write_enabled {
             Err(SyscallError::new(syscall::EPIPE))
+        } else if file.reset_pending {
+            file.reset_pending = false;
+            file.pending_error = None;
+            Err(SyscallError::new(syscall::ECONNRESET))
         } else if !self.is_active() {
-            Err(SyscallError::new(syscall::ENOTCONN))
+            if let Some(err) = file.pending_error.take() {
+                Err(SyscallError::new(err))
+            } else {
+                Err(SyscallError::new(syscall::ENOTCONN))
+            }
         } else if self.can_send() {
             Ok(self.send_slice(buf).expect("Can't send slice"))
         } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
             Err(SyscallError::new(syscall::EAGAIN))
         } else {
-            Err(SyscallError::new(syscall::EWOULDBLOCK)) // internally scheduled to re-write
+            Err(SyscallError::new(syscall::EWOULDBLOCK))
         }
     }
 
@@ -300,17 +394,34 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     ) -> SyscallResult<usize> {
         if !file.read_enabled {
             Ok(0)
-        } else if !self.is_active() {
-            Err(SyscallError::new(syscall::ENOTCONN))
         } else if self.can_recv(&file.data) {
             let length = self.recv_slice(buf).expect("Can't receive slice");
             Ok(length)
+        } else if file.reset_pending {
+            file.reset_pending = false;
+            file.pending_error = None;
+            Err(SyscallError::new(syscall::ECONNRESET))
+        } else if !self.is_active() {
+            let saw_fin = matches!(
+                file.data,
+                TcpRole::Connected {
+                    saw_peer_fin: true,
+                    ..
+                }
+            );
+            if saw_fin {
+                Ok(0)
+            } else if let Some(err) = file.pending_error.take() {
+                Err(SyscallError::new(err))
+            } else {
+                Err(SyscallError::new(syscall::ENOTCONN))
+            }
         } else if !self.may_recv() {
             Ok(0)
         } else if file.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
             Err(SyscallError::new(syscall::EAGAIN))
         } else {
-            Err(SyscallError::new(syscall::EWOULDBLOCK)) // internally scheduled to re-read
+            Err(SyscallError::new(syscall::EWOULDBLOCK))
         }
     }
 
@@ -329,12 +440,20 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
 
         let file = match path {
             "listen" => {
-                if let SchemeFile::Socket(ref tcp_handle) = *file {
-                    let Some(listen_data) = tcp_handle.data else {
+                if let SchemeFile::Socket(ref mut tcp_handle) = *file {
+                    let TcpRole::Listening(ref mut pool) = tcp_handle.data else {
                         return Err(SyscallError::new(syscall::EINVAL));
                     };
 
-                    if !is_active {
+                    let ready_extra_idx = if is_active {
+                        None
+                    } else {
+                        pool.extra_handles
+                            .iter()
+                            .position(|&h| socket_set.get::<TcpSocket>(h).is_active())
+                    };
+
+                    if !is_active && ready_extra_idx.is_none() {
                         if tcp_handle.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
                             return Err(SyscallError::new(syscall::EAGAIN));
                         } else {
@@ -342,28 +461,49 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                         }
                     }
                     trace!("TCP creating new listening socket");
-                    let new_handle = SchemeFile::Socket(tcp_handle.clone_with_data(None));
-
-                    let rx_packets = vec![0; listen_data.rx_buf_bytes];
-                    let tx_packets = vec![0; listen_data.tx_buf_bytes];
+                    let rx_packets = vec![0; pool.rx_buf_bytes];
+                    let tx_packets = vec![0; pool.tx_buf_bytes];
                     let rx_buffer = TcpSocketBuffer::new(rx_packets);
                     let tx_buffer = TcpSocketBuffer::new(tx_packets);
-                    let socket = TcpSocket::new(rx_buffer, tx_buffer);
-                    let new_socket_handle = socket_set.add(socket);
+                    let mut repl = TcpSocket::new(rx_buffer, tx_buffer);
+                    apply_tcp_opts(&mut repl, pool.nodelay, pool.keepalive, pool.keepidle_secs);
+                    let new_socket_handle = socket_set.add(repl);
                     {
                         let tcp_socket = socket_set.get_mut::<TcpSocket>(new_socket_handle);
                         tcp_socket
-                            .listen(listen_data.endpoint)
+                            .listen(pool.endpoint)
                             .expect("Can't listen on local endpoint");
                     }
+                    let connected_role = TcpRole::Connected {
+                        local_port: pool.endpoint.port,
+                        saw_established: true,
+                        saw_peer_fin: false,
+                    };
+                    if let Some(idx) = ready_extra_idx {
+                        let accepted_handle = pool.extra_handles[idx];
+                        pool.extra_handles[idx] = new_socket_handle;
+                        let accepted_port = socket_set
+                            .get::<TcpSocket>(accepted_handle)
+                            .local_endpoint()
+                            .map(|ep| ep.port)
+                            .unwrap_or(pool.endpoint.port);
+                        port_set.port_set.acquire_port(accepted_port);
+                        let new_handle = SchemeFile::Socket(
+                            tcp_handle.clone_with_handle(accepted_handle, connected_role),
+                        );
+                        return Ok(Some((new_handle, None)));
+                    }
+                    let next_pool = pool.clone();
                     port_set.port_set.acquire_port(
                         local_endpoint
                             .expect("Socket was active so local endpoint must be set")
                             .port,
                     );
+                    let new_handle =
+                        SchemeFile::Socket(tcp_handle.clone_with_data(connected_role));
                     return Ok(Some((
                         new_handle,
-                        Some((new_socket_handle, Some(listen_data))),
+                        Some((new_socket_handle, TcpRole::Listening(next_pool))),
                     )));
                 } else {
                     return Err(SyscallError::new(syscall::EBADF));
@@ -372,9 +512,16 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             _ => {
                 trace!("TCP dup unknown {}", path);
                 if let SchemeFile::Socket(ref tcp_handle) = *file {
-                    SchemeFile::Socket(tcp_handle.clone_with_data(tcp_handle.data))
+                    SchemeFile::Socket(tcp_handle.clone_with_data(tcp_handle.data.clone()))
                 } else {
-                    SchemeFile::Socket(SocketFile::new_with_data(socket_handle, None))
+                    SchemeFile::Socket(SocketFile::new_with_data(
+                        socket_handle,
+                        TcpRole::Connected {
+                            local_port: local_endpoint.map(|ep| ep.port).unwrap_or(0),
+                            saw_established: true,
+                            saw_peer_fin: false,
+                        },
+                    ))
                 }
             }
         };
@@ -401,11 +548,11 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                 (
                     None,
                     SchemeFile::Socket(SocketFile {
-                        data: Some(listen_data),
+                        data: TcpRole::Listening(ref pool),
                         ..
                     }),
                 ) => {
-                    let endpoint = listen_data.endpoint;
+                    let endpoint = pool.endpoint;
                     if endpoint.is_specified() {
                         write!(w, "{}", endpoint).unwrap()
                     } else {
@@ -484,36 +631,217 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         Ok(0)
     }
 
-    fn get_sock_opt(
-        &self,
-        _file: &SchemeFile<Self>,
-        name: usize,
-        buf: &mut [u8],
-    ) -> SyscallResult<usize> {
-        match name {
-            SO_RCVBUF => {
-                let val = self.recv_capacity() as i32;
-                let bytes = val.to_ne_bytes();
+    fn supports_tcp_opts() -> bool {
+        true
+    }
 
-                if buf.len() < bytes.len() {
-                    return Err(SyscallError::new(syscall::EINVAL));
+    fn sync_state(
+        sockets: &mut SocketSet,
+        handle: SocketHandle,
+        file: &mut SocketFile<Self::DataT>,
+        now_us: i64,
+    ) {
+        let tcp_socket = sockets.get_mut::<TcpSocket>(handle);
+        let state = tcp_socket.state();
+        match file.data {
+            TcpRole::Connecting {
+                local_port,
+                deadline_us,
+            } => match state {
+                TcpState::Established | TcpState::CloseWait => {
+                    tcp_socket.set_timeout(None);
+                    file.data = TcpRole::Connected {
+                        local_port,
+                        saw_established: true,
+                        saw_peer_fin: state == TcpState::CloseWait,
+                    };
                 }
+                TcpState::Closed => {
+                    let err = if now_us >= deadline_us {
+                        syscall::ETIMEDOUT
+                    } else {
+                        syscall::ECONNREFUSED
+                    };
+                    file.pending_error = Some(err);
+                    file.data = TcpRole::Connected {
+                        local_port,
+                        saw_established: false,
+                        saw_peer_fin: false,
+                    };
+                }
+                TcpState::SynSent | TcpState::SynReceived => {
+                    if now_us >= deadline_us {
+                        tcp_socket.abort();
+                        file.pending_error = Some(syscall::ETIMEDOUT);
+                        file.data = TcpRole::Connected {
+                            local_port,
+                            saw_established: false,
+                            saw_peer_fin: false,
+                        };
+                    }
+                }
+                _ => {
+                    tcp_socket.set_timeout(None);
+                    file.data = TcpRole::Connected {
+                        local_port,
+                        saw_established: true,
+                        saw_peer_fin: true,
+                    };
+                }
+            },
+            TcpRole::Connected {
+                saw_established,
+                ref mut saw_peer_fin,
+                ..
+            } => match state {
+                TcpState::CloseWait | TcpState::Closing | TcpState::LastAck | TcpState::TimeWait => {
+                    *saw_peer_fin = true;
+                }
+                TcpState::Closed => {
+                    if saw_established && !*saw_peer_fin {
+                        *saw_peer_fin = true;
+                        file.reset_pending = true;
+                        file.pending_error.get_or_insert(syscall::ECONNRESET);
+                    }
+                }
+                _ => {}
+            },
+            TcpRole::Listening(_) => {}
+        }
+    }
 
-                buf[0..bytes.len()].copy_from_slice(&bytes);
-                Ok(bytes.len())
+    fn is_readable(sockets: &mut SocketSet, handle: SocketHandle, data: &Self::DataT) -> bool {
+        match data {
+            TcpRole::Listening(pool) => {
+                if sockets.get::<TcpSocket>(handle).is_active() {
+                    return true;
+                }
+                pool.extra_handles
+                    .iter()
+                    .any(|&h| sockets.get::<TcpSocket>(h).is_active())
             }
-            SO_SNDBUF => {
-                let val = self.send_capacity() as i32;
-                let bytes = val.to_ne_bytes();
+            TcpRole::Connecting { .. } => false,
+            TcpRole::Connected { .. } => {
+                let socket = sockets.get_mut::<TcpSocket>(handle);
+                smoltcp::socket::tcp::Socket::can_recv(socket) || !socket.may_recv()
+            }
+        }
+    }
 
-                if buf.len() < bytes.len() {
+    fn handle_listen(
+        sockets: &mut SocketSet,
+        file: &mut SocketFile<Self::DataT>,
+        backlog: usize,
+        scheme_data: &mut Self::SchemeDataT,
+    ) -> SyscallResult<usize> {
+        let TcpRole::Listening(ref mut pool) = file.data else {
+            return Err(SyscallError::new(syscall::EINVAL));
+        };
+        let target = backlog.clamp(1, MAX_LISTEN_BACKLOG);
+        let desired_extra = target.saturating_sub(1);
+        while pool.extra_handles.len() < desired_extra {
+            let rx_buffer = TcpSocketBuffer::new(vec![0; pool.rx_buf_bytes]);
+            let tx_buffer = TcpSocketBuffer::new(vec![0; pool.tx_buf_bytes]);
+            let mut sock = TcpSocket::new(rx_buffer, tx_buffer);
+            apply_tcp_opts(&mut sock, pool.nodelay, pool.keepalive, pool.keepidle_secs);
+            if sock.listen(pool.endpoint).is_err() {
+                return Err(SyscallError::new(syscall::EINVAL));
+            }
+            let h = sockets.add(sock);
+            scheme_data.port_set.acquire_port(pool.endpoint.port);
+            pool.extra_handles.push(h);
+        }
+        while pool.extra_handles.len() > desired_extra {
+            let Some(pos) = pool
+                .extra_handles
+                .iter()
+                .rposition(|&h| sockets.get::<TcpSocket>(h).state() == TcpState::Listen)
+            else {
+                break;
+            };
+            let h = pool.extra_handles.remove(pos);
+            sockets.get_mut::<TcpSocket>(h).close();
+            sockets.remove(h);
+            scheme_data.port_set.release_port(pool.endpoint.port);
+        }
+        assert!(1 + pool.extra_handles.len() <= MAX_LISTEN_BACKLOG);
+        Ok(0)
+    }
+
+    fn set_sock_opt(
+        &mut self,
+        file: &mut SocketFile<Self::DataT>,
+        level: usize,
+        name: usize,
+        buf: &[u8],
+    ) -> SyscallResult<usize> {
+        if buf.len() < size_of::<i32>() {
+            return Err(SyscallError::new(syscall::EINVAL));
+        }
+        let val = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        match (level, name) {
+            (SOL_SOCKET, SO_KEEPALIVE) => {
+                let on = val != 0;
+                if on {
+                    self.set_keep_alive(Some(SmolDuration::from_secs(u64::from(
+                        file.keepidle_secs,
+                    ))));
+                } else {
+                    self.set_keep_alive(None);
+                }
+                if let TcpRole::Listening(ref mut pool) = file.data {
+                    pool.keepalive = on;
+                }
+                Ok(0)
+            }
+            (IPPROTO_TCP, TCP_NODELAY) => {
+                let nodelay = val != 0;
+                self.set_nagle_enabled(!nodelay);
+                if let TcpRole::Listening(ref mut pool) = file.data {
+                    pool.nodelay = nodelay;
+                }
+                Ok(0)
+            }
+            (IPPROTO_TCP, TCP_KEEPIDLE) => {
+                if !(MIN_TCP_KEEPIDLE_SECS..=MAX_TCP_KEEPIDLE_SECS).contains(&val) {
                     return Err(SyscallError::new(syscall::EINVAL));
                 }
-
-                buf[0..bytes.len()].copy_from_slice(&bytes);
-                Ok(bytes.len())
+                file.keepidle_secs = val as u32;
+                if self.keep_alive().is_some() {
+                    self.set_keep_alive(Some(SmolDuration::from_secs(val as u64)));
+                }
+                if let TcpRole::Listening(ref mut pool) = file.data {
+                    pool.keepidle_secs = val as u32;
+                }
+                Ok(0)
             }
             _ => Err(SyscallError::new(syscall::ENOPROTOOPT)),
         }
+    }
+
+    fn get_sock_opt(
+        &self,
+        file: &SchemeFile<Self>,
+        level: usize,
+        name: usize,
+        buf: &mut [u8],
+    ) -> SyscallResult<usize> {
+        let val = match (level, name) {
+            (SOL_SOCKET, SO_RCVBUF) => self.recv_capacity() as i32,
+            (SOL_SOCKET, SO_SNDBUF) => self.send_capacity() as i32,
+            (SOL_SOCKET, SO_KEEPALIVE) => i32::from(self.keep_alive().is_some()),
+            (IPPROTO_TCP, TCP_NODELAY) => i32::from(!self.nagle_enabled()),
+            (IPPROTO_TCP, TCP_KEEPIDLE) => match *file {
+                SchemeFile::Socket(ref sf) => sf.keepidle_secs as i32,
+                _ => return Err(SyscallError::new(syscall::EBADF)),
+            },
+            _ => return Err(SyscallError::new(syscall::ENOPROTOOPT)),
+        };
+        let bytes = val.to_ne_bytes();
+        if buf.len() < bytes.len() {
+            return Err(SyscallError::new(syscall::EINVAL));
+        }
+        buf[0..bytes.len()].copy_from_slice(&bytes);
+        Ok(bytes.len())
     }
 }

@@ -27,8 +27,77 @@ use crate::scheme::smoltcp::iface::SocketHandle;
 use crate::scheme::Router;
 use crate::Smolnetd;
 
-const SO_RCVBUF: usize = 8;
+const EVENT_ERR_BIT: usize = 8;
+const SOL_SOCKET: usize = 1;
+const IPPROTO_TCP: usize = 6;
+const SO_REUSEADDR: usize = 2;
+const SO_ERROR: usize = 4;
 const SO_SNDBUF: usize = 7;
+const SO_RCVBUF: usize = 8;
+const SO_KEEPALIVE: usize = 9;
+const SO_RCVTIMEO: usize = 20;
+const SO_SNDTIMEO: usize = 21;
+const TCP_NODELAY: usize = 1;
+const TCP_KEEPIDLE: usize = 4;
+const SOCKET_CALL_LISTEN: usize = 10;
+const DEFAULT_TCP_KEEPIDLE_SECS: u32 = 7200;
+const MIN_TCP_KEEPIDLE_SECS: i32 = 1;
+const MAX_TCP_KEEPIDLE_SECS: i32 = 86_400;
+const TIMEVAL_BYTES: usize = 16;
+
+fn parse_i32_opt(payload: &[u8]) -> SyscallResult<i32> {
+    if payload.len() < size_of::<i32>() {
+        return Err(SyscallError::new(syscall::EINVAL));
+    }
+    Ok(i32::from_ne_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+}
+
+fn write_i32_opt(payload: &mut [u8], val: i32) -> SyscallResult<usize> {
+    let bytes = val.to_ne_bytes();
+    if payload.len() < bytes.len() {
+        return Err(SyscallError::new(syscall::EINVAL));
+    }
+    payload[..bytes.len()].copy_from_slice(&bytes);
+    Ok(bytes.len())
+}
+
+fn parse_timeval_opt(payload: &[u8]) -> SyscallResult<Option<TimeSpec>> {
+    if payload.len() < TIMEVAL_BYTES {
+        return Err(SyscallError::new(syscall::EINVAL));
+    }
+    let tv_sec = i64::from_ne_bytes([
+        payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+        payload[7],
+    ]);
+    let tv_usec = i32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
+    if tv_sec < 0 || !(0..1_000_000).contains(&tv_usec) {
+        return Err(SyscallError::new(syscall::EDOM));
+    }
+    if tv_sec == 0 && tv_usec == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(TimeSpec {
+            tv_sec,
+            tv_nsec: tv_usec * 1000,
+        }))
+    }
+}
+
+fn write_timeval_opt(payload: &mut [u8], timeout: Option<TimeSpec>) -> SyscallResult<usize> {
+    if payload.len() < TIMEVAL_BYTES {
+        return Err(SyscallError::new(syscall::EINVAL));
+    }
+    let (tv_sec, tv_usec) = match timeout {
+        Some(ts) => (ts.tv_sec, ts.tv_nsec / 1000),
+        None => (0i64, 0i32),
+    };
+    payload[0..8].copy_from_slice(&tv_sec.to_ne_bytes());
+    payload[8..12].copy_from_slice(&tv_usec.to_ne_bytes());
+    payload[12..16].fill(0);
+    Ok(TIMEVAL_BYTES)
+}
 
 pub struct Context {
     pub iface: Interface,
@@ -42,10 +111,31 @@ impl Context {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct SocketOpts {
     pub rcvbuf: Option<usize>,
     pub sndbuf: Option<usize>,
+    pub reuseaddr: bool,
+    pub keepalive: bool,
+    pub nodelay: bool,
+    pub keepidle_secs: u32,
+    pub read_timeout: Option<TimeSpec>,
+    pub write_timeout: Option<TimeSpec>,
+}
+
+impl Default for SocketOpts {
+    fn default() -> Self {
+        Self {
+            rcvbuf: None,
+            sndbuf: None,
+            reuseaddr: false,
+            keepalive: false,
+            nodelay: false,
+            keepidle_secs: DEFAULT_TCP_KEEPIDLE_SECS,
+            read_timeout: None,
+            write_timeout: None,
+        }
+    }
 }
 
 pub struct NullFile {
@@ -65,10 +155,15 @@ pub struct SocketFile<DataT> {
     socket_handle: SocketHandle,
     read_notified: bool,
     write_notified: bool,
+    err_notified: bool,
     read_timeout: Option<TimeSpec>,
     write_timeout: Option<TimeSpec>,
     pub read_enabled: bool,
     pub write_enabled: bool,
+    pub reuseaddr: bool,
+    pub keepidle_secs: u32,
+    pub pending_error: Option<i32>,
+    pub reset_pending: bool,
 }
 
 impl<DataT> SocketFile<DataT> {
@@ -76,13 +171,38 @@ impl<DataT> SocketFile<DataT> {
         SocketFile {
             flags: self.flags,
             events: self.events,
-            read_notified: false, // we still want to notify about this new socket
+            read_notified: false,
             write_notified: false,
+            err_notified: false,
             read_timeout: self.read_timeout,
             write_timeout: self.write_timeout,
             socket_handle: self.socket_handle,
             read_enabled: self.read_enabled,
             write_enabled: self.write_enabled,
+            reuseaddr: self.reuseaddr,
+            keepidle_secs: self.keepidle_secs,
+            pending_error: None,
+            reset_pending: false,
+            data,
+        }
+    }
+
+    pub fn clone_with_handle(&self, socket_handle: SocketHandle, data: DataT) -> SocketFile<DataT> {
+        SocketFile {
+            flags: self.flags,
+            events: self.events,
+            read_notified: false,
+            write_notified: false,
+            err_notified: false,
+            read_timeout: self.read_timeout,
+            write_timeout: self.write_timeout,
+            socket_handle,
+            read_enabled: self.read_enabled,
+            write_enabled: self.write_enabled,
+            reuseaddr: self.reuseaddr,
+            keepidle_secs: self.keepidle_secs,
+            pending_error: None,
+            reset_pending: false,
             data,
         }
     }
@@ -93,10 +213,15 @@ impl<DataT> SocketFile<DataT> {
             events: 0,
             read_notified: false,
             write_notified: false,
+            err_notified: false,
             read_timeout: None,
             write_timeout: None,
             read_enabled: true,
             write_enabled: true,
+            reuseaddr: false,
+            keepidle_secs: DEFAULT_TCP_KEEPIDLE_SECS,
+            pending_error: None,
+            reset_pending: false,
             socket_handle,
             data,
         }
@@ -137,42 +262,60 @@ where
         }
     }
 
-    pub fn events(&mut self, socket_set: &mut SocketSet) -> usize
+    pub fn events(&mut self, socket_set: &mut SocketSet, now_us: i64) -> usize
     where
         SocketT: AnySocket<'static>,
     {
         let mut revents = 0;
-        if let &mut SchemeFile::Socket(SocketFile {
-            socket_handle,
-            events,
-            ref mut read_notified,
-            ref mut write_notified,
-            ref data,
-            ..
-        }) = self
-        {
-            let socket = socket_set.get_mut::<SocketT>(socket_handle);
+        if let SchemeFile::Socket(ref mut sock_file) = *self {
+            let socket_handle = sock_file.socket_handle;
+            SocketT::sync_state(socket_set, socket_handle, sock_file, now_us);
 
-            if events & syscall::EVENT_READ.bits() == syscall::EVENT_READ.bits()
-                && (socket.can_recv(data) || !socket.may_recv())
+            let has_err = sock_file.pending_error.is_some() || sock_file.reset_pending;
+            if has_err {
+                if !sock_file.err_notified {
+                    sock_file.err_notified = true;
+                    revents |= EVENT_ERR_BIT;
+                    if sock_file.events & syscall::EVENT_WRITE.bits() != 0 {
+                        sock_file.write_notified = true;
+                        revents |= EVENT_WRITE.bits();
+                    }
+                    if sock_file.events & syscall::EVENT_READ.bits() != 0 {
+                        sock_file.read_notified = true;
+                        revents |= EVENT_READ.bits();
+                    }
+                }
+                return revents;
+            } else {
+                sock_file.err_notified = false;
+            }
+
+            let can_recv = SocketT::is_readable(socket_set, socket_handle, &sock_file.data);
+            let can_send = {
+                let socket = socket_set.get::<SocketT>(socket_handle);
+                socket.can_send()
+            };
+
+            if sock_file.events & syscall::EVENT_READ.bits() == syscall::EVENT_READ.bits()
+                && can_recv
             {
-                if !*read_notified {
-                    *read_notified = true;
+                if !sock_file.read_notified {
+                    sock_file.read_notified = true;
                     revents |= EVENT_READ.bits();
                 }
             } else {
-                *read_notified = false;
+                sock_file.read_notified = false;
             }
 
-            if events & syscall::EVENT_WRITE.bits() == syscall::EVENT_WRITE.bits()
-                && socket.can_send()
+            if sock_file.events & syscall::EVENT_WRITE.bits() == syscall::EVENT_WRITE.bits()
+                && can_send
             {
-                if !*write_notified {
-                    *write_notified = true;
+                if !sock_file.write_notified {
+                    sock_file.write_notified = true;
                     revents |= EVENT_WRITE.bits();
                 }
             } else {
-                *write_notified = false;
+                sock_file.write_notified = false;
             }
         }
         revents
@@ -287,13 +430,52 @@ where
         flags: usize,
     ) -> SyscallResult<usize>;
 
+    fn supports_tcp_opts() -> bool {
+        false
+    }
+
+    fn sync_state(
+        _sockets: &mut SocketSet,
+        _handle: SocketHandle,
+        _file: &mut SocketFile<Self::DataT>,
+        _now_us: i64,
+    ) {
+    }
+
+    fn is_readable(sockets: &mut SocketSet, handle: SocketHandle, data: &Self::DataT) -> bool
+    where
+        Self: AnySocket<'static>,
+    {
+        let socket = sockets.get_mut::<Self>(handle);
+        socket.can_recv(data) || !socket.may_recv()
+    }
+
+    fn handle_listen(
+        _sockets: &mut SocketSet,
+        _file: &mut SocketFile<Self::DataT>,
+        _backlog: usize,
+        _data: &mut Self::SchemeDataT,
+    ) -> SyscallResult<usize> {
+        Err(SyscallError::new(syscall::EOPNOTSUPP))
+    }
+
+    fn set_sock_opt(
+        &mut self,
+        _file: &mut SocketFile<Self::DataT>,
+        _level: usize,
+        _name: usize,
+        _buf: &[u8],
+    ) -> SyscallResult<usize> {
+        Err(SyscallError::new(syscall::ENOPROTOOPT))
+    }
+
     fn get_sock_opt(
         &self,
         _file: &SchemeFile<Self>,
+        _level: usize,
         _name: usize,
         _buf: &mut [u8],
     ) -> SyscallResult<usize> {
-        // Return Err for default implementation
         Err(SyscallError::new(syscall::ENOPROTOOPT))
     }
 
@@ -356,6 +538,10 @@ where
         let cap_id = scheme.scheme_root()?;
         register_scheme_inner(&scheme.scheme_file, name, cap_id)?;
         Ok(scheme)
+    }
+
+    pub fn now_us(&self) -> i64 {
+        self.context.now_us()
     }
 
     pub fn sweep_lingering(&mut self, now_us: i64) {
@@ -501,71 +687,182 @@ where
         metadata: &[u64],
         _ctx: &CallerCtx,
     ) -> SyscallResult<usize> {
-        // metadata to Vec<u8>
-        let Some(verb) = SocketCall::try_from_raw(metadata[0] as usize) else {
+        let raw_verb = metadata.first().copied().unwrap_or(usize::MAX as u64) as usize;
+        if raw_verb == SOCKET_CALL_LISTEN {
+            let backlog = metadata.get(1).copied().unwrap_or(0) as usize;
+            let handle = self.handles.get_mut(fd)?;
+            return match *handle {
+                Handle::File(SchemeFile::Socket(ref mut sock_file)) => {
+                    let mut socket_set = self.socket_set.borrow_mut();
+                    SocketT::handle_listen(
+                        &mut socket_set,
+                        sock_file,
+                        backlog,
+                        &mut self.scheme_data,
+                    )
+                }
+                Handle::Null(_) => Err(SyscallError::new(syscall::EINVAL)),
+                _ => Err(SyscallError::new(syscall::EBADF)),
+            };
+        }
+        let Some(verb) = SocketCall::try_from_raw(raw_verb) else {
             warn!("Invalid verb in metadata: {:?}", metadata);
             return Err(SyscallError::new(EINVAL));
         };
         match verb {
-            // TODO
-            // SocketCall::Bind => self.handle_bind(id, &payload),
-            // SocketCall::Connect => self.handle_connect(id, &payload),
             SocketCall::SetSockOpt => {
                 let name = metadata.get(1).copied().unwrap_or(0) as usize;
+                let level = match metadata.get(2).copied().unwrap_or(0) {
+                    0 => SOL_SOCKET,
+                    raw => usize::try_from(raw).unwrap_or(usize::MAX),
+                };
                 let handle = self.handles.get_mut(fd)?;
-                if name == SO_RCVBUF || name == SO_SNDBUF {
-                    if payload.len() < size_of::<i32>() {
-                        return Err(SyscallError::new(syscall::EINVAL));
-                    }
-                    let raw = i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    if raw <= 0 {
-                        return Err(SyscallError::new(syscall::EINVAL));
-                    }
-                    let clamped = SocketT::clamp_buf_bytes(raw as usize);
-                    match *handle {
-                        Handle::Null(ref mut null) => {
-                            if name == SO_RCVBUF {
-                                null.opts.rcvbuf = Some(clamped);
-                            } else {
-                                null.opts.sndbuf = Some(clamped);
+                match *handle {
+                    Handle::Null(ref mut null) => match (level, name) {
+                        (SOL_SOCKET, SO_RCVBUF) => {
+                            let raw = parse_i32_opt(payload)?;
+                            if raw <= 0 {
+                                return Err(SyscallError::new(syscall::EINVAL));
                             }
+                            null.opts.rcvbuf = Some(SocketT::clamp_buf_bytes(raw as usize));
                             Ok(0)
                         }
-                        Handle::File(_) => Ok(0),
-                        Handle::SchemeRoot => Err(SyscallError::new(syscall::EBADF)),
+                        (SOL_SOCKET, SO_SNDBUF) => {
+                            let raw = parse_i32_opt(payload)?;
+                            if raw <= 0 {
+                                return Err(SyscallError::new(syscall::EINVAL));
+                            }
+                            null.opts.sndbuf = Some(SocketT::clamp_buf_bytes(raw as usize));
+                            Ok(0)
+                        }
+                        (SOL_SOCKET, SO_REUSEADDR) => {
+                            null.opts.reuseaddr = parse_i32_opt(payload)? != 0;
+                            Ok(0)
+                        }
+                        (SOL_SOCKET, SO_KEEPALIVE) if SocketT::supports_tcp_opts() => {
+                            null.opts.keepalive = parse_i32_opt(payload)? != 0;
+                            Ok(0)
+                        }
+                        (SOL_SOCKET, SO_RCVTIMEO) => {
+                            null.opts.read_timeout = parse_timeval_opt(payload)?;
+                            Ok(0)
+                        }
+                        (SOL_SOCKET, SO_SNDTIMEO) => {
+                            null.opts.write_timeout = parse_timeval_opt(payload)?;
+                            Ok(0)
+                        }
+                        (IPPROTO_TCP, TCP_NODELAY) if SocketT::supports_tcp_opts() => {
+                            null.opts.nodelay = parse_i32_opt(payload)? != 0;
+                            Ok(0)
+                        }
+                        (IPPROTO_TCP, TCP_KEEPIDLE) if SocketT::supports_tcp_opts() => {
+                            let raw = parse_i32_opt(payload)?;
+                            if !(MIN_TCP_KEEPIDLE_SECS..=MAX_TCP_KEEPIDLE_SECS).contains(&raw) {
+                                return Err(SyscallError::new(syscall::EINVAL));
+                            }
+                            null.opts.keepidle_secs = raw as u32;
+                            Ok(0)
+                        }
+                        _ => Err(SyscallError::new(syscall::ENOPROTOOPT)),
+                    },
+                    Handle::File(SchemeFile::Socket(ref mut sock_file)) => match (level, name) {
+                        (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF) => {
+                            let raw = parse_i32_opt(payload)?;
+                            if raw <= 0 {
+                                return Err(SyscallError::new(syscall::EINVAL));
+                            }
+                            let _ = SocketT::clamp_buf_bytes(raw as usize);
+                            Ok(0)
+                        }
+                        (SOL_SOCKET, SO_REUSEADDR) => {
+                            sock_file.reuseaddr = parse_i32_opt(payload)? != 0;
+                            Ok(0)
+                        }
+                        (SOL_SOCKET, SO_RCVTIMEO) => {
+                            sock_file.read_timeout = parse_timeval_opt(payload)?;
+                            Ok(0)
+                        }
+                        (SOL_SOCKET, SO_SNDTIMEO) => {
+                            sock_file.write_timeout = parse_timeval_opt(payload)?;
+                            Ok(0)
+                        }
+                        _ => {
+                            let mut socket_set = self.socket_set.borrow_mut();
+                            let socket = socket_set.get_mut::<SocketT>(sock_file.socket_handle);
+                            SocketT::set_sock_opt(socket, sock_file, level, name, payload)
+                        }
+                    },
+                    Handle::File(SchemeFile::Setting(_)) | Handle::SchemeRoot => {
+                        Err(SyscallError::new(syscall::EBADF))
                     }
-                } else {
-                    Ok(0)
                 }
             }
             SocketCall::GetSockOpt => {
+                let name = metadata.get(1).copied().unwrap_or(0) as usize;
+                let level = match metadata.get(2).copied().unwrap_or(0) {
+                    0 => SOL_SOCKET,
+                    raw => usize::try_from(raw).unwrap_or(usize::MAX),
+                };
+                let now_us = self.context.now_us();
                 let handle = self.handles.get_mut(fd)?;
 
                 match *handle {
                     Handle::File(ref mut file) => {
                         let mut socket_set = self.socket_set.borrow_mut();
-                        let socket = socket_set.get_mut::<SocketT>(file.socket_handle());
-                        SocketT::get_sock_opt(socket, file, metadata[1] as usize, payload)
-                    }
-                    Handle::Null(ref null) => {
-                        let name = metadata[1] as usize;
-                        if name == SO_RCVBUF || name == SO_SNDBUF {
-                            let val: i32 = if name == SO_RCVBUF {
-                                null.opts.rcvbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32
-                            } else {
-                                null.opts.sndbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32
-                            };
-                            let bytes = val.to_ne_bytes();
-
-                            if payload.len() < bytes.len() {
-                                return Err(SyscallError::new(syscall::EINVAL));
+                        if let SchemeFile::Socket(ref mut sock_file) = *file {
+                            let socket_handle = sock_file.socket_handle;
+                            SocketT::sync_state(&mut socket_set, socket_handle, sock_file, now_us);
+                            match (level, name) {
+                                (SOL_SOCKET, SO_ERROR) => {
+                                    let err = sock_file.pending_error.take().unwrap_or(0);
+                                    sock_file.err_notified = false;
+                                    return write_i32_opt(payload, err);
+                                }
+                                (SOL_SOCKET, SO_REUSEADDR) => {
+                                    return write_i32_opt(payload, i32::from(sock_file.reuseaddr));
+                                }
+                                (SOL_SOCKET, SO_RCVTIMEO) => {
+                                    return write_timeval_opt(payload, sock_file.read_timeout);
+                                }
+                                (SOL_SOCKET, SO_SNDTIMEO) => {
+                                    return write_timeval_opt(payload, sock_file.write_timeout);
+                                }
+                                _ => {}
                             }
-                            payload[..bytes.len()].copy_from_slice(&bytes);
-                            Ok(bytes.len())
-                        } else {
-                            Err(SyscallError::new(syscall::EINVAL))
                         }
+                        let socket = socket_set.get_mut::<SocketT>(file.socket_handle());
+                        SocketT::get_sock_opt(socket, file, level, name, payload)
                     }
+                    Handle::Null(ref null) => match (level, name) {
+                        (SOL_SOCKET, SO_RCVBUF) => write_i32_opt(
+                            payload,
+                            null.opts.rcvbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32,
+                        ),
+                        (SOL_SOCKET, SO_SNDBUF) => write_i32_opt(
+                            payload,
+                            null.opts.sndbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32,
+                        ),
+                        (SOL_SOCKET, SO_REUSEADDR) => {
+                            write_i32_opt(payload, i32::from(null.opts.reuseaddr))
+                        }
+                        (SOL_SOCKET, SO_ERROR) => write_i32_opt(payload, 0),
+                        (SOL_SOCKET, SO_KEEPALIVE) if SocketT::supports_tcp_opts() => {
+                            write_i32_opt(payload, i32::from(null.opts.keepalive))
+                        }
+                        (SOL_SOCKET, SO_RCVTIMEO) => {
+                            write_timeval_opt(payload, null.opts.read_timeout)
+                        }
+                        (SOL_SOCKET, SO_SNDTIMEO) => {
+                            write_timeval_opt(payload, null.opts.write_timeout)
+                        }
+                        (IPPROTO_TCP, TCP_NODELAY) if SocketT::supports_tcp_opts() => {
+                            write_i32_opt(payload, i32::from(null.opts.nodelay))
+                        }
+                        (IPPROTO_TCP, TCP_KEEPIDLE) if SocketT::supports_tcp_opts() => {
+                            write_i32_opt(payload, null.opts.keepidle_secs as i32)
+                        }
+                        _ => Err(SyscallError::new(syscall::ENOPROTOOPT)),
+                    },
                     Handle::SchemeRoot => Err(SyscallError::new(syscall::EBADF)),
                 }
             }
@@ -671,10 +968,15 @@ where
                 socket_handle,
                 read_notified: false,
                 write_notified: false,
-                write_timeout: None,
-                read_timeout: None,
+                err_notified: false,
+                write_timeout: opts.write_timeout,
+                read_timeout: opts.read_timeout,
                 read_enabled,
                 write_enabled,
+                reuseaddr: opts.reuseaddr,
+                keepidle_secs: opts.keepidle_secs,
+                pending_error: None,
+                reset_pending: false,
                 data,
             });
 
@@ -801,7 +1103,9 @@ where
                 }
                 Handle::File(SchemeFile::Socket(ref mut file)) => {
                     let mut socket_set = self.socket_set.borrow_mut();
-                    let socket = socket_set.get_mut::<SocketT>(file.socket_handle);
+                    let socket_handle = file.socket_handle;
+                    SocketT::sync_state(&mut socket_set, socket_handle, file, self.context.now_us());
+                    let socket = socket_set.get_mut::<SocketT>(socket_handle);
                     let ret = SocketT::write_buf(socket, file, buf);
                     match ret {
                         Err(e) if e.errno == syscall::EWOULDBLOCK || e.errno == syscall::EAGAIN => {
@@ -832,7 +1136,9 @@ where
                 }
                 Handle::File(SchemeFile::Socket(ref mut file)) => {
                     let mut socket_set = self.socket_set.borrow_mut();
-                    let socket = socket_set.get_mut::<SocketT>(file.socket_handle);
+                    let socket_handle = file.socket_handle;
+                    SocketT::sync_state(&mut socket_set, socket_handle, file, self.context.now_us());
+                    let socket = socket_set.get_mut::<SocketT>(socket_handle);
 
                     let ret = SocketT::read_buf(socket, file, buf);
                     match ret {
@@ -965,12 +1271,14 @@ where
             SchemeFile::Setting(_) => return Err(SyscallError::new(syscall::EBADF)),
             SchemeFile::Socket(ref mut file) => {
                 file.events = events.bits();
-                file.read_notified = false; // resend missed events
+                file.read_notified = false;
                 file.write_notified = false;
+                file.err_notified = false;
             }
         }
+        let now_us = self.context.now_us();
         let mut socket_set = self.socket_set.borrow_mut();
-        let revents = SyscallEventFlags::from_bits_truncate(file.events(&mut socket_set));
+        let revents = SyscallEventFlags::from_bits_retain(file.events(&mut socket_set, now_us));
         Ok(revents)
     }
 
