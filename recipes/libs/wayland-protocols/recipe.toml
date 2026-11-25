@@ -2,7 +2,8 @@
 tar = "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/1.50/downloads/wayland-protocols-1.50.tar.xz"
 blake3 = "9f6e05db70240bd54c7233e897c48d45ef1d8b4cd3aba227da2303fbd831841e"
 [build]
-template = "meson"
-mesonflags = [
-    "-Dtests=false"
-]
+template = "custom"
+script = """
+cookbook_meson -Dtests=false
+install -Dm644 "${COOKBOOK_SOURCE}/COPYING" "${COOKBOOK_STAGE}/usr/share/licenses/wayland-protocols/COPYING"
+"""
