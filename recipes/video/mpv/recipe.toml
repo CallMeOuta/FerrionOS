@@ -7,6 +7,7 @@ rev = "b0841e8c4d156b8403dc1876c4cbd9011eb583f3"
 patches = [
     "ferrion-accept-fallback.patch",
     "ferrion-ao.patch",
+    "ferrion-wayland-shm.patch",
 ]
 
 [build]
@@ -16,12 +17,24 @@ dependencies = [
     "libass",
     "libiconv",
     "libplacebo",
+    "libwayland",
+    "libxkbcommon",
     "zlib",
+]
+dev-dependencies = [
+    "linux-input-event-codes",
+    "wayland-protocols",
 ]
 script = """
 DYNAMIC_INIT
 
+cat > wayland_scanner_cross.txt <<'EOF'
+[binaries]
+wayland-scanner = '/usr/bin/wayland-scanner'
+EOF
+
 cookbook_meson \
+    --cross-file wayland_scanner_cross.txt \
     -Dgpl=false \
     -Dauto_features=disabled \
     -Dgl=disabled \
@@ -30,6 +43,7 @@ cookbook_meson \
     -Dcplayer=true \
     -Dlibmpv=true \
     -Dferrion-audio=enabled \
+    -Dwayland=enabled \
     -Diconv=enabled \
     -Dzlib=enabled \
     -Dmanpage-build=disabled
