@@ -30,3 +30,18 @@ crates/rune/src/popup_menu/wayland/protocol.rs | foreign_display_backend | asser
 crates/rune/src/popup_menu/wayland/protocol.rs | foreign_xdg_surface_id | asserts `ptr.as_ptr().addr() != 0` on winit's live parent `xdg_surface` handle; `Host` cancels and asserts `!self.popup.is_open()` before hiding, closing or dropping the parent window.
 crates/rune/src/popup_menu/wayland/protocol.rs | foreign_layer_surface_id | asserts `ptr.as_ptr().addr() != 0` on the live `zwlr_layer_surface_v1` handle owned by the active layer overlay.
 crates/rune/src/popup_menu/wayland/protocol.rs | create_wgpu_surface | asserts both handles are `RawDisplayHandle::Wayland` and `RawWindowHandle::Wayland` pointing to winit's live `wl_display` and this level's live `wl_surface`, and `LevelPresenter` is dropped before `PopupSurfaceHandles::destroy`.
+crates/rune-term/src/pty.rs | open_pty_raw | asserts `cols` in `1..=MAX_COLS` and `rows` in `1..=MAX_ROWS`, passes valid out-pointers and `winsize` to `libc::openpty`, and checks `rc == 0` and both descriptors non-negative.
+crates/rune-term/src/pty.rs | own_fd | `raw` is asserted non-negative and freshly created by `open_pty_raw` or `create_pipe`, transferring sole ownership into `OwnedFd`.
+crates/rune-term/src/pty.rs | create_pipe | passes a valid 2-element `c_int` array to `libc::pipe` and checks `rc == 0` and both descriptors non-negative.
+crates/rune-term/src/pty.rs | set_fd_cloexec | `fd` is asserted non-negative and freshly opened before applying `F_SETFD`/`FD_CLOEXEC`.
+crates/rune-term/src/pty.rs | get_fd_flags | `fd` is asserted non-negative and open before querying file status flags via `F_GETFL`.
+crates/rune-term/src/pty.rs | set_fd_flags | `fd` is asserted non-negative and open before applying `O_NONBLOCK` flags via `F_SETFL`.
+crates/rune-term/src/pty.rs | ioctl_get_winsize | asserts `fd >= 0` and passes a valid mutable `winsize` pointer to `libc::ioctl(TIOCGWINSZ)`.
+crates/rune-term/src/pty.rs | ioctl_set_winsize | asserts `fd >= 0`, `cols` in `1..=MAX_COLS`, and `rows` in `1..=MAX_ROWS`, passing a valid `winsize` pointer to `libc::ioctl(TIOCSWINSZ)`.
+crates/rune-term/src/pty.rs | setsid_in_child | invokes async-signal-safe `libc::setsid` in the forked child before `exec` and checks `rc < 0`.
+crates/rune-term/src/pty.rs | set_ctty_stdin | invokes async-signal-safe `libc::ioctl(0, TIOCSCTTY, 0)` on the subordinate PTY dup2'd to fd 0 in the forked child before `exec`.
+crates/rune-term/src/pty.rs | attach_pre_exec | registers a `CommandExt::pre_exec` closure whose body calls only async-signal-safe `setsid_in_child` and `set_ctty_stdin` with no allocations or locks.
+crates/rune-term/src/pty.rs | poll_two_fds | asserts both `pollfd` descriptors (owned PTY master clone and wake pipe read end) are non-negative before calling `libc::poll` over the 2-element array.
+crates/rune-term/src/pty.rs | read_fd | asserts `fd >= 0` and `!buf.is_empty()` before calling `libc::read` into `buf` for up to `buf.len()` bytes.
+crates/rune-term/src/pty.rs | write_fd | asserts `fd >= 0` and `!buf.is_empty()` before calling `libc::write` from `buf` for up to `buf.len()` bytes.
+crates/rune-term/src/pty.rs | kill_pid | asserts `pid != 0` so `libc::kill` targets only the child process or its process group and never the caller's own group.

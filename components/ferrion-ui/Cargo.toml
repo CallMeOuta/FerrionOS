@@ -16,6 +16,7 @@ members = [
     "crates/rune-highlights",
     "crates/procwatch",
     "crates/rune-taffy",
+    "crates/rune-term",
     "themes/opencode",
     "examples/hello",
     "examples/settings",
@@ -26,6 +27,7 @@ members = [
     "examples/popup-menu-demo",
     "examples/dnd-demo",
     "examples/scripts-demo",
+    "examples/term-demo",
 ]
 # Default cargo check/test targets: the core framework, libraries and theme.
 # Excludes examples/*, www/app, rune-luau (C++ Luau build via cc/mlua), rune-notify/rune-mac
@@ -47,6 +49,7 @@ default-members = [
     "crates/rune-highlights",
     "crates/procwatch",
     "crates/rune-taffy",
+    "crates/rune-term",
     "themes/opencode",
 ]
 exclude = ["tools/rune-dev-guard", "tools/ratex-math-wasm", "tools/ratex-math-wasm/pack", "vendor/accesskit_macos", "vendor/accesskit_windows", "vendor/parley_engine", "vendor/sctk-adwaita", "vendor/tiny-skia-path", "vendor/wgpu-hal", "vendor/winit"]
@@ -132,6 +135,7 @@ rune-ref = { path = "crates/rune-ref" }
 rune-spell = { path = "crates/rune-spell" }
 rune-staging = { path = "crates/rune-staging" }
 rune-taffy = { path = "crates/rune-taffy" }
+rune-term = { path = "crates/rune-term" }
 rune-text = { path = "crates/rune-text", default-features = false }
 rune-theme-opencode = { path = "themes/opencode" }
 
@@ -164,6 +168,8 @@ swash = "0.2.10"
 taffy = { version = "0.15", default-features = false }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 unicode-segmentation = "1.13"
+unicode-width = "0.2.2"
+vte = { version = "0.15.0", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 wasmi = { version = "1.1", default-features = false }
