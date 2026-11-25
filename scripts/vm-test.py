@@ -12232,7 +12232,396 @@ def test_display_socket(vm, args):
     )
 
 
+def nested_scope_quadrant_png():
+    width, height = 64, 64
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            if y < height // 2 and x < width // 2:
+                rows.extend((220, 40, 40, 255))
+            elif y < height // 2:
+                rows.extend((40, 200, 40, 255))
+            elif x < width // 2:
+                rows.extend((40, 60, 220, 255))
+            else:
+                rows.extend((230, 220, 40, 255))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(rows)))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_nested_scope(vm, args):
+    """PFR1 nested-scope (use --config wm-session; runs only on QEMU -snapshot copy): a manifest-sandboxed parent with files-pictures and no network launches nested ferrion-run sub-scopes through /.ferrion-scope/new; verifies narrower child access and isolation (including parent app home and raw openat), wider-than-parent refusals (Documents, ro->rw escalation, manifest network-internet, --pty, --display), symlink-in-parent-rw escape refusal, planted .ferrion-sub-<id>/home symlink refusal and no-follow cleanup leaving ~/Documents intact, depth-5 EMLINK, parent-end process-group teardown via read_root_contexts with positive control, and manifest-wrapped glycin-load-probe decoding a PNG from ~/Pictures."""
+    server, seen = ferrion_run_server()
+    try:
+        if not vm.wait_serial(r"login: ", args.timeout):
+            return False, f"no serial login prompt within {args.timeout}s"
+        vm.type("user\n")
+        time.sleep(3)
+        user_uid = read_user_uid(vm, "nested-uid")
+        if user_uid is None:
+            return False, f"could not read user uid; see {vm.out / 'serial.log'}"
+        address, transcript = f"10.0.2.2:{server.server_address[1]}", []
+        png_b64 = base64.b64encode(nested_scope_quadrant_png()).decode("ascii")
+        setup_cmd = (
+            "mkdir -p /home/user/Documents /home/user/Pictures /home/user/Downloads && "
+            "echo PFR1-DOC-SECRET > /home/user/Documents/secret.txt && "
+            "echo PFR1-PIC-SECRET > /home/user/Pictures/secret.txt && "
+            "echo PFR1-DL-SECRET > /home/user/Downloads/secret.txt && "
+            f"printf '%s' {shlex.quote(png_b64)} | base64 -d > /home/user/Pictures/sample.png"
+        )
+        st, _ = pfr1_run_as_user(vm, transcript, "n-setup-user", setup_cmd)
+        if st != 0:
+            (vm.out / "nested-scope.txt").write_text("".join(transcript))
+            return False, f"nested user setup failed (exit {st}); see {vm.out}"
+
+        bins_cmd = (
+            "sudo bash -c "
+            + shlex.quote(
+                "mkdir -p /usr/share/ferrion/apps /var/lib/ferrion/grants && "
+                "chmod 755 /usr/share/ferrion/apps /var/lib/ferrion/grants && "
+                "cp /usr/bin/bash /usr/bin/pfr1-nested-parent && "
+                "cp /usr/bin/ferrion-run-probe /usr/bin/pfr1-nested-net && "
+                "cp /usr/bin/glycin-load-probe /usr/bin/pfr1-nested-glycin && "
+                "cp /usr/bin/ferrion-run-probe /usr/bin/pfr1-nested-sleeper && "
+                "cp /usr/bin/ferrion-run-probe /usr/bin/pfr1-nested-ctrl && "
+                "chmod 755 /usr/bin/pfr1-nested-parent /usr/bin/pfr1-nested-net "
+                "/usr/bin/pfr1-nested-glycin /usr/bin/pfr1-nested-sleeper /usr/bin/pfr1-nested-ctrl"
+            )
+        )
+        st, _ = pfr1_run_as_user(vm, transcript, "n-setup-bins", bins_cmd, sudo=True)
+        if st != 0:
+            (vm.out / "nested-scope.txt").write_text("".join(transcript))
+            return False, f"nested root bin setup failed (exit {st}); see {vm.out}"
+
+        parent_man = (
+            'format = 1\n'
+            'id = "pfr1-nested-parent"\n'
+            'name = "PFR1 Nested Parent"\n'
+            'kind = "native"\n'
+            'exec = "/usr/bin/pfr1-nested-parent"\n'
+            '\n'
+            '[capabilities.files-pictures]\n'
+            'reason = "Reads pictures for nested scope check."\n'
+        )
+        net_man = (
+            'format = 1\n'
+            'id = "pfr1-nested-net"\n'
+            'name = "PFR1 Nested Net Child"\n'
+            'kind = "native"\n'
+            'exec = "/usr/bin/pfr1-nested-net"\n'
+            '\n'
+            '[capabilities.network-internet]\n'
+            'reason = "Requests network inside offline parent."\n'
+        )
+        glycin_man = (
+            'format = 1\n'
+            'id = "pfr1-nested-glycin"\n'
+            'name = "PFR1 Nested Glycin"\n'
+            'kind = "native"\n'
+            'exec = "/usr/bin/pfr1-nested-glycin"\n'
+            '\n'
+            '[capabilities.files-pictures]\n'
+            'reason = "Loads images from Pictures through nested glycin loaders."\n'
+        )
+        grants = (
+            'format = 1\n'
+            '\n'
+            '[apps.pfr1-nested-parent]\n'
+            'files-pictures = true\n'
+            '\n'
+            '[apps.pfr1-nested-glycin]\n'
+            'files-pictures = true\n'
+        )
+        for tag, path, content in (
+            ("n-man-parent", "/usr/share/ferrion/apps/pfr1-nested-parent.toml", parent_man),
+            ("n-man-net", "/usr/share/ferrion/apps/pfr1-nested-net.toml", net_man),
+            ("n-man-glycin", "/usr/share/ferrion/apps/pfr1-nested-glycin.toml", glycin_man),
+            ("n-grants", f"/var/lib/ferrion/grants/{user_uid}.toml", grants),
+        ):
+            st = pfr1_write_root_file(vm, transcript, tag, path, content)
+            if st != 0:
+                (vm.out / "nested-scope.txt").write_text("".join(transcript))
+                return False, f"nested {tag} setup failed (exit {st}); see {vm.out}"
+
+        problems = []
+
+        narrow_script = (
+            'echo PARENT-HOME-SECRET > "$HOME/parent-secret.txt" && '
+            f'ferrion-run --read-only /home/user/Pictures --no-network '
+            f'ferrion-run-probe cap-check {address} /nested-net '
+            '/home/user/Documents/secret.txt /home/user/Pictures/secret.txt "$HOME/parent-secret.txt"'
+        )
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-narrow",
+            f"ferrion-run pfr1-nested-parent -c {shlex.quote(narrow_script)}",
+            timeout=90,
+        )
+        caps = pfr1_parse_caps(out)
+        if st != 0:
+            problems.append(f"narrower nested child failed (exit {st}): {out.strip()[:160]}")
+        else:
+            if caps.get("pics", ("",))[0] != "REACHED" or "PFR1-PIC-SECRET" not in caps.get("pics", ("", ""))[1]:
+                problems.append(f"narrower child could not read Pictures: {caps.get('pics')}")
+            if "/nested-net" in seen or caps.get("net", ("",))[0] != "ABSENT":
+                problems.append(f"narrower child reached network: {caps.get('net')} seen={seen}")
+            for denied in ("docs", "downloads", "sudo"):
+                if caps.get(denied, ("",))[0] != "ABSENT":
+                    problems.append(f"narrower child reached {denied}: {caps.get(denied)}")
+            if re.search(r"OPENAT_REACHED \d+ (?:/home/user/(?:Documents|Downloads|\.local)|/scheme/(?:tcp|sudo|audio))", out) or not re.search(r"(?m)^OPENAT_SCANNED [1-9]\d*$", out):
+                problems.append("narrower child raw openat check failed")
+
+        wider_cases = [
+            ("w-docs", "ferrion-run --files /home/user/Documents --no-network true"),
+            ("w-ro-to-rw", "ferrion-run --read-only /home/user/Pictures --no-network bash -c 'ferrion-run --files /home/user/Pictures --no-network true'"),
+            ("w-net-manifest", f"ferrion-run pfr1-nested-net cap-check {address} /nested-widen /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"),
+            ("w-pty", "ferrion-run --pty --no-network true"),
+            ("w-display", "ferrion-run --display --no-network true"),
+            ("w-symlink", "rm -f /tmp/escape-docs && ln -s /home/user/Documents /tmp/escape-docs && ferrion-run --read-only /tmp/escape-docs --no-network true"),
+        ]
+        for wtag, wscript in wider_cases:
+            st, out = pfr1_run_as_user(
+                vm, transcript, wtag,
+                f"ferrion-run pfr1-nested-parent -c {shlex.quote(wscript)}",
+                timeout=60,
+            )
+            if st != 125 or "wider-than-parent" not in out:
+                problems.append(f"{wtag} was not refused with 125 wider-than-parent (exit {st})")
+
+        plant_script = (
+            "ferrion-run --no-network sleep 2 & p=$!; "
+            "sub=''; for i in $(seq 1 20); do sub=$(ls -1a /tmp | grep '^\\.ferrion-sub-' | head -n 1); [ -n \"$sub\" ] && break; sleep 0.1; done; "
+            "wait $p; "
+            "echo SAW_SUB=$sub; "
+            "echo AFTER_P1=$(ls -1a /tmp | grep '^\\.ferrion-sub-' | tr '\\n' ','); "
+            "id=${sub#.ferrion-sub-}; next=$((id + 1)); "
+            "mkdir -p /tmp/.ferrion-sub-$next && ln -s /home/user/Documents /tmp/.ferrion-sub-$next/home; "
+            "ferrion-run --no-network true; pre_rc=$?; echo PRE_PLANT_RC=$pre_rc; "
+            "rm -f /tmp/.ferrion-sub-$next/home && rmdir /tmp/.ferrion-sub-$next; "
+            "ferrion-run --no-network sleep 2 & p2=$!; "
+            "sub2=''; for i in $(seq 1 20); do sub2=$(ls -1a /tmp | grep '^\\.ferrion-sub-' | grep -v \"^${sub}$\" | head -n 1); [ -n \"$sub2\" ] && break; sleep 0.1; done; "
+            "echo LIVE_SUB=$sub2; "
+            "[ -n \"$sub2\" ] && ln -s /home/user/Documents /tmp/$sub2/home/escape && echo LINK_PLANTED=1; "
+            "wait $p2; echo LIVE_DONE=$?; "
+            "echo AFTER_P2=$(ls -1a /tmp | grep '^\\.ferrion-sub-' | tr '\\n' ',')"
+        )
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-plant",
+            f"ferrion-run pfr1-nested-parent -c {shlex.quote(plant_script)}",
+            timeout=90,
+        )
+        _, doc_after = pfr1_run_as_user(vm, transcript, "n-plant-docs", "cat /home/user/Documents/secret.txt")
+        if "PRE_PLANT_RC=125" not in out:
+            problems.append(f"pre-planted .ferrion-sub-<next>/home symlink was not refused with 125: {out.strip()[:160]}")
+        if "LINK_PLANTED=1" not in out:
+            problems.append(f"live symlink was not planted inside active .ferrion-sub dir: {out.strip()[:160]}")
+        if not re.search(r"(?m)^AFTER_P1=\s*$", out) or not re.search(r"(?m)^AFTER_P2=\s*$", out):
+            problems.append(f"no-follow cleanup left .ferrion-sub dir behind: {out.strip()[:200]}")
+        if "PFR1-DOC-SECRET" not in doc_after:
+            problems.append("no-follow cleanup damaged /home/user/Documents/secret.txt")
+
+        swap_ro_script = (
+            "rm -rf /home/user/Pictures/swap-dir /home/user/Pictures/swap-old && "
+            "mkdir -p /home/user/Pictures/swap-dir && "
+            "echo INSIDE-OK > /home/user/Pictures/swap-dir/ok.txt && "
+            "(ferrion-run --read-only /home/user/Pictures/swap-dir --no-network "
+            "bash -c 'echo CHILD_READY; sleep 2; cat /home/user/Pictures/swap-dir/secret.txt 2>&1 || true' "
+            "</dev/null 2>&1 | cat > /tmp/swap-ro.out) & cp=$!; "
+            "for i in $(seq 1 30); do grep -q CHILD_READY /tmp/swap-ro.out 2>/dev/null && break; sleep 0.1; done; "
+            "mv /home/user/Pictures/swap-dir /home/user/Pictures/swap-old 2>/tmp/swap-ro.err; "
+            "mv_rc=$?; echo SWAP_RO_MV_RC=$mv_rc; "
+            "if [ \"$mv_rc\" -eq 0 ]; then ln -s /home/user/Documents /home/user/Pictures/swap-dir; fi; "
+            "wait $cp; "
+            "echo SWAP_RO_ERR=$(tr '\\n' ' ' < /tmp/swap-ro.err); "
+            "echo SWAP_RO_OUT=$(tr '\\n' ' ' < /tmp/swap-ro.out); "
+            "rm -rf /home/user/Pictures/swap-dir /home/user/Pictures/swap-old /tmp/swap-ro.out /tmp/swap-ro.err"
+        )
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-swap-ro",
+            f"ferrion-run pfr1-nested-parent -c {shlex.quote(swap_ro_script)}",
+            timeout=60,
+        )
+        if "SWAP_RO_MV_RC=0" in out or "SWAP_RO_MV_RC=" not in out or "busy" not in out.lower() or "PFR1-DOC-SECRET" in out:
+            problems.append(f"parent swap of live child --ro root was not refused with EBUSY: {out.strip()[:200]}")
+
+        swap_home_script = (
+            "rm -f /tmp/swap-home.out /tmp/swap-home.err && "
+            "(ferrion-run --no-network "
+            "bash -c 'echo HOME_READY; sleep 2; echo SWAP-WRITE > \"$HOME/swap-pwn.txt\" 2>&1; cat \"$HOME/secret.txt\" 2>&1 || true' "
+            "</dev/null 2>&1 | cat > /tmp/swap-home.out) & cp=$!; "
+            "sub=''; for i in $(seq 1 30); do "
+            "grep -q HOME_READY /tmp/swap-home.out 2>/dev/null && sub=$(ls -1a /tmp | grep '^\\.ferrion-sub-' | head -n 1); "
+            "[ -n \"$sub\" ] && break; sleep 0.1; done; "
+            "echo SWAP_HOME_SUB=$sub; "
+            "mv \"/tmp/$sub/home\" \"/tmp/$sub/home-old\" 2>/tmp/swap-home.err; "
+            "mv_rc=$?; echo SWAP_HOME_MV_RC=$mv_rc; "
+            "if [ \"$mv_rc\" -eq 0 ]; then ln -s /home/user/Documents \"/tmp/$sub/home\"; fi; "
+            "wait $cp; "
+            "echo SWAP_HOME_ERR=$(tr '\\n' ' ' < /tmp/swap-home.err); "
+            "echo SWAP_HOME_OUT=$(tr '\\n' ' ' < /tmp/swap-home.out); "
+            "rm -f /tmp/swap-home.out /tmp/swap-home.err"
+        )
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-swap-home",
+            f"ferrion-run pfr1-nested-parent -c {shlex.quote(swap_home_script)}",
+            timeout=60,
+        )
+        _, pwn_check = pfr1_run_as_user(vm, transcript, "n-swap-pwn", "test -e /home/user/Documents/swap-pwn.txt && echo PWN_EXISTS || echo PWN_ABSENT")
+        if "SWAP_HOME_SUB=.ferrion-sub-" not in out or "SWAP_HOME_MV_RC=0" in out or "SWAP_HOME_MV_RC=" not in out or "busy" not in out.lower() or "PFR1-DOC-SECRET" in out or "PWN_EXISTS" in pwn_check:
+            problems.append(f"parent swap of live child .ferrion-sub/home was not refused with EBUSY: {out.strip()[:200]} {pwn_check.strip()}")
+
+        depth_script = (
+            "ferrion-run --no-network bash -c "
+            + shlex.quote(
+                "ferrion-run --no-network bash -c "
+                + shlex.quote(
+                    "ferrion-run --no-network bash -c "
+                    + shlex.quote("echo DEPTH4_OK; ferrion-run --no-network true")
+                )
+            )
+        )
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-depth",
+            f"ferrion-run pfr1-nested-parent -c {shlex.quote(depth_script)}",
+            timeout=90,
+        )
+        if st != 125 or "DEPTH4_OK" not in out or "EMLINK" not in out:
+            problems.append(f"depth 4 ok / depth 5 EMLINK check failed (exit {st})")
+
+        start_bg = (
+            "rm -f /tmp/nested-parent.pid /tmp/nested-ctrl.pid && "
+            "(/usr/bin/pfr1-nested-ctrl sleep 90 </dev/null >/dev/null 2>&1 & echo $! > /tmp/nested-ctrl.pid) && "
+            "(ferrion-run pfr1-nested-parent -c 'ferrion-run --no-network /usr/bin/pfr1-nested-sleeper sleep 60' "
+            "</dev/null >/dev/null 2>&1 & echo $! > /tmp/nested-parent.pid) && "
+            "for i in $(seq 1 20); do [ -s /tmp/nested-parent.pid ] && [ -s /tmp/nested-ctrl.pid ] && break; sleep 0.1; done && "
+            "echo PIDS=$(cat /tmp/nested-parent.pid),$(cat /tmp/nested-ctrl.pid)"
+        )
+        st, out = pfr1_run_as_user(vm, transcript, "n-bg-start", start_bg, timeout=60)
+        pid_match = re.search(r"(?m)^PIDS=(\d+),(\d+)\s*$", out)
+        if st != 0 or not pid_match:
+            problems.append(f"could not start parent-end nested sleeper and control (exit {st})")
+        else:
+            parent_pid, ctrl_pid = int(pid_match.group(1)), int(pid_match.group(2))
+            seen_ctrl = False
+            seen_live = False
+            for poll in range(15):
+                ctx_res = read_root_contexts(vm, f"n-live-{poll}", timeout=30)
+                if ctx_res is not None:
+                    rows, _ = ctx_res
+                    if any("pfr1-nested-ctrl" in row.name and row.euid == user_uid for row in rows):
+                        seen_ctrl = True
+                    if any("pfr1-nested-sleeper" in row.name and row.euid == user_uid for row in rows):
+                        seen_live = True
+                    if seen_ctrl and seen_live:
+                        break
+                time.sleep(0.3)
+            if not seen_ctrl:
+                problems.append("independent positive control failed: pfr1-nested-ctrl not seen in read_root_contexts")
+            if not seen_live:
+                problems.append("nested sleeper not seen live in read_root_contexts")
+            if seen_ctrl and seen_live:
+                kill_t0 = time.monotonic()
+                pfr1_run_as_user(vm, transcript, "n-bg-kill", f"kill -9 {parent_pid}", timeout=30)
+                gone_ms = None
+                after_saw_ctrl = False
+                for poll in range(6):
+                    time.sleep(0.25)
+                    ctx_res = read_root_contexts(vm, f"n-after-{poll}", timeout=30)
+                    if ctx_res is None:
+                        continue
+                    rows, _ = ctx_res
+                    ctrl_present = any("pfr1-nested-ctrl" in row.name and row.euid == user_uid for row in rows)
+                    left = [row for row in rows if "pfr1-nested-sleeper" in row.name]
+                    if ctrl_present and not left:
+                        after_saw_ctrl = True
+                        gone_ms = int((time.monotonic() - kill_t0) * 1000)
+                        break
+                if not after_saw_ctrl or gone_ms is None:
+                    problems.append("parent-end did not kill nested sleeper while independent control stayed visible in read_root_contexts")
+            pfr1_run_as_user(vm, transcript, "n-ctrl-kill", f"kill -9 {ctrl_pid} 2>/dev/null || true", timeout=30)
+
+        pfr1_run_as_user(vm, transcript, "n-shm-out", "ferrion-run-probe shm-create /pfr-nested-out OUT-SECRET", timeout=30)
+        nshm_script = (
+            "ferrion-run-probe shm-create /parent-shm PARENT-SECRET && "
+            "ferrion-run --no-network -- ferrion-run-probe shm-check /pfr-nested-out /parent-shm /nested-pool; "
+            "rc=$?; ferrion-run-probe shm-unlink /parent-shm >/dev/null 2>&1 || true; exit $rc"
+        )
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-shm",
+            f"ferrion-run pfr1-nested-parent -c {shlex.quote(nshm_script)}",
+            timeout=60,
+        )
+        pfr1_run_as_user(vm, transcript, "n-shm-clean", "ferrion-run-probe shm-unlink /pfr-nested-out 2>/dev/null || true", timeout=15)
+        for token in (
+            "SHM_OUTSIDE_API ERR 2",
+            "SHM_OUTSIDE_RAW ERR 2",
+            "SHM_PEER ERR 2",
+            "SHM_AUDIO_SHM ERR 2",
+            "SHM_OWN_CREATE OK",
+            "SHM_OWN_EXCL ERR 17",
+            "SHM_OWN_UNLINK OK",
+            "SHM_OWN_AFTER_UNLINK ERR 2",
+        ):
+            if st != 0 or token not in out:
+                problems.append(f"nested shm sub-prefix check missing {token} (exit {st})")
+                break
+
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-adhoc-true",
+            "ferrion-run --no-network -- ferrion-run --no-network -- true",
+            timeout=60,
+        )
+        if st != 0:
+            problems.append(f"ad-hoc nested ferrion-run --no-network true failed (exit {st})")
+
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-adhoc-glycin",
+            "ferrion-run --no-network --read-only /home/user/Pictures/sample.png -- glycin-load-probe load /home/user/Pictures/sample.png",
+            timeout=120,
+        )
+        if st != 0 or "GLYCIN_LOAD_OK" not in out or "sandbox=FerrionRun" not in out or "w=64 h=64" not in out:
+            problems.append(f"ad-hoc nested glycin-load-probe failed (exit {st})")
+
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-glycin",
+            "ferrion-run pfr1-nested-glycin load /home/user/Pictures/sample.png",
+            timeout=120,
+        )
+        if st != 0 or "GLYCIN_LOAD_OK" not in out or "sandbox=FerrionRun" not in out or "w=64 h=64" not in out:
+            problems.append(f"manifest-wrapped glycin-load-probe failed (exit {st})")
+
+        st, out = pfr1_run_as_user(
+            vm, transcript, "n-glycin-deny",
+            "ferrion-run pfr1-nested-glycin load /home/user/Documents/secret.txt --expect-fail",
+            timeout=60,
+        )
+        if st != 0 or "GLYCIN_REFUSED" not in out:
+            problems.append(f"manifest-wrapped glycin-load-probe did not refuse Documents (exit {st})")
+
+        (vm.out / "nested-scope.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
+        if problems:
+            return False, "; ".join(problems) + f"; see {vm.out}"
+        return True, (
+            f"narrower nested child ok, 6 wider/symlink cases refused (125), planted .ferrion-sub symlink refused and ~/Documents intact, "
+            f"depth 4 ok / depth 5 EMLINK, parent-end teardown verified via read_root_contexts, nested shm sub-prefix isolated, "
+            f"ad-hoc and manifest-wrapped glycin decoded 64x64 PNG; see {vm.out}"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 TESTS["display-socket"] = test_display_socket
+TESTS["nested-scope"] = test_nested_scope
 TESTS["daemon-continue"] = test_daemon_continue
 TESTS["relibc-signal-wait"] = test_relibc_signal_wait
 TESTS["firefox-js"] = test_firefox_js
