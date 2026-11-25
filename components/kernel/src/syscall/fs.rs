@@ -10,6 +10,7 @@ use crate::{
         file::{FileDescription, FileDescriptor, InternalFlags, LockedFileDescription},
         memory::{
             handle_notify_files, AddrSpace, GenericFlusher, Grant, PageSpan, TlbShootdownActions,
+            UnmapVec,
         },
     },
     memory::{Page, VirtualAddress, PAGE_SIZE},
@@ -488,41 +489,52 @@ pub fn mremap(
 
         let raii_frame = addr_space.borrow_frame_enforce_rw_allocated(src_span.base, token)?;
 
-        let mut token = token.token();
-        let base = addr_space.acquire_write(token.downgrade()).mmap(
-            &addr_space,
-            requested_dst_base,
-            NonZeroUsize::new(1).expect("value specified is not zero"),
-            map_flags,
-            None,
-            |page, page_flags, mapper, flusher| {
-                let frame = raii_frame.take();
-                // XXX: add_ref(RefKind::Shared) is internally done by borrow_frame_enforce_rw_allocated(src_span.base).
-                // The page does not get unref-ed as we call take() on the `raii_frame`.
-                unsafe {
-                    mapper
-                        .map_phys(page.start_address(), frame.base(), page_flags, 0)
-                        .ok_or(Error::new(ENOMEM))?
-                        .ignore();
+        let mut notify_files = UnmapVec::new();
+        let base_res = {
+            let mut lock_token = token.token();
+            addr_space.acquire_write(lock_token.downgrade()).mmap(
+                &addr_space,
+                requested_dst_base,
+                NonZeroUsize::new(1).expect("value specified is not zero"),
+                map_flags,
+                &mut notify_files,
+                |page, page_flags, mapper, flusher| {
+                    let frame = raii_frame.take();
+                    // XXX: add_ref(RefKind::Shared) is internally done by borrow_frame_enforce_rw_allocated(src_span.base).
+                    // The page does not get unref-ed as we call take() on the `raii_frame`.
+                    unsafe {
+                        mapper
+                            .map_phys(page.start_address(), frame.base(), page_flags, 0)
+                            .ok_or(Error::new(ENOMEM))?
+                            .ignore();
 
-                    flusher.queue(frame, None, TlbShootdownActions::NEW_MAPPING);
-                }
+                        flusher.queue(frame, None, TlbShootdownActions::NEW_MAPPING);
+                    }
 
-                Ok(Grant::allocated_one_page_nomap(page, page_flags))
-            },
-        )?;
+                    Ok(Grant::allocated_one_page_nomap(page, page_flags))
+                },
+            )
+        };
+        handle_notify_files(notify_files, token);
+        let base = base_res?;
 
         Ok(base.start_address().data())
     } else {
-        let base = addr_space.r#move(
-            None,
-            src_span,
-            requested_dst_base,
-            new_page_count,
-            map_flags,
-            None,
-            token.downgrade(),
-        )?;
+        let mut notify_files = UnmapVec::new();
+        let base_res = {
+            let mut lock_token = token.token();
+            addr_space.r#move(
+                None,
+                src_span,
+                requested_dst_base,
+                new_page_count,
+                map_flags,
+                &mut notify_files,
+                lock_token.downgrade(),
+            )
+        };
+        handle_notify_files(notify_files, token);
+        let base = base_res?;
 
         Ok(base.start_address().data())
     }

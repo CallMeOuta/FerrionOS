@@ -802,9 +802,9 @@ impl KernelScheme for ProcScheme {
                         requested_dst_base,
                         src_page_count.get(),
                         map.flags,
-                        Some(&mut notify_files),
+                        &mut notify_files,
                         lock_token,
-                    )?
+                    )
                 } else {
                     // SAFETY: We've compared  Arc::ptr_eq(addrspace, dst_addr_space) before
                     let mut dst_addrsp_guard =
@@ -814,7 +814,7 @@ impl KernelScheme for ProcScheme {
                         requested_dst_base,
                         src_page_count,
                         map.flags,
-                        Some(&mut notify_files),
+                        &mut notify_files,
                         |dst_page, _, dst_mapper, flusher| {
                             Grant::borrow(
                                 Arc::clone(addrspace),
@@ -830,14 +830,14 @@ impl KernelScheme for ProcScheme {
                                 false,
                             )
                         },
-                    )?
+                    )
                 };
 
                 drop(src_addr_space_guard);
 
                 handle_notify_files(notify_files, token);
 
-                Ok(result_base.start_address().data())
+                Ok(result_base?.start_address().data())
             }
             ContextHandle::Sighandler => {
                 let context = context.read(token.token());

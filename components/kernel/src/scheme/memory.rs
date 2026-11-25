@@ -97,44 +97,46 @@ impl MemoryScheme {
         let fixed = map.flags.contains(MapFlags::MAP_FIXED)
             || map.flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
 
-        let mut lock_token = token.token();
-        let page = addr_space.acquire_write(lock_token.downgrade()).mmap(
-            addr_space,
-            (map.address != 0 || fixed).then_some(span.base),
-            page_count,
-            map.flags,
-            Some(&mut notify_files),
-            |dst_page, mut flags, mapper, flusher| {
-                // The memory type suffix is part of the allocation contract,
-                // not only of physical borrows. Drivers request
-                // `zeroed@uc?phys_contiguous` specifically so CPU mappings of
-                // DMA buffers are coherent with non-snooping devices.
-                match memory_type {
-                    MemoryType::Writeback => (),
-                    MemoryType::WriteCombining => flags = flags.write_combining(true),
-                    MemoryType::Uncacheable => flags = flags.uncacheable(true),
-                    MemoryType::DeviceMemory => flags = flags.device_memory(true),
-                }
-                let span = PageSpan::new(dst_page, page_count.get());
-                if is_phys_contiguous {
-                    Ok(Grant::zeroed_phys_contiguous(
-                        span, flags, mapper, flusher, mem_policy,
-                    )?)
-                } else {
-                    Ok(Grant::zeroed(
-                        span,
-                        flags,
-                        mapper,
-                        flusher,
-                        map.flags.contains(MapFlags::MAP_SHARED),
-                    )?)
-                }
-            },
-        )?;
+        let page = {
+            let mut lock_token = token.token();
+            addr_space.acquire_write(lock_token.downgrade()).mmap(
+                addr_space,
+                (map.address != 0 || fixed).then_some(span.base),
+                page_count,
+                map.flags,
+                &mut notify_files,
+                |dst_page, mut flags, mapper, flusher| {
+                    // The memory type suffix is part of the allocation contract,
+                    // not only of physical borrows. Drivers request
+                    // `zeroed@uc?phys_contiguous` specifically so CPU mappings of
+                    // DMA buffers are coherent with non-snooping devices.
+                    match memory_type {
+                        MemoryType::Writeback => (),
+                        MemoryType::WriteCombining => flags = flags.write_combining(true),
+                        MemoryType::Uncacheable => flags = flags.uncacheable(true),
+                        MemoryType::DeviceMemory => flags = flags.device_memory(true),
+                    }
+                    let span = PageSpan::new(dst_page, page_count.get());
+                    if is_phys_contiguous {
+                        Ok(Grant::zeroed_phys_contiguous(
+                            span, flags, mapper, flusher, mem_policy,
+                        )?)
+                    } else {
+                        Ok(Grant::zeroed(
+                            span,
+                            flags,
+                            mapper,
+                            flusher,
+                            map.flags.contains(MapFlags::MAP_SHARED),
+                        )?)
+                    }
+                },
+            )
+        };
 
         handle_notify_files(notify_files, token);
 
-        Ok(page.start_address().data())
+        Ok(page?.start_address().data())
     }
     pub fn physmap(
         physical_address: usize,

@@ -70,7 +70,7 @@ pub fn fmap(
             (map.address != 0 || fixed).then_some(span.base),
             count,
             map.flags,
-            Some(&mut notify_files),
+            &mut notify_files,
             |dst_page, mut flags, mapper, flusher| {
                 flags = match memory_type {
                     0 => flags,

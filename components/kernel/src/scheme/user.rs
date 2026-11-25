@@ -628,6 +628,7 @@ impl UserInner {
             .find_free(dst_space.mmap_min, page_count)
             .ok_or(Error::new(ENOMEM))?;
 
+        let mut notify_files = UnmapVec::new();
         let head = if let Some(array) = head_buf_opt {
             let frame = array.frame();
             dst_space.mmap(
@@ -635,7 +636,7 @@ impl UserInner {
                 Some(free_span.base),
                 ONE,
                 map_flags | MAP_FIXED_NOREPLACE,
-                None,
+                &mut notify_files,
                 move |dst_page, page_flags, mapper, flusher| {
                     let is_pinned = true;
                     Grant::allocated_shared_one_page(
@@ -643,6 +644,7 @@ impl UserInner {
                     )
                 },
             )?;
+            assert!(notify_files.is_empty());
 
             CopyInfo {
                 src: Some(array),
@@ -666,7 +668,7 @@ impl UserInner {
                 Some(first_middle_dst_page),
                 middle_page_count,
                 map_flags | MAP_FIXED_NOREPLACE,
-                None,
+                &mut notify_files,
                 move |dst_page, _, mapper, flusher| {
                     let eager = true;
 
@@ -702,6 +704,7 @@ impl UserInner {
                     )
                 },
             )?;
+            assert!(notify_files.is_empty());
         }
 
         let tail = if let Some(array) = tail_buf_opt {
@@ -713,7 +716,7 @@ impl UserInner {
                 Some(tail_dst_page),
                 ONE,
                 map_flags | MAP_FIXED_NOREPLACE,
-                None,
+                &mut notify_files,
                 move |dst_page, page_flags, mapper, flusher| {
                     let is_pinned = true;
                     Grant::allocated_shared_one_page(
@@ -721,6 +724,7 @@ impl UserInner {
                     )
                 },
             )?;
+            assert!(notify_files.is_empty());
 
             CopyInfo {
                 src: Some(array),
@@ -1174,7 +1178,7 @@ impl UserInner {
                 dst_base,
                 page_count_nz,
                 map.flags,
-                Some(&mut notify_files),
+                &mut notify_files,
                 |dst_base, flags, mapper, flusher| {
                     Grant::borrow_fmap(
                         PageSpan::new(dst_base, page_count),
@@ -1186,12 +1190,12 @@ impl UserInner {
                         flusher,
                     )
                 },
-            )?
+            )
         };
 
         handle_notify_files(notify_files, token);
 
-        Ok(dst_base.start_address().data())
+        Ok(dst_base?.start_address().data())
     }
 
     pub fn call_fdwrite(

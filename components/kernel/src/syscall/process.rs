@@ -8,7 +8,7 @@ use crate::{
     context::{
         context::SyscallFrame,
         file::{FileDescription, FileDescriptor, InternalFlags, KernelSchemeRef},
-        memory::{AddrSpace, Grant, PageSpan},
+        memory::{AddrSpace, Grant, PageSpan, UnmapVec},
         ContextRef,
     },
     event,
@@ -156,13 +156,14 @@ pub unsafe fn usermode_bootstrap(bootstrap: &Bootstrap, token: &mut CleanLockTok
         let _base_page = {
             let mut lock_token = token.token();
             let mut addr_space_lock = addr_space.acquire_write(lock_token.downgrade());
-            addr_space_lock
+            let mut notify_files = UnmapVec::new();
+            let page = addr_space_lock
                 .mmap(
                     &addr_space,
                     Some(base),
                     page_count,
                     flags,
-                    None,
+                    &mut notify_files,
                     |page, flags, mapper, flusher| {
                         let shared = false;
                         Ok(Grant::zeroed(
@@ -174,7 +175,9 @@ pub unsafe fn usermode_bootstrap(bootstrap: &Bootstrap, token: &mut CleanLockTok
                         )?)
                     },
                 )
-                .expect("Failed to allocate bootstrap pages")
+                .expect("Failed to allocate bootstrap pages");
+            assert!(notify_files.is_empty());
+            page
         };
 
         // Insert kernel schemes root capabilities.
@@ -205,6 +208,7 @@ pub unsafe fn usermode_bootstrap(bootstrap: &Bootstrap, token: &mut CleanLockTok
         };
 
         let mut lock_token = token.token();
+        let mut notify_files = UnmapVec::new();
         let kernel_schemes_info_page = addr_space
             .acquire_write(lock_token.downgrade())
             .mmap(
@@ -214,7 +218,7 @@ pub unsafe fn usermode_bootstrap(bootstrap: &Bootstrap, token: &mut CleanLockTok
                 ))),
                 NonZeroUsize::new(KERNEL_METADATA_PAGE_COUNT).unwrap(),
                 MapFlags::MAP_FIXED_NOREPLACE | MapFlags::PROT_READ | MapFlags::PROT_WRITE,
-                None,
+                &mut notify_files,
                 |page, flags, mapper, flusher| {
                     let shared = false;
                     Ok(Grant::zeroed(
@@ -227,6 +231,7 @@ pub unsafe fn usermode_bootstrap(bootstrap: &Bootstrap, token: &mut CleanLockTok
                 },
             )
             .expect("Failed to allocate kernel scheme info page");
+        assert!(notify_files.is_empty());
 
         let mut cursor = kernel_schemes_info_page.start_address().data();
         const HEADER_SIZE: usize = size_of::<usize>();
