@@ -28,6 +28,7 @@ features = [
     "std",
     "medium-ethernet", "medium-ip",
     "proto-ipv4",
+    "auto-icmp-echo-reply",
     "socket-raw", "socket-icmp", "socket-udp", "socket-tcp", "socket-tcp-cubic",
     "iface-max-addr-count-8",
     "log"
