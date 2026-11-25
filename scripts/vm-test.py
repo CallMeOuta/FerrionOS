@@ -7881,10 +7881,16 @@ def test_one_password(args, out):
             vm.type("password\n")
             if not vm.wait_serial(r"root:.*# ", 20, since):
                 return False, f"no root shell after claim check; see {vm.out}"
-            _, post_claim = run_status(vm, "ls -ld /var/run/unlock-session /var/run/unlock-session/claimed")
-            (vm.out / "claim-check.txt").write_text(f"pre:\n{pre_claim}\npost:\n{post_claim}\n")
-            if "drwx------" not in post_claim or "/var/run/unlock-session/claimed" not in post_claim:
-                return False, f"claim marker not in root-only 0700 /var/run/unlock-session: {post_claim!r}"
+            claim_file_rc, _ = run_status(vm, "test -f /var/run/unlock-session/claimed")
+            claim_dir_rc, claim_dir_stat = run_status(vm, "stat -c '%a %u %g' /var/run/unlock-session")
+            (vm.out / "claim-check.txt").write_text(
+                f"pre:\n{pre_claim}\nclaimed_rc={claim_file_rc}\ndir_rc={claim_dir_rc} stat={claim_dir_stat!r}\n"
+            )
+            if claim_file_rc != 0 or claim_dir_rc != 0 or claim_dir_stat.strip() != "700 0 0":
+                return False, (
+                    f"claim marker not in root-only 0700 /var/run/unlock-session "
+                    f"(claimed_rc={claim_file_rc}, dir_rc={claim_dir_rc}, stat={claim_dir_stat.strip()!r})"
+                )
             run_status(vm, "rm -rf /var/run/unlock-session")
             since = vm.mark()
             vm.type("exit\n")
