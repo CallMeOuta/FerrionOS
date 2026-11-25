@@ -224,6 +224,18 @@ directory = true
 mode = 0o755
 
 [[files]]
+path = "/usr/share/ferrion"
+data = ""
+directory = true
+mode = 0o755
+
+[[files]]
+path = "/usr/share/ferrion/apps"
+data = ""
+directory = true
+mode = 0o755
+
+[[files]]
 path = "/share"
 data = "usr/share"
 symlink = true
@@ -243,6 +255,18 @@ mode = 0o755
 
 [[files]]
 path = "/var/lib"
+data = ""
+directory = true
+mode = 0o755
+
+[[files]]
+path = "/var/lib/ferrion"
+data = ""
+directory = true
+mode = 0o755
+
+[[files]]
+path = "/var/lib/ferrion/grants"
 data = ""
 directory = true
 mode = 0o755

@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use ferrion_manifest::{GrantsFile, Manifest, effective_grant};
 use serde::Deserialize;
 
 #[cfg(target_os = "redox")]
@@ -9,9 +10,29 @@ pub mod launch;
 #[cfg(target_os = "redox")]
 pub mod escape;
 
+pub mod manifest;
 pub mod sessions;
 
 pub const NETWORK_SCHEMES: [&str; 4] = ["ip", "icmp", "tcp", "udp"];
+
+pub const AUDIO_SCHEMES: [&str; 1] = ["audio"];
+
+pub const MANIFEST_DIR: &str = "/usr/share/ferrion/apps";
+
+pub const GRANTS_DIR: &str = "/var/lib/ferrion/grants";
+
+pub const APP_HOME_ROOT_REL: &str = ".local/share/ferrion/apps";
+
+pub const MAX_PATH_ENTRIES: usize = 64;
+
+pub const FOLDER_CAPABILITIES: [(&str, &str, &str); 6] = [
+    ("files-documents", "Documents", "XDG_DOCUMENTS_DIR"),
+    ("files-downloads", "Downloads", "XDG_DOWNLOAD_DIR"),
+    ("files-desktop", "Desktop", "XDG_DESKTOP_DIR"),
+    ("files-pictures", "Pictures", "XDG_PICTURES_DIR"),
+    ("files-music", "Music", "XDG_MUSIC_DIR"),
+    ("files-videos", "Videos", "XDG_VIDEOS_DIR"),
+];
 
 pub const SCOPED_SCHEMES: [&str; 13] = [
     "event",
@@ -100,15 +121,28 @@ must be a terminal, a pipe or the null device: ferrion-run refuses to start when
 one is a socket or a file on disk. ferrion-run waits for PROGRAM; the session's
 files close when ferrion-run exits, also for programs PROGRAM left running.
 
-A profile in /etc/ferrion-run/<file name of PROGRAM>.toml applies to every launch
-of that program:
+A manifest in /usr/share/ferrion/apps/<package>.toml whose exec matches the
+canonical system path of PROGRAM (/usr or /bin) replaces profiles: grants come
+from the intersection of that manifest and /var/lib/ferrion/grants/<uid>.toml
+(root-owned; missing file uses class defaults, malformed file is refused).
+Under a manifest, --files, --read-only, --clone, --pty, --display and --pass-fd
+are refused; HOME is a persistent per-app folder (~/.local/share/ferrion/apps/<id>/home);
+granted folders are advertised in XDG_*_DIR and $HOME/.config/user-dirs.dirs;
+display grants the compositor's Wayland socket as wayland-0 in a private
+XDG_RUNTIME_DIR; network-internet gates ip, icmp, tcp and udp (network-local
+and network-loopback-shared fail closed until netstack views land);
+audio-playback gates the audio scheme (capture still requires audiod's grant);
+sudo is never passed.
+
+A legacy profile in /etc/ferrion-run/<file name of PROGRAM>.toml is deprecated
+and read only when no manifest matches:
   version = 1
   network = false     # the same as --no-network; true leaves the network to the
                       # command line
   allow_sudo = true   # optional, default false. WARNING: through sudo PROGRAM can
                       # get a namespace with the network, every other scheme and
                       # the whole file system, so the session no longer holds.
-Apart from allow_sudo, a profile and the command line only take access away.
+Apart from allow_sudo in legacy profiles, flags only take access away.
 ferrion-run exits with 125 when it refuses to start PROGRAM, and with PROGRAM's
 status otherwise.
 ";
@@ -292,11 +326,91 @@ pub fn parse_profile(text: &str) -> Result<Profile, String> {
     Ok(profile)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestPolicy {
+    pub id: String,
+    pub resolved_exec: PathBuf,
+    pub allow_network: bool,
+    pub allow_audio: bool,
+    pub allow_display: bool,
+    pub granted_folders: Vec<(&'static str, &'static str, &'static str)>,
+    pub allow_home: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchPolicy {
+    Manifest(ManifestPolicy),
+    Legacy {
+        withhold_network: bool,
+        allow_sudo: bool,
+    },
+}
+
+pub fn manifest_policy(
+    manifest: &Manifest,
+    grants: &GrantsFile,
+    options: &Options,
+    resolved_exec: PathBuf,
+) -> Result<ManifestPolicy, String> {
+    if !options.grants.is_empty() || options.pty || options.display || options.pass_fd.is_some() {
+        return Err(format!(
+            "grants for {} come from the grant record, not command-line flags",
+            manifest.id
+        ));
+    }
+    let allow_network =
+        effective_grant(manifest, grants, "network-internet") && !options.no_network;
+    let allow_audio = effective_grant(manifest, grants, "audio-playback");
+    let allow_display = effective_grant(manifest, grants, "display");
+    let granted_folders = FOLDER_CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|(cap, _, _)| effective_grant(manifest, grants, cap))
+        .collect();
+    let allow_home = effective_grant(manifest, grants, "files-home");
+    assert!(!effective_grant(manifest, grants, "sudo"));
+    Ok(ManifestPolicy {
+        id: manifest.id.clone(),
+        resolved_exec,
+        allow_network,
+        allow_audio,
+        allow_display,
+        granted_folders,
+        allow_home,
+    })
+}
+
+pub fn is_system_exec_path(canonical: &str) -> bool {
+    canonical.starts_with("/usr/") || canonical.starts_with("/bin/")
+}
+
+pub fn normalize_system_exec(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("/bin/") {
+        format!("/usr/bin/{rest}")
+    } else {
+        path.to_owned()
+    }
+}
+
+pub fn format_user_dirs(entries: &[(&str, String)]) -> String {
+    let mut out = String::new();
+    for (var, path) in entries {
+        assert!(!path.contains(['\n', '\0']));
+        let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+        out.push_str(var);
+        out.push_str("=\"");
+        out.push_str(&escaped);
+        out.push_str("\"\n");
+    }
+    out
+}
+
 pub fn child_schemes(
     caller: &[String],
     withhold_network: bool,
     allow_sudo: bool,
     pty: bool,
+    allow_audio: bool,
 ) -> Vec<String> {
     caller
         .iter()
@@ -306,6 +420,7 @@ pub fn child_schemes(
                 || (!withhold_network && NETWORK_SCHEMES.contains(&name))
                 || (allow_sudo && name == "sudo")
                 || (pty && name == "pty")
+                || (allow_audio && AUDIO_SCHEMES.contains(&name))
         })
         .cloned()
         .collect()

@@ -15,10 +15,11 @@ name = "ferrion-run-probe"
 path = "src/bin/ferrion-run-probe.rs"
 
 [dependencies]
+ferrion-manifest = { path = "../../ferrion-manifest/crate" }
 ferrion-scope = { path = "../../ferrion-scope/crate" }
 libc = "0.2.191"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 
 [target.'cfg(target_os = "redox")'.dependencies]
 libredox = { version = "0.2.0", features = ["mkns"] }

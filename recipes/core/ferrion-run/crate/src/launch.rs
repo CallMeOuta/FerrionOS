@@ -1,6 +1,7 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -15,7 +16,8 @@ use libredox::flag::{F_SETFD, O_CLOEXEC, O_RDWR};
 
 use crate::sessions::{CLONE_PREFIX, PID, clone_dirs, state_root};
 use crate::{
-    GrantKind, Options, PASSED_VARIABLES, SYSTEM_PATHS, check_pass_fd, check_stdio, child_schemes,
+    FOLDER_CAPABILITIES, GrantKind, LaunchPolicy, ManifestPolicy, Options, PASSED_VARIABLES,
+    SYSTEM_PATHS, check_pass_fd, check_stdio, child_schemes, format_user_dirs,
     is_valid_wayland_display, new_handles, parse_snapshot, to_close,
 };
 
@@ -211,6 +213,123 @@ fn validate_display_socket() -> Result<String, String> {
     Ok(socket_text)
 }
 
+fn attach_display_socket(
+    dir: &SessionDir,
+    scope: &mut Scope,
+    real_socket: String,
+) -> Result<String, String> {
+    let run_path = dir.path().join("run");
+    private_dir(&run_path)?;
+    let run_text = text(&run_path)?;
+    scope.grants.push(Grant {
+        virt: run_text.clone(),
+        real: run_text.clone(),
+        access: Access::ReadWrite,
+        layer: None,
+    });
+    scope.grants.push(Grant {
+        virt: format!("{run_text}/wayland-0"),
+        real: real_socket,
+        access: Access::Socket,
+        layer: None,
+    });
+    Ok(run_text)
+}
+
+fn ensure_owned_dir_component(parent: &Path, name: &str, uid: u32) -> Result<PathBuf, String> {
+    let child = parent.join(name);
+    match fs::symlink_metadata(&child) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(create_err) = fs::DirBuilder::new().mode(0o700).create(&child)
+                && create_err.kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(format!("cannot create {}: {create_err}", child.display()));
+            }
+        }
+        Err(e) => {
+            return Err(format!(
+                "unsafe-app-home: cannot stat {}: {e}",
+                child.display()
+            ));
+        }
+        Ok(_) => {}
+    }
+    let meta = fs::symlink_metadata(&child)
+        .map_err(|e| format!("unsafe-app-home: cannot stat {}: {e}", child.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("unsafe-app-home: {} is a symlink", child.display()));
+    }
+    if !meta.is_dir() {
+        return Err(format!(
+            "unsafe-app-home: {} is not a directory",
+            child.display()
+        ));
+    }
+    if meta.uid() != uid {
+        return Err(format!(
+            "unsafe-app-home: {} is not owned by uid {uid}",
+            child.display()
+        ));
+    }
+    Ok(child)
+}
+
+fn ensure_app_home(caller_home: &Path, id: &str) -> Result<(PathBuf, PathBuf), String> {
+    let uid = unsafe { libc::geteuid() };
+    let cur = ensure_owned_dir_component(caller_home, ".local", uid)?;
+    let cur = ensure_owned_dir_component(&cur, "share", uid)?;
+    let cur = ensure_owned_dir_component(&cur, "ferrion", uid)?;
+    let apps_root = ensure_owned_dir_component(&cur, "apps", uid)?;
+    let app_dir = ensure_owned_dir_component(&apps_root, id, uid)?;
+    let app_home = ensure_owned_dir_component(&app_dir, "home", uid)?;
+    Ok((apps_root, app_home))
+}
+
+fn write_user_dirs_in_scope(app_home: &str, content: &str) -> Result<(), String> {
+    let uid = unsafe { libc::geteuid() };
+    let config_dir = ensure_owned_dir_component(Path::new(app_home), ".config", uid)?;
+    let target = config_dir.join("user-dirs.dirs");
+    match fs::symlink_metadata(&target) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Err(format!(
+                    "unsafe-app-home: {} is a symlink or not a regular file",
+                    target.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "unsafe-app-home: cannot stat {}: {e}",
+                target.display()
+            ));
+        }
+    }
+    let tmp = config_dir.join(format!(".user-dirs.dirs.tmp.{}", process::id()));
+    if let Ok(meta) = fs::symlink_metadata(&tmp) {
+        if meta.file_type().is_symlink() {
+            return Err(format!("unsafe-app-home: {} is a symlink", tmp.display()));
+        }
+        let _ = fs::remove_file(&tmp);
+    }
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .map_err(|e| format!("unsafe-app-home: cannot create {}: {e}", tmp.display()))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("unsafe-app-home: cannot write {}: {e}", tmp.display()))?;
+    }
+    fs::rename(&tmp, &target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("unsafe-app-home: cannot replace {}: {e}", target.display())
+    })
+}
+
 enum Life {
     Preparing,
     Ran { clones: usize },
@@ -274,9 +393,122 @@ struct Prepared {
     run_dir: Option<String>,
     scope: Scope,
     clones: usize,
+    xdg_entries: Vec<(&'static str, String)>,
+    user_dirs: Option<String>,
 }
 
-fn prepare_session(options: &Options) -> Result<Prepared, String> {
+fn prepare_manifest_session(policy: &ManifestPolicy) -> Result<Prepared, String> {
+    let display_socket = if policy.allow_display && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        Some(validate_display_socket()?)
+    } else {
+        None
+    };
+    let caller_home_raw = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    let caller_home =
+        fs::canonicalize(&caller_home_raw).map_err(|e| format!("cannot resolve HOME: {e}"))?;
+    let caller_home_text = text(&caller_home)?;
+    let root = state_root()?;
+    private_dir(&root)?;
+    let root =
+        fs::canonicalize(&root).map_err(|e| format!("cannot resolve {}: {e}", root.display()))?;
+    let root_text = text(&root)?;
+    let (apps_root, app_home_path) = ensure_app_home(&caller_home, &policy.id)?;
+    let apps_root_text = text(&apps_root)?;
+    let app_home_text = text(&app_home_path)?;
+
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let id = format!("{seconds}-{}", process::id());
+    let dir = SessionDir::create(root.join(&id))?;
+    dir.write_pid()?;
+    let tmp = dir.path().join("tmp");
+    private_dir(&tmp)?;
+
+    let mut scope = Scope {
+        grants: Vec::new(),
+        hidden: vec![root_text.clone(), apps_root_text.clone()],
+    };
+    if policy.allow_home {
+        scope.grants.push(Grant {
+            virt: caller_home_text.clone(),
+            real: caller_home_text.clone(),
+            access: Access::ReadWrite,
+            layer: None,
+        });
+    }
+    let uid = unsafe { libc::geteuid() };
+    let mut xdg_entries = Vec::new();
+    for &(_cap, folder_name, xdg_var) in &policy.granted_folders {
+        let candidate = caller_home.join(folder_name);
+        let Ok(meta) = fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != uid {
+            continue;
+        }
+        let Ok(real) = fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if real != candidate {
+            continue;
+        }
+        let real_text = text(&real)?;
+        if within(&real_text, &root_text) || within(&real_text, &apps_root_text) {
+            continue;
+        }
+        if !scope.grants.iter().any(|g| g.virt == real_text) {
+            scope.grants.push(Grant {
+                virt: real_text.clone(),
+                real: real_text.clone(),
+                access: Access::ReadWrite,
+                layer: None,
+            });
+        }
+        xdg_entries.push((xdg_var, real_text));
+    }
+    for system in SYSTEM_PATHS {
+        if fs::symlink_metadata(system).is_ok() && !scope.grants.iter().any(|g| g.virt == system) {
+            scope.grants.push(Grant {
+                virt: system.into(),
+                real: system.into(),
+                access: Access::ReadOnly,
+                layer: None,
+            });
+        }
+    }
+    scope.grants.push(Grant {
+        virt: app_home_text.clone(),
+        real: app_home_text.clone(),
+        access: Access::ReadWrite,
+        layer: None,
+    });
+    if !scope.grants.iter().any(|g| g.virt == "/tmp") {
+        scope.grants.push(Grant {
+            virt: "/tmp".into(),
+            real: text(&tmp)?,
+            access: Access::ReadWrite,
+            layer: None,
+        });
+    }
+    let run_dir = match display_socket {
+        Some(real_socket) => Some(attach_display_socket(&dir, &mut scope, real_socket)?),
+        None => None,
+    };
+    let user_dirs = Some(format_user_dirs(&xdg_entries));
+    Ok(Prepared {
+        dir,
+        home: app_home_text,
+        run_dir,
+        scope,
+        clones: 0,
+        xdg_entries,
+        user_dirs,
+    })
+}
+
+fn prepare_legacy_session(options: &Options) -> Result<Prepared, String> {
     let display_socket = if options.display {
         Some(validate_display_socket()?)
     } else {
@@ -366,25 +598,9 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
             layer: None,
         });
     }
-    let run_dir = if let Some(real_socket) = display_socket {
-        let run_path = dir.path().join("run");
-        private_dir(&run_path)?;
-        let run_text = text(&run_path)?;
-        scope.grants.push(Grant {
-            virt: run_text.clone(),
-            real: run_text.clone(),
-            access: Access::ReadWrite,
-            layer: None,
-        });
-        scope.grants.push(Grant {
-            virt: format!("{run_text}/wayland-0"),
-            real: real_socket,
-            access: Access::Socket,
-            layer: None,
-        });
-        Some(run_text)
-    } else {
-        None
+    let run_dir = match display_socket {
+        Some(real_socket) => Some(attach_display_socket(&dir, &mut scope, real_socket)?),
+        None => None,
     };
     Ok(Prepared {
         dir,
@@ -392,6 +608,8 @@ fn prepare_session(options: &Options) -> Result<Prepared, String> {
         run_dir,
         scope,
         clones,
+        xdg_entries: Vec::new(),
+        user_dirs: None,
     })
 }
 
@@ -453,7 +671,13 @@ impl Drop for ProxySession {
     }
 }
 
-fn child_env(options: &Options, home: &str, run_dir: Option<&str>) -> Vec<(OsString, OsString)> {
+fn child_env(
+    options: &Options,
+    home: &str,
+    run_dir: Option<&str>,
+    manifest_mode: bool,
+    xdg_entries: &[(&'static str, String)],
+) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = PASSED_VARIABLES
         .iter()
         .filter_map(|name| std::env::var_os(name).map(|v| (OsString::from(name), v)))
@@ -462,6 +686,14 @@ fn child_env(options: &Options, home: &str, run_dir: Option<&str>) -> Vec<(OsStr
         if let Some(value) = std::env::var_os(name) {
             env.retain(|(n, _)| n != name);
             env.push((name.clone(), value));
+        }
+    }
+    if manifest_mode {
+        for &(_, _, xdg_var) in &FOLDER_CAPABILITIES {
+            env.retain(|(n, _)| n != xdg_var);
+        }
+        for (xdg_var, path) in xdg_entries {
+            env.push((OsString::from(xdg_var), OsString::from(path)));
         }
     }
     env.retain(|(n, _)| {
@@ -482,13 +714,19 @@ fn child_env(options: &Options, home: &str, run_dir: Option<&str>) -> Vec<(OsStr
 
 fn enter(
     options: &Options,
+    exec_path: &OsStr,
     namespace: usize,
     start: &Path,
     env: &[(OsString, OsString)],
+    home: &str,
+    user_dirs: Option<&str>,
 ) -> String {
     let result = (|| -> Result<(), String> {
         let old = call::setns(namespace).map_err(|e| format!("cannot enter the namespace: {e}"))?;
         call::close(old).map_err(|e| format!("cannot close the caller's namespace: {e}"))?;
+        if let Some(content) = user_dirs {
+            write_user_dirs_in_scope(home, content)?;
+        }
         let (proc_fd, thread_fd) = unsafe { (redox_cur_procfd_v0(), redox_cur_thrfd_v0()) };
         let before = file_table(thread_fd)?;
         std::env::set_current_dir(start)
@@ -539,12 +777,12 @@ fn enter(
     if let Err(reason) = result {
         return reason;
     }
-    let error = process::Command::new(&options.program)
+    let error = process::Command::new(exec_path)
         .args(&options.args)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)))
         .exec();
-    format!("cannot run {}: {error}", options.program.to_string_lossy())
+    format!("cannot run {}: {error}", exec_path.to_string_lossy())
 }
 
 fn read_report(session: usize) -> Vec<u8> {
@@ -637,7 +875,7 @@ pub enum Outcome {
     Exited(i32),
 }
 
-pub fn run(options: &Options, withhold_network: bool, allow_sudo: bool) -> Outcome {
+pub fn run(options: &Options, policy: &LaunchPolicy) -> Outcome {
     for fd in 0..3 {
         match path_of(fd) {
             Ok(path) => {
@@ -663,12 +901,20 @@ pub fn run(options: &Options, withhold_network: bool, allow_sudo: bool) -> Outco
         Ok(cwd) => cwd,
         Err(e) => return Outcome::Refused(format!("cannot read the working directory: {e}")),
     };
-    let mut prepared = match prepare_session(options) {
-        Ok(prepared) => prepared,
-        Err(reason) => return Outcome::Refused(reason),
+    let mut prepared = match policy {
+        LaunchPolicy::Manifest(manifest_policy) => {
+            match prepare_manifest_session(manifest_policy) {
+                Ok(prepared) => prepared,
+                Err(reason) => return Outcome::Refused(reason),
+            }
+        }
+        LaunchPolicy::Legacy { .. } => match prepare_legacy_session(options) {
+            Ok(prepared) => prepared,
+            Err(reason) => return Outcome::Refused(reason),
+        },
     };
     assert!(prepared.dir.path().join(PID).is_file());
-    let outcome = launch(options, withhold_network, allow_sudo, &cwd, &mut prepared);
+    let outcome = launch(options, policy, &cwd, &mut prepared);
     if prepared.dir.has_run() {
         match clone_dirs(prepared.dir.path()) {
             Ok(actual) if actual.len() != prepared.clones => {
@@ -702,13 +948,19 @@ pub fn run(options: &Options, withhold_network: bool, allow_sudo: bool) -> Outco
 
 fn launch(
     options: &Options,
-    withhold_network: bool,
-    allow_sudo: bool,
+    policy: &LaunchPolicy,
     cwd: &Path,
     prepared: &mut Prepared,
 ) -> Outcome {
+    let (withhold_network, allow_sudo, pty, allow_audio, manifest_mode) = match policy {
+        LaunchPolicy::Manifest(p) => (!p.allow_network, false, false, p.allow_audio, true),
+        LaunchPolicy::Legacy {
+            withhold_network,
+            allow_sudo,
+        } => (*withhold_network, *allow_sudo, options.pty, false, false),
+    };
     let schemes = match caller_schemes() {
-        Ok(caller) => child_schemes(&caller, withhold_network, allow_sudo, options.pty),
+        Ok(caller) => child_schemes(&caller, withhold_network, allow_sudo, pty, allow_audio),
         Err(reason) => return Outcome::Refused(reason),
     };
     let mut proxy = match ProxySession::open(&prepared.scope) {
@@ -739,7 +991,13 @@ fn launch(
         }
         _ => PathBuf::from(&prepared.home),
     };
-    let env = child_env(options, &prepared.home, prepared.run_dir.as_deref());
+    let env = child_env(
+        options,
+        &prepared.home,
+        prepared.run_dir.as_deref(),
+        manifest_mode,
+        &prepared.xdg_entries,
+    );
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         let _ = call::close(namespace);
@@ -748,8 +1006,20 @@ fn launch(
             std::io::Error::last_os_error()
         ));
     }
+    let exec_path = match policy {
+        LaunchPolicy::Manifest(p) => p.resolved_exec.as_os_str(),
+        LaunchPolicy::Legacy { .. } => options.program.as_os_str(),
+    };
     if pid == 0 {
-        let reason = enter(options, namespace, &start, &env);
+        let reason = enter(
+            options,
+            exec_path,
+            namespace,
+            &start,
+            &env,
+            &prepared.home,
+            prepared.user_dirs.as_deref(),
+        );
         eprintln!("ferrion-run: {reason}");
         unsafe { libc::_exit(crate::EXIT_REFUSED) };
     }
