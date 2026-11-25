@@ -31,12 +31,21 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         self.can_send()
     }
 
-    fn can_recv(&mut self, _data: &Self::DataT) -> bool {
-        smoltcp::socket::tcp::Socket::can_recv(self)
+    fn can_recv(&mut self, data: &Self::DataT) -> bool {
+        if data.is_some() {
+            self.is_active()
+        } else {
+            smoltcp::socket::tcp::Socket::can_recv(self)
+        }
     }
 
     fn may_recv(&self) -> bool {
-        self.may_recv()
+        match self.state() {
+            smoltcp::socket::tcp::State::Listen
+            | smoltcp::socket::tcp::State::SynSent
+            | smoltcp::socket::tcp::State::SynReceived => true,
+            _ => smoltcp::socket::tcp::Socket::may_recv(self),
+        }
     }
 
     fn hop_limit(&self) -> u8 {
