@@ -29,13 +29,14 @@ pub struct if_nameindex {
 pub const IF_NAMESIZE: usize = 16;
 
 /// cbindgen:ignore
-const IF_STUB_INTERFACE: *const c_char = (c"stub").as_ptr();
-
-/// cbindgen:ignore
 const INTERFACES: &[if_nameindex] = &[
     if_nameindex {
         if_index: 1,
-        if_name: IF_STUB_INTERFACE,
+        if_name: (c"lo").as_ptr(),
+    },
+    if_nameindex {
+        if_index: 2,
+        if_name: (c"eth0").as_ptr(),
     },
     if_nameindex {
         if_index: 0,
@@ -57,12 +58,27 @@ pub unsafe extern "C" fn if_freenameindex(_s: *mut if_nameindex) {}
 /// Returns NULL in case of not found + ERRNO being set to ENXIO.
 /// Currently only checks against inteface index 1.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn if_indextoname(idx: c_uint, _buf: *mut c_char) -> *const c_char {
-    if idx == 1 {
-        return IF_STUB_INTERFACE;
+pub unsafe extern "C" fn if_indextoname(idx: c_uint, buf: *mut c_char) -> *const c_char {
+    let name: &[u8] = match idx {
+        1 => b"lo\0",
+        2 => b"eth0\0",
+        _ => {
+            ERRNO.set(ENXIO);
+            return null::<c_char>();
+        }
+    };
+    if buf.is_null() {
+        return match idx {
+            1 => (c"lo").as_ptr(),
+            2 => (c"eth0").as_ptr(),
+            _ => null::<c_char>(),
+        };
     }
-    ERRNO.set(ENXIO);
-    null::<c_char>()
+    assert!(name.len() <= IF_NAMESIZE);
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr().cast::<c_char>(), buf, name.len());
+    }
+    buf.cast_const()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/if_nameindex.html>.
@@ -86,10 +102,11 @@ pub unsafe extern "C" fn if_nametoindex(name: *const c_char) -> c_uint {
         return 0;
     }
     let name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("") };
-    if name.eq("stub") {
-        return 1;
+    match name {
+        "lo" => 1,
+        "eth0" => 2,
+        _ => 0,
     }
-    0
 }
 
 // Nonstandard, used alongside ifaddrs.h
