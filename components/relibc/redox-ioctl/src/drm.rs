@@ -70,6 +70,8 @@ define_ioctl_data! {
 
 pub const PRIME_HANDLE_TO_FD: u64 = 0x2D;
 pub const PRIME_FD_TO_HANDLE: u64 = 0x2E;
+pub const PRIME_WIRE_RDWR: u32 = 1 << 0;
+pub const PRIME_WIRE_CLOEXEC: u32 = 1 << 1;
 define_ioctl_data! {
     struct drm_prime_handle, DrmPrimeHandle {
         handle: u32,

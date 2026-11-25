@@ -5,13 +5,13 @@ use redox_ioctl::{
     drm::*,
     virtgpu::{self, GEM_CLOSE, VirtgpuContextInit, drm_gem_close, drm_virtgpu_context_set_param},
 };
-use syscall::flag::{F_SETFD, O_RDWR};
+use syscall::flag::F_SETFD;
 
 use crate::{
     error::{Errno, Result},
     header::{
         errno::{EFAULT, EINVAL},
-        fcntl::sys::FD_CLOEXEC,
+        fcntl::{O_CLOEXEC, O_RDONLY, O_RDWR, sys::FD_CLOEXEC},
     },
     platform::{self, types::c_int},
 };
@@ -239,14 +239,30 @@ impl Dev {
 
     unsafe fn prime_handle_to_fd(&self, mut buf: IoctlBuffer) -> Result<c_int> {
         let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
-        let writable = (data.flags & O_RDWR as u32) != 0;
+        let known = O_CLOEXEC as u32 | O_RDWR as u32;
+        if (data.flags & !known) != 0 {
+            return Err(Errno(EINVAL));
+        }
+        let cloexec = (data.flags & O_CLOEXEC as u32) != 0;
+        let access = data.flags & O_RDWR as u32;
+        let writable = match access {
+            0 => false,
+            x if x == O_RDONLY as u32 => false,
+            x if x == O_RDWR as u32 => true,
+            _ => return Err(Errno(EINVAL)),
+        };
+        let wire_flags = (if writable { PRIME_WIRE_RDWR } else { 0 })
+            | (if cloexec { PRIME_WIRE_CLOEXEC } else { 0 });
         let mut metadata = [0u8; 16];
         metadata[0..8].copy_from_slice(&PRIME_HANDLE_TO_FD.to_ne_bytes());
         metadata[8..12].copy_from_slice(&data.handle.to_ne_bytes());
-        metadata[12..16].copy_from_slice(&(if writable { 1u32 } else { 0u32 }).to_ne_bytes());
+        metadata[12..16].copy_from_slice(&wire_flags.to_ne_bytes());
         let new_fd = redox_rt::sys::dup(self.fd as usize, &metadata)?;
-        if (data.flags & FD_CLOEXEC as u32) != 0 {
-            redox_rt::sys::fcntl(new_fd as usize, F_SETFD, FD_CLOEXEC as usize)?;
+        if cloexec {
+            if let Err(err) = redox_rt::sys::fcntl(new_fd, F_SETFD, FD_CLOEXEC as usize) {
+                let _ = redox_rt::sys::close(new_fd);
+                return Err(err.into());
+            }
         }
         data.fd = new_fd as i32;
         unsafe { buf.write(data) }?;
@@ -255,10 +271,14 @@ impl Dev {
 
     unsafe fn prime_fd_to_handle(&self, mut buf: IoctlBuffer) -> Result<c_int> {
         let mut data = unsafe { buf.read::<drm_prime_handle>() }?;
+        if data.flags != 0 || data.fd < 0 {
+            return Err(Errno(EINVAL));
+        }
         let metadata = [PRIME_FD_TO_HANDLE];
+        let payload = data.flags.to_ne_bytes();
         let handle = redox_rt::sys::sys_call_wo(
             &[self.fd as usize, data.fd as usize][..],
-            &[],
+            &payload,
             syscall::CallFlags::empty(),
             &metadata,
         )?;
