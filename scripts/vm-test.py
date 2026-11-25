@@ -4132,6 +4132,13 @@ def run_wm_display_heads(args, out):
     return check(args, out, VM, root_shell, run_status)
 
 
+def run_display_edid_override(args, out):
+    """Tests /usr/lib/firmware/edid/<connector>.edid overrides on edid-override-test across valid 4K120, valid 8K120 (max_hostmem=1G), oversized, bad checksum, symlink escape, absent baseline, and Virtual-2 hotplug off/on."""
+    from display_edid_override import run_display_edid_override as check
+
+    return check(args, out, VM, root_shell, run_status, login, ROOT)
+
+
 def run_gpu_heads(args, out):
     """gpu-heads with head 1 given 1280x800 through its VNC client before boot."""
     from display_modes import run_gpu_heads as check
@@ -13623,6 +13630,7 @@ OWN_IMAGE["display-connectors"] = run_display_connectors
 OWN_IMAGE["display-modes"] = run_display_modes
 OWN_IMAGE["display-heads"] = run_display_heads
 OWN_IMAGE["wm-display-heads"] = run_wm_display_heads
+OWN_IMAGE["display-edid-override"] = run_display_edid_override
 OWN_IMAGE["gpu-heads"] = run_gpu_heads
 OWN_IMAGE["desktop-gpu"] = run_desktop_gpu
 OWN_IMAGE["mkfs-reuse"] = test_mkfs_reuse
