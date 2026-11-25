@@ -10,7 +10,7 @@ use smoltcp::socket::udp::{
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
-use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
+use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile, SocketOpts};
 use super::{parse_endpoint, recvmsg, SchemeWrapper, Smolnetd, SocketSet};
 use crate::port_set::PortSet;
 use crate::router::Router;
@@ -117,6 +117,7 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
         uid: u32,
         port_set: &mut Self::SchemeDataT,
         context: &Context,
+        _opts: &SocketOpts,
     ) -> SyscallResult<(SocketHandle, Self::DataT)> {
         let mut parts = path.split('/');
         let remote_endpoint = parse_endpoint(parts.next().unwrap_or(""));

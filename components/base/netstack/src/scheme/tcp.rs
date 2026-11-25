@@ -7,18 +7,28 @@ use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer as TcpSocketBuffer}
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
-use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
+use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile, SocketOpts};
 use super::{parse_endpoint, recvmsg, SchemeWrapper, SocketSet};
 use crate::port_set::PortSet;
 
 const SO_SNDBUF: usize = 7;
 const SO_RCVBUF: usize = 8;
+const TCP_DEFAULT_BUF_BYTES: usize = 1048576;
+const TCP_MIN_BUF_BYTES: usize = 16 * 1024;
+const TCP_MAX_BUF_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub struct TcpListenData {
+    pub endpoint: IpListenEndpoint,
+    pub rx_buf_bytes: usize,
+    pub tx_buf_bytes: usize,
+}
 
 pub type TcpScheme = SchemeWrapper<TcpSocket<'static>>;
 
 impl<'a> SchemeSocket for TcpSocket<'a> {
     type SchemeDataT = PortSet;
-    type DataT = Option<IpListenEndpoint>;
+    type DataT = Option<TcpListenData>;
     type SettingT = ();
 
     const BASE_PATH: &'static str = "/scheme/tcp/";
@@ -72,12 +82,21 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         Ok(0)
     }
 
+    fn default_buf_bytes() -> usize {
+        TCP_DEFAULT_BUF_BYTES
+    }
+
+    fn clamp_buf_bytes(requested: usize) -> usize {
+        requested.clamp(TCP_MIN_BUF_BYTES, TCP_MAX_BUF_BYTES)
+    }
+
     fn new_socket(
         socket_set: &mut SocketSet,
         path: &str,
         uid: u32,
         port_set: &mut Self::SchemeDataT,
         context: &Context,
+        opts: &SocketOpts,
     ) -> SyscallResult<(SocketHandle, Self::DataT)> {
         trace!("TCP open {}", path);
         let mut parts = path.split('/');
@@ -88,8 +107,18 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             return Err(SyscallError::new(syscall::EACCES));
         }
 
-        let rx_packets = vec![0; 0xffff];
-        let tx_packets = vec![0; 0xffff];
+        let rx_buf_bytes = opts
+            .rcvbuf
+            .map(Self::clamp_buf_bytes)
+            .unwrap_or(TCP_DEFAULT_BUF_BYTES);
+        let tx_buf_bytes = opts
+            .sndbuf
+            .map(Self::clamp_buf_bytes)
+            .unwrap_or(TCP_DEFAULT_BUF_BYTES);
+        assert!(rx_buf_bytes >= TCP_MIN_BUF_BYTES && rx_buf_bytes <= TCP_MAX_BUF_BYTES);
+        assert!(tx_buf_bytes >= TCP_MIN_BUF_BYTES && tx_buf_bytes <= TCP_MAX_BUF_BYTES);
+        let rx_packets = vec![0; rx_buf_bytes];
+        let tx_packets = vec![0; tx_buf_bytes];
         let rx_buffer = TcpSocketBuffer::new(rx_packets);
         let tx_buffer = TcpSocketBuffer::new(tx_packets);
         let socket = TcpSocket::new(rx_buffer, tx_buffer);
@@ -140,7 +169,11 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             tcp_socket
                 .listen(local_endpoint)
                 .expect("Can't listen on local endpoint");
-            Some(local_endpoint)
+            Some(TcpListenData {
+                endpoint: local_endpoint,
+                rx_buf_bytes,
+                tx_buf_bytes,
+            })
         };
 
         Ok((socket_handle, listen_enpoint))
@@ -155,9 +188,8 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             if let Some(endpoint) = self.local_endpoint() {
                 // Socket was connected on some port
                 port_set.release_port(endpoint.port);
-            } else if let Some(endpoint) = data {
-                // Socket was listening on some port
-                port_set.release_port(endpoint.port);
+            } else if let Some(listen_data) = data {
+                port_set.release_port(listen_data.endpoint.port);
             }
         }
         Ok(())
@@ -218,13 +250,11 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         let file = match path {
             "listen" => {
                 if let SchemeFile::Socket(ref tcp_handle) = *file {
-                    let Some(listen_enpoint) = tcp_handle.data else {
-                        // This socket is not listening so we can't accept a connection
+                    let Some(listen_data) = tcp_handle.data else {
                         return Err(SyscallError::new(syscall::EINVAL));
                     };
 
                     if !is_active {
-                        // Socket listening but no connection received
                         if tcp_handle.flags & syscall::O_NONBLOCK == syscall::O_NONBLOCK {
                             return Err(SyscallError::new(syscall::EAGAIN));
                         } else {
@@ -232,13 +262,10 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                         }
                     }
                     trace!("TCP creating new listening socket");
-                    // We pass None as data because this new handle is to the active connection so
-                    // not a listening socket
                     let new_handle = SchemeFile::Socket(tcp_handle.clone_with_data(None));
 
-                    // Creating a socket to continue listening
-                    let rx_packets = vec![0; 0xffff];
-                    let tx_packets = vec![0; 0xffff];
+                    let rx_packets = vec![0; listen_data.rx_buf_bytes];
+                    let tx_packets = vec![0; listen_data.tx_buf_bytes];
                     let rx_buffer = TcpSocketBuffer::new(rx_packets);
                     let tx_buffer = TcpSocketBuffer::new(tx_packets);
                     let socket = TcpSocket::new(rx_buffer, tx_buffer);
@@ -246,10 +273,9 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                     {
                         let tcp_socket = socket_set.get_mut::<TcpSocket>(new_socket_handle);
                         tcp_socket
-                            .listen(listen_enpoint)
+                            .listen(listen_data.endpoint)
                             .expect("Can't listen on local endpoint");
                     }
-                    // We got a new connection to the socket so acquire the port
                     port_set.acquire_port(
                         local_endpoint
                             .expect("Socket was active so local endpoint must be set")
@@ -257,7 +283,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                     );
                     return Ok(Some((
                         new_handle,
-                        Some((new_socket_handle, Some(listen_enpoint))),
+                        Some((new_socket_handle, Some(listen_data))),
                     )));
                 } else {
                     return Err(SyscallError::new(syscall::EBADF));
@@ -295,10 +321,11 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                 (
                     None,
                     SchemeFile::Socket(SocketFile {
-                        data: Some(endpoint),
+                        data: Some(listen_data),
                         ..
                     }),
                 ) => {
+                    let endpoint = listen_data.endpoint;
                     if endpoint.is_specified() {
                         write!(w, "{}", endpoint).unwrap()
                     } else {

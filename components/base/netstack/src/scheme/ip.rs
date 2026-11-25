@@ -8,7 +8,7 @@ use smoltcp::socket::raw::{
 use smoltcp::wire::{IpProtocol, IpVersion};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
-use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
+use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile, SocketOpts};
 use super::{SchemeWrapper, Smolnetd, SocketSet};
 use crate::router::Router;
 
@@ -63,6 +63,7 @@ impl<'a> SchemeSocket for RawSocket<'a> {
         uid: u32,
         _: &mut Self::SchemeDataT,
         _context: &Context,
+        _opts: &SocketOpts,
     ) -> SyscallResult<(SocketHandle, Self::DataT)> {
         if uid != 0 {
             return Err(SyscallError::new(syscall::EACCES));

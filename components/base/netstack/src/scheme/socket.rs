@@ -35,12 +35,19 @@ pub struct Context {
     pub route_table: Rc<RefCell<RouteTable>>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct SocketOpts {
+    pub rcvbuf: Option<usize>,
+    pub sndbuf: Option<usize>,
+}
+
 pub struct NullFile {
     pub flags: usize,
     pub uid: u32,
     pub gid: u32,
     pub read_enabled: bool,
     pub write_enabled: bool,
+    pub opts: SocketOpts,
 }
 
 pub struct SocketFile<DataT> {
@@ -200,12 +207,21 @@ where
         buf: &[u8],
     ) -> SyscallResult<usize>;
 
+    fn default_buf_bytes() -> usize {
+        Router::MTU * Smolnetd::SOCKET_BUFFER_SIZE
+    }
+
+    fn clamp_buf_bytes(requested: usize) -> usize {
+        requested.clamp(Router::MTU, Router::MTU * Smolnetd::SOCKET_BUFFER_SIZE)
+    }
+
     fn new_socket(
         sockets: &mut SocketSet,
         path: &str,
         uid: u32,
         data: &mut Self::SchemeDataT,
         context: &Context,
+        opts: &SocketOpts,
     ) -> SyscallResult<(SocketHandle, Self::DataT)>;
 
     fn close_file(
@@ -461,10 +477,32 @@ where
             // SocketCall::Bind => self.handle_bind(id, &payload),
             // SocketCall::Connect => self.handle_connect(id, &payload),
             SocketCall::SetSockOpt => {
-                // currently not used
-                // self.handle_setsockopt(id, metadata[1] as i32, &payload)
-                // TODO: SO_REUSEADDR from null socket
-                Ok(0)
+                let name = metadata.get(1).copied().unwrap_or(0) as usize;
+                let handle = self.handles.get_mut(fd)?;
+                if name == SO_RCVBUF || name == SO_SNDBUF {
+                    if payload.len() < size_of::<i32>() {
+                        return Err(SyscallError::new(syscall::EINVAL));
+                    }
+                    let raw = i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    if raw <= 0 {
+                        return Err(SyscallError::new(syscall::EINVAL));
+                    }
+                    let clamped = SocketT::clamp_buf_bytes(raw as usize);
+                    match *handle {
+                        Handle::Null(ref mut null) => {
+                            if name == SO_RCVBUF {
+                                null.opts.rcvbuf = Some(clamped);
+                            } else {
+                                null.opts.sndbuf = Some(clamped);
+                            }
+                            Ok(0)
+                        }
+                        Handle::File(_) => Ok(0),
+                        Handle::SchemeRoot => Err(SyscallError::new(syscall::EBADF)),
+                    }
+                } else {
+                    Ok(0)
+                }
             }
             SocketCall::GetSockOpt => {
                 let handle = self.handles.get_mut(fd)?;
@@ -475,14 +513,14 @@ where
                         let socket = socket_set.get_mut::<SocketT>(file.socket_handle());
                         SocketT::get_sock_opt(socket, file, metadata[1] as usize, payload)
                     }
-                    Handle::Null(_) => {
-                        // TODO
-                        // The socket exists but hasn't been bound/connected yet.
-                        // We return default values for buffer sizes to satisfy apps like iperf3.
-                        // Figure out maybe a better way?
+                    Handle::Null(ref null) => {
                         let name = metadata[1] as usize;
                         if name == SO_RCVBUF || name == SO_SNDBUF {
-                            let val: i32 = (Router::MTU * Smolnetd::SOCKET_BUFFER_SIZE) as i32;
+                            let val: i32 = if name == SO_RCVBUF {
+                                null.opts.rcvbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32
+                            } else {
+                                null.opts.sndbuf.unwrap_or_else(SocketT::default_buf_bytes) as i32
+                            };
                             let bytes = val.to_ne_bytes();
 
                             if payload.len() < bytes.len() {
@@ -565,6 +603,7 @@ where
         gid: u32,
         read_enabled: bool,
         write_enabled: bool,
+        opts: SocketOpts,
     ) -> SyscallResult<OpenResult> {
         if path.is_empty() {
             let null = NullFile {
@@ -573,6 +612,7 @@ where
                 gid,
                 read_enabled,
                 write_enabled,
+                opts,
             };
 
             let id = self.handles.insert(Handle::Null(null));
@@ -588,6 +628,7 @@ where
                 uid,
                 &mut self.scheme_data,
                 &self.context,
+                &opts,
             )?;
 
             let file = SchemeFile::Socket(SocketFile {
@@ -631,7 +672,9 @@ where
         ctx: &CallerCtx,
     ) -> SyscallResult<OpenResult> {
         match self.handles.get(fd)? {
-            Handle::SchemeRoot => self.open_inner(path, flags, ctx.uid, ctx.gid, true, true),
+            Handle::SchemeRoot => {
+                self.open_inner(path, flags, ctx.uid, ctx.gid, true, true, SocketOpts::default())
+            }
             _ => Err(SyscallError::new(syscall::EACCES)),
         }
     }
@@ -772,12 +815,13 @@ where
             let file = match *handle {
                 Handle::SchemeRoot => return Err(SyscallError::new(syscall::EBADF)),
                 Handle::Null(ref null) => {
-                    let (flags, uid, gid, read_enabled, write_enabled) = (
+                    let (flags, uid, gid, read_enabled, write_enabled, opts) = (
                         null.flags,
                         null.uid,
                         null.gid,
                         null.read_enabled,
                         null.write_enabled,
+                        null.opts,
                     );
 
                     let path =
@@ -785,8 +829,7 @@ where
 
                     SocketT::validate_dup(path)?;
 
-                    // dup from empty path to a new path
-                    return self.open_inner(path, flags, uid, gid, read_enabled, write_enabled);
+                    return self.open_inner(path, flags, uid, gid, read_enabled, write_enabled, opts);
                 }
                 Handle::File(ref mut file) => file,
             };

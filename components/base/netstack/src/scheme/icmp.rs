@@ -9,7 +9,7 @@ use smoltcp::socket::icmp::{
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpListenEndpoint};
 use syscall::{self, Error as SyscallError, Result as SyscallResult};
 
-use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile};
+use super::socket::{Context, DupResult, SchemeFile, SchemeSocket, SocketFile, SocketOpts};
 use super::{SchemeWrapper, Smolnetd, SocketSet};
 use crate::port_set::PortSet;
 use crate::router::Router;
@@ -80,6 +80,7 @@ impl<'a> SchemeSocket for IcmpSocket<'a> {
         _uid: u32,
         ident_set: &mut Self::SchemeDataT,
         _context: &Context,
+        _opts: &SocketOpts,
     ) -> SyscallResult<(SocketHandle, Self::DataT)> {
         use std::str::FromStr;
 
