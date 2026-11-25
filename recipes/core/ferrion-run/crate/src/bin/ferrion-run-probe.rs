@@ -88,6 +88,14 @@ mod probe {
             ["wayland-check"] => wayland_check(false, 0),
             ["wayland-check", "--map"] => wayland_check(true, 0),
             ["wayland-check", "--map", secs] => wayland_check(true, secs.parse().unwrap_or(5)),
+            [
+                "cap-check",
+                address,
+                net_path,
+                docs_file,
+                pics_file,
+                dl_file,
+            ] => cap_check(address, net_path, docs_file, pics_file, dl_file),
             _ => {
                 eprintln!("ferrion-run-probe: unknown arguments {args:?}");
                 2
@@ -1232,6 +1240,119 @@ mod probe {
             }
         }
         let _ = std::fs::remove_file(&shm_path);
+        0
+    }
+
+    fn cap_read_file(tag: &str, path: &str) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let first = text.lines().next().unwrap_or("");
+                println!("CAP {tag} REACHED {first}");
+            }
+            Err(e) => println!("CAP {tag} ABSENT {e}"),
+        }
+    }
+
+    fn cap_check(
+        address: &str,
+        net_path: &str,
+        docs_file: &str,
+        pics_file: &str,
+        dl_file: &str,
+    ) -> i32 {
+        const MAX_SCAN_FDS: usize = 256;
+        match TcpStream::connect(address).and_then(|mut stream| {
+            stream.write_all(request(net_path).as_bytes())?;
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply)?;
+            Ok(reply)
+        }) {
+            Ok(reply) if !reply.is_empty() => println!("CAP net REACHED {}", first_line(&reply)),
+            Ok(_) => println!("CAP net ABSENT empty-reply"),
+            Err(e) => println!("CAP net ABSENT {e}"),
+        }
+        cap_read_file("docs", docs_file);
+        cap_read_file("pics", pics_file);
+        cap_read_file("downloads", dl_file);
+        let audio_open = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/scheme/audio/stream")
+            .or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open("/scheme/audio")
+            });
+        match audio_open {
+            Ok(_) => println!("CAP audio-playback REACHED"),
+            Err(e) => println!("CAP audio-playback ABSENT {e}"),
+        }
+        match std::fs::File::open("/scheme/audio/record") {
+            Ok(mut f) => {
+                let mut buf = [0u8; 64];
+                match f.read(&mut buf) {
+                    Ok(n) if buf[..n].iter().all(|b| *b == 0) => {
+                        println!("CAP audio-capture SILENT");
+                    }
+                    Ok(_) => println!("CAP audio-capture REACHED"),
+                    Err(e) => println!("CAP audio-capture ABSENT {e}"),
+                }
+            }
+            Err(e) => println!("CAP audio-capture ABSENT {e}"),
+        }
+        match std::fs::File::open("/scheme/sudo") {
+            Ok(_) => println!("CAP sudo REACHED"),
+            Err(e) => println!("CAP sudo ABSENT {e}"),
+        }
+        let xdg_docs = std::env::var("XDG_DOCUMENTS_DIR").unwrap_or_default();
+        println!("XDG_DOCUMENTS_DIR={xdg_docs}");
+        let app_home = std::env::var("HOME").unwrap_or_default();
+        println!("APP_HOME={app_home}");
+        let user_dirs_path = std::path::Path::new(&app_home).join(".config/user-dirs.dirs");
+        let user_dirs = std::fs::read_to_string(&user_dirs_path)
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(";")
+            })
+            .unwrap_or_default();
+        println!("USER_DIRS={user_dirs}");
+        let marker_path = std::path::Path::new(&app_home).join(".pfr1-marker");
+        if marker_path.is_file() {
+            println!("HOME_MARKER existed");
+        } else {
+            match std::fs::write(&marker_path, "pfr1\n") {
+                Ok(()) => println!("HOME_MARKER created"),
+                Err(e) => println!("HOME_MARKER err {e}"),
+            }
+        }
+        let targets = [
+            docs_file,
+            pics_file,
+            dl_file,
+            "/scheme/audio/stream",
+            "/scheme/sudo",
+            "/scheme/tcp",
+        ];
+        let thread_fd = ferrion_run::launch::current_thread_fd();
+        let fds = ferrion_run::launch::file_table(thread_fd).unwrap_or_default();
+        let mut scanned = 0usize;
+        for fd in fds.into_iter().filter(|fd| *fd > 2).take(MAX_SCAN_FDS) {
+            scanned += 1;
+            for target in targets {
+                let Ok(cpath) = std::ffi::CString::new(target) else {
+                    continue;
+                };
+                let opened =
+                    unsafe { libc::openat(fd as libc::c_int, cpath.as_ptr(), libc::O_RDONLY) };
+                if opened >= 0 {
+                    unsafe { libc::close(opened) };
+                    println!("OPENAT_REACHED {fd} {target}");
+                }
+            }
+        }
+        println!("OPENAT_SCANNED {scanned}");
         0
     }
 }

@@ -6135,6 +6135,319 @@ def ferrion_run_checks(vm, args, port, seen):
     return True, f"--no-network curl fails with {error.group(0).strip()!r}; held socket and profile denied; see {vm.out}"
 
 
+def pfr1_run_as_user(vm, transcript, tag, line, timeout=60, sudo=False):
+    since = vm.mark()
+    vm.type(f"bash -c {shlex.quote(line + f'; echo pfr1-end-{tag}-$?')}\n")
+    end = rf"(?s)\n(.*)pfr1-end-{tag}-(\d+)"
+    if sudo and vm.wait_serial(rf"\[sudo\] password|pfr1-end-{tag}-\d", timeout, since):
+        if not re.search(rf"pfr1-end-{tag}-\d", vm.text(since)):
+            vm.type("\n")
+    found = vm.wait_serial(end, timeout, since)
+    output = found.group(1) if found else vm.text(since)
+    transcript.append(f"$ {line}\n{output}exit {found.group(2) if found else 'none'}\n")
+    return (int(found.group(2)) if found else None), output
+
+
+def pfr1_parse_caps(output):
+    caps = {}
+    for m in re.finditer(r"(?m)^CAP ([a-z-]+) (REACHED|ABSENT|SILENT)(?: (.*))?$", output):
+        caps[m.group(1)] = (m.group(2), (m.group(3) or "").strip())
+    return caps
+
+
+def pfr1_write_root_file(vm, transcript, tag, path, content):
+    tmp = f"/tmp/pfr1-{tag}.tmp"
+    lines = [f": > {tmp}"]
+    for raw in content.splitlines():
+        lines.append(f"printf '%s\\n' {shlex.quote(raw)} >> {tmp}")
+    st, _ = pfr1_run_as_user(vm, transcript, f"{tag}-stage", " && ".join(lines))
+    if st != 0:
+        return st
+    st, _ = pfr1_run_as_user(
+        vm,
+        transcript,
+        f"{tag}-install",
+        f"sudo bash -c {shlex.quote(f'cp {tmp} {path} && chmod 644 {path}')}",
+        sudo=True,
+    )
+    return st
+
+
+def pfr1_setup_snapshot(vm, transcript):
+    setup_cmd = (
+        "mkdir -p /home/user/Documents /home/user/Pictures /home/user/Downloads /home/user/bin && "
+        "echo PFR1-DOC-SECRET > /home/user/Documents/secret.txt && "
+        "echo PFR1-PIC-SECRET > /home/user/Pictures/secret.txt && "
+        "echo PFR1-DL-SECRET > /home/user/Downloads/secret.txt && "
+        "echo UNTOUCHED-TARGET > /home/user/outside-config-target && "
+        "cp /usr/bin/ferrion-run-probe /home/user/bin/pfr1-declared && "
+        "chmod 755 /home/user/bin/pfr1-declared"
+    )
+    status, _ = pfr1_run_as_user(vm, transcript, "setup-user", setup_cmd)
+    if status != 0:
+        return f"user fixture setup failed (exit {status})"
+    bins_cmd = (
+        "sudo bash -c "
+        + shlex.quote(
+            "mkdir -p /usr/share/ferrion/apps /var/lib/ferrion/grants && "
+            "chmod 755 /usr/share/ferrion/apps /var/lib/ferrion/grants && "
+            "cp /usr/bin/ferrion-run-probe /usr/bin/pfr1-undeclared && "
+            "cp /usr/bin/ferrion-run-probe /usr/bin/pfr1-declared && "
+            "chmod 755 /usr/bin/pfr1-undeclared /usr/bin/pfr1-declared"
+        )
+    )
+    status, _ = pfr1_run_as_user(vm, transcript, "setup-bins", bins_cmd, sudo=True)
+    if status != 0:
+        return f"root snapshot bin setup failed (exit {status})"
+    und_manifest = (
+        'format = 1\n'
+        'id = "pfr1-undeclared"\n'
+        'name = "PFR1 Undeclared Probe"\n'
+        'kind = "native"\n'
+        'exec = "/usr/bin/pfr1-undeclared"\n'
+    )
+    dec_manifest = (
+        'format = 1\n'
+        'id = "pfr1-declared"\n'
+        'name = "PFR1 Declared Probe"\n'
+        'kind = "native"\n'
+        'exec = "/usr/bin/pfr1-declared"\n'
+        '\n'
+        '[capabilities.network-internet]\n'
+        'reason = "Connects to the local test server."\n'
+        '\n'
+        '[capabilities.files-documents]\n'
+        'reason = "Reads the test file in Documents."\n'
+        '\n'
+        '[capabilities.files-pictures]\n'
+        'reason = "Requests Pictures without a grant."\n'
+        '\n'
+        '[capabilities.audio-playback]\n'
+        'reason = "Opens the audio playback stream."\n'
+    )
+    grants_toml = (
+        'format = 1\n'
+        '\n'
+        '[apps.pfr1-undeclared]\n'
+        'network-internet = true\n'
+        'files-documents = true\n'
+        'audio-playback = true\n'
+        '\n'
+        '[apps.pfr1-declared]\n'
+        'files-documents = true\n'
+    )
+    for tag, path, content in (
+        ("und-man", "/usr/share/ferrion/apps/pfr1-undeclared.toml", und_manifest),
+        ("dec-man", "/usr/share/ferrion/apps/pfr1-declared.toml", dec_manifest),
+        ("grants", "/var/lib/ferrion/grants/1000.toml", grants_toml),
+    ):
+        status = pfr1_write_root_file(vm, transcript, tag, path, content)
+        if status != 0:
+            return f"root snapshot {tag} setup failed (exit {status})"
+    return None
+
+
+def test_app_undeclared(vm, args):
+    """PFR1 app-undeclared (runs only on QEMU -snapshot copy, writing test manifests under /usr/share/ferrion/apps and grants under /var/lib/ferrion/grants on the ephemeral disk): an app with an empty manifest gets absence for network, Documents/Pictures/Downloads, audio playback/capture, sudo and raw openat even when the grant file tries to allow them; CLI widening flags including --pass-fd are refused (exit 125); a copy of a manifest app under ~/bin gets no manifest grants; explicit false grants override automatic defaults; a symlink planted at ~/Pictures -> ~ is skipped rather than exposing ~ or Documents; a symlink planted at <app_home>/.config is refused without touching the target; and a malformed grant file fails closed (exit 125)."""
+    server, seen = ferrion_run_server()
+    try:
+        if not vm.wait_serial(r"login: ", args.timeout):
+            return False, f"no serial login prompt within {args.timeout}s"
+        vm.type("user\n")
+        time.sleep(3)
+        address, transcript = f"10.0.2.2:{server.server_address[1]}", []
+        err = pfr1_setup_snapshot(vm, transcript)
+        if err:
+            (vm.out / "app-undeclared.txt").write_text("".join(transcript))
+            return False, f"{err}; see {vm.out}"
+        probe_args = f"{address} /control-net /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
+        controls, problems = [], []
+        for attempt in range(8):
+            st, out = pfr1_run_as_user(vm, transcript, f"ctrl{attempt}", f"pfr1-undeclared cap-check {probe_args}")
+            caps = pfr1_parse_caps(out)
+            if st == 0 and caps.get("net", ("",))[0] == "REACHED":
+                break
+            time.sleep(2)
+        else:
+            controls.append("plain cap-check could not reach host server")
+        caps = pfr1_parse_caps(out)
+        for req in ("net", "docs", "pics", "downloads", "audio-playback", "sudo"):
+            if caps.get(req, ("",))[0] != "REACHED":
+                controls.append(f"plain cap-check did not reach {req}: {caps.get(req)}")
+
+        und_args = f"{address} /undeclared-net /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
+        st, out = pfr1_run_as_user(vm, transcript, "empty", f"ferrion-run pfr1-undeclared cap-check {und_args}")
+        caps = pfr1_parse_caps(out)
+        if st != 0:
+            problems.append(f"empty-manifest launch exited {st}")
+        if "/undeclared-net" in seen or caps.get("net", ("",))[0] != "ABSENT":
+            problems.append(f"undeclared network not absent: {caps.get('net')} seen={seen}")
+        for denied in ("docs", "pics", "downloads", "audio-playback", "audio-capture", "sudo"):
+            if caps.get(denied, ("",))[0] != "ABSENT":
+                problems.append(f"undeclared {denied} not absent: {caps.get(denied)}")
+        if "OPENAT_REACHED" in out:
+            problems.append("raw openat reached a withheld capability under empty manifest")
+        if not re.search(r"(?m)^OPENAT_SCANNED [1-9]\d*$", out):
+            problems.append("raw openat scan did not inspect any descriptor")
+        if re.search(r"(?m)^XDG_DOCUMENTS_DIR=.+$", out):
+            problems.append("empty manifest exposed XDG_DOCUMENTS_DIR")
+
+        st, _ = pfr1_run_as_user(vm, transcript, "widen-files", f"ferrion-run --files /home/user/Documents pfr1-undeclared cap-check {und_args}")
+        if st != 125:
+            problems.append(f"--files under manifest was not refused with 125 (exit {st})")
+        st, _ = pfr1_run_as_user(vm, transcript, "widen-pty", f"ferrion-run --pty pfr1-undeclared cap-check {und_args}")
+        if st != 125:
+            problems.append(f"--pty under manifest was not refused with 125 (exit {st})")
+        st, _ = pfr1_run_as_user(vm, transcript, "widen-display", f"ferrion-run --display pfr1-undeclared cap-check {und_args}")
+        if st != 125:
+            problems.append(f"--display under manifest was not refused with 125 (exit {st})")
+        st, out = pfr1_run_as_user(vm, transcript, "widen-passfd", f"ferrion-run --pass-fd 9 pfr1-undeclared cap-check {und_args}")
+        if st != 125 or "come from the grant record" not in out:
+            problems.append(f"--pass-fd under manifest was not refused with 125 (exit {st})")
+
+        copy_args = f"{address} /homecopy-net /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
+        st, out = pfr1_run_as_user(vm, transcript, "homecopy", f"ferrion-run --read-only /home/user/bin /home/user/bin/pfr1-declared cap-check {copy_args}")
+        caps = pfr1_parse_caps(out)
+        if st != 0:
+            problems.append(f"home-copy launch exited {st}")
+        if caps.get("docs", ("",))[0] != "ABSENT" or caps.get("audio-playback", ("",))[0] != "ABSENT" or re.search(r"(?m)^XDG_DOCUMENTS_DIR=.+$", out):
+            problems.append(f"home copy inherited manifest grants: docs={caps.get('docs')} audio={caps.get('audio-playback')}")
+
+        pfr1_write_root_file(
+            vm,
+            transcript,
+            "grant-symfolder",
+            "/var/lib/ferrion/grants/1000.toml",
+            "format = 1\n\n[apps.pfr1-declared]\nnetwork-internet = false\naudio-playback = false\nfiles-documents = false\nfiles-pictures = true\n",
+        )
+        pfr1_run_as_user(vm, transcript, "symfolder-plant", "rm -rf /home/user/Pictures && ln -s /home/user /home/user/Pictures")
+        sf_args = f"{address} /symfolder-net /home/user/Documents/secret.txt /home/user/Pictures/Documents/secret.txt /home/user/Downloads/secret.txt"
+        st, out = pfr1_run_as_user(vm, transcript, "symfolder-run", f"ferrion-run pfr1-declared cap-check {sf_args}")
+        pfr1_run_as_user(vm, transcript, "symfolder-restore", "rm -f /home/user/Pictures && mkdir -p /home/user/Pictures && echo PFR1-PIC-SECRET > /home/user/Pictures/secret.txt")
+        caps = pfr1_parse_caps(out)
+        if st != 0 or caps.get("docs", ("",))[0] != "ABSENT" or caps.get("pics", ("",))[0] != "ABSENT" or re.search(r"(?m)^XDG_PICTURES_DIR=.+$", out):
+            problems.append(f"symlinked granted folder ~/Pictures -> ~ was not skipped (exit {st}): docs={caps.get('docs')} pics={caps.get('pics')}")
+
+        pfr1_write_root_file(
+            vm,
+            transcript,
+            "grant-deny",
+            "/var/lib/ferrion/grants/1000.toml",
+            "format = 1\n\n[apps.pfr1-declared]\nnetwork-internet = false\naudio-playback = false\nfiles-documents = false\n",
+        )
+        ov_args = f"{address} /override-net /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
+        st, out = pfr1_run_as_user(vm, transcript, "override", f"ferrion-run pfr1-declared cap-check {ov_args}")
+        caps = pfr1_parse_caps(out)
+        if st != 0 or "/override-net" in seen or caps.get("net", ("",))[0] != "ABSENT" or caps.get("audio-playback", ("",))[0] != "ABSENT" or caps.get("docs", ("",))[0] != "ABSENT":
+            problems.append(f"explicit false grant override did not deny capabilities (exit {st}): {caps}")
+
+        sym_cmd = (
+            "mkdir -p /home/user/.local/share/ferrion/apps/pfr1-undeclared/home && "
+            "rm -rf /home/user/.local/share/ferrion/apps/pfr1-undeclared/home/.config && "
+            "ln -s /home/user/outside-config-target /home/user/.local/share/ferrion/apps/pfr1-undeclared/home/.config"
+        )
+        pfr1_run_as_user(vm, transcript, "symlink-plant", sym_cmd)
+        st, out = pfr1_run_as_user(vm, transcript, "symlink-run", f"ferrion-run pfr1-undeclared cap-check {und_args}")
+        _, target_after = pfr1_run_as_user(vm, transcript, "symlink-check", "cat /home/user/outside-config-target")
+        if st != 125 or "unsafe-app-home" not in out:
+            problems.append(f"symlinked .config was not refused with unsafe-app-home (exit {st})")
+        if "UNTOUCHED-TARGET" not in target_after:
+            problems.append("symlinked .config modified outside-config-target")
+
+        pfr1_write_root_file(vm, transcript, "bad-grant", "/var/lib/ferrion/grants/1000.toml", "format = 99\n")
+        st, out = pfr1_run_as_user(vm, transcript, "bad-grant-run", f"ferrion-run pfr1-declared cap-check {ov_args}")
+        if st != 125 or "unsupported-format" not in out:
+            problems.append(f"malformed grant file was not refused with unsupported-format (exit {st})")
+
+        (vm.out / "app-undeclared.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
+        if controls:
+            return False, "control without launcher failed: " + "; ".join(controls) + f"; see {vm.out}"
+        if problems:
+            return False, "; ".join(problems) + f"; see {vm.out}"
+        return True, f"empty manifest, CLI widening (--pass-fd included), home copy, symlinked granted folder, false override, .config symlink and bad grants all refused; see {vm.out}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_app_declared(vm, args):
+    """PFR1 app-declared (runs only on QEMU -snapshot copy, writing test manifests under /usr/share/ferrion/apps and grants under /var/lib/ferrion/grants on the ephemeral disk): a probe with declared and granted network-internet, files-documents and audio-playback reaches those capabilities, discovers Documents via XDG_DOCUMENTS_DIR and $HOME/.config/user-dirs.dirs, keeps its persistent app HOME across launches, still gets silent/absent audio capture without an audiod grant, cannot reach declared-but-ungranted Pictures, undeclared Downloads or sudo, honors --no-network narrowing, and verifies desktop app manifests are installed."""
+    server, seen = ferrion_run_server()
+    try:
+        if not vm.wait_serial(r"login: ", args.timeout):
+            return False, f"no serial login prompt within {args.timeout}s"
+        vm.type("user\n")
+        time.sleep(3)
+        address, transcript = f"10.0.2.2:{server.server_address[1]}", []
+        err = pfr1_setup_snapshot(vm, transcript)
+        if err:
+            (vm.out / "app-declared.txt").write_text("".join(transcript))
+            return False, f"{err}; see {vm.out}"
+        problems = []
+        dec_args = f"{address} /declared-net /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
+        for attempt in range(8):
+            st, out = pfr1_run_as_user(vm, transcript, f"dec1-{attempt}", f"ferrion-run pfr1-declared cap-check {dec_args}")
+            caps = pfr1_parse_caps(out)
+            if st == 0 and caps.get("net", ("",))[0] == "REACHED":
+                break
+            time.sleep(2)
+        if st != 0:
+            problems.append(f"declared launch 1 exited {st}")
+        if "/declared-net" not in seen or caps.get("net", ("",))[0] != "REACHED":
+            problems.append(f"declared network-internet did not reach host: {caps.get('net')}")
+        if caps.get("docs", ("",))[0] != "REACHED" or "PFR1-DOC-SECRET" not in caps.get("docs", ("", ""))[1]:
+            problems.append(f"declared+granted Documents not reached: {caps.get('docs')}")
+        if caps.get("audio-playback", ("",))[0] != "REACHED":
+            problems.append(f"declared audio-playback not reached: {caps.get('audio-playback')}")
+        if caps.get("audio-capture", ("",))[0] not in ("SILENT", "ABSENT"):
+            problems.append(f"audio capture without audiod grant was not silent/absent: {caps.get('audio-capture')}")
+        for denied in ("pics", "downloads", "sudo"):
+            if caps.get(denied, ("",))[0] != "ABSENT":
+                problems.append(f"{denied} was not absent: {caps.get(denied)}")
+        if "XDG_DOCUMENTS_DIR=/home/user/Documents" not in out:
+            problems.append("XDG_DOCUMENTS_DIR was not advertised for granted Documents")
+        if 'XDG_DOCUMENTS_DIR="/home/user/Documents"' not in out:
+            problems.append("user-dirs.dirs did not advertise granted Documents")
+        if "XDG_PICTURES_DIR" in out or "XDG_DOWNLOAD_DIR" in out:
+            problems.append("user-dirs.dirs advertised ungranted folders")
+        if "APP_HOME=/home/user/.local/share/ferrion/apps/pfr1-declared/home" not in out:
+            problems.append("APP_HOME was not the persistent app home")
+        if "HOME_MARKER created" not in out:
+            problems.append("first launch did not create persistent HOME marker")
+        if re.search(r"OPENAT_REACHED \d+ (?:/home/user/(?:Pictures|Downloads)|/scheme/sudo)", out):
+            problems.append("raw openat reached withheld folder or sudo")
+
+        dec2_args = f"{address} /declared-net2 /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
+        st2, out2 = pfr1_run_as_user(vm, transcript, "dec2", f"ferrion-run pfr1-declared cap-check {dec2_args}")
+        if st2 != 0 or "HOME_MARKER existed" not in out2:
+            problems.append(f"persistent app HOME did not survive second launch (exit {st2})")
+
+        nonet_args = f"{address} /declared-nonet /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
+        st3, out3 = pfr1_run_as_user(vm, transcript, "nonet", f"ferrion-run --no-network pfr1-declared cap-check {nonet_args}")
+        caps3 = pfr1_parse_caps(out3)
+        if st3 != 0 or "/declared-nonet" in seen or caps3.get("net", ("",))[0] != "ABSENT":
+            problems.append(f"--no-network did not narrow declared network-internet (exit {st3})")
+        if caps3.get("docs", ("",))[0] != "REACHED" or caps3.get("audio-playback", ("",))[0] != "REACHED":
+            problems.append(f"--no-network broke docs/audio under manifest: {caps3}")
+
+        st4, out4 = pfr1_run_as_user(
+            vm,
+            transcript,
+            "installed",
+            "ls -1 /usr/share/ferrion/apps/cosmic-edit.toml /usr/share/ferrion/apps/cosmic-files.toml /usr/share/ferrion/apps/cosmic-term.toml /usr/share/ferrion/apps/mpv.toml",
+        )
+        if st4 != 0:
+            problems.append(f"desktop app manifests missing under /usr/share/ferrion/apps (exit {st4})")
+
+        (vm.out / "app-declared.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
+        if problems:
+            return False, "; ".join(problems) + f"; see {vm.out}"
+        return True, f"declared network, Documents (XDG+user-dirs+persistent HOME) and audio-playback granted; capture silent/absent; ungranted Pictures, Downloads and sudo absent; 4 desktop manifests installed; see {vm.out}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_boot_gc_generation(args, out):
     """A copy whose RedoxFS generation is an allocator-GC threshold reaches the graphical login. Build RedoxFS's boot_gc_generation host example and install it in build/fstools/bin first."""
     helper = ROOT / "build" / "fstools" / "bin" / "boot_gc_generation"
@@ -11362,7 +11675,9 @@ TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-lo
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
          "dev-parity": test_dev_parity, "firefox-headless": test_firefox_headless, "rand-seed": test_rand_seed,
          "firefox-cjk": test_firefox_cjk,
-         "ferrion-run": test_ferrion_run}
+         "ferrion-run": test_ferrion_run,
+         "app-undeclared": test_app_undeclared,
+         "app-declared": test_app_declared}
 TESTS["hw-live"] = test_hw_live
 TESTS["ferrion-cli"] = test_ferrion_cli
 TESTS["update-today"] = test_update_today
