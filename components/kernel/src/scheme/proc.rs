@@ -1,11 +1,12 @@
 use crate::{
     context::{
         self,
-        context::{HardBlockedReason, LockedFdTbl, SignalState},
+        context::{AccessStop, HardBlockedReason, LockedFdTbl, SignalState},
         file::InternalFlags,
         memory::{handle_notify_files, AddrSpace, AddrSpaceWrapper, Grant, PageSpan, UnmapVec},
         unblock_context, wakeup_context, Context, ContextLock, Status,
     },
+    cpu_set::LogicalCpuId,
     memory::{Page, VirtualAddress, PAGE_SIZE},
     numa, ptrace,
     scheme::{
@@ -50,6 +51,47 @@ fn read_from(dst: UserSliceWo, src: &[u8], offset: u64) -> Result<usize> {
     dst.copy_common_bytes_from_slice(avail_src)
 }
 
+const MAX_ACCESS_STOP_HOLDERS: usize = 64;
+const MAX_ACCESS_STOP_WAIT_ITERS: usize = 65_536;
+
+fn release_access_stop(context: &mut Context) -> (bool, Option<LogicalCpuId>) {
+    assert!(matches!(context.access_stop, AccessStop::Stopped { .. }));
+    let is_last = match &mut context.access_stop {
+        AccessStop::Stopped { holders, .. } => {
+            let count = holders.get();
+            assert!(count > 0);
+            if let Some(next) = NonZeroUsize::new(count - 1) {
+                *holders = next;
+                false
+            } else {
+                true
+            }
+        }
+        AccessStop::None => unreachable!(),
+    };
+    if !is_last {
+        return (false, None);
+    }
+    let AccessStop::Stopped { saved, holders } =
+        core::mem::replace(&mut context.access_stop, AccessStop::None)
+    else {
+        unreachable!();
+    };
+    assert!(holders.get() == 1);
+    if matches!(
+        context.status,
+        Status::HardBlocked {
+            reason: HardBlockedReason::StoppedForAccess,
+        }
+    ) && !context.being_sigkilled
+    {
+        context.status = saved;
+    }
+    let wake = context.status.is_runnable();
+    assert!(!(wake && context.status.is_dead()));
+    (wake, context.cpu_id)
+}
+
 fn try_stop_context<T>(
     context_ref: Arc<ContextLock>,
     token: &mut CleanLockToken,
@@ -60,48 +102,76 @@ fn try_stop_context<T>(
         let (context, token) = context.token_split();
         return callback(context, token);
     }
-    // Stop process
-    let (prev_status, mut running) = {
-        let mut context = context_ref.write(token.token());
 
-        (
-            core::mem::replace(
-                &mut context.status,
-                context::Status::HardBlocked {
-                    reason: HardBlockedReason::NotYetStarted,
-                },
-            ),
-            context.running,
-        )
-    };
+    {
+        let mut guard = context_ref.write(token.token());
+        if guard.being_sigkilled || guard.status.is_dead() {
+            return Err(Error::new(ESRCH));
+        }
+        match &mut guard.access_stop {
+            AccessStop::None => {
+                let saved = core::mem::replace(
+                    &mut guard.status,
+                    Status::HardBlocked {
+                        reason: HardBlockedReason::StoppedForAccess,
+                    },
+                );
+                guard.access_stop = AccessStop::Stopped {
+                    saved,
+                    holders: NonZeroUsize::MIN,
+                };
+            }
+            AccessStop::Stopped { holders, .. } => {
+                let count = holders.get();
+                assert!(count > 0);
+                if count >= MAX_ACCESS_STOP_HOLDERS {
+                    return Err(Error::new(EAGAIN));
+                }
+                *holders = NonZeroUsize::new(count + 1).ok_or(Error::new(EAGAIN))?;
+            }
+        }
+        if !guard.running {
+            let (context, l4_token) = guard.token_split();
+            let ret = callback(context, l4_token);
+            let (wake, cpu_id) = release_access_stop(context);
+            drop(guard);
+            if wake {
+                wakeup_context(&context_ref, cpu_id, &mut token.downgrade());
+            }
+            return ret;
+        }
+    }
 
-    // Wait until stopped
-    while running {
+    for _ in 0..MAX_ACCESS_STOP_WAIT_ITERS {
         context::switch(token);
-
-        running = context_ref.read(token.token()).running;
+        let mut guard = context_ref.write(token.token());
+        if guard.being_sigkilled || guard.status.is_dead() {
+            let (wake, cpu_id) = release_access_stop(&mut guard);
+            drop(guard);
+            if wake {
+                wakeup_context(&context_ref, cpu_id, &mut token.downgrade());
+            }
+            return Err(Error::new(ESRCH));
+        }
+        if !guard.running {
+            let (context, l4_token) = guard.token_split();
+            let ret = callback(context, l4_token);
+            let (wake, cpu_id) = release_access_stop(context);
+            drop(guard);
+            if wake {
+                wakeup_context(&context_ref, cpu_id, &mut token.downgrade());
+            }
+            return ret;
+        }
     }
 
     let mut guard = context_ref.write(token.token());
-    assert!(
-        !guard.running,
-        "process can't have been restarted, we stopped it!"
-    );
-
-    let (context, l4_token) = guard.token_split();
-    let ret = callback(context, l4_token);
-
-    context.status = prev_status;
-
-    let cpu_id = context.cpu_id;
-
-    let wake = context.status.is_runnable();
+    let (wake, cpu_id) = release_access_stop(&mut guard);
     drop(guard);
     if wake {
         wakeup_context(&context_ref, cpu_id, &mut token.downgrade());
     }
-
-    ret
+    Err(Error::new(EAGAIN))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -453,6 +523,7 @@ impl KernelScheme for ProcScheme {
                         arg1,
                     },
             } => {
+                let mut new = Some(new);
                 let old_ctx = try_stop_context(context, token, |context, token| {
                     let regs = context.regs_mut().ok_or(Error::new(EBADFD))?;
                     regs.set_instr_pointer(new_ip);
@@ -464,8 +535,14 @@ impl KernelScheme for ProcScheme {
                     ))]
                     regs.set_arg1(arg1);
 
-                    Ok(context.set_addr_space(Some(new), token))
-                })?;
+                    Ok(context.set_addr_space(new.take(), token))
+                });
+                if let Some(unused_new) = new
+                    && let Some(addrspace) = Arc::into_inner(unused_new)
+                {
+                    addrspace.into_drop(token);
+                }
+                let old_ctx = old_ctx?;
                 if let Some(old_ctx) = old_ctx
                     && let Some(addrspace) = Arc::into_inner(old_ctx)
                 {

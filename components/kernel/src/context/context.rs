@@ -70,11 +70,21 @@ impl Status {
 pub enum HardBlockedReason {
     /// "SIGSTOP", only procmgr is allowed to switch contexts this state
     Stopped,
+    StoppedForAccess,
     AwaitingMmap {
         file_ref: GrantFileRef,
     },
     // TODO: PageFaultOom?
     NotYetStarted,
+}
+
+#[derive(Debug)]
+pub enum AccessStop {
+    None,
+    Stopped {
+        saved: Status,
+        holders: NonZeroUsize,
+    },
 }
 
 pub const CONTEXT_NAME_CAPAC: usize = 32;
@@ -168,6 +178,7 @@ pub struct Context {
     /// interrupts or syscalls occur. This flag is set for all contexts but kmain.
     pub userspace: bool,
     pub being_sigkilled: bool,
+    pub access_stop: AccessStop,
     pub fmap_ret: Option<Frame>,
     /// Priority
     pub prio: usize,
@@ -257,6 +268,7 @@ impl Context {
             is_active: false,
             queue_key: None,
             being_sigkilled: false,
+            access_stop: AccessStop::None,
             owner_proc_id,
 
             euid: 0,
