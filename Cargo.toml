@@ -37,6 +37,7 @@ tui = ["ratatui", "ansi-to-tui", "strip-ansi-escapes"]
 
 [dependencies]
 blake3 = "1"
+ferrion-manifest = { path = "recipes/core/ferrion-manifest/crate" }
 ferrion-update = { path = "recipes/core/ferrion-update/crate" }
 globset = "0.4"
 libc = "0.2"

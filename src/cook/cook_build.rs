@@ -11,12 +11,65 @@ use crate::recipe::BuildCompiler;
 use crate::recipe::{AutoDeps, BuildKind, CookRecipe, OptionalPackageRecipe, Recipe};
 use std::{
     collections::{BTreeSet, VecDeque},
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     str,
 };
 
-use crate::{Error, Result, log_to_pty, wrap_io_err};
+use crate::{Error, Result, bail_other_err, log_to_pty, wrap_io_err};
+
+fn stage_app_manifest(recipe_dir: &Path, package_name: &str, stage_dir: &Path) -> Result<()> {
+    let manifest_src = recipe_dir.join("manifest.toml");
+    if !manifest_src.is_file() {
+        return Ok(());
+    }
+    let file = std::fs::File::open(&manifest_src)
+        .map_err(wrap_io_err!(manifest_src, "Opening app manifest"))?;
+    let mut bytes = Vec::new();
+    let max_read = (ferrion_manifest::MAX_MANIFEST_BYTES as u64).saturating_add(1);
+    file.take(max_read)
+        .read_to_end(&mut bytes)
+        .map_err(wrap_io_err!(manifest_src, "Reading app manifest"))?;
+    let manifest = ferrion_manifest::parse_manifest_bytes(
+        &bytes,
+        ferrion_manifest::Origin::Repository {
+            package: package_name,
+        },
+    )
+    .map_err(|err| {
+        Error::Other(format!(
+            "App manifest '{}' failed validation ({}): {err}",
+            manifest_src.display(),
+            err.reason_code()
+        ))
+    })?;
+    let rel_exec = manifest
+        .exec
+        .strip_prefix('/')
+        .expect("validated exec starts with '/'");
+    let direct = stage_dir.join(rel_exec);
+    let usrmerge = rel_exec
+        .strip_prefix("bin/")
+        .map(|tail| stage_dir.join("usr/bin").join(tail));
+    let exec_exists = std::fs::symlink_metadata(&direct).is_ok()
+        || usrmerge
+            .as_ref()
+            .is_some_and(|alt| std::fs::symlink_metadata(alt).is_ok());
+    if !exec_exists {
+        bail_other_err!(
+            "App manifest '{}' failed validation (missing-exec): exec {:?} not found in staged tree '{}'",
+            manifest_src.display(),
+            manifest.exec,
+            stage_dir.display()
+        );
+    }
+    let apps_dir = stage_dir.join("usr/share/ferrion/apps");
+    fs::create_dir(&apps_dir)?;
+    let dst = apps_dir.join(format!("{package_name}.toml"));
+    std::fs::write(&dst, &bytes).map_err(wrap_io_err!(dst, "Writing staged app manifest"))?;
+    Ok(())
+}
 
 fn auto_deps_from_dynamic_linking(
     stage_dirs: &[PathBuf],
@@ -498,6 +551,7 @@ pub fn build(
             BUILD_PRESCRIPT, SHARED_PRESCRIPT, script, BUILD_POSTSCRIPT
         );
         fs::run_command_stdin(command, full_script.as_bytes(), logger)?;
+        stage_app_manifest(recipe_dir, name.name(), &stage_dir_tmp)?;
 
         let mut globs = Vec::new();
         for (i, feat) in recipe.optional_packages.iter().enumerate() {
@@ -557,6 +611,12 @@ fn build_is_source_newer(
         && recipe_modified > source_modified
     {
         source_modified = recipe_modified;
+        recipe_is_newest = true;
+    }
+    if let Ok(manifest_modified) = fs::modified(&recipe_dir.join("manifest.toml"))
+        && manifest_modified > source_modified
+    {
+        source_modified = manifest_modified;
         recipe_is_newest = true;
     }
     let newer = source_modified > stage_modified;
