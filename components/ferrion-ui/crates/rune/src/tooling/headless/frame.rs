@@ -375,6 +375,14 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
             let text = serde_json::to_string_pretty(&tree).unwrap();
             std::fs::write(p, text).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
         }
+        if self.k == s.snap_frame
+            && let Some(p) = &s.args.glyphs
+        {
+            let glyphs = crate::tooling::glyphs_json_core(self.app.rt(), self.real_t);
+            let text = serde_json::to_string_pretty(&glyphs)
+                .unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+            std::fs::write(p, text).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+        }
     }
 }
 

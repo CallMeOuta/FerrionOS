@@ -64,6 +64,12 @@ pub use direction::first_strong_char;
 #[doc(hidden)]
 pub use direction::paragraph_ranges;
 pub use fonts::collate::compare_names;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fonts::dir_fonts::{
+    DEFAULT_FONT_DIRS, DirFontSummary, FONT_DIRS_ENV, FontDirError, MAX_FONT_DIRS,
+    MAX_FONT_FILE_BYTES, MAX_FONT_FILES, MAX_SCAN_DEPTH, collect_font_files, configured_font_dirs,
+};
+pub use fonts::system_fonts::{fontconfig_files_loaded, fontconfig_system_families};
 #[doc(hidden)]
 pub use fonts::face_weights;
 pub use fonts::face_weights::FaceWeights;
@@ -120,6 +126,8 @@ pub use layout::hash::shape_key;
 pub use layout::hash::text_hash;
 #[doc(hidden)]
 pub use layout::id::LayoutId;
+#[doc(hidden)]
+pub use layout::inspect::{InspectedGlyph, InspectedRun, inspect_layout};
 pub use layout::line_metrics::last_line_fill;
 pub use layout::line_metrics::layout_height;
 #[doc(hidden)]
@@ -363,6 +371,8 @@ pub struct TextSystem {
     face_kinds: FxHashMap<(u64, u32), windfoil::FaceKind>,
     /// Masks kept across launches (`mask_cache`).
     masks: mask_cache::Masks,
+    #[cfg(not(target_arch = "wasm32"))]
+    dir_fonts: DirFontSummary,
 }
 
 impl Default for TextSystem {
@@ -411,7 +421,9 @@ impl TextSystem {
         #[cfg(target_arch = "wasm32")]
         platform_face::register(&mut collection);
         // No system font loads here: each comes the first time a text needs it (`load_fallbacks`).
-        let cjk = register_cjk_fallbacks(&mut collection, &registered, families);
+        let mut cjk = register_cjk_fallbacks(&mut collection, &registered, families);
+        #[cfg(not(target_arch = "wasm32"))]
+        let dir_fonts = fonts::dir_fonts::register_configured_font_dirs(&mut collection, families, &mut cjk);
         #[cfg(target_arch = "wasm32")]
         let families = if fonts.is_empty() { ("Inter", "IBM Plex Mono") } else { families };
         let (sans, mono) = families::slots(families.0, families.1);
@@ -423,6 +435,8 @@ impl TextSystem {
             slot_system_mono: [names_system_mono(families.0), names_system_mono(families.1)],
             fallbacks: system_fonts::Fallbacks::new(list, cjk),
             atlas: Atlas::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            dir_fonts,
             ..Self::empty()
         };
         text.load_installed(families.0);
@@ -495,7 +509,14 @@ impl TextSystem {
             paths: Default::default(),
             masks: Default::default(),
             face_kinds: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            dir_fonts: DirFontSummary::default(),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn dir_font_summary(&self) -> DirFontSummary {
+        self.dir_fonts
     }
 
     /// The `trak` table of the font text in `family` at `weight` shapes with first.

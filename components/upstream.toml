@@ -71,6 +71,7 @@ added = [
     "examples/clipboard-demo",
     "examples/popup-menu-demo",
     "examples/dnd-demo",
+    "examples/scripts-demo",
 ]
 
 [ferrion-ui.include]

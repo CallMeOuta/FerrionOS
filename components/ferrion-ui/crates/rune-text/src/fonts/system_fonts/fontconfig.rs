@@ -5,15 +5,33 @@
 //! match for its script and language, the font a GTK or Qt app falls back to.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parley::fontique::{Collection, CollectionOptions, FallbackKey, FamilyId, GenericFamily, Language, Script, SourceKind};
+
+static FONTCONFIG_FILES_LOADED: AtomicUsize = AtomicUsize::new(0);
+static FONTCONFIG_SYSTEM_FAMILIES: AtomicUsize = AtomicUsize::new(0);
+
+pub(super) fn files_loaded() -> usize {
+    FONTCONFIG_FILES_LOADED.load(Ordering::Relaxed)
+}
+
+pub(super) fn system_families() -> usize {
+    FONTCONFIG_SYSTEM_FAMILIES.load(Ordering::Relaxed)
+}
 
 thread_local! {
     static SYSTEM: std::cell::RefCell<Option<Collection>> = const { std::cell::RefCell::new(None) };
 }
 
 fn with_system<R>(f: impl FnOnce(&mut Collection) -> R) -> R {
-    SYSTEM.with_borrow_mut(|system| f(system.get_or_insert_with(|| Collection::new(CollectionOptions { shared: false, system_fonts: true }))))
+    SYSTEM.with_borrow_mut(|system| {
+        f(system.get_or_insert_with(|| {
+            let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: true });
+            FONTCONFIG_SYSTEM_FAMILIES.store(collection.family_ids().count(), Ordering::Relaxed);
+            collection
+        }))
+    })
 }
 
 /// Every file of family `id` in the system collection.
@@ -23,6 +41,7 @@ fn files_of(system: &mut Collection, id: FamilyId, out: &mut Vec<PathBuf>) {
         if let SourceKind::Path(path) = &font.source().kind
             && !out.iter().any(|f| f.as_path() == path.as_ref())
         {
+            FONTCONFIG_FILES_LOADED.fetch_add(1, Ordering::Relaxed);
             out.push(path.to_path_buf());
         }
     }

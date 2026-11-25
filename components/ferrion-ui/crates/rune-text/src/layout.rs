@@ -7,6 +7,7 @@ pub(crate) mod decorations;
 pub(crate) mod hash;
 pub(crate) mod id;
 pub(crate) mod inline_fit;
+pub(crate) mod inspect;
 pub(crate) mod line_break;
 pub(crate) mod line_metrics;
 pub(crate) mod ltr_units;

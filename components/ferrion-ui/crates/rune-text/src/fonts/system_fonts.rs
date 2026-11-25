@@ -724,5 +724,27 @@ pub(crate) fn font_file_name(path: &std::path::Path) -> Option<String> {
     [".ttf", ".otf", ".ttc", ".otc"].iter().any(|ext| name.ends_with(ext)).then(|| name.replace([' ', '.'], ""))
 }
 
+pub fn fontconfig_files_loaded() -> usize {
+    #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+    {
+        fontconfig::files_loaded()
+    }
+    #[cfg(not(all(unix, not(target_vendor = "apple"), not(target_os = "android"))))]
+    {
+        0
+    }
+}
+
+pub fn fontconfig_system_families() -> usize {
+    #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+    {
+        fontconfig::system_families()
+    }
+    #[cfg(not(all(unix, not(target_vendor = "apple"), not(target_os = "android"))))]
+    {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -21,6 +21,7 @@ pub struct Args {
     pub fps: f64,
     pub out: Option<PathBuf>,
     pub tree: Option<PathBuf>,
+    pub glyphs: Option<PathBuf>,
     pub trace: Option<PathBuf>,
     /// Trace the native window's submission clock instead of a virtual headless clock.
     pub native: bool,
@@ -220,6 +221,7 @@ impl Args {
                 "--pointer" => a.pointer = true,
                 "--desktop" => a.desktop = Some(val(&mut i).into()),
                 "--tree" => a.tree = Some(val(&mut i).into()),
+                "--glyphs" => a.glyphs = Some(val(&mut i).into()),
                 "--html" => a.html = Some(val(&mut i).into()),
                 "--html-template" => a.html_template = Some(val(&mut i).into()),
                 "--html-widths" => {
@@ -275,6 +277,7 @@ impl Args {
         self.snap.is_some()
             || self.snap_popup.is_some()
             || self.tree.is_some()
+            || self.glyphs.is_some()
             || self.html.is_some()
             || (!self.native
                 && (self.script.is_some() || self.trace.is_some() || self.frames.is_some() || self.duration.is_some() || self.out.is_some()))
@@ -359,6 +362,7 @@ const HELP: &str = "usage: <app> [window]
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
   --tree out.json       element tree with animated values
+  --glyphs out.json     shaped glyph runs, ids, positions and run direction
   --html out.html       the page as static HTML and CSS, at rest, for a web app's first paint
                         (no GPU); --html-widths 360,640,1000 lays it out at each width and
                         folds them into @media rules; --html-template FILE fills

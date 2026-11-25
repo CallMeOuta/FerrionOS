@@ -178,6 +178,8 @@ mod crop;
 #[path = "tooling/eased_input.rs"]
 mod eased_input;
 pub(crate) use eased_input::step_resize;
+#[path = "tooling/glyphs.rs"]
+mod glyphs;
 #[path = "tooling/headless.rs"]
 mod headless;
 #[path = "tooling/loop_check.rs"]
@@ -205,6 +207,7 @@ use script::parse_script;
 pub(crate) use strip::*;
 #[cfg(test)]
 pub(crate) use trace::tree_json;
+pub(crate) use glyphs::glyphs_json_core;
 pub(crate) use trace::{FrameTiming, Trace, tree_json_core};
 use trace::r2;
 

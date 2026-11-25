@@ -2,6 +2,8 @@
 
 pub(crate) mod collate;
 pub(crate) mod default_fonts;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dir_fonts;
 #[doc(hidden)]
 pub mod face_weights;
 pub(crate) mod fallback;
