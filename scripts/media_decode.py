@@ -457,7 +457,7 @@ def run_media_decode(vm, args, helpers):
                     f"bash -c 'ffmpeg -hide_banner -nostdin -c:a {spec['acodec']} -i /tmp/media/{name} "
                     f"-map 0:a:0 -f f32le -c:a pcm_f32le /tmp/media/{a_out} && "
                     f"got=$(sha256sum /tmp/media/{a_out} | cut -d\" \" -f1) && "
-                    f"if test \"$got\" = \"{ref_sha}\"; then echo MEDIA_AUDIO_EXACT; else "
+                    f"if test \"$got\" = \"{ref_sha}\"; then echo MEDIA_AUDIO''_EXACT; else "
                     f"rm -f /tmp/media/{a_out}.part.*; split -b {UPLOAD_CHUNK_BYTES} /tmp/media/{a_out} /tmp/media/{a_out}.part. && "
                     f"first=1; for p in /tmp/media/{a_out}.part.*; do "
                     f"if test $first -eq 1; then {curl_post} \"@$p\" {base}/{a_out} || exit 1; first=0; "
@@ -468,7 +468,7 @@ def run_media_decode(vm, args, helpers):
                     return False, f"timeout decoding audio {name}; see {vm.out}"
                 if code != 0:
                     problems.append(f"audio decode failed for {name} (rc={code}): {a_cmd.strip()[-300:]}")
-                elif "MEDIA_AUDIO_EXACT" in a_cmd:
+                elif not (guest_dir / a_out).is_file() and re.search(r"(?m)^MEDIA_AUDIO_EXACT$", a_cmd):
                     record["audio"][name] = {
                         "acodec": spec["acodec"],
                         "bytes": len(ref_bytes),
@@ -522,7 +522,7 @@ def run_media_decode(vm, args, helpers):
                 f"bash -c 'ffmpeg -hide_banner -nostdin -c:a {spec['acodec']} -i /tmp/media/{name} "
                 f"-map 0:a:0 -f {fmt} -c:a {enc} /tmp/media/{a_out} && "
                 f"got=$(sha256sum /tmp/media/{a_out} | cut -d\" \" -f1) && "
-                f"if test \"$got\" = \"{ref_sha}\"; then echo MEDIA_AUDIO_EXACT; else "
+                f"if test \"$got\" = \"{ref_sha}\"; then echo MEDIA_AUDIO''_EXACT; else "
                 f"rm -f /tmp/media/{a_out}.part.*; split -b {UPLOAD_CHUNK_BYTES} /tmp/media/{a_out} /tmp/media/{a_out}.part. && "
                 f"first=1; for p in /tmp/media/{a_out}.part.*; do "
                 f"if test $first -eq 1; then {curl_post} \"@$p\" {base}/{a_out} || exit 1; first=0; "
@@ -534,7 +534,7 @@ def run_media_decode(vm, args, helpers):
             if code != 0:
                 problems.append(f"audio decode failed for {name} (rc={code}): {a_cmd.strip()[-300:]}")
                 continue
-            if "MEDIA_AUDIO_EXACT" in a_cmd:
+            if not (guest_dir / a_out).is_file() and re.search(r"(?m)^MEDIA_AUDIO_EXACT$", a_cmd):
                 record["audio"][name] = {
                     "acodec": spec["acodec"],
                     "bytes": len(ref_bytes),
