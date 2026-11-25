@@ -88,6 +88,16 @@ mod probe {
             ["wayland-check"] => wayland_check(false, 0),
             ["wayland-check", "--map"] => wayland_check(true, 0),
             ["wayland-check", "--map", secs] => wayland_check(true, secs.parse().unwrap_or(5)),
+            ["shm-create", name, marker] => shm_create(name, marker, 0),
+            ["shm-create", name, marker, hold_secs] => {
+                shm_create(name, marker, hold_secs.parse().unwrap_or(0))
+            }
+            ["shm-unlink", name] => shm_unlink(name),
+            ["shm-exists", name] => shm_exists(name),
+            ["shm-check", outside_name, peer_name, own_name] => {
+                shm_check(outside_name, peer_name, own_name)
+            }
+            ["sleep", secs] => sleep_secs(secs.parse().unwrap_or(0)),
             [
                 "cap-check",
                 address,
@@ -1353,6 +1363,218 @@ mod probe {
             }
         }
         println!("OPENAT_SCANNED {scanned}");
+        0
+    }
+
+    fn sleep_secs(secs: u64) -> i32 {
+        std::thread::sleep(std::time::Duration::from_secs(secs.min(MAX_LISTEN_SECS)));
+        0
+    }
+
+    fn shm_create(name: &str, marker: &str, hold_secs: u64) -> i32 {
+        let Ok(cname) = std::ffi::CString::new(name) else {
+            eprintln!("ferrion-run-probe: invalid shm name");
+            return 2;
+        };
+        let fd = unsafe {
+            libc::shm_open(
+                cname.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            eprintln!(
+                "ferrion-run-probe: shm_open {name}: {}",
+                std::io::Error::last_os_error()
+            );
+            return 1;
+        }
+        let bytes = marker.as_bytes();
+        let ok = unsafe { libc::ftruncate(fd, bytes.len() as libc::off_t) } == 0
+            && unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) }
+                == bytes.len() as isize;
+        let err = std::io::Error::last_os_error();
+        if !ok {
+            unsafe { libc::close(fd) };
+            eprintln!("ferrion-run-probe: shm write {name}: {err}");
+            return 1;
+        }
+        println!("SHM_CREATED {name}");
+        let _ = std::io::stdout().flush();
+        if hold_secs > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(
+                hold_secs.min(MAX_LISTEN_SECS),
+            ));
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+        unsafe { libc::close(fd) };
+        0
+    }
+
+    fn shm_unlink(name: &str) -> i32 {
+        let Ok(cname) = std::ffi::CString::new(name) else {
+            eprintln!("ferrion-run-probe: invalid shm name");
+            return 2;
+        };
+        if unsafe { libc::shm_unlink(cname.as_ptr()) } == 0 {
+            println!("SHM_UNLINKED {name}");
+            0
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_UNLINK_ERR {err}");
+            1
+        }
+    }
+
+    fn shm_exists(name: &str) -> i32 {
+        let Ok(cname) = std::ffi::CString::new(name) else {
+            return 2;
+        };
+        let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0) };
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+            println!("SHM_EXISTS {name} OK");
+            0
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_EXISTS {name} ERR {err}");
+            1
+        }
+    }
+
+    fn shm_check(outside_name: &str, peer_name: &str, own_name: &str) -> i32 {
+        let Ok(c_outside) = std::ffi::CString::new(outside_name) else {
+            return 2;
+        };
+        let fd = unsafe { libc::shm_open(c_outside.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0) };
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+            println!("SHM_OUTSIDE_API REACHED");
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_OUTSIDE_API ERR {err}");
+        }
+
+        let raw_outside = format!("/scheme/shm/{}", outside_name.trim_start_matches('/'));
+        if let Ok(c_raw) = std::ffi::CString::new(raw_outside) {
+            let fd = unsafe { libc::open(c_raw.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd >= 0 {
+                unsafe { libc::close(fd) };
+                println!("SHM_OUTSIDE_RAW REACHED");
+            } else {
+                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+                println!("SHM_OUTSIDE_RAW ERR {err}");
+            }
+        }
+
+        let Ok(c_peer) = std::ffi::CString::new(peer_name) else {
+            return 2;
+        };
+        let fd = unsafe { libc::shm_open(c_peer.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0) };
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+            println!("SHM_PEER REACHED");
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_PEER ERR {err}");
+        }
+
+        for (tag, path) in [
+            ("SHM_AUDIO_SHM", "/scheme/shm/audio_shm"),
+            ("SHM_AUDIOHW", "/scheme/audiohw/ring"),
+        ] {
+            if let Ok(c_path) = std::ffi::CString::new(path) {
+                let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+                if fd >= 0 {
+                    unsafe { libc::close(fd) };
+                    println!("{tag} REACHED");
+                } else {
+                    let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+                    println!("{tag} ERR {err}");
+                }
+            }
+        }
+
+        let Ok(c_own) = std::ffi::CString::new(own_name) else {
+            return 2;
+        };
+        let fd = unsafe {
+            libc::shm_open(
+                c_own.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_OWN_CREATE ERR {err}");
+            return 1;
+        }
+        let trunc_ok = unsafe { libc::ftruncate(fd, 4096) } == 0;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if !trunc_ok || ptr == libc::MAP_FAILED {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            unsafe {
+                libc::shm_unlink(c_own.as_ptr());
+                libc::close(fd);
+            }
+            println!("SHM_OWN_CREATE ERR {err}");
+            return 1;
+        }
+        unsafe {
+            *(ptr as *mut u32) = 0x5046_5231;
+            let got = *(ptr as *const u32);
+            libc::munmap(ptr, 4096);
+            if got != 0x5046_5231 {
+                libc::shm_unlink(c_own.as_ptr());
+                libc::close(fd);
+                println!("SHM_OWN_CREATE ERR 5");
+                return 1;
+            }
+        }
+        println!("SHM_OWN_CREATE OK");
+
+        let dup = unsafe {
+            libc::shm_open(
+                c_own.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if dup >= 0 {
+            unsafe { libc::close(dup) };
+            println!("SHM_OWN_EXCL REACHED");
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_OWN_EXCL ERR {err}");
+        }
+
+        if unsafe { libc::shm_unlink(c_own.as_ptr()) } == 0 {
+            println!("SHM_OWN_UNLINK OK");
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_OWN_UNLINK ERR {err}");
+        }
+        unsafe { libc::close(fd) };
+
+        let after = unsafe { libc::shm_open(c_own.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0) };
+        if after >= 0 {
+            unsafe { libc::close(after) };
+            println!("SHM_OWN_AFTER_UNLINK REACHED");
+        } else {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            println!("SHM_OWN_AFTER_UNLINK ERR {err}");
+        }
         0
     }
 }

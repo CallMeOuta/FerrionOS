@@ -10497,7 +10497,7 @@ SCOPE_LINKS = ("cd /home/user/scope && ln -s /home/user/.ssh to-ssh && ln -s ins
                "ln -s ../.. d/up && ln -s ../in d/back && ln -s ../../x d2/sub/l && mv d2/sub/l l2 && mv p/q/old old2")
 SCOPE_LINKS_OUT = {"/home/user/scope/to-ssh", "/home/user/scope/d/up", "/home/user/scope/l2", "/home/user/scope/old2"}
 SCOPE_SCHEMES = {"event", "memory", "pipe", "time", "rand", "null", "zero", "sys", "proc", "uds_stream", "uds_dgram",
-                 "eventfd", "timerfd", "ip", "icmp", "tcp", "udp", "file"}
+                 "eventfd", "timerfd", "ip", "icmp", "tcp", "udp", "file", "shm"}
 SCOPE_TOP = {"bin", "dev", "etc", "home", "include", "lib", "share", "ssl", "tmp", "usr"}
 SCOPE_VARS = {"PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "COLUMNS", "LINES", "USER", "LOGNAME", "HOME", "TMPDIR"}
 
@@ -12299,6 +12299,29 @@ def test_gtk4_window(args, out):
 
 
 OWN_IMAGE["gtk4-window"] = test_gtk4_window
+
+
+def test_display_shm(args, out):
+    """Checks GTK 4 Wayland window under ferrion-run --display and session-private shm isolation (outside object, another session's object with the same name, audio buffers, O_EXCL EEXIST, and shm_unlink cleanup; use --config wm-session)."""
+    import display_shm
+    vm = VM(args, out)
+    try:
+        return display_shm.run_display_shm(
+            vm,
+            args,
+            {
+                "Blocked": Blocked,
+                "root_shell": root_shell,
+                "run_status": run_status,
+                "sendkeys": sendkeys,
+                "settle": settle,
+            },
+        )
+    finally:
+        vm.close()
+
+
+OWN_IMAGE["display-shm"] = test_display_shm
 
 
 def test_glycin_load(args, out):

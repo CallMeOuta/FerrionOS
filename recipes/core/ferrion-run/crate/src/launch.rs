@@ -12,7 +12,7 @@ use ferrion_scope::overlay::{LAYER, LOWER, Session};
 use ferrion_scope::proxy::END_SESSION;
 use ferrion_scope::scope::{Access, Grant, Scope, within};
 use libredox::call;
-use libredox::flag::{F_SETFD, O_CLOEXEC, O_RDWR};
+use libredox::flag::{F_SETFD, O_CLOEXEC, O_DIRECTORY, O_RDONLY, O_RDWR};
 
 use crate::sessions::{CLONE_PREFIX, PID, clone_dirs, state_root};
 use crate::{
@@ -22,6 +22,8 @@ use crate::{
 };
 
 const SCOPE_SERVICE: &str = "/scheme/file-scope/new";
+const SHM_RAND_BYTES: usize = 16;
+const MAX_RAND_READS: usize = 16;
 const MAX_REPORT: usize = 16 << 20;
 const REPORT_CHUNK: usize = 4096;
 const MAX_TABLE_BYTES: usize = 1 << 20;
@@ -946,6 +948,49 @@ pub fn run(options: &Options, policy: &LaunchPolicy) -> Outcome {
     outcome
 }
 
+fn random_hex_128() -> Result<String, String> {
+    let fd = call::open("/scheme/rand", O_RDONLY | O_CLOEXEC, 0)
+        .map_err(|e| format!("cannot open /scheme/rand: {e}"))?;
+    let mut bytes = [0u8; SHM_RAND_BYTES];
+    let mut got = 0usize;
+    for _ in 0..MAX_RAND_READS {
+        if got == SHM_RAND_BYTES {
+            break;
+        }
+        match call::read(fd, &mut bytes[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) => {
+                let _ = call::close(fd);
+                return Err(format!("cannot read /scheme/rand: {e}"));
+            }
+        }
+    }
+    let _ = call::close(fd);
+    if got != SHM_RAND_BYTES {
+        return Err(format!(
+            "short read from /scheme/rand ({got}/{SHM_RAND_BYTES} bytes)"
+        ));
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(SHM_RAND_BYTES * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    assert_eq!(out.len(), SHM_RAND_BYTES * 2);
+    assert!(!out.contains('.'));
+    Ok(out)
+}
+
+fn open_shm_prefix(tag: &str) -> Result<usize, String> {
+    assert!(!tag.contains('.') && !tag.contains('/'));
+    let hex = random_hex_128()?;
+    let path = format!("/scheme/shm/{tag}{hex}");
+    call::open(&path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)
+        .map_err(|e| format!("cannot open private shm prefix: {e}"))
+}
+
 fn launch(
     options: &Options,
     policy: &LaunchPolicy,
@@ -959,10 +1004,11 @@ fn launch(
             allow_sudo,
         } => (*withhold_network, *allow_sudo, options.pty, false, false),
     };
-    let schemes = match caller_schemes() {
-        Ok(caller) => child_schemes(&caller, withhold_network, allow_sudo, pty, allow_audio),
+    let caller = match caller_schemes() {
+        Ok(caller) => caller,
         Err(reason) => return Outcome::Refused(reason),
     };
+    let schemes = child_schemes(&caller, withhold_network, allow_sudo, pty, allow_audio);
     let mut proxy = match ProxySession::open(&prepared.scope) {
         Ok(proxy) => proxy,
         Err(reason) => return Outcome::Refused(reason),
@@ -978,6 +1024,24 @@ fn launch(
     if let Err(e) = call::register_scheme_to_ns(namespace, "file", proxy.root()) {
         let _ = call::close(namespace);
         return Outcome::Refused(format!("cannot give the session its file scheme: {e}"));
+    }
+    let shm_root = if caller.iter().any(|s| s == "shm") {
+        match open_shm_prefix("ferrion-run-") {
+            Ok(fd) => Some(fd),
+            Err(reason) => {
+                let _ = call::close(namespace);
+                return Outcome::Refused(reason);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(fd) = shm_root
+        && let Err(e) = call::register_scheme_to_ns(namespace, "shm", fd)
+    {
+        let _ = call::close(fd);
+        let _ = call::close(namespace);
+        return Outcome::Refused(format!("cannot give the session its shm scheme: {e}"));
     }
     let start = match cwd.to_str() {
         Some(c)
@@ -1000,6 +1064,9 @@ fn launch(
     );
     let pid = unsafe { libc::fork() };
     if pid < 0 {
+        if let Some(fd) = shm_root {
+            let _ = call::close(fd);
+        }
         let _ = call::close(namespace);
         return Outcome::Refused(format!(
             "cannot start the program: {}",
@@ -1029,6 +1096,9 @@ fn launch(
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
     }
     let _ = call::close(namespace);
+    if let Some(fd) = shm_root {
+        let _ = call::close(fd);
+    }
     proxy.close_root();
     let status = wait(pid);
     let (ended, report) = proxy.end();

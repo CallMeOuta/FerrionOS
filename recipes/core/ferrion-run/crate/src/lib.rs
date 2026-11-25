@@ -105,9 +105,11 @@ ferrion-run lists each such symlink that leads outside its folder when PROGRAM
 exits; `diff` and `apply` list those in a layer. A symlink that was there before
 the session and that PROGRAM re-aims by changing a folder or symlink on its way
 is not listed. The namespace holds the `file` scheme
-of the session and event, memory, pipe, time, rand, null, zero, sys, proc,
+of the session, a session-private `shm` prefix (each session's shared-memory
+objects live under its own prefix and it cannot reach any object outside it),
+and event, memory, pipe, time, rand, null, zero, sys, proc,
 uds_stream, uds_dgram, eventfd and timerfd, plus the network schemes and pty as
-above; never sudo, file-scope, debug, log, shm, chan, audio, the display schemes or
+above; never sudo, file-scope, debug, log, chan, audio, the display schemes or
 a disk. Through sys PROGRAM still reads the list of processes and the paths of the
 descriptors every process holds. PROGRAM's environment holds PATH, TERM, LANG,
 LC_ALL, LC_CTYPE, TZ, COLUMNS, LINES, USER, LOGNAME, HOME, TMPDIR and the --env
