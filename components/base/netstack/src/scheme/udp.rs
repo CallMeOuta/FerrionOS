@@ -152,17 +152,26 @@ impl<'a> SchemeSocket for UdpSocket<'a> {
         let udp_socket = socket_set.get_mut::<UdpSocket>(socket_handle);
 
         if remote_endpoint.is_specified() {
-            let local_endpoint_addr = match local_endpoint.addr {
-                Some(addr) if addr.is_unspecified() => Some(addr),
-                _ => {
-                    // local ip is 0.0.0.0, resolve it
-                    let route_table = context.route_table.borrow();
-                    let addr = route_table
-                        .lookup_src_addr(&remote_endpoint.addr.expect("Checked in is_specified"));
-                    if addr.is_none() {
-                        error!("Opening a UDP connection with a probably invalid source IP as no route have been found for destination: {}", remote_endpoint);
+            let remote_is_broadcast = matches!(
+                remote_endpoint.addr,
+                Some(smoltcp::wire::IpAddress::Ipv4(ip)) if ip.is_broadcast()
+            );
+            let local_endpoint_addr = if remote_is_broadcast {
+                None
+            } else {
+                match local_endpoint.addr {
+                    Some(addr) if addr.is_unspecified() => Some(addr),
+                    _ => {
+                        // local ip is 0.0.0.0, resolve it
+                        let route_table = context.route_table.borrow();
+                        let addr = route_table.lookup_src_addr(
+                            &remote_endpoint.addr.expect("Checked in is_specified"),
+                        );
+                        if addr.is_none() {
+                            error!("Opening a UDP connection with a probably invalid source IP as no route have been found for destination: {}", remote_endpoint);
+                        }
+                        addr
                     }
-                    addr
                 }
             };
             local_endpoint = IpListenEndpoint {

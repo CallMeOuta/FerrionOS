@@ -3,8 +3,8 @@ pub mod loopback;
 
 use std::rc::Rc;
 
-use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
+use smoltcp::time::{Duration, Instant};
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
 
 /// Represent a link layer device (eth0, loopback...)
 pub trait LinkDevice {
@@ -29,6 +29,16 @@ pub trait LinkDevice {
 
     fn ip_address(&self) -> Option<IpCidr>;
     fn set_ip_address(&mut self, addr: IpCidr);
+    fn clear_ip_address(&mut self) {}
+
+    fn start_arp_probe(&mut self, _target: Ipv4Address, _now: Instant) {}
+    fn clear_arp_probe(&mut self) {}
+    fn arp_probe_status(&self) -> String {
+        "idle\n".into()
+    }
+    fn next_arp_probe_delay(&self, _now: Instant) -> Option<Duration> {
+        None
+    }
 }
 
 #[derive(Default)]

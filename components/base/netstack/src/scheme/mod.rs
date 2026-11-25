@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
@@ -67,6 +67,8 @@ pub struct Smolnetd {
     timer: ::std::time::Instant,
     pending_scheme_events: bool,
     pending_timers: Vec<u128>,
+    pending_abort_ip: Rc<RefCell<Option<Ipv4Address>>>,
+    probe_started: Rc<Cell<bool>>,
 
     ip_scheme: IpScheme,
     udp_scheme: UdpScheme,
@@ -84,6 +86,7 @@ impl Smolnetd {
     pub fn new(
         network_file: Fd,
         hardware_addr: EthernetAddress,
+        link_file: Option<File>,
         ip_file: Socket,
         udp_file: Socket,
         tcp_file: Socket,
@@ -102,8 +105,15 @@ impl Smolnetd {
 
         let devices = Rc::new(RefCell::new(DeviceList::default()));
         let route_table = Rc::new(RefCell::new(RouteTable::default()));
+        let mtu = Rc::new(Cell::new(Router::MTU));
+        let pending_abort_ip = Rc::new(RefCell::new(None));
+        let probe_started = Rc::new(Cell::new(false));
         let mut network_device = Tracer::new(
-            Router::new(Rc::clone(&devices), Rc::clone(&route_table)),
+            Router::new(
+                Rc::clone(&devices),
+                Rc::clone(&route_table),
+                Rc::clone(&mtu),
+            ),
             |_timestamp, printer| trace!("{}", printer),
         );
 
@@ -126,12 +136,15 @@ impl Smolnetd {
         let socket_set = Rc::new(RefCell::new(SocketSet::new(vec![])));
 
         let loopback = LoopbackDevice::default();
-        route_table.borrow_mut().insert_rule(Rule::new(
-            "127.0.0.0/8".parse().unwrap(),
-            None,
-            Rc::clone(loopback.name()),
-            "127.0.0.1".parse().unwrap(),
-        ));
+        route_table
+            .borrow_mut()
+            .insert_rule(Rule::new(
+                "127.0.0.0/8".parse().unwrap(),
+                None,
+                Rc::clone(loopback.name()),
+                "127.0.0.1".parse().unwrap(),
+            ))
+            .expect("Failed to insert loopback route");
 
         let mut eth0 = EthernetLink::new("eth0", unsafe {
             File::from_raw_fd(network_file.into_raw() as RawFd)
@@ -148,6 +161,8 @@ impl Smolnetd {
             timer,
             pending_scheme_events: false,
             pending_timers: Vec::with_capacity(MAX_PENDING_TIMERS),
+            pending_abort_ip: Rc::clone(&pending_abort_ip),
+            probe_started: Rc::clone(&probe_started),
             time_file: unsafe { File::from_raw_fd(time_file.into_raw() as RawFd) },
             ip_scheme: IpScheme::new(
                 "ip",
@@ -186,6 +201,11 @@ impl Smolnetd {
                 netcfg_file,
                 Rc::clone(&route_table),
                 Rc::clone(&devices),
+                mtu,
+                link_file,
+                pending_abort_ip,
+                probe_started,
+                timer,
             )?,
         })
     }
@@ -255,6 +275,16 @@ impl Smolnetd {
 
     pub fn on_netcfg_scheme_event(&mut self) -> Result<()> {
         self.netcfg_scheme.on_scheme_event()?;
+        let old_ip = self.pending_abort_ip.borrow_mut().take();
+        if let Some(old_ip) = old_ip {
+            self.router_device.get_mut().drop_tx_from(old_ip);
+            self.tcp_scheme.abort_local_addr(old_ip);
+            self.notify_sockets()?;
+        }
+        if self.probe_started.replace(false) {
+            let timeout = self.poll()?;
+            self.arm_timer(timeout)?;
+        }
         Ok(())
     }
 
@@ -335,6 +365,12 @@ impl Smolnetd {
 
         self.tcp_scheme.sweep_lingering(self.now().total_micros());
         self.notify_sockets()?;
+
+        let probe_timeout = self.router_device.get_ref().next_probe_delay(self.now());
+        let timeout = match probe_timeout {
+            Some(delay) => ::std::cmp::min(timeout, delay),
+            None => timeout,
+        };
 
         Ok(::std::cmp::min(
             ::std::cmp::max(Smolnetd::MIN_CHECK_TIMEOUT, timeout),
@@ -421,6 +457,10 @@ where
 
     pub fn sweep_lingering(&mut self, now_us: i64) {
         self.scheme.sweep_lingering(now_us);
+    }
+
+    pub fn abort_local_addr(&mut self, local_ip: Ipv4Address) {
+        self.scheme.abort_local_addr(local_ip);
     }
     pub fn on_scheme_event(&mut self) -> Result<bool> {
         for _ in 0..MAX_SCHEME_REQUESTS_PER_BATCH {

@@ -164,6 +164,7 @@ pub struct SocketFile<DataT> {
     pub keepidle_secs: u32,
     pub pending_error: Option<i32>,
     pub reset_pending: bool,
+    pub abort_pending: bool,
 }
 
 impl<DataT> SocketFile<DataT> {
@@ -183,6 +184,7 @@ impl<DataT> SocketFile<DataT> {
             keepidle_secs: self.keepidle_secs,
             pending_error: None,
             reset_pending: false,
+            abort_pending: false,
             data,
         }
     }
@@ -203,6 +205,7 @@ impl<DataT> SocketFile<DataT> {
             keepidle_secs: self.keepidle_secs,
             pending_error: None,
             reset_pending: false,
+            abort_pending: false,
             data,
         }
     }
@@ -222,6 +225,7 @@ impl<DataT> SocketFile<DataT> {
             keepidle_secs: DEFAULT_TCP_KEEPIDLE_SECS,
             pending_error: None,
             reset_pending: false,
+            abort_pending: false,
             socket_handle,
             data,
         }
@@ -271,7 +275,9 @@ where
             let socket_handle = sock_file.socket_handle;
             SocketT::sync_state(socket_set, socket_handle, sock_file, now_us);
 
-            let has_err = sock_file.pending_error.is_some() || sock_file.reset_pending;
+            let has_err = sock_file.pending_error.is_some()
+                || sock_file.reset_pending
+                || sock_file.abort_pending;
             if has_err {
                 if !sock_file.err_notified {
                     sock_file.err_notified = true;
@@ -398,12 +404,7 @@ where
         true
     }
 
-    fn sweep_lingering(
-        _sockets: &mut SocketSet,
-        _data: &mut Self::SchemeDataT,
-        _now_us: i64,
-    ) {
-    }
+    fn sweep_lingering(_sockets: &mut SocketSet, _data: &mut Self::SchemeDataT, _now_us: i64) {}
 
     fn write_buf(&mut self, file: &mut SocketFile<Self::DataT>, buf: &[u8])
         -> SyscallResult<usize>;
@@ -447,6 +448,14 @@ where
         _handle: SocketHandle,
         _file: &mut SocketFile<Self::DataT>,
         _now_us: i64,
+    ) {
+    }
+
+    fn abort_local_addr(
+        _sockets: &mut SocketSet,
+        _handle: SocketHandle,
+        _file: &mut SocketFile<Self::DataT>,
+        _local_ip: smoltcp::wire::Ipv4Address,
     ) {
     }
 
@@ -555,6 +564,17 @@ where
     pub fn sweep_lingering(&mut self, now_us: i64) {
         let mut socket_set = self.socket_set.borrow_mut();
         SocketT::sweep_lingering(&mut socket_set, &mut self.scheme_data, now_us);
+    }
+
+    pub fn abort_local_addr(&mut self, local_ip: smoltcp::wire::Ipv4Address) {
+        let mut socket_set = self.socket_set.borrow_mut();
+        for (_, handle) in self.handles.iter_mut() {
+            let Handle::File(SchemeFile::Socket(ref mut sock_file)) = *handle else {
+                continue;
+            };
+            let socket_handle = sock_file.socket_handle;
+            SocketT::abort_local_addr(&mut socket_set, socket_handle, sock_file, local_ip);
+        }
     }
 
     pub fn handle_block(&mut self, op: &Op) -> SyscallResult<Option<TimeSpec>> {
@@ -844,11 +864,17 @@ where
                     Handle::Null(ref null) => match (level, name) {
                         (SOL_SOCKET, SO_RCVBUF) => write_i32_opt(
                             payload,
-                            null.opts.rcvbuf.unwrap_or_else(SocketT::default_rx_buf_bytes) as i32,
+                            null.opts
+                                .rcvbuf
+                                .unwrap_or_else(SocketT::default_rx_buf_bytes)
+                                as i32,
                         ),
                         (SOL_SOCKET, SO_SNDBUF) => write_i32_opt(
                             payload,
-                            null.opts.sndbuf.unwrap_or_else(SocketT::default_tx_buf_bytes) as i32,
+                            null.opts
+                                .sndbuf
+                                .unwrap_or_else(SocketT::default_tx_buf_bytes)
+                                as i32,
                         ),
                         (SOL_SOCKET, SO_REUSEADDR) => {
                             write_i32_opt(payload, i32::from(null.opts.reuseaddr))
@@ -985,6 +1011,7 @@ where
                 keepidle_secs: opts.keepidle_secs,
                 pending_error: None,
                 reset_pending: false,
+                abort_pending: false,
                 data,
             });
 
@@ -1016,9 +1043,15 @@ where
         ctx: &CallerCtx,
     ) -> SyscallResult<OpenResult> {
         match self.handles.get(fd)? {
-            Handle::SchemeRoot => {
-                self.open_inner(path, flags, ctx.uid, ctx.gid, true, true, SocketOpts::default())
-            }
+            Handle::SchemeRoot => self.open_inner(
+                path,
+                flags,
+                ctx.uid,
+                ctx.gid,
+                true,
+                true,
+                SocketOpts::default(),
+            ),
             _ => Err(SyscallError::new(syscall::EACCES)),
         }
     }
@@ -1112,7 +1145,12 @@ where
                 Handle::File(SchemeFile::Socket(ref mut file)) => {
                     let mut socket_set = self.socket_set.borrow_mut();
                     let socket_handle = file.socket_handle;
-                    SocketT::sync_state(&mut socket_set, socket_handle, file, self.context.now_us());
+                    SocketT::sync_state(
+                        &mut socket_set,
+                        socket_handle,
+                        file,
+                        self.context.now_us(),
+                    );
                     let socket = socket_set.get_mut::<SocketT>(socket_handle);
                     let ret = SocketT::write_buf(socket, file, buf);
                     match ret {
@@ -1145,7 +1183,12 @@ where
                 Handle::File(SchemeFile::Socket(ref mut file)) => {
                     let mut socket_set = self.socket_set.borrow_mut();
                     let socket_handle = file.socket_handle;
-                    SocketT::sync_state(&mut socket_set, socket_handle, file, self.context.now_us());
+                    SocketT::sync_state(
+                        &mut socket_set,
+                        socket_handle,
+                        file,
+                        self.context.now_us(),
+                    );
                     let socket = socket_set.get_mut::<SocketT>(socket_handle);
 
                     let ret = SocketT::read_buf(socket, file, buf);
@@ -1186,7 +1229,15 @@ where
 
                     SocketT::validate_dup(path)?;
 
-                    return self.open_inner(path, flags, uid, gid, read_enabled, write_enabled, opts);
+                    return self.open_inner(
+                        path,
+                        flags,
+                        uid,
+                        gid,
+                        read_enabled,
+                        write_enabled,
+                        opts,
+                    );
                 }
                 Handle::File(ref mut file) => file,
             };
@@ -1238,10 +1289,7 @@ where
                         .and_modify(|e| *e = e.saturating_sub(1))
                         .or_insert(0);
 
-                    *self
-                        .ref_counts
-                        .entry(socket_handle)
-                        .or_insert(0) += 1;
+                    *self.ref_counts.entry(socket_handle).or_insert(0) += 1;
 
                     file.socket_handle = socket_handle;
                     file.data = data;

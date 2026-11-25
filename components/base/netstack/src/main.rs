@@ -63,6 +63,8 @@ fn run(daemon: daemon::Daemon) -> Result<()> {
         .map(|mac_address| EthernetAddress::from_bytes(&mac_address))
         .context("failed to get mac address from network adapter")?;
 
+    let link_file = std::fs::File::open(format!("/scheme/{adapter}/link")).ok();
+
     trace!("opening ip scheme socket");
     let ip_fd = Socket::nonblock()
         .map_err(|e| anyhow!("failed to open create ip scheme socket: {:?}", e))?;
@@ -153,6 +155,7 @@ fn run(daemon: daemon::Daemon) -> Result<()> {
     let mut smolnetd = Smolnetd::new(
         network_fd,
         hardware_addr,
+        link_file,
         ip_fd,
         udp_fd,
         tcp_fd,

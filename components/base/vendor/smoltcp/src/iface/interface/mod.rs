@@ -324,6 +324,10 @@ impl Interface {
         self.inner.tcp_isn_generator = generator;
     }
 
+    pub fn set_mtu(&mut self, mtu: usize) {
+        self.inner.caps.max_transmission_unit = mtu;
+    }
+
     /// Get the HardwareAddress address of the interface.
     ///
     /// # Panics

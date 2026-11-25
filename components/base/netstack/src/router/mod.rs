@@ -1,10 +1,10 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use smoltcp::phy::{Device, DeviceCapabilities, Medium};
 use smoltcp::storage::PacketMetadata;
-use smoltcp::time::Instant;
-use smoltcp::wire::IpAddress;
+use smoltcp::time::{Duration, Instant};
+use smoltcp::wire::{IpAddress, Ipv4Address};
 
 use self::route_table::RouteTable;
 use crate::link::DeviceList;
@@ -19,10 +19,15 @@ pub struct Router {
     tx_buffer: PacketBuffer,
     devices: Rc<RefCell<DeviceList>>,
     route_table: Rc<RefCell<RouteTable>>,
+    mtu: Rc<Cell<usize>>,
 }
 
 impl Router {
-    pub fn new(devices: Rc<RefCell<DeviceList>>, route_table: Rc<RefCell<RouteTable>>) -> Self {
+    pub fn new(
+        devices: Rc<RefCell<DeviceList>>,
+        route_table: Rc<RefCell<RouteTable>>,
+        mtu: Rc<Cell<usize>>,
+    ) -> Self {
         let rx_buffer = PacketBuffer::new(
             vec![PacketMetadata::EMPTY; Smolnetd::SOCKET_BUFFER_SIZE],
             vec![0u8; Router::MTU * Smolnetd::SOCKET_BUFFER_SIZE],
@@ -36,10 +41,45 @@ impl Router {
             tx_buffer,
             devices,
             route_table,
+            mtu,
         }
     }
 
+    pub const MIN_MTU: usize = 576;
     pub const MTU: usize = 1500;
+
+    pub fn next_probe_delay(&self, now: Instant) -> Option<Duration> {
+        let mut min_delay: Option<Duration> = None;
+        for dev in self.devices.borrow().iter() {
+            if let Some(delay) = dev.next_arp_probe_delay(now) {
+                min_delay = Some(match min_delay {
+                    Some(cur) => cur.min(delay),
+                    None => delay,
+                });
+            }
+        }
+        min_delay
+    }
+
+    pub fn drop_tx_from(&mut self, src_ip: Ipv4Address) {
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..Smolnetd::SOCKET_BUFFER_SIZE {
+            let Ok(((), packet)) = self.tx_buffer.dequeue() else {
+                break;
+            };
+            let drop_it = smoltcp::wire::Ipv4Packet::new_checked(&*packet)
+                .map(|p| p.src_addr() == src_ip)
+                .unwrap_or(false);
+            if !drop_it {
+                kept.push(packet.to_vec());
+            }
+        }
+        for pkt in kept {
+            if let Ok(slot) = self.tx_buffer.enqueue(pkt.len(), ()) {
+                slot.copy_from_slice(&pkt);
+            }
+        }
+    }
 
     pub fn can_recv(&self) -> bool {
         let mut can_recv = false;
@@ -152,7 +192,7 @@ impl Device for Router {
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ip;
-        caps.max_transmission_unit = Router::MTU;
+        caps.max_transmission_unit = self.mtu.get().clamp(Router::MIN_MTU, Router::MTU);
         caps.max_burst_size = Some(Smolnetd::SOCKET_BUFFER_SIZE);
         caps
     }

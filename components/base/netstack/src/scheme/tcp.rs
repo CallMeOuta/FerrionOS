@@ -368,11 +368,7 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         false
     }
 
-    fn sweep_lingering(
-        sockets: &mut SocketSet,
-        scheme_data: &mut Self::SchemeDataT,
-        now_us: i64,
-    ) {
+    fn sweep_lingering(sockets: &mut SocketSet, scheme_data: &mut Self::SchemeDataT, now_us: i64) {
         let mut i = 0usize;
         while i < scheme_data.lingering.len() {
             let entry = &scheme_data.lingering[i];
@@ -400,6 +396,10 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     ) -> SyscallResult<usize> {
         if !file.write_enabled {
             Err(SyscallError::new(syscall::EPIPE))
+        } else if file.abort_pending {
+            file.abort_pending = false;
+            let err = file.pending_error.take().unwrap_or(syscall::ECONNABORTED);
+            Err(SyscallError::new(err))
         } else if file.reset_pending {
             file.reset_pending = false;
             file.pending_error = None;
@@ -427,6 +427,10 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
     ) -> SyscallResult<usize> {
         if !file.read_enabled {
             Ok(0)
+        } else if file.abort_pending {
+            file.abort_pending = false;
+            let err = file.pending_error.take().unwrap_or(syscall::ECONNABORTED);
+            Err(SyscallError::new(err))
         } else if self.can_recv(&file.data) {
             match self.recv_slice(buf) {
                 Ok(length) => Ok(length),
@@ -535,11 +539,12 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                         return Ok(Some((new_handle, None)));
                     }
                     let next_pool = pool.clone();
-                    port_set
-                        .port_set
-                        .acquire_port(local_endpoint.map(|ep| ep.port).unwrap_or(pool.endpoint.port));
-                    let new_handle =
-                        SchemeFile::Socket(tcp_handle.clone_with_data(connected_role));
+                    port_set.port_set.acquire_port(
+                        local_endpoint
+                            .map(|ep| ep.port)
+                            .unwrap_or(pool.endpoint.port),
+                    );
+                    let new_handle = SchemeFile::Socket(tcp_handle.clone_with_data(connected_role));
                     return Ok(Some((
                         new_handle,
                         Some((new_socket_handle, TcpRole::Listening(next_pool))),
@@ -617,6 +622,13 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         };
         if !socket_file.read_enabled {
             Ok(0)
+        } else if socket_file.abort_pending {
+            socket_file.abort_pending = false;
+            let err = socket_file
+                .pending_error
+                .take()
+                .unwrap_or(syscall::ECONNABORTED);
+            Err(SyscallError::new(err))
         } else if self.can_recv(&socket_file.data) {
             let request = recvmsg::Request::parse(how)?;
             let address = match self.remote_endpoint() {
@@ -625,7 +637,8 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             };
 
             let start = recvmsg::write_name(how, address.as_bytes(), request.payload_len)?;
-            let payload_length = match self.recv_slice(&mut how[start..start + request.payload_len]) {
+            let payload_length = match self.recv_slice(&mut how[start..start + request.payload_len])
+            {
                 Ok(n) => n,
                 Err(RecvError::Finished) => 0,
                 Err(RecvError::InvalidState) => return Err(SyscallError::new(syscall::ENOTCONN)),
@@ -682,6 +695,9 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
         file: &mut SocketFile<Self::DataT>,
         now_us: i64,
     ) {
+        if file.abort_pending {
+            return;
+        }
         let tcp_socket = sockets.get_mut::<TcpSocket>(handle);
         let state = tcp_socket.state();
         match file.data {
@@ -735,7 +751,10 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
                 ref mut saw_peer_fin,
                 ..
             } => match state {
-                TcpState::CloseWait | TcpState::Closing | TcpState::LastAck | TcpState::TimeWait => {
+                TcpState::CloseWait
+                | TcpState::Closing
+                | TcpState::LastAck
+                | TcpState::TimeWait => {
                     *saw_peer_fin = true;
                 }
                 TcpState::Closed => {
@@ -749,6 +768,35 @@ impl<'a> SchemeSocket for TcpSocket<'a> {
             },
             TcpRole::Listening(_) => {}
         }
+    }
+
+    fn abort_local_addr(
+        sockets: &mut SocketSet,
+        handle: SocketHandle,
+        file: &mut SocketFile<Self::DataT>,
+        local_ip: smoltcp::wire::Ipv4Address,
+    ) {
+        let local_port = match file.data {
+            TcpRole::Connecting { local_port, .. } | TcpRole::Connected { local_port, .. } => {
+                local_port
+            }
+            TcpRole::Listening(_) => return,
+        };
+        let tcp_socket = sockets.get_mut::<TcpSocket>(handle);
+        if tcp_socket.local_endpoint().map(|ep| ep.addr)
+            != Some(smoltcp::wire::IpAddress::Ipv4(local_ip))
+        {
+            return;
+        }
+        tcp_socket.abort_silent();
+        file.abort_pending = true;
+        file.reset_pending = false;
+        file.pending_error = Some(syscall::ECONNABORTED);
+        file.data = TcpRole::Connected {
+            local_port,
+            saw_established: false,
+            saw_peer_fin: false,
+        };
     }
 
     fn is_readable(sockets: &mut SocketSet, handle: SocketHandle, data: &Self::DataT) -> bool {

@@ -56,6 +56,25 @@ enum ArpState {
     },
 }
 
+#[derive(Debug, Default)]
+enum ArpProbeState {
+    #[default]
+    Idle,
+    Probing {
+        target: Ipv4Address,
+        probes_sent: u8,
+        next_send: Instant,
+        deadline: Instant,
+    },
+    Free {
+        target: Ipv4Address,
+    },
+    Conflict {
+        target: Ipv4Address,
+        mac: EthernetAddress,
+    },
+}
+
 type PacketBuffer = smoltcp::storage::PacketBuffer<'static, IpAddress>;
 
 const EMPTY_MAC: EthernetAddress = EthernetAddress([0; 6]);
@@ -64,6 +83,7 @@ pub struct EthernetLink {
     name: Rc<str>,
     neighbor_cache: BTreeMap<IpAddress, Neighbor>,
     arp_state: ArpState,
+    arp_probe: ArpProbeState,
     waiting_packets: PacketBuffer,
     input_buffer: Vec<u8>,
     output_buffer: Vec<u8>,
@@ -83,6 +103,9 @@ impl EthernetLink {
 
     const NEIGHBOR_LIVE_TIME: Duration = Duration::from_secs(60);
     const ARP_SILENCE_TIME: Duration = Duration::from_secs(1);
+    const ARP_PROBE_COUNT: u8 = 2;
+    const ARP_PROBE_INTERVAL: Duration = Duration::from_millis(150);
+    const ARP_PROBE_FINAL_WAIT: Duration = Duration::from_millis(150);
 
     pub fn new(name: &str, network_file: File) -> Self {
         let waiting_packets = PacketBuffer::new(
@@ -101,8 +124,58 @@ impl EthernetLink {
             input_buffer: vec![0u8; Self::MAX_FRAME_LEN + 1],
             output_buffer: Vec::with_capacity(Self::MTU),
             arp_state: Default::default(),
+            arp_probe: Default::default(),
             neighbor_cache: Default::default(),
             oversized_frames: 0,
+        }
+    }
+
+    fn send_arp_probe(&mut self, target: Ipv4Address) {
+        let Some(hardware_address) = self.hardware_address else {
+            return;
+        };
+        let arp_repr = ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Request,
+            source_hardware_addr: hardware_address,
+            source_protocol_addr: Ipv4Address::UNSPECIFIED,
+            target_hardware_addr: EMPTY_MAC,
+            target_protocol_addr: target,
+        };
+        self.send_to(
+            EthernetAddress::BROADCAST,
+            arp_repr.buffer_len(),
+            |buf| arp_repr.emit(&mut ArpPacket::new_unchecked(buf)),
+            EthernetProtocol::Arp,
+        );
+    }
+
+    fn step_arp_probe(&mut self, now: Instant) {
+        let action = match self.arp_probe {
+            ArpProbeState::Probing {
+                target,
+                probes_sent,
+                next_send,
+                deadline,
+            } => {
+                if probes_sent < Self::ARP_PROBE_COUNT && now >= next_send {
+                    Some((target, probes_sent + 1, deadline))
+                } else if probes_sent >= Self::ARP_PROBE_COUNT && now >= deadline {
+                    self.arp_probe = ArpProbeState::Free { target };
+                    None
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((target, next_count, deadline)) = action {
+            self.send_arp_probe(target);
+            self.arp_probe = ArpProbeState::Probing {
+                target,
+                probes_sent: next_count,
+                next_send: now + Self::ARP_PROBE_INTERVAL,
+                deadline,
+            };
         }
     }
 
@@ -140,10 +213,6 @@ impl EthernetLink {
             return;
         };
 
-        let Some(ip_addr) = self.ip_address else {
-            return;
-        };
-
         let Ok(repr) = ArpPacket::new_checked(packet).and_then(|packet| ArpRepr::parse(&packet))
         else {
             debug!("Dropped incomming arp packet on {} (Malformed)", self.name);
@@ -159,6 +228,25 @@ impl EthernetLink {
                 target_hardware_addr,
                 target_protocol_addr,
             } => {
+                if let ArpProbeState::Probing { target, .. } = self.arp_probe {
+                    if matches!(operation, ArpOperation::Request | ArpOperation::Reply)
+                        && source_hardware_addr != hardware_address
+                        && source_hardware_addr != EMPTY_MAC
+                        && (source_protocol_addr == target
+                            || (operation == ArpOperation::Request
+                                && source_protocol_addr.is_unspecified()
+                                && target_protocol_addr == target))
+                    {
+                        self.arp_probe = ArpProbeState::Conflict {
+                            target,
+                            mac: source_hardware_addr,
+                        };
+                    }
+                }
+
+                let Some(ip_addr) = self.ip_address else {
+                    return;
+                };
                 let is_unicast_mac =
                     target_hardware_addr != EMPTY_MAC && !target_hardware_addr.is_broadcast();
 
@@ -378,6 +466,7 @@ impl LinkDevice for EthernetLink {
     }
 
     fn recv(&mut self, now: Instant) -> Option<&[u8]> {
+        self.step_arp_probe(now);
         let hardware_address = self.hardware_address?;
 
         let mut input_buffer = std::mem::take(&mut self.input_buffer);
@@ -457,5 +546,64 @@ impl LinkDevice for EthernetLink {
     fn set_ip_address(&mut self, addr: IpCidr) {
         let IpCidr::Ipv4(addr) = addr;
         self.ip_address = Some(addr);
+    }
+
+    fn clear_ip_address(&mut self) {
+        self.ip_address = None;
+        self.neighbor_cache.clear();
+        self.arp_state = ArpState::Discovered;
+        for _ in 0..Self::MAX_WAITING_PACKET_COUNT {
+            if self.waiting_packets.dequeue().is_err() {
+                break;
+            }
+        }
+    }
+
+    fn start_arp_probe(&mut self, target: Ipv4Address, now: Instant) {
+        let total = Self::ARP_PROBE_INTERVAL * u32::from(Self::ARP_PROBE_COUNT.saturating_sub(1))
+            + Self::ARP_PROBE_FINAL_WAIT;
+        self.arp_probe = ArpProbeState::Probing {
+            target,
+            probes_sent: 0,
+            next_send: now,
+            deadline: now + total,
+        };
+        self.step_arp_probe(now);
+    }
+
+    fn clear_arp_probe(&mut self) {
+        self.arp_probe = ArpProbeState::Idle;
+    }
+
+    fn arp_probe_status(&self) -> String {
+        match self.arp_probe {
+            ArpProbeState::Idle => "idle\n".into(),
+            ArpProbeState::Probing { .. } => "pending\n".into(),
+            ArpProbeState::Free { .. } => "free\n".into(),
+            ArpProbeState::Conflict { mac, .. } => format!("conflict {mac}\n"),
+        }
+    }
+
+    fn next_arp_probe_delay(&self, now: Instant) -> Option<Duration> {
+        match self.arp_probe {
+            ArpProbeState::Probing {
+                probes_sent,
+                next_send,
+                deadline,
+                ..
+            } => {
+                let target_t = if probes_sent < Self::ARP_PROBE_COUNT {
+                    next_send
+                } else {
+                    deadline
+                };
+                if target_t <= now {
+                    Some(Duration::ZERO)
+                } else {
+                    Some(target_t - now)
+                }
+            }
+            _ => None,
+        }
     }
 }

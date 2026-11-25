@@ -1123,6 +1123,10 @@ impl<'a> Socket<'a> {
         self.set_state(State::Closed);
     }
 
+    pub fn abort_silent(&mut self) {
+        self.reset();
+    }
+
     /// Return whether the socket is passively listening for incoming connections.
     ///
     /// In terms of the TCP state machine, the socket must be in the `LISTEN` state.

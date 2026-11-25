@@ -2,9 +2,11 @@
 mod nodes;
 mod notifier;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::ops::ControlFlow;
+use std::os::unix::fs::FileExt;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::{mem, str};
@@ -12,6 +14,7 @@ use std::{mem, str};
 use redox_scheme::scheme::{register_scheme_inner, SchemeSync};
 use redox_scheme::{CallerCtx, OpenResult, Socket};
 use scheme_utils::{Blocking, HandleMap};
+use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
 use syscall::data::Stat;
 use syscall::flag::{MODE_DIR, MODE_FILE};
@@ -26,15 +29,33 @@ use super::{post_fevent, Interface};
 use crate::error::{Error, Result};
 use crate::link::DeviceList;
 use crate::router::route_table::{RouteTable, Rule};
+use crate::router::Router;
 
 const WRITE_BUFFER_MAX_SIZE: usize = 0xffff;
+const MAX_LINK_STATUS_BYTES: usize = 16;
 
 fn gateway_cidr() -> IpCidr {
     // TODO: const fn
     IpCidr::new(IpAddress::v4(0, 0, 0, 0), 0)
 }
 
-fn parse_route(value: &str, route_table: &RouteTable) -> SyscallResult<Rule> {
+fn read_link_status(link_file: &Option<File>) -> String {
+    let Some(file) = link_file.as_ref() else {
+        return "unknown\n".into();
+    };
+    let mut buf = [0u8; MAX_LINK_STATUS_BYTES];
+    let Ok(n) = file.read_at(&mut buf, 0) else {
+        return "unknown\n".into();
+    };
+    let text = str::from_utf8(&buf[..n]).unwrap_or("").trim();
+    match text {
+        "up" => "up\n".into(),
+        "down" => "down\n".into(),
+        _ => "unknown\n".into(),
+    }
+}
+
+fn parse_route(value: &str, route_table: &RouteTable, devices: &DeviceList) -> SyscallResult<Rule> {
     let mut parts = value.split_whitespace();
     let cidr_str = parts.next().ok_or(SyscallError::new(syscall::EINVAL))?;
     let cidr = match cidr_str {
@@ -44,32 +65,50 @@ fn parse_route(value: &str, route_table: &RouteTable) -> SyscallResult<Rule> {
             .map_err(|_| SyscallError::new(syscall::EINVAL))?,
     };
 
-    let via: IpAddress = match parts.next().ok_or(SyscallError::new(syscall::EINVAL))? {
-        "via" => parts
-            .next()
-            .ok_or(SyscallError::new(syscall::EINVAL))?
-            .parse()
-            .map_err(|_| SyscallError::new(syscall::EINVAL))?,
-        _ => return Err(SyscallError::new(syscall::EINVAL)),
-    };
-
-    if !via.is_unicast() {
-        return Err(SyscallError::new(syscall::EINVAL));
+    match parts.next().ok_or(SyscallError::new(syscall::EINVAL))? {
+        "via" => {
+            let via: IpAddress = parts
+                .next()
+                .ok_or(SyscallError::new(syscall::EINVAL))?
+                .parse()
+                .map_err(|_| SyscallError::new(syscall::EINVAL))?;
+            if !via.is_unicast() {
+                return Err(SyscallError::new(syscall::EINVAL));
+            }
+            let rule = route_table
+                .lookup_rule(&via)
+                .ok_or(SyscallError::new(syscall::EINVAL))?;
+            Ok(Rule::new(cidr, Some(via), rule.dev.clone(), rule.src))
+        }
+        "dev" => {
+            let dev_name = parts.next().ok_or(SyscallError::new(syscall::EINVAL))?;
+            let dev = devices
+                .get(dev_name)
+                .ok_or(SyscallError::new(syscall::EINVAL))?;
+            let IpCidr::Ipv4(addr) = dev.ip_address().ok_or(SyscallError::new(syscall::EINVAL))?;
+            Ok(Rule::new(
+                cidr,
+                None,
+                dev.name().clone(),
+                IpAddress::Ipv4(addr.address()),
+            ))
+        }
+        _ => Err(SyscallError::new(syscall::EINVAL)),
     }
-
-    let rule = route_table
-        .lookup_rule(&via)
-        .ok_or(SyscallError::new(syscall::EINVAL))?;
-
-    Ok(Rule::new(cidr, Some(via), rule.dev.clone(), rule.src))
 }
 
+#[expect(clippy::too_many_arguments, reason = "netcfg shared state")]
 fn mk_root_node(
     iface: Interface,
     notifier: NotifierRef,
     dns_config: DNSConfigRef,
     route_table: Rc<RefCell<RouteTable>>,
     devices: Rc<RefCell<DeviceList>>,
+    mtu: Rc<Cell<usize>>,
+    link_file: Rc<Option<File>>,
+    pending_abort_ip: Rc<RefCell<Option<Ipv4Address>>>,
+    probe_started: Rc<Cell<bool>>,
+    timer: ::std::time::Instant,
 ) -> CfgNodeRef {
     cfg_node! {
         "resolv" => {
@@ -107,10 +146,10 @@ fn mk_root_node(
                 }
             },
             "add" => {
-                wo [iface, notifier, route_table] (Option<Rule>, None)
+                wo [iface, notifier, route_table, devices] (Option<Rule>, None)
                 |cur_value, line| {
                     if cur_value.is_none() {
-                        let route = parse_route(line, &route_table.borrow())?;
+                        let route = parse_route(line, &route_table.borrow(), &devices.borrow())?;
                         *cur_value = Some(route);
                         Ok(())
                     } else {
@@ -119,7 +158,7 @@ fn mk_root_node(
                 }
                 |cur_value| {
                     if let Some(route) = cur_value.take() {
-                        route_table.borrow_mut().insert_rule(route);
+                        route_table.borrow_mut().insert_rule(route)?;
                         notifier.borrow_mut().schedule_notify("route/list");
                         Ok(())
                     } else {
@@ -248,7 +287,7 @@ fn mk_root_node(
 
                                     let IpCidr::Ipv4(v4_cidr) = cidr;
                                     let network_cidr = IpCidr::Ipv4(v4_cidr.network());
-                                    route_table.insert_rule(Rule::new(network_cidr, None, dev.name().clone(), cidr.address()))
+                                    route_table.insert_rule(Rule::new(network_cidr, None, dev.name().clone(), cidr.address()))?;
                                 }
                                 notifier.borrow_mut().schedule_notify("ifaces/eth0/addr/list");
                                 notifier.borrow_mut().schedule_notify("route/list");
@@ -256,7 +295,116 @@ fn mk_root_node(
                             Ok(())
                         }
                     },
-                }
+                    "clear" => {
+                        wo [iface, notifier, devices, route_table, pending_abort_ip] (bool, false)
+                        |cur_value, _line| {
+                            *cur_value = true;
+                            Ok(())
+                        }
+                        |cur_value| {
+                            if !*cur_value {
+                                return Ok(());
+                            }
+                            let old_addr = devices
+                                .borrow_mut()
+                                .get_mut("eth0")
+                                .and_then(|dev| {
+                                    let prev = dev.ip_address();
+                                    dev.clear_ip_address();
+                                    prev
+                                });
+                            if let Some(old_cidr) = old_addr {
+                                let IpCidr::Ipv4(old_v4) = old_cidr;
+                                iface
+                                    .borrow_mut()
+                                    .update_ip_addrs(|addrs| addrs.retain(|addr| *addr != old_cidr));
+                                *pending_abort_ip.borrow_mut() = Some(old_v4.address());
+                            }
+                            route_table.borrow_mut().remove_dev_rules("eth0");
+                            notifier.borrow_mut().schedule_notify("ifaces/eth0/addr/list");
+                            notifier.borrow_mut().schedule_notify("route/list");
+                            Ok(())
+                        }
+                    },
+                },
+                "link" => {
+                    ro [link_file] || {
+                        read_link_status(&link_file)
+                    }
+                },
+                "mtu" => {
+                    rw [iface, notifier, mtu] (Option<usize>, None)
+                    || {
+                        format!("{}\n", mtu.get())
+                    }
+                    |cur_value, line| {
+                        if cur_value.is_none() {
+                            let val = line
+                                .trim()
+                                .parse::<usize>()
+                                .map_err(|_| SyscallError::new(syscall::EINVAL))?;
+                            if !(Router::MIN_MTU..=Router::MTU).contains(&val) {
+                                return Err(SyscallError::new(syscall::EINVAL));
+                            }
+                            *cur_value = Some(val);
+                            Ok(())
+                        } else {
+                            Err(SyscallError::new(syscall::EINVAL))
+                        }
+                    }
+                    |cur_value| {
+                        if let Some(val) = cur_value.take() {
+                            mtu.set(val);
+                            iface.borrow_mut().set_mtu(val);
+                            notifier.borrow_mut().schedule_notify("ifaces/eth0/mtu");
+                        }
+                        Ok(())
+                    }
+                },
+                "arp" => {
+                    "probe" => {
+                        rw [devices, probe_started, timer] (Option<Option<Ipv4Address>>, None)
+                        || {
+                            match devices.borrow().get("eth0") {
+                                Some(dev) => dev.arp_probe_status(),
+                                None => "idle\n".into(),
+                            }
+                        }
+                        |cur_value, line| {
+                            if cur_value.is_some() {
+                                return Err(SyscallError::new(syscall::EINVAL));
+                            }
+                            let trimmed = line.trim();
+                            if trimmed == "clear" {
+                                *cur_value = Some(None);
+                                return Ok(());
+                            }
+                            let ip = Ipv4Address::from_str(trimmed)
+                                .map_err(|_| SyscallError::new(syscall::EINVAL))?;
+                            if !IpAddress::Ipv4(ip).is_unicast() {
+                                return Err(SyscallError::new(syscall::EINVAL));
+                            }
+                            *cur_value = Some(Some(ip));
+                            Ok(())
+                        }
+                        |cur_value| {
+                            if let Some(req) = cur_value.take() {
+                                if let Some(dev) = devices.borrow_mut().get_mut("eth0") {
+                                    match req {
+                                        Some(ip) => {
+                                            let micros = i64::try_from(timer.elapsed().as_micros())
+                                                .unwrap_or(i64::MAX);
+                                            dev.start_arp_probe(ip, Instant::from_micros(micros));
+                                            probe_started.set(true);
+                                        }
+                                        None => dev.clear_arp_probe(),
+                                    }
+                                }
+                            }
+                            Ok(())
+                        }
+                    },
+                },
             }
         }
     }
@@ -331,11 +479,17 @@ pub struct NetCfgScheme {
 }
 
 impl NetCfgScheme {
+    #[expect(clippy::too_many_arguments, reason = "netcfg shared state")]
     pub fn new(
         iface: Interface,
         scheme_file: Socket,
         route_table: Rc<RefCell<RouteTable>>,
         devices: Rc<RefCell<DeviceList>>,
+        mtu: Rc<Cell<usize>>,
+        link_file: Option<File>,
+        pending_abort_ip: Rc<RefCell<Option<Ipv4Address>>>,
+        probe_started: Rc<Cell<bool>>,
+        timer: ::std::time::Instant,
     ) -> Result<NetCfgScheme> {
         let notifier = Notifier::new_ref();
         let dns_config = Rc::new(RefCell::new(DNSConfig {
@@ -349,6 +503,11 @@ impl NetCfgScheme {
                 dns_config,
                 route_table,
                 devices,
+                mtu,
+                Rc::new(link_file),
+                pending_abort_ip,
+                probe_started,
+                timer,
             ),
             notifier,
         };

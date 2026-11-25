@@ -2,6 +2,7 @@ use std::fmt::Display;
 use std::rc::Rc;
 
 use smoltcp::wire::{IpAddress, IpCidr};
+use syscall::{Error, Result, ENOSPC};
 
 #[derive(Debug)]
 pub struct Rule {
@@ -41,6 +42,8 @@ impl Display for Rule {
     }
 }
 
+const MAX_ROUTES: usize = 64;
+
 #[derive(Debug, Default)]
 pub struct RouteTable {
     rules: Vec<Rule>,
@@ -58,7 +61,11 @@ impl RouteTable {
         Some(self.lookup_rule(dst)?.src)
     }
 
-    pub fn insert_rule(&mut self, new_rule: Rule) {
+    pub fn insert_rule(&mut self, new_rule: Rule) -> Result<()> {
+        self.rules.retain(|rule| rule.filter != new_rule.filter);
+        if self.rules.len() >= MAX_ROUTES {
+            return Err(Error::new(ENOSPC));
+        }
         let i = match self
             .rules
             .binary_search_by_key(&new_rule.filter.prefix_len(), |rule| {
@@ -67,10 +74,15 @@ impl RouteTable {
             Ok(i) | Err(i) => i,
         };
         self.rules.insert(i, new_rule);
+        Ok(())
     }
 
     pub fn remove_rule(&mut self, filter: IpCidr) {
         self.rules.retain(|rule| rule.filter != filter);
+    }
+
+    pub fn remove_dev_rules(&mut self, dev_name: &str) {
+        self.rules.retain(|rule| rule.dev.as_ref() != dev_name);
     }
 
     pub fn change_src(&mut self, old_src: IpAddress, new_src: IpAddress) {
