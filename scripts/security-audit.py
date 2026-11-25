@@ -35,6 +35,9 @@ BLAKE3_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_IMAGE_ENTRIES = 200_000
 MAX_ELF_PHDRS = 256
 MAX_DYN_ENTRIES = 4096
+MAX_STATIC_ELF_SCAN_BYTES = 64 * 1024 * 1024
+RELIBC_START_MARKER = b"no thread fd present"
+STACK_CHK_GUARD_INIT_64 = struct.pack("<Q", 0xD048C37519FCADFE)
 PT_LOAD = 1
 PT_DYNAMIC = 2
 PT_INTERP = 3
@@ -297,6 +300,22 @@ def check_downloads():
     return out
 
 
+def _non_relro_slices(seg_start, seg_end, relro_ranges):
+    slices = [(seg_start, seg_end)]
+    for r_start, r_end in relro_ranges:
+        next_slices = []
+        for s_start, s_end in slices:
+            if r_end <= s_start or r_start >= s_end:
+                next_slices.append((s_start, s_end))
+                continue
+            if s_start < r_start:
+                next_slices.append((s_start, r_start))
+            if r_end < s_end:
+                next_slices.append((r_end, s_end))
+        slices = next_slices
+    return slices
+
+
 def parse_elf(path):
     with open(path, "rb") as fh:
         ident = fh.read(16)
@@ -304,26 +323,20 @@ def parse_elf(path):
             return None
         ei_class = ident[4]
         ei_data = ident[5]
-        if ei_class not in (1, 2) or ei_data not in (1, 2):
-            return {"error": f"unsupported ELF class={ei_class} data={ei_data}"}
-        endian = "<" if ei_data == 1 else ">"
-        is_64 = ei_class == 2
-        if is_64:
-            hdr = fh.read(48)
-            if len(hdr) < 48:
-                return {"error": "truncated ELF64 header"}
-            e_type, _e_mach, _e_ver, _e_entry, e_phoff, _e_shoff, _e_flags, _e_ehsize, e_phentsize, e_phnum = (
-                struct.unpack(endian + "HHIQQQIHHH", hdr[:42])
-            )
-            min_phent = 56
-        else:
-            hdr = fh.read(36)
-            if len(hdr) < 36:
-                return {"error": "truncated ELF32 header"}
-            e_type, _e_mach, _e_ver, _e_entry, e_phoff, _e_shoff, _e_flags, _e_ehsize, e_phentsize, e_phnum = (
-                struct.unpack(endian + "HHIIIIIHHH", hdr[:30])
-            )
-            min_phent = 32
+        if ei_class != 2 or ei_data != 1:
+            return {
+                "unsupported": (
+                    f"unsupported ELF class={ei_class} data={ei_data} "
+                    "(expected ELF64 little-endian)"
+                )
+            }
+        hdr = fh.read(48)
+        if len(hdr) < 48:
+            return {"error": "truncated ELF64 header"}
+        e_type, _e_mach, _e_ver, _e_entry, e_phoff, _e_shoff, _e_flags, _e_ehsize, e_phentsize, e_phnum = (
+            struct.unpack("<HHIQQQIHHH", hdr[:42])
+        )
+        min_phent = 56
         if e_phnum > MAX_ELF_PHDRS:
             return {"error": f"e_phnum {e_phnum} exceeds bound {MAX_ELF_PHDRS}"}
         if e_phnum > 0 and e_phentsize < min_phent:
@@ -335,21 +348,20 @@ def parse_elf(path):
         dyn_filesz = 0
         gnu_stack = "none"
         wx_load = 0
+        relro_ranges = []
+        load_segments = []
         for i in range(e_phnum):
             fh.seek(e_phoff + i * e_phentsize)
             raw = fh.read(min_phent)
             if len(raw) < min_phent:
                 return {"error": f"truncated program header {i}"}
-            if is_64:
-                p_type, p_flags, p_offset, _p_vaddr, _p_paddr, p_filesz, p_memsz, _p_align = (
-                    struct.unpack(endian + "IIQQQQQQ", raw)
-                )
-            else:
-                p_type, p_offset, _p_vaddr, _p_paddr, p_filesz, p_memsz, p_flags, _p_align = (
-                    struct.unpack(endian + "IIIIIIII", raw)
-                )
+            p_type, p_flags, p_offset, _p_vaddr, _p_paddr, p_filesz, p_memsz, _p_align = (
+                struct.unpack("<IIQQQQQQ", raw)
+            )
             if p_type == PT_GNU_RELRO and p_memsz > 0:
                 has_relro = True
+                if p_filesz > 0:
+                    relro_ranges.append((p_offset, p_offset + p_filesz))
             elif p_type == PT_DYNAMIC:
                 has_dynamic = True
                 dyn_offset = p_offset
@@ -358,18 +370,20 @@ def parse_elf(path):
                 has_interp = True
             elif p_type == PT_GNU_STACK:
                 gnu_stack = "RWE" if (p_flags & PF_X) else "RW"
-            elif p_type == PT_LOAD and (p_flags & PF_W) and (p_flags & PF_X):
-                wx_load += 1
+            elif p_type == PT_LOAD:
+                if (p_flags & PF_W) and (p_flags & PF_X):
+                    wx_load += 1
+                if p_filesz > 0:
+                    load_segments.append((p_flags, p_offset, p_filesz))
         bind_now = False
         if has_dynamic and dyn_filesz > 0:
-            ent_size = 16 if is_64 else 8
+            ent_size = 16
             count = min(dyn_filesz // ent_size, MAX_DYN_ENTRIES)
             fh.seek(dyn_offset)
             dyn_bytes = fh.read(count * ent_size)
             actual = len(dyn_bytes) // ent_size
-            fmt = endian + ("qQ" if is_64 else "iI")
             for i in range(actual):
-                d_tag, d_val = struct.unpack_from(fmt, dyn_bytes, i * ent_size)
+                d_tag, d_val = struct.unpack_from("<qQ", dyn_bytes, i * ent_size)
                 if d_tag == DT_NULL:
                     break
                 if d_tag == DT_BIND_NOW:
@@ -381,6 +395,34 @@ def parse_elf(path):
         type_name = ELF_TYPES.get(e_type, f"ET_{e_type}")
         if e_type == 3:
             type_name = "ET_DYN(PIE)" if has_interp else "ET_DYN(DSO)"
+        stack_guard = "dynamic" if has_dynamic else "n/a"
+        if not has_dynamic and e_type != 1:
+            scanned = 0
+            is_relibc = False
+            has_rw_guard = False
+            for p_flags, p_offset, p_filesz in load_segments:
+                if p_filesz > MAX_STATIC_ELF_SCAN_BYTES - scanned:
+                    return {
+                        "error": (
+                            f"static ELF PT_LOAD scan exceeds bound "
+                            f"{MAX_STATIC_ELF_SCAN_BYTES}"
+                        )
+                    }
+                fh.seek(p_offset)
+                seg_bytes = fh.read(p_filesz)
+                scanned += len(seg_bytes)
+                if not is_relibc and RELIBC_START_MARKER in seg_bytes:
+                    is_relibc = True
+                if (p_flags & PF_W) and not has_rw_guard:
+                    seg_end = p_offset + len(seg_bytes)
+                    for sl_start, sl_end in _non_relro_slices(
+                        p_offset, seg_end, relro_ranges
+                    ):
+                        if STACK_CHK_GUARD_INIT_64 in seg_bytes[sl_start - p_offset : sl_end - p_offset]:
+                            has_rw_guard = True
+                            break
+            if is_relibc:
+                stack_guard = "yes" if has_rw_guard else "no"
         return {
             "type": type_name,
             "has_relro": has_relro,
@@ -388,6 +430,7 @@ def parse_elf(path):
             "bind_now": bind_now,
             "gnu_stack": gnu_stack,
             "wx_load": wx_load,
+            "stack_guard": stack_guard,
         }
 
 
@@ -397,6 +440,7 @@ def check_files(image_root):
         return [line("files", str(image_root), "unknown", "image root is not a directory")]
     out = []
     seen = 0
+    static_relibc_count = 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames.sort()
         filenames.sort()
@@ -443,6 +487,15 @@ def check_files(image_root):
                 continue
             if info is None:
                 continue
+            if "unsupported" in info:
+                out.append(line(
+                    "files",
+                    subject,
+                    "fail",
+                    info["unsupported"],
+                    "build 64-bit little-endian ELF binaries only",
+                ))
+                continue
             if "error" in info:
                 out.append(line("files", subject, "unknown", f"malformed ELF: {info['error']}"))
                 continue
@@ -453,9 +506,11 @@ def check_files(image_root):
             relro_str = "yes" if info["has_relro"] else "no"
             note = (
                 f"type={info['type']} relro={relro_str} bind_now={bind_str} "
-                f"gnu_stack={info['gnu_stack']} wx_load={info['wx_load']}"
+                f"gnu_stack={info['gnu_stack']} wx_load={info['wx_load']} "
+                f"stack_guard={info['stack_guard']}"
             )
             problems = []
+            fixes = []
             if not info["has_relro"]:
                 problems.append("no PT_GNU_RELRO")
             if info["has_dynamic"] and not info["bind_now"]:
@@ -465,15 +520,33 @@ def check_files(image_root):
             if info["wx_load"] > 0:
                 problems.append(f"{info['wx_load']} W+X PT_LOAD")
             if problems:
+                fixes.append("link with -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack and no W+X segments")
+            if info["stack_guard"] in ("yes", "no"):
+                static_relibc_count += 1
+            if info["stack_guard"] == "no":
+                problems.append("no random stack guard")
+                fixes.append("relink statically linked program against current relibc")
+            if problems:
                 out.append(line(
                     "files",
                     subject,
                     "fail",
                     f"{note} ({', '.join(problems)})",
-                    "link with -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack and no W+X segments",
+                    "; ".join(fixes),
                 ))
             else:
                 out.append(line("files", subject, "pass", note))
+    has_base_image = (root / "usr/bin").is_dir() and (
+        (root / "usr/lib/init.d").is_dir() or (root / "usr/bin/getty").is_file()
+    )
+    if has_base_image and static_relibc_count == 0:
+        out.append(line(
+            "files",
+            "/usr/bin: stack_guard",
+            "fail",
+            "0 static relibc ELFs recognized in base image",
+            "verify RELIBC_START_MARKER in scripts/security-audit.py matches relibc startup",
+        ))
     return out
 
 
@@ -547,6 +620,16 @@ def main(argv):
                 parts = [f"{s} {counts[(name, s)]}" for s in ("pass", "info", "warn", "fail", "unknown")
                          if counts[(name, s)]]
                 print(f"{name}: {', '.join(parts) or 'nothing checked'}")
+        if "files" in active:
+            exempt = [
+                r["subject"]
+                for r in results
+                if r["check"] == "files" and "stack_guard=n/a" in r["note"]
+            ]
+            if exempt:
+                print(f"files stack_guard=n/a ({len(exempt)}):")
+                for subj in exempt:
+                    print(f"  {subj}")
         for r in new:
             label = "FAIL" if (closures and r["check"] == "sources") else "NEW FAIL"
             print(f"{label} {r['check']}: {r['subject']}: {r['note']}\n    fix: {r['fix']}")
