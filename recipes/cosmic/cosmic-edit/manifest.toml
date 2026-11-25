@@ -1,0 +1,14 @@
+format = 1
+id = "cosmic-edit"
+name = "COSMIC Text Editor"
+kind = "ported"
+exec = "/usr/bin/cosmic-edit"
+
+[capabilities.display]
+reason = "Draws the text editor window on screen."
+
+[capabilities.gpu]
+reason = "Renders the editor interface with hardware acceleration."
+
+[capabilities.files-documents]
+reason = "Opens and saves text files in your Documents folder."

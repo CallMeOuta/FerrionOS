@@ -1,0 +1,32 @@
+format = 1
+id = "cosmic-files"
+name = "COSMIC File Manager"
+kind = "ported"
+exec = "/usr/bin/cosmic-files"
+
+[capabilities.display]
+reason = "Draws the file manager window on screen."
+
+[capabilities.gpu]
+reason = "Renders the file manager interface with hardware acceleration."
+
+[capabilities.files-documents]
+reason = "Lists and organizes files in your Documents folder."
+
+[capabilities.files-downloads]
+reason = "Lists and organizes files in your Downloads folder."
+
+[capabilities.files-desktop]
+reason = "Lists and organizes files on your Desktop."
+
+[capabilities.files-pictures]
+reason = "Lists and organizes images in your Pictures folder."
+
+[capabilities.files-music]
+reason = "Lists and organizes audio files in your Music folder."
+
+[capabilities.files-videos]
+reason = "Lists and organizes video files in your Videos folder."
+
+[capabilities.files-removable]
+reason = "Opens and manages files on removable storage volumes."

@@ -1,0 +1,11 @@
+format = 1
+id = "cosmic-term"
+name = "COSMIC Terminal"
+kind = "ported"
+exec = "/usr/bin/cosmic-term"
+
+[capabilities.display]
+reason = "Draws the terminal window on screen."
+
+[capabilities.gpu]
+reason = "Renders terminal text and graphics with hardware acceleration."

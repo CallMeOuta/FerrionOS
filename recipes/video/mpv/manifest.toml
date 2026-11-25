@@ -1,0 +1,17 @@
+format = 1
+id = "mpv"
+name = "mpv Media Player"
+kind = "ported"
+exec = "/usr/bin/mpv"
+
+[capabilities.display]
+reason = "Draws video frames in the media player window."
+
+[capabilities.audio-playback]
+reason = "Plays audio tracks from media files."
+
+[capabilities.files-videos]
+reason = "Opens video files from your Videos folder."
+
+[capabilities.files-music]
+reason = "Opens audio files from your Music folder."
