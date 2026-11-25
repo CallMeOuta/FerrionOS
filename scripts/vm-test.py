@@ -1712,6 +1712,120 @@ def test_exec_handles(vm, args):
     return True, "exec'd and spawned programs (1 and 9 threads, direct exec, ferrion-run, ferrion-scope, system-wide iostat) held only auxv runtime handles"
 
 
+def count_null_rip_exceptions(text):
+    """Counts UNHANDLED EXCEPTION serial dumps whose PC/RIP register is zero."""
+    pending = 0
+    count = 0
+    for line in text.splitlines():
+        if re.search(r"\b(?:RIP|ELR_EL1|SEPC):\s+0+\b", line):
+            pending += 1
+        elif "UNHANDLED EXCEPTION" in line:
+            if pending > 0:
+                count += 1
+                pending -= 1
+        elif "EXCEPTION RAISED" in line:
+            if pending > 0:
+                pending -= 1
+    return count
+
+
+SPAWN_FAILURE_WAIT_LIMIT_S = 120
+
+
+def test_spawn_failure(vm, args):
+    """Checks that failed posix_spawn calls return ENOENT cleanly without null-RIP exceptions or leftover contexts (use --config desktop)."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    user_uid = read_user_uid(vm, "sf-uid")
+    if user_uid is None:
+        return False, f"could not read user uid; see {vm.out / 'serial.log'}"
+
+    since = vm.mark()
+    start = guest_run(
+        vm,
+        "sf-start",
+        "rm -f /tmp/sf.pid /tmp/sf.rc /tmp/sf.out; "
+        "(spawn-failure-probe >/tmp/sf.out 2>&1 & p=$!; echo $p >/tmp/sf.pid; wait $p; echo $? >/tmp/sf.rc) "
+        "</dev/null >/dev/null 2>&1 & "
+        "for i in $(seq 20); do [ -s /tmp/sf.pid ] && break; sleep 0.2; done; cat /tmp/sf.pid",
+        30,
+    )
+    pid_match = re.search(r"(?m)^\s*(\d+)\s*$", start.out) if not isinstance(start, NoAnswer) else None
+    if not pid_match:
+        return False, f"spawn-failure-probe did not record its pid; see {vm.out / 'serial.log'}"
+    probe_pid = int(pid_match.group(1))
+
+    seen_live = False
+    for poll in range(POSITIVE_CONTROL_MAX_POLLS):
+        ctrl = read_root_contexts(vm, f"sf-ctrl-{poll}", timeout=60)
+        if ctrl is not None:
+            ctrl_rows, _ = ctrl
+            if any(
+                row.pid == probe_pid
+                and row.euid == user_uid
+                and "spawn-failure-probe" in row.name
+                for row in ctrl_rows
+            ):
+                seen_live = True
+                break
+        rc_check = guest_run(vm, f"sf-done-{poll}", "test -f /tmp/sf.rc && echo DONE || echo LIVE", 15)
+        if not isinstance(rc_check, NoAnswer) and "DONE" in rc_check.out:
+            break
+        time.sleep(0.5)
+
+    wait_res = guest_run(
+        vm,
+        "sf-wait",
+        f"for i in $(seq {SPAWN_FAILURE_WAIT_LIMIT_S}); do [ -f /tmp/sf.rc ] && break; sleep 1; done; "
+        "cat /tmp/sf.rc 2>/dev/null || echo TIMEOUT",
+        SPAWN_FAILURE_WAIT_LIMIT_S + 30,
+    )
+    serial_during = vm.text(since)
+    out_res = guest_run(vm, "sf-out", "cat /tmp/sf.out 2>/dev/null || true", 30)
+    output = out_res.out if not isinstance(out_res, NoAnswer) else ""
+    rc_match = re.search(r"(?m)^\s*(\d+)\s*$", wait_res.out) if not isinstance(wait_res, NoAnswer) else None
+    rc = int(rc_match.group(1)) if rc_match else None
+    (vm.out / "spawn-failure-probe.txt").write_text(f"exit {rc}\n{output}\n")
+
+    after = read_root_contexts(vm, "sf-after", timeout=60)
+    after_rows = []
+    if after is not None:
+        after_rows, ctx_out = after
+        (vm.out / "spawn-failure-context.txt").write_text(ctx_out)
+    leftover_rows = [row for row in after_rows if "spawn-failure-probe" in row.name]
+
+    null_rip = count_null_rip_exceptions(serial_during)
+    problems = []
+    if "KERNEL PANIC" in vm.text(0):
+        problems.append("KERNEL PANIC on serial")
+    if rc != 0 or "spawn-failure-probe: PASS" not in output:
+        summary = [line.strip() for line in output.splitlines() if "spawn-failure-probe:" in line]
+        detail = "; ".join(summary[:4]) if summary else f"exit {rc}"
+        problems.append(f"probe failed ({detail})")
+    if "fork cleanup: unable to reap child" in serial_during or "fork cleanup: unable to reap child" in output:
+        problems.append("reap warning in probe or serial output")
+    if not seen_live:
+        problems.append(f"positive control failed: root context read did not observe spawn-failure-probe pid {probe_pid}")
+    if after is None:
+        problems.append("root context read failed after spawn-failure-probe")
+    elif leftover_rows:
+        problems.append(
+            f"{len(leftover_rows)} leftover spawn-failure-probe context(s): {[row.line for row in leftover_rows][:3]}"
+        )
+    if null_rip != 0:
+        problems.append(f"{null_rip} null-RIP UNHANDLED EXCEPTION dump(s)")
+
+    if problems:
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return (
+        True,
+        f"50 failed posix_spawn calls returned ENOENT with 0 null-RIP exceptions, "
+        f"positive control saw pid {probe_pid}, and 0 leftover contexts (root read, {len(after_rows)} total)",
+    )
+
+
 def test_forcekill_wakeup(vm, args):
     """Checks that SIGKILL wakes multithreaded children entering futex, pipe, nanosleep, and UNIX socket waits within a bounded deadline (use --config desktop)."""
     if not user_bash(vm, args.timeout):
@@ -11705,6 +11819,7 @@ TESTS["fdtable-race"] = test_fdtable_race
 TESTS["fork-filetable"] = test_fork_filetable
 TESTS["exec-handles"] = test_exec_handles
 TESTS["forcekill-wakeup"] = test_forcekill_wakeup
+TESTS["spawn-failure"] = test_spawn_failure
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["blocked-wait"] = test_blocked_wait

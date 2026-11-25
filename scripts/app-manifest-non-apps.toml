@@ -237,6 +237,9 @@ reason = "MIME type database data package."
 [non_app.signal-handle-probe]
 reason = "In-OS test probe for process-handle signal checks."
 
+[non_app.spawn-failure-probe]
+reason = "In-OS test probe for posix_spawn failure cleanup checks."
+
 [non_app.tpmd]
 reason = "Base daemon driving the TPM hardware device."
 

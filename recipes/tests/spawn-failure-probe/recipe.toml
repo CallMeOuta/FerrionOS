@@ -1,0 +1,10 @@
+[package]
+description = "Checks that failed posix_spawn calls return ENOENT cleanly without leaving children behind"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/spawn-failure-probe" "${COOKBOOK_RECIPE}/spawn-failure-probe.c" ${LDFLAGS}
+"""
