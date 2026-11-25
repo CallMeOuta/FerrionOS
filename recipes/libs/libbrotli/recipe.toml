@@ -1,7 +1,7 @@
 [source]
 git = "https://github.com/google/brotli"
 patches = [ "redox.patch" ]
-rev = "v1.2.1"
+rev = "db24a98aed38a16de78cc05ca15cdd8dc2a0d92d"
 shallow_clone = true
 
 [build]

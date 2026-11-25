@@ -3,6 +3,7 @@ description = "Library for lockfree/\"read-copy-update\" parallel-access data st
 
 [source]
 tar = "https://lttng.org/files/urcu/userspace-rcu-0.14.0.tar.bz2"
+blake3 = "a7ef7fb16d09436eea1d9eb09a456d3901ba042cebdd35b230c58e948895c718"
 patches = ["0001-Fix-compilation-on-Redox-OS.patch"]
 
 [build]

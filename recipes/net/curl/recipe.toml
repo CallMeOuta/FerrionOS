@@ -1,6 +1,6 @@
 [source]
 git = "https://github.com/curl/curl.git"
-rev = "curl-8_23_0"
+rev = "3163ec065643ba20709f190111f42c3e1fe95273"
 patches = ["redox.patch"]
 shallow_clone = true
 

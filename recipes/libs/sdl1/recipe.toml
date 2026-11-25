@@ -3,6 +3,7 @@ description = "Simple Directmedia Layer library (API version 1.2)"
 
 [source]
 git = "https://gitlab.redox-os.org/redox-os/sdl1.2.git"
+rev = "90bf2be2a252de61db171c7e1399f772fde01f3f"
 
 [build]
 template = "configure"
