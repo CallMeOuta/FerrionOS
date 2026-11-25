@@ -1239,6 +1239,7 @@ pub enum Provider {
     FmapBorrowed {
         file_ref: GrantFileRef,
         pin_refcount: usize,
+        is_cow: bool,
     },
 }
 
@@ -1491,6 +1492,9 @@ impl Grant {
         mapper: &mut PageMapper,
         flusher: &mut Flusher,
     ) -> Result<Self> {
+        let is_cow = src
+            .as_ref()
+            .is_some_and(|s| matches!(s.mode, MmapMode::Cow));
         if let Some(src) = src {
             let mut guard = src.addr_space_guard;
             let mut src_addrspace = &mut *guard;
@@ -1648,6 +1652,7 @@ impl Grant {
                 provider: Provider::FmapBorrowed {
                     file_ref,
                     pin_refcount: 0,
+                    is_cow,
                 },
             },
         })
@@ -1676,8 +1681,9 @@ impl Grant {
 
         let src_span = PageSpan::new(src_base, page_count);
         let mut prev_span = None;
+        let mut src_has_cow_fmap = false;
 
-        for (src_grant_base, src_grant) in src_address_space.grants.conflicts_mut(src_span) {
+        for (src_grant_base, src_grant) in src_address_space.grants.conflicts(src_span) {
             let grant_span = PageSpan::new(src_grant_base, src_grant.page_count);
             let prev_span = prev_span.replace(grant_span);
 
@@ -1701,12 +1707,11 @@ impl Grant {
                 return Err(Error::new(EPERM));
             }
 
-            if let Provider::FmapBorrowed {
-                ref mut pin_refcount,
-                ..
-            } = src_grant.provider
-            {
-                *pin_refcount += 1;
+            if matches!(
+                src_grant.provider,
+                Provider::FmapBorrowed { is_cow: true, .. }
+            ) {
+                src_has_cow_fmap = true;
             }
         }
 
@@ -1720,18 +1725,75 @@ impl Grant {
             return Err(Error::new(EINVAL));
         }
         if eager {
+            let mut src_flusher = (flags.has_write() && src_has_cow_fmap).then(|| {
+                Flusher::with_cpu_set(
+                    &src_address_space_lock.used_by,
+                    &src_address_space_lock.tlb_ack,
+                )
+            });
+
             for (i, page) in PageSpan::new(src_base, page_count)
                 .pages()
                 .enumerate()
                 .take(MAX_EAGER_PAGES)
             {
-                let Some((phys, _)) = src_address_space
+                let Some((phys, src_pte_flags)) = src_address_space
                     .table
                     .utable
                     .translate(page.start_address())
                 else {
                     continue;
                 };
+
+                if flags.has_write() && src_has_cow_fmap && !src_pte_flags.has_write() {
+                    let cow_grant_flags =
+                        src_address_space.grants.contains(page).and_then(|(_, g)| {
+                            matches!(g.provider, Provider::FmapBorrowed { is_cow: true, .. })
+                                .then_some(g.flags)
+                        });
+                    if let Some(src_grant_flags) = cow_grant_flags {
+                        assert!(src_grant_flags.has_write());
+                        let src_frame = Frame::containing(phys);
+                        let info = get_page_info(src_frame).ok_or(Error::new(EFAULT))?;
+                        let CowResult {
+                            new_frame,
+                            old_frame,
+                        } = cow(src_frame, info, RefKind::Shared)
+                            .map_err(|_| Error::new(ENOMEM))?;
+                        unsafe {
+                            if let Some((_, _, flush)) = src_address_space
+                                .table
+                                .utable
+                                .remap_with_full(page.start_address(), |_, _| {
+                                    Some((new_frame.base(), src_grant_flags))
+                                })
+                            {
+                                flush.flush();
+                            }
+                        }
+                        if let Some(old_frame) = old_frame {
+                            src_flusher
+                                .as_mut()
+                                .expect("src_flusher created for writable cow borrow")
+                                .queue(old_frame, None, TlbShootdownActions::FREE);
+                        }
+                        unsafe {
+                            let Some(flush) = dst_mapper.map_phys(
+                                dst_base.next_by(i).start_address(),
+                                new_frame.base(),
+                                flags.write(true),
+                                0,
+                            ) else {
+                                dst_flusher.queue(new_frame, None, TlbShootdownActions::FREE);
+                                return Err(Error::new(ENOMEM));
+                            };
+                            flush.ignore();
+
+                            dst_flusher.queue(new_frame, None, TlbShootdownActions::NEW_MAPPING);
+                        }
+                        continue;
+                    }
+                }
 
                 let writable = match get_page_info(Frame::containing(phys)) {
                     None => true,
@@ -1761,6 +1823,16 @@ impl Grant {
                         TlbShootdownActions::NEW_MAPPING,
                     );
                 }
+            }
+        }
+
+        for (_, src_grant) in src_address_space.grants.conflicts_mut(src_span) {
+            if let Provider::FmapBorrowed {
+                ref mut pin_refcount,
+                ..
+            } = src_grant.provider
+            {
+                *pin_refcount += 1;
             }
         }
 
@@ -2251,9 +2323,14 @@ impl Grant {
                         is_pinned_userscheme_borrow: false,
                     },
                     Provider::PhysBorrowed { base } => Provider::PhysBorrowed { base },
-                    Provider::FmapBorrowed { ref file_ref, .. } => Provider::FmapBorrowed {
+                    Provider::FmapBorrowed {
+                        ref file_ref,
+                        is_cow,
+                        ..
+                    } => Provider::FmapBorrowed {
                         file_ref: file_ref.clone(),
                         pin_refcount: 0,
+                        is_cow,
                     },
                 },
             },
@@ -2316,12 +2393,17 @@ impl Grant {
                     Provider::PhysBorrowed { base } => Provider::PhysBorrowed {
                         base: base.next_by(this_span.count),
                     },
-                    Provider::FmapBorrowed { ref file_ref, .. } => Provider::FmapBorrowed {
+                    Provider::FmapBorrowed {
+                        ref file_ref,
+                        is_cow,
+                        ..
+                    } => Provider::FmapBorrowed {
                         file_ref: GrantFileRef {
                             base_offset: file_ref.base_offset + this_span.count * PAGE_SIZE,
                             description: Arc::clone(&file_ref.description),
                         },
                         pin_refcount: 0,
+                        is_cow,
                     },
                 },
             },
@@ -2689,11 +2771,12 @@ fn correct_inner<'l>(
     // By now, the memory at the faulting page is actually valid, but simply not yet mapped, either
     // at all, or with the required flags.
 
-    let faulting_frame_opt = addr_space
+    let faulting_entry_opt = addr_space
         .table
         .utable
         .translate(faulting_page.start_address())
-        .map(|(phys, _page_flags)| Frame::containing(phys));
+        .map(|(phys, page_flags)| (Frame::containing(phys), page_flags));
+    let faulting_frame_opt = faulting_entry_opt.map(|(frame, _)| frame);
     let faulting_pageinfo_opt = faulting_frame_opt.map(|frame| (frame, get_page_info(frame)));
 
     // TODO: Aligned readahead? AMD Zen3+ CPUs can smash 4 4k pages that are 16k-aligned, into a
@@ -2704,6 +2787,7 @@ fn correct_inner<'l>(
     // TODO: Readahead backwards, i.e. MAP_GROWSDOWN.
 
     let mut allow_writable = true;
+    let mut override_flags: Option<PageFlags<RmmA>> = None;
 
     let frame = match grant_info.provider {
         Provider::Allocated { .. } | Provider::AllocatedShared { .. }
@@ -2776,85 +2860,131 @@ fn correct_inner<'l>(
 
             match guard.grants.contains(src_page) {
                 Some(_) => {
-                    let src_frame = match guard.table.utable.translate(src_page.start_address()) {
-                        Some((phys, _)) => Frame::containing(phys),
-                        _ => {
-                            // Grant was valid (TODO check), but we need to correct the underlying page.
-                            // TODO: Access mode
+                    let (src_frame, src_pte_flags) =
+                        match guard.table.utable.translate(src_page.start_address()) {
+                            Some((phys, pte_flags)) => (Frame::containing(phys), pte_flags),
+                            _ => {
+                                // Grant was valid (TODO check), but we need to correct the underlying page.
+                                // TODO: Access mode
 
-                            // TODO: Reasonable maximum?
-                            let new_recursion_level = recursion_level
-                                .checked_add(1)
-                                .filter(|new_lvl| *new_lvl < 16)
-                                .ok_or(PfError::RecursionLimitExceeded)?;
+                                // TODO: Reasonable maximum?
+                                let new_recursion_level = recursion_level
+                                    .checked_add(1)
+                                    .filter(|new_lvl| *new_lvl < 16)
+                                    .ok_or(PfError::RecursionLimitExceeded)?;
 
-                            let guard_token = guard.into_token();
-                            let addr_space_guard_token = addr_space.into_token();
-                            drop(flusher);
+                                let guard_token = guard.into_token();
+                                let addr_space_guard_token = addr_space.into_token();
+                                drop(flusher);
 
-                            // FIXME: Can this result in invalid address space state?
-                            let ext_addrspace = &foreign_address_space;
-                            let mut free_token = unsafe { CleanLockToken::new() };
-                            let (frame, _, _) = {
-                                let g = ext_addrspace.acquire_write(free_token.downgrade());
-                                correct_inner(
-                                    ext_addrspace,
-                                    g,
-                                    src_page,
-                                    AccessMode::Read,
-                                    new_recursion_level,
-                                )?
-                            };
+                                // FIXME: Can this result in invalid address space state?
+                                let ext_addrspace = &foreign_address_space;
+                                let mut free_token = unsafe { CleanLockToken::new() };
+                                let (frame, _, _) = {
+                                    let g = ext_addrspace.acquire_write(free_token.downgrade());
+                                    correct_inner(
+                                        ext_addrspace,
+                                        g,
+                                        src_page,
+                                        AccessMode::Read,
+                                        new_recursion_level,
+                                    )?
+                                };
 
-                            // SAFETY: Caller guarantees addr_space_guard is coming from this addr_space_lock
-                            addr_space =
-                                unsafe { addr_space_lock.acquire_rewrite(addr_space_guard_token) };
-                            flusher = Flusher::with_cpu_set(
-                                &addr_space_lock.used_by,
-                                &addr_space_lock.tlb_ack,
-                            );
+                                // SAFETY: Caller guarantees addr_space_guard is coming from this addr_space_lock
+                                addr_space = unsafe {
+                                    addr_space_lock.acquire_rewrite(addr_space_guard_token)
+                                };
+                                flusher = Flusher::with_cpu_set(
+                                    &addr_space_lock.used_by,
+                                    &addr_space_lock.tlb_ack,
+                                );
 
-                            // SAFETY: We guarantee that guard is coming from foreign_address_space
-                            guard = unsafe {
-                                foreign_address_space.acquire_reupgradeable_read(guard_token)
-                            };
+                                // SAFETY: We guarantee that guard is coming from foreign_address_space
+                                guard = unsafe {
+                                    foreign_address_space.acquire_reupgradeable_read(guard_token)
+                                };
 
-                            frame
-                        }
-                    };
-
-                    let info =
-                        get_page_info(src_frame).expect("all allocated frames need a PageInfo");
-
-                    match info.add_ref(RefKind::Shared) {
-                        Ok(()) => src_frame,
-                        Err(AddRefError::CowToShared) => {
-                            let CowResult {
-                                new_frame,
-                                old_frame,
-                            } = cow(src_frame, info, RefKind::Shared)?;
-
-                            if let Some(old_frame) = old_frame {
-                                flusher.queue(old_frame, None, TlbShootdownActions::FREE);
-                                flusher.flush();
-                            }
-
-                            let mut guard = RwLockUpgradableGuard::upgrade(guard);
-
-                            // TODO: flusher
-                            unsafe {
-                                guard
+                                let pte_flags = guard
                                     .table
                                     .utable
-                                    .remap_with_full(src_page.start_address(), |_, f| {
-                                        Some((new_frame.base(), f))
-                                    });
-                            }
+                                    .translate(src_page.start_address())
+                                    .map_or(PageFlags::new(), |(_, f)| f);
 
-                            new_frame
+                                (frame, pte_flags)
+                            }
+                        };
+
+                    let cow_fmap_flags = if grant_flags.has_write() && !src_pte_flags.has_write() {
+                        guard.grants.contains(src_page).and_then(|(_, g)| {
+                            matches!(g.provider, Provider::FmapBorrowed { is_cow: true, .. })
+                                .then_some(g.flags)
+                        })
+                    } else {
+                        None
+                    };
+
+                    if let Some(src_grant_flags) = cow_fmap_flags {
+                        let info = get_page_info(src_frame).ok_or(PfError::Segv)?;
+                        let CowResult {
+                            new_frame,
+                            old_frame,
+                        } = cow(src_frame, info, RefKind::Shared)?;
+                        let mut guard = RwLockUpgradableGuard::upgrade(guard);
+                        let mut src_flusher = Flusher::with_cpu_set(
+                            &foreign_address_space.used_by,
+                            &foreign_address_space.tlb_ack,
+                        );
+                        unsafe {
+                            if let Some((_, _, flush)) = guard
+                                .table
+                                .utable
+                                .remap_with_full(src_page.start_address(), |_, _| {
+                                    Some((new_frame.base(), src_grant_flags))
+                                })
+                            {
+                                flush.flush();
+                            }
                         }
-                        Err(AddRefError::SharedToCow) => unreachable!(),
-                        Err(AddRefError::RcOverflow) => return Err(PfError::Oom),
+                        if let Some(old_frame) = old_frame {
+                            src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+                        }
+                        drop(src_flusher);
+                        new_frame
+                    } else {
+                        let info =
+                            get_page_info(src_frame).expect("all allocated frames need a PageInfo");
+
+                        match info.add_ref(RefKind::Shared) {
+                            Ok(()) => src_frame,
+                            Err(AddRefError::CowToShared) => {
+                                let CowResult {
+                                    new_frame,
+                                    old_frame,
+                                } = cow(src_frame, info, RefKind::Shared)?;
+
+                                if let Some(old_frame) = old_frame {
+                                    flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+                                    flusher.flush();
+                                }
+
+                                let mut guard = RwLockUpgradableGuard::upgrade(guard);
+
+                                // TODO: flusher
+                                unsafe {
+                                    guard
+                                        .table
+                                        .utable
+                                        .remap_with_full(src_page.start_address(), |_, f| {
+                                            Some((new_frame.base(), f))
+                                        });
+                                }
+
+                                new_frame
+                            }
+                            Err(AddRefError::SharedToCow) => unreachable!(),
+                            Err(AddRefError::RcOverflow) => return Err(PfError::Oom),
+                        }
                     }
                 }
                 _ => {
@@ -2876,95 +3006,115 @@ fn correct_inner<'l>(
             }
         }
         // TODO: NonfatalInternalError if !MAP_LAZY and this page fault occurs.
-        Provider::FmapBorrowed { ref file_ref, .. } => {
-            let file_ref = file_ref.clone();
-            let flags = map_flags(grant_info.flags());
-            drop(flusher);
-            let addr_space_guard_token = addr_space.into_token();
-
-            // XXX: This is cheating, but guaranteed we won't deadlock because we've dropped addr_space_guard
-            let mut token = unsafe { CleanLockToken::new() };
-
-            let context_lock = Arc::clone(&*crate::context::current());
-            if context_lock.read(token.token()).being_sigkilled {
-                return Err(PfError::Killed);
-            }
-
-            let (scheme_res, scheme_number) = {
-                let desc = &file_ref.description.read(token.token());
-                (desc.scheme_ref.upgrade(), desc.number)
-            };
-            let user_inner = scheme_res
-                .ok()
-                .and_then(|s| {
-                    if let KernelSchemes::User(user) = s {
-                        Some(user.inner)
-                    } else {
-                        None
+        Provider::FmapBorrowed {
+            ref file_ref,
+            is_cow,
+            ..
+        } => {
+            if let Some((frame, existing_flags)) = faulting_entry_opt {
+                if is_cow && access == AccessMode::Write {
+                    let info = get_page_info(frame).ok_or(PfError::Segv)?;
+                    let result = cow(frame, info, RefKind::Cow)?;
+                    if let Some(old_frame) = result.old_frame {
+                        flusher.queue(old_frame, None, TlbShootdownActions::FREE);
                     }
-                })
-                .ok_or(PfError::Segv)?;
-
-            const FMAP_WAIT_MAX_RESUMES: usize = 64;
-
-            let offset = file_ref.base_offset as u64 + (pages_from_grant_start * PAGE_SIZE) as u64;
-            let tag = user_inner
-                .request_fmap(scheme_number, offset, 1, flags, &mut token)
-                .map_err(|_| PfError::Segv)?;
-
-            let frame = {
-                let mut resolved = None;
-                for _ in 0..FMAP_WAIT_MAX_RESUMES {
-                    let mut guard = context_lock.write(token.token());
-                    if guard.being_sigkilled {
-                        let _ = guard.fmap_ret.take();
-                        drop(guard);
-                        user_inner.cancel_fmap(tag, &context_lock, &mut token);
-                        return Err(PfError::Killed);
-                    }
-                    if let Some(frame) = guard.fmap_ret.take() {
-                        resolved = Some(frame);
-                        break;
-                    }
-                    let _ = guard.hard_block(HardBlockedReason::AwaitingMmap {
-                        file_ref: file_ref.clone(),
-                    });
-                    drop(guard);
-
-                    super::switch(&mut token);
+                    result.new_frame
+                } else {
+                    override_flags = Some(existing_flags);
+                    frame
                 }
-                match resolved {
-                    Some(frame) => frame,
-                    None => {
+            } else {
+                let file_ref = file_ref.clone();
+                let flags = map_flags(grant_info.flags());
+                drop(flusher);
+                let addr_space_guard_token = addr_space.into_token();
+
+                // XXX: This is cheating, but guaranteed we won't deadlock because we've dropped addr_space_guard
+                let mut token = unsafe { CleanLockToken::new() };
+
+                let context_lock = Arc::clone(&*crate::context::current());
+                if context_lock.read(token.token()).being_sigkilled {
+                    return Err(PfError::Killed);
+                }
+
+                let (scheme_res, scheme_number) = {
+                    let desc = &file_ref.description.read(token.token());
+                    (desc.scheme_ref.upgrade(), desc.number)
+                };
+                let user_inner = scheme_res
+                    .ok()
+                    .and_then(|s| {
+                        if let KernelSchemes::User(user) = s {
+                            Some(user.inner)
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or(PfError::Segv)?;
+
+                const FMAP_WAIT_MAX_RESUMES: usize = 64;
+
+                let offset =
+                    file_ref.base_offset as u64 + (pages_from_grant_start * PAGE_SIZE) as u64;
+                let tag = user_inner
+                    .request_fmap(scheme_number, offset, 1, flags, &mut token)
+                    .map_err(|_| PfError::Segv)?;
+
+                let frame = {
+                    let mut resolved = None;
+                    for _ in 0..FMAP_WAIT_MAX_RESUMES {
                         let mut guard = context_lock.write(token.token());
-                        let killed = guard.being_sigkilled;
-                        let frame = guard.fmap_ret.take();
-                        drop(guard);
-                        if killed {
+                        if guard.being_sigkilled {
+                            let _ = guard.fmap_ret.take();
+                            drop(guard);
                             user_inner.cancel_fmap(tag, &context_lock, &mut token);
                             return Err(PfError::Killed);
                         }
-                        if let Some(frame) = frame {
-                            frame
-                        } else {
-                            user_inner.cancel_fmap(tag, &context_lock, &mut token);
-                            return Err(PfError::Segv);
+                        if let Some(frame) = guard.fmap_ret.take() {
+                            resolved = Some(frame);
+                            break;
+                        }
+                        let _ = guard.hard_block(HardBlockedReason::AwaitingMmap {
+                            file_ref: file_ref.clone(),
+                        });
+                        drop(guard);
+
+                        super::switch(&mut token);
+                    }
+                    match resolved {
+                        Some(frame) => frame,
+                        None => {
+                            let mut guard = context_lock.write(token.token());
+                            let killed = guard.being_sigkilled;
+                            let frame = guard.fmap_ret.take();
+                            drop(guard);
+                            if killed {
+                                user_inner.cancel_fmap(tag, &context_lock, &mut token);
+                                return Err(PfError::Killed);
+                            }
+                            if let Some(frame) = frame {
+                                frame
+                            } else {
+                                user_inner.cancel_fmap(tag, &context_lock, &mut token);
+                                return Err(PfError::Segv);
+                            }
                         }
                     }
-                }
-            };
+                };
 
-            // SAFETY: Caller guarantees addr_space_guard is coming from this addr_space_lock
-            addr_space = unsafe { addr_space_lock.acquire_rewrite(addr_space_guard_token) };
-            flusher = Flusher::with_cpu_set(&addr_space_lock.used_by, &addr_space_lock.tlb_ack);
+                // SAFETY: Caller guarantees addr_space_guard is coming from this addr_space_lock
+                addr_space = unsafe { addr_space_lock.acquire_rewrite(addr_space_guard_token) };
+                flusher = Flusher::with_cpu_set(&addr_space_lock.used_by, &addr_space_lock.tlb_ack);
 
-            info!("Got frame {:?} from external fmap", frame);
+                info!("Got frame {:?} from external fmap", frame);
 
-            frame
+                frame
+            }
         }
     };
 
-    let new_flags = grant_flags.write(grant_flags.has_write() && allow_writable);
+    let new_flags = override_flags
+        .unwrap_or_else(|| grant_flags.write(grant_flags.has_write() && allow_writable));
     let Some(flush) = (unsafe {
         addr_space
             .table
