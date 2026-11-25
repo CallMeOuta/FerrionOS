@@ -109,6 +109,36 @@ def generate_fixtures(tmp_dir):
     )
     fixtures["sample.svg"] = svg_text.encode("utf-8")
 
+    embed_png = tmp_dir / "embed.png"
+    run_host([
+        ffmpeg, "-y", "-f", "lavfi",
+        "-i", "color=c=#a020c8:s=64x64:d=0.04,format=rgba",
+        "-frames:v", "1", "-c:v", "png", str(embed_png),
+    ])
+    fixtures["embed.png"] = embed_png.read_bytes()
+
+    sibling_png = tmp_dir / "sibling.png"
+    run_host([
+        ffmpeg, "-y", "-f", "lavfi",
+        "-i", "color=c=#20d0d0:s=64x64:d=0.04,format=rgba",
+        "-frames:v", "1", "-c:v", "png", str(sibling_png),
+    ])
+    fixtures["sibling.png"] = sibling_png.read_bytes()
+
+    fixtures["ref_basedir.svg"] = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">\n'
+        '  <rect x="0" y="0" width="64" height="64" fill="#101010"/>\n'
+        '  <image href="embed.png" x="0" y="0" width="64" height="64"/>\n'
+        '</svg>\n'
+    ).encode("utf-8")
+
+    fixtures["sibling_basedir.svg"] = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">\n'
+        '  <rect x="0" y="0" width="64" height="64" fill="#101010"/>\n'
+        '  <image href="../glycin-sibling/sibling.png" x="0" y="0" width="64" height="64"/>\n'
+        '</svg>\n'
+    ).encode("utf-8")
+
     mp24_path = tmp_dir / "sample_24mp.png"
     run_host([
         ffmpeg, "-y", "-f", "lavfi",
@@ -317,12 +347,67 @@ def run_glycin_load(vm_cls, args, out):
                     "mkdir -p /tmp/glycin-xdg/glycin-loaders/2+/conf.d && "
                     "printf \"[loader:image/x-ferrion-escape]\\nExec=/usr/bin/glycin-load-probe\\nIdentifiers=0:FERRION_ESCAPE;\\n\" "
                     "> /tmp/glycin-xdg/glycin-loaders/2+/conf.d/ferrion-escape.conf && "
+                    "printf \"[loader:image/x-ferrion-escape-basedir]\\nExec=/usr/bin/glycin-load-probe\\nIdentifiers=0:FERRION_BASEDIR_ESCAPE;\\nExposeBaseDir=true\\n\" "
+                    "> /tmp/glycin-xdg/glycin-loaders/2+/conf.d/ferrion-escape-basedir.conf && "
+                    "rm -rf /tmp/glycin-base /tmp/glycin-sibling && "
+                    "mkdir -p /tmp/glycin-base /tmp/glycin-sibling && "
+                    "cp /tmp/glycin-fx/embed.png /tmp/glycin-base/embed.png && "
+                    "cp /tmp/glycin-fx/ref_basedir.svg /tmp/glycin-base/ref.svg && "
+                    "cp /tmp/glycin-fx/sibling_basedir.svg /tmp/glycin-base/sibling_ref.svg && "
+                    "cp /tmp/glycin-fx/sibling.png /tmp/glycin-sibling/sibling.png && "
+                    "printf FERRION_SIBLING_SECRET > /tmp/glycin-sibling/sibling-secret.txt && "
+                    "chmod 600 /tmp/glycin-sibling/sibling-secret.txt && "
+                    f"printf \"FERRION_BASEDIR_ESCAPE\\n/tmp/glycin-sibling/sibling-secret.txt\\n10.0.2.2:{port}\\n/tmp/glycin-trap.sock\\n\" > /tmp/glycin-base/escape_base.bin && "
                     f"printf \"FERRION_ESCAPE\\n/home/user/glycin-secret.txt\\n10.0.2.2:{port}\\n/tmp/glycin-trap.sock\\n\" > /tmp/escape.bin"
                 ),
                 timeout=60,
             )
             if rc != 0:
                 problems.append(f"escape test setup failed (exit {rc})")
+
+            rc, text = run(vm, "basedir-svg-off", "glycin-load-probe load /tmp/glycin-base/ref.svg", timeout=60)
+            m = load_re.search(text or "")
+            if rc != 0 or not m:
+                problems.append(f"expose-base-dir baseline off load failed (exit {rc})")
+            else:
+                off_rgb = parse_rgb(m.group(12), m.group(7))
+                results["ref_basedir_off"] = {"mid": m.group(12), "fmt": m.group(7), "rgb": list(off_rgb)}
+                if not close_rgb(off_rgb, (16, 16, 16), 16):
+                    problems.append(f"ref.svg without --expose-base-dir rendered {off_rgb}, expected background (16, 16, 16)")
+
+            rc, text = run(vm, "basedir-svg-on", "glycin-load-probe load /tmp/glycin-base/ref.svg --expose-base-dir", timeout=60)
+            m = load_re.search(text or "")
+            if rc != 0 or not m:
+                problems.append(f"expose-base-dir SVG load failed (exit {rc}): {(text or '').strip()[-300:]}")
+            else:
+                on_rgb = parse_rgb(m.group(12), m.group(7))
+                results["ref_basedir_on"] = {
+                    "sandbox": m.group(3), "w": int(m.group(4)), "h": int(m.group(5)),
+                    "mid": m.group(12), "fmt": m.group(7), "rgb": list(on_rgb), "ms": int(m.group(9)),
+                }
+                if m.group(3) != "FerrionRun":
+                    problems.append(f"ref.svg --expose-base-dir: wrong sandbox {m.group(3)}")
+                if not close_rgb(on_rgb, (160, 32, 200), 16):
+                    problems.append(f"ref.svg --expose-base-dir mid pixel {on_rgb} != referenced embed.png (160, 32, 200)")
+
+            rc, text = run(vm, "basedir-svg-sibling", "glycin-load-probe load /tmp/glycin-base/sibling_ref.svg --expose-base-dir", timeout=60)
+            m = load_re.search(text or "")
+            if rc != 0 or not m:
+                problems.append(f"expose-base-dir sibling SVG load failed (exit {rc}): {(text or '').strip()[-300:]}")
+            else:
+                sib_rgb = parse_rgb(m.group(12), m.group(7))
+                results["sibling_basedir_on"] = {"mid": m.group(12), "fmt": m.group(7), "rgb": list(sib_rgb)}
+                if not close_rgb(sib_rgb, (16, 16, 16), 16):
+                    problems.append(f"sibling_ref.svg --expose-base-dir leaked sibling pixels: {sib_rgb} != background (16, 16, 16)")
+
+            rc, text = run(
+                vm,
+                "escape-basedir-sibling",
+                "XDG_DATA_HOME=/tmp/glycin-xdg glycin-load-probe sandbox-probe /tmp/glycin-base/escape_base.bin --expose-base-dir",
+                timeout=60,
+            )
+            if rc != 0 or "SANDBOX_PROBE_OK mech=FerrionRun" not in text:
+                problems.append(f"expose-base-dir sibling file isolation probe failed (exit {rc}): {text!r}")
 
             rc, text = run(
                 vm,
@@ -375,9 +460,9 @@ def run_glycin_load(vm_cls, args, out):
                 return False, "; ".join(problems) + f"; see {out}"
             mp24_ms = results.get("sample_24mp.png", {}).get("ms", "?")
             return True, (
-                f"{len(positive_specs)}/{len(positive_specs)} positive formats decoded under FerrionRun "
+                f"{len(positive_specs)}/{len(positive_specs)} positive formats + expose-base-dir SVG decoded under FerrionRun "
                 f"(24MP 96MB pipe in {mp24_ms}ms), {len(negative_files)} negative formats refused, "
-                f"sandbox blocked secret/TCP(0 leaks)/Unix(0 leaks) with and without GLYCIN_DISABLE_SANDBOX; see {out}"
+                f"sandbox blocked secret/sibling/TCP(0 leaks)/Unix(0 leaks) with and without GLYCIN_DISABLE_SANDBOX; see {out}"
             )
         finally:
             vm.close()

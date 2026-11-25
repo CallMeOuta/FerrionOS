@@ -218,11 +218,12 @@ impl LoaderImplementation for EscapeProbeLoader {
     }
 }
 
-fn cmd_load(path: &str, expect_fail: bool) -> ExitCode {
+fn cmd_load(path: &str, expect_fail: bool, expose_base_dir: bool) -> ExitCode {
     async_io::block_on(async {
         let start = Instant::now();
         let file = gio::File::for_path(path);
-        let loader = Loader::new(file);
+        let mut loader = Loader::new(file);
+        loader.use_expose_base_dir(expose_base_dir);
         match loader.load().await {
             Ok(mut image) => {
                 let mech = image.active_sandbox_mechanism();
@@ -348,10 +349,11 @@ fn cmd_unix_listener(sock_path: &str, count_path: &str, max_secs: u64) -> ExitCo
     ExitCode::SUCCESS
 }
 
-fn cmd_sandbox_probe(input_path: &str) -> ExitCode {
+fn cmd_sandbox_probe(input_path: &str, expose_base_dir: bool) -> ExitCode {
     async_io::block_on(async {
         let file = gio::File::for_path(input_path);
-        let loader = Loader::new(file);
+        let mut loader = Loader::new(file);
+        loader.use_expose_base_dir(expose_base_dir);
         match loader.load().await {
             Ok(mut image) => {
                 let mech = image.active_sandbox_mechanism();
@@ -406,8 +408,10 @@ fn main() -> ExitCode {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["load", path] => cmd_load(path, false),
-        ["load", path, "--expect-fail"] => cmd_load(path, true),
+        ["load", path] => cmd_load(path, false, false),
+        ["load", path, "--expect-fail"] => cmd_load(path, true, false),
+        ["load", path, "--expose-base-dir"] => cmd_load(path, false, true),
+        ["load", path, "--expose-base-dir", "--expect-fail"] => cmd_load(path, true, true),
         ["supported"] => cmd_supported(),
         ["unix-listener", sock_path, count_path, secs] => {
             cmd_unix_listener(sock_path, count_path, secs.parse().unwrap_or(60))
@@ -424,10 +428,11 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        ["sandbox-probe", input_path] => cmd_sandbox_probe(input_path),
+        ["sandbox-probe", input_path] => cmd_sandbox_probe(input_path, false),
+        ["sandbox-probe", input_path, "--expose-base-dir"] => cmd_sandbox_probe(input_path, true),
         _ => {
             eprintln!(
-                "usage: glycin-load-probe <load PATH [--expect-fail]|supported|unix-listener SOCK COUNT SECS|sandbox-control SECRET TCP UNIX|sandbox-probe INPUT>"
+                "usage: glycin-load-probe <load PATH [--expose-base-dir] [--expect-fail]|supported|unix-listener SOCK COUNT SECS|sandbox-control SECRET TCP UNIX|sandbox-probe INPUT [--expose-base-dir]>"
             );
             ExitCode::from(2)
         }
