@@ -3,8 +3,20 @@
 
 #![forbid(unsafe_code)]
 
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rune::tok::{self, motion, type_};
-use rune::{AppSpec, Cx, El, col, el, text};
+use rune::{App, AppSpec, Cx, El, col, el, text};
+
+static LOG_SWITCH: AtomicBool = AtomicBool::new(false);
+
+fn log_line(line: &str) {
+    let mut out = std::io::stdout().lock();
+    if writeln!(out, "{line}").is_ok() {
+        out.flush().ok();
+    }
+}
 
 #[derive(Default)]
 struct State {
@@ -21,16 +33,27 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
     let switch = el().key("switch").role("switch").label("Lights").checked(s.on).focusable(true).size(38.0, 22.0).radius(11.0)
         .fill(if s.on { tok::accent(0, true) } else { t.control_off })
         .motion(motion::SNAPPY)
-        .on_press(|s: &mut State| s.on = !s.on)
+        .on_press(|s: &mut State| {
+            s.on = !s.on;
+            if LOG_SWITCH.load(Ordering::Relaxed) {
+                log_line(if s.on { "HELLO_SWITCH state=on" } else { "HELLO_SWITCH state=off" });
+            }
+        })
         .child(knob);
     col().w_full().h_full().center().gap(16.0).fill(t.bg).child(label).child(switch)
 }
 
 fn main() {
-    rune::run(AppSpec::<State> {
+    let log_switch = std::env::args().skip(1).any(|a| a == "--log-switch");
+    LOG_SWITCH.store(log_switch, Ordering::Relaxed);
+    let mut app = App::new(AppSpec::<State> {
         scenes: &[("on", |s| s.on = true)],
         ..AppSpec::new("Hello", (320.0, 200.0), State::default, view)
     });
+    if log_switch {
+        app = app.on_ready(|_| log_line("HELLO_READY"));
+    }
+    app.run();
 }
 
 #[cfg(test)]

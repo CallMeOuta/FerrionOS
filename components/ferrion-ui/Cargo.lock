@@ -696,6 +696,8 @@ name = "clipboard-demo"
 version = "0.0.1"
 dependencies = [
  "rune",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

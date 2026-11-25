@@ -218,7 +218,10 @@ impl PendingSend {
                 Ok(n) => self.offset += n,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return false,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return true,
+                Err(err) => {
+                    eprintln!("wayland-clipboard: send failed: {err}");
+                    return true;
+                }
             }
         }
         true
