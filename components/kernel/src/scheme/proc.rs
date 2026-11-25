@@ -180,6 +180,8 @@ enum RegsKind {
     Int,
     Env,
 }
+const ATTR_CALL_SET_RUID: u64 = 0x4645_0002;
+
 #[derive(Clone)]
 enum ContextHandle {
     // Opened by the process manager, after which it is locked. This capability is used to open
@@ -1906,6 +1908,16 @@ impl ContextHandle {
                     drop(addrspace);
                     payload.copy_from_slice(&mem_policy)?;
                 }
+                Ok(0)
+            }
+            ContextHandle::Attr => {
+                let verb = *metadata.first().ok_or(Error::new(EINVAL))?;
+                if verb != ATTR_CALL_SET_RUID {
+                    return Err(Error::new(EINVAL));
+                }
+                let raw_ruid = *metadata.get(1).ok_or(Error::new(EINVAL))?;
+                let ruid = u32::try_from(raw_ruid).map_err(|_| Error::new(EINVAL))?;
+                context.write(token.token()).ruid = ruid;
                 Ok(0)
             }
             _ => Err(Error::new(EBADF)),

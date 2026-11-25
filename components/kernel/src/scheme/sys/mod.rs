@@ -72,7 +72,10 @@ pub(super) fn context_visible_to(context: &crate::context::Context, caller_uid: 
     if caller_uid == 0 {
         return true;
     }
-    context.userspace && context.addr_space.is_some() && context.euid == caller_uid
+    context.userspace
+        && context.addr_space.is_some()
+        && context.ruid == caller_uid
+        && context.euid == caller_uid
 }
 
 /// System information scheme

@@ -202,6 +202,7 @@ pub struct Context {
     pub owner_proc_id: Option<NonZeroUsize>,
 
     // TODO: Temporary replacement for existing kernel logic, replace with capabilities!
+    pub ruid: u32,
     pub euid: u32,
     pub egid: u32,
     pub pid: usize,
@@ -271,6 +272,7 @@ impl Context {
             access_stop: AccessStop::None,
             owner_proc_id,
 
+            ruid: 0,
             euid: 0,
             egid: 0,
             pid: 0,

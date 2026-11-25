@@ -21,7 +21,8 @@ Exec ends every other thread of the process before the new program runs. On Ferr
 - A sibling killed mid-`fork` between `new_child_process` and `start` can leave a never-started child process holding a copy of the file table that `waitpid(-1)` can block on (tracked in `.scratch/kernel/issues/06-exec-during-fork-orphans-child.md`).
 - A process with more than `1024` threads cannot `exec` (exits `127`).
 - The allocator hook is installed by `relibc`'s `Sys::execve` and `Sys::fexecve`, so an `exec` through `redox-rt` without `relibc`'s platform layer (such as `bootstrap`) runs without the allocator lock, which is safe only because it is single-threaded.
-- Any future FerrionOS-owned `procmgr` thread-handle verb takes the next value in `0x4645_xxxx` and is recorded alongside `0x4645_0001`.
+- Any future FerrionOS-owned `procmgr` thread-handle or kernel `ContextHandle::Attr` verb takes the next value in `0x4645_xxxx` and is recorded alongside `0x4645_0001`.
+- `ATTR_CALL_SET_RUID = 0x4645_0002` is handled on `ContextHandle::Attr` (`components/kernel/src/scheme/proc.rs`, behind `ContextHandle::Authority`) and sent by `procmgr` (`components/base/bootstrap/src/procmgr.rs`) right after writing `ProcSchemeAttrs` so kernel `Context.ruid` stays synced without changing `ProcSchemeAttrs`.
 
 ## Where
 

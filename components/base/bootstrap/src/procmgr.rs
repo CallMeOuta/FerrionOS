@@ -37,6 +37,7 @@ use syscall::{
 };
 
 const THREAD_CALL_TERMINATE_SIBLINGS: u64 = 0x4645_0001;
+const ATTR_CALL_SET_RUID: u64 = 0x4645_0002;
 const MAX_EXEC_SIBLINGS: usize = 1024;
 const MAX_NEXT_EVENT_EINTR_RETRIES: usize = 64;
 
@@ -925,6 +926,11 @@ impl<'a> ProcScheme<'a> {
             prio: proc.prio,
             debug_name: arraystring_to_bytes(proc.name),
         })?;
+        redox_rt::sys::sys_call(
+            attr_fd.as_raw_fd(),
+            CallFlags::empty(),
+            &[ATTR_CALL_SET_RUID, u64::from(proc.ruid)],
+        )?;
 
         let status_hndl =
             ctxt_fd.dup(alloc::format!("auth-{}-status", self.auth.as_raw_fd()).as_bytes())?;
@@ -3228,6 +3234,11 @@ impl Thread {
             prio: process.prio,
             debug_name: arraystring_to_bytes(process.name),
         })?;
+        redox_rt::sys::sys_call(
+            attr_fd.as_raw_fd(),
+            CallFlags::empty(),
+            &[ATTR_CALL_SET_RUID, u64::from(process.ruid)],
+        )?;
         Ok(())
     }
 }
