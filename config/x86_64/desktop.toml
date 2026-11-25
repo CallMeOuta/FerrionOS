@@ -93,6 +93,7 @@ update-index-probe = {}
 fork-filetable-probe = {}
 exec-handles-probe = {}
 forcekill-wakeup-probe = {}
+sigkill-exit-probe = {}
 spawn-failure-probe = {}
 ffmpeg = {}
 

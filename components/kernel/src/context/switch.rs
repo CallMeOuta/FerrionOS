@@ -1331,6 +1331,7 @@ pub struct ContextSwitchPercpu {
     /// The idle process.
     idle_ctxt: RefCell<Option<Arc<ContextLock>>>,
     pub(crate) being_sigkilled: Cell<bool>,
+    pub(crate) sigkill_pending: AtomicBool,
 
     // wakeups
     pub(crate) ipi_context_wakeup_list: Mutex<L4, Vec<WeakContextRef>>,
@@ -1361,6 +1362,7 @@ impl ContextSwitchPercpu {
             sched_ctxt: RefCell::new(None),
             idle_ctxt: RefCell::new(None),
             being_sigkilled: Cell::new(false),
+            sigkill_pending: AtomicBool::new(false),
             ipi_context_wakeup_list: Mutex::new(Vec::new()),
             local_wakeup_list: RefCell::new(Vec::new()),
             tmp_wakeups: RefCell::new(Vec::new()),

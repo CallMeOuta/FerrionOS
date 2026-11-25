@@ -15,7 +15,7 @@ pub use self::{fs::*, futex::futex, process::*, time::*, usercopy::validate_regi
 use self::{
     data::{Map, TimeSpec},
     debug::{debug_end, debug_start},
-    error::{Error, Result, EINVAL, ENOSYS},
+    error::{Error, Result, EINTR, EINVAL, ENOSYS},
     flag::{CallFlags, EventFlags, MapFlags, RwFlags},
     number::*,
     usercopy::UserSlice,
@@ -277,7 +277,21 @@ pub fn syscall(
     let percpu = PercpuBlock::current();
     percpu.inside_syscall.set(false);
 
-    if percpu.switch_internals.being_sigkilled.get() {
+    let need_sigkill_check = matches!(result, Err(Error { errno: EINTR }))
+        || (percpu
+            .switch_internals
+            .sigkill_pending
+            .load(core::sync::atomic::Ordering::Acquire)
+            && {
+                percpu
+                    .switch_internals
+                    .sigkill_pending
+                    .swap(false, core::sync::atomic::Ordering::AcqRel);
+                true
+            });
+    if percpu.switch_internals.being_sigkilled.get()
+        || (need_sigkill_check && crate::context::current().read(token.token()).being_sigkilled)
+    {
         exit_this_context(None, token);
     }
 

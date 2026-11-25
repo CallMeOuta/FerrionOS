@@ -81,6 +81,9 @@ reason = "Command-line shell."
 [non_app.forcekill-wakeup-probe]
 reason = "In-OS test probe for force-kill wake-up checks."
 
+[non_app.sigkill-exit-probe]
+reason = "In-OS test probe for SIGKILL syscall-exit and thread-exit teardown checks."
+
 [non_app.foreign-call-probe]
 reason = "In-OS test probe for Linux foreign-call checks."
 

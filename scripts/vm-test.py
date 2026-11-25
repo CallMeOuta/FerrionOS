@@ -1879,6 +1879,44 @@ def test_forcekill_wakeup(vm, args):
     return True, "SIGKILL woke and reaped multithreaded children across futex, pipe, nanosleep, and UDS waits"
 
 
+def test_sigkill_exit(vm, args):
+    """Checks that SIGKILL exits at syscall return with 0 post-kill user code and exit(7) vs pthread_exit gives 0 SIGILL / invalid-opcode faults (use --config desktop)."""
+    if not user_bash(vm, args.timeout):
+        return False, "no user Bash prompt after login"
+
+    since = vm.mark()
+    vm.type("sigkill-exit-probe all; echo SKERC-$((40+2))=$?\n")
+    found = vm.wait_serial(r"(?s)\n(.*?)SKERC-42=(\d+)\s", 240, since)
+    raw = vm.text(since)
+    (vm.out / "sigkill-exit-probe.txt").write_text(raw)
+    if not found:
+        return False, f"sigkill-exit-probe timed out; see {vm.out}"
+
+    rc = int(found.group(2))
+    output = found.group(1)
+    summary = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith("sigkill-exit-probe:")
+    ]
+    bad_opcode = [
+        line.strip()
+        for line in raw.splitlines()
+        if "invalid opcode" in line.lower() or "unhandled exception" in line.lower()
+    ]
+    problems = []
+    if rc != 0:
+        problems.append(f"probe exit {rc}")
+    if len(summary) < 3:
+        problems.append(f"expected 3 summary lines, got {len(summary)}")
+    if bad_opcode:
+        problems.append(f"{len(bad_opcode)} invalid-opcode/exception serial lines")
+    detail = "; ".join(summary[:4]) if summary else "no summary"
+    if problems:
+        return False, f"{'; '.join(problems)} ({detail}); see {vm.out}"
+    return True, f"PASS ({detail})"
+
+
 def test_nvme_queue(vm, args):
     """Runs nvme-queue-probe for 300 s (128 + (r % 64) 128 KiB records compressed to 4 KiB blocks), failing with /scheme/sys watcher dumps if no progress occurs for 20 s (use --config firefox)."""
     if not user_bash(vm, args.timeout):
@@ -12245,6 +12283,7 @@ TESTS["fdtable-race"] = test_fdtable_race
 TESTS["fork-filetable"] = test_fork_filetable
 TESTS["exec-handles"] = test_exec_handles
 TESTS["forcekill-wakeup"] = test_forcekill_wakeup
+TESTS["sigkill-exit"] = test_sigkill_exit
 TESTS["spawn-failure"] = test_spawn_failure
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake

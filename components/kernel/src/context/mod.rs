@@ -163,6 +163,18 @@ pub fn unblock_context(context_lock: &Arc<ContextLock>, token: &mut LockToken<'_
     true
 }
 
+pub fn notify_sigkilled(cpu_id: Option<LogicalCpuId>) {
+    let Some(target_cpu) = cpu_id else {
+        return;
+    };
+    if let Some(percpu) = get_percpu_block(target_cpu) {
+        percpu
+            .switch_internals
+            .sigkill_pending
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
 pub fn wakeup_context(
     context_lock: &Arc<ContextLock>,
     cpu_id: Option<LogicalCpuId>,

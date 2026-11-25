@@ -1,0 +1,10 @@
+[package]
+description = "Checks that SIGKILL exits at syscall return and thread exit does not panic during process exit"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -o "${COOKBOOK_STAGE}/usr/bin/sigkill-exit-probe" "${COOKBOOK_RECIPE}/sigkill-exit-probe.c" ${LDFLAGS} -lpthread
+"""

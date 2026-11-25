@@ -1452,7 +1452,9 @@ pub fn page_fault_handler(
                     } else {
                         ctx_guard.being_sigkilled = true;
                         ctx_guard.status = context::Status::Runnable;
+                        let cpu_id = ctx_guard.cpu_id;
                         drop(ctx_guard);
+                        context::notify_sigkilled(cpu_id);
                         crate::syscall::exit_context(None, &mut token, ctx_lock);
                     }
                 }

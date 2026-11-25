@@ -1639,6 +1639,7 @@ impl ContextHandle {
                                 ctxt.being_sigkilled = true;
                                 ctxt.cpu_id
                             };
+                            context::notify_sigkilled(cpu_id);
                             wakeup_context(&context, cpu_id, &mut token.downgrade());
                             Ok(size_of::<usize>())
                         }
