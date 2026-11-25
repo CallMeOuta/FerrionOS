@@ -54,6 +54,9 @@ pub struct InterpOverride {
     name: Box<[u8]>,
     min_mmap_addr: usize,
     grants_fd: usize,
+    exec_range: Range<usize>,
+    has_random: bool,
+    entropy: [u8; EXEC_ENTROPY_BYTES],
 }
 
 pub struct ExtraInfo<'a> {
@@ -81,6 +84,7 @@ pub struct ExtraInfo<'a> {
 pub const AT_RANDOM_BYTES: usize = 16;
 pub const MAX_AUXV_ENTRIES: usize = 32;
 const STANDARD_AUXV_MAX_ENTRIES: usize = 16;
+const EXEC_ENTROPY_BYTES: usize = 48;
 const EXEC_RANDOM_MAX_BYTES: usize = 256;
 
 #[cfg(target_arch = "x86_64")]
@@ -137,6 +141,97 @@ fn standard_auxv_entries(
     (entries, count)
 }
 const EXEC_RANDOM_MAX_READS: usize = 64;
+const ASLR_MAP_MAX_TRIES: usize = 16;
+const ASLR_STACK_ALIGN: usize = 16;
+const ASLR_HIGH_EXEC_MMAP_BUDGET: usize = 64 * 1024 * 1024;
+
+const _: () = {
+    assert!(EXEC_ENTROPY_BYTES <= EXEC_RANDOM_MAX_BYTES);
+    assert!(ASLR_PIE_BASE >= PAGE_SIZE);
+    assert!(ASLR_PIE_BASE % PAGE_SIZE == 0);
+    assert!(ASLR_PIE_WINDOW >= PAGE_SIZE && ASLR_PIE_WINDOW % PAGE_SIZE == 0);
+    assert!(ASLR_INTERP_BASE % PAGE_SIZE == 0);
+    assert!(ASLR_INTERP_WINDOW >= PAGE_SIZE && ASLR_INTERP_WINDOW % PAGE_SIZE == 0);
+    assert!(ASLR_MMAP_BASE % PAGE_SIZE == 0);
+    assert!(ASLR_MMAP_WINDOW >= PAGE_SIZE && ASLR_MMAP_WINDOW % PAGE_SIZE == 0);
+    assert!(ASLR_MMAP_BUDGET % PAGE_SIZE == 0);
+    assert!(ASLR_STACK_WINDOW >= PAGE_SIZE && ASLR_STACK_WINDOW % PAGE_SIZE == 0);
+    assert!(ASLR_STACK_CEILING <= STACK_TOP && ASLR_STACK_CEILING % PAGE_SIZE == 0);
+    assert!(ASLR_PIE_BASE + ASLR_PIE_WINDOW < ASLR_INTERP_BASE);
+    assert!(ASLR_INTERP_BASE + ASLR_INTERP_WINDOW < ASLR_MMAP_BASE);
+    assert!(
+        ASLR_MMAP_BASE + ASLR_MMAP_WINDOW + ASLR_MMAP_BUDGET
+            <= ASLR_STACK_CEILING - ASLR_STACK_WINDOW - STACK_SIZE
+    );
+};
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+fn aslr_seed_word(entropy: &[u8; EXEC_ENTROPY_BYTES], slot: usize) -> u64 {
+    let start = AT_RANDOM_BYTES + slot * 8;
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&entropy[start..start + 8]);
+    u64::from_le_bytes(bytes)
+}
+
+fn aslr_random_page_addr(base: usize, window: usize, seed: u64) -> usize {
+    let pages = window / PAGE_SIZE;
+    assert!(pages > 0);
+    base + ((seed as usize) % pages) * PAGE_SIZE
+}
+
+fn mmap_anon_remote_aslr(
+    grants_fd: &FdGuardUpper,
+    base: usize,
+    window: usize,
+    upper_limit: usize,
+    span_size: usize,
+    flags: MapFlags,
+    mut seed: u64,
+) -> Result<usize> {
+    if span_size == 0 || !span_size.is_multiple_of(PAGE_SIZE) {
+        return Err(Error::new(EINVAL));
+    }
+    let Some(min_end) = base.checked_add(span_size) else {
+        return Err(Error::new(ENOMEM));
+    };
+    if min_end > upper_limit {
+        return Err(Error::new(ENOMEM));
+    }
+    let max_offset = (upper_limit - min_end) / PAGE_SIZE * PAGE_SIZE;
+    let eff_window = cmp::min(window, max_offset.saturating_add(PAGE_SIZE));
+    for _ in 0..ASLR_MAP_MAX_TRIES {
+        let candidate = aslr_random_page_addr(base, eff_window, seed);
+        seed = splitmix64(seed);
+        if candidate
+            .checked_add(span_size)
+            .is_none_or(|end| end > upper_limit)
+        {
+            continue;
+        }
+        match mmap_anon_remote(
+            grants_fd,
+            0,
+            candidate,
+            span_size,
+            flags | MapFlags::MAP_FIXED_NOREPLACE,
+        ) {
+            Ok(addr) => {
+                assert_eq!(addr, candidate);
+                return Ok(addr);
+            }
+            Err(Error { errno: EEXIST }) => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(Error::new(ENOMEM))
+}
 #[cfg(feature = "proc")]
 const THREAD_CALL_TERMINATE_SIBLINGS: u64 = 0x4645_0001;
 #[cfg(feature = "proc")]
@@ -288,11 +383,51 @@ pub fn fexec_impl(
     let span = span.expect("ELF executables must contain at least one `PT_LOAD` segment");
     let span_size = (span.end - span.start).next_multiple_of(PAGE_SIZE);
 
-    let base_addr = if header.e_type == ET_DYN {
-        // PIE
-        let addr = mmap_anon_remote(&grants_fd, 0, 0, span_size, MapFlags::PROT_NONE)?;
+    let mut entropy = [0_u8; EXEC_ENTROPY_BYTES];
+    let has_random = if let Some(interp) = interp_override.as_ref() {
+        entropy = interp.entropy;
+        interp.has_random
+    } else {
+        match exec_random_bytes(&mut entropy) {
+            Ok(()) => true,
+            Err(err)
+                if (err == Error::new(ENODEV) || cfg!(not(feature = "proc")))
+                    && is_early_boot_spawner() =>
+            {
+                false
+            }
+            Err(err) => return Err(err),
+        }
+    };
+
+    let (base_addr, mapped_range) = if header.e_type == ET_DYN {
+        let addr = if has_random {
+            if interp_override.is_none() {
+                mmap_anon_remote_aslr(
+                    &grants_fd,
+                    ASLR_PIE_BASE,
+                    ASLR_PIE_WINDOW,
+                    ASLR_INTERP_BASE,
+                    span_size,
+                    MapFlags::PROT_NONE,
+                    aslr_seed_word(&entropy, 0),
+                )?
+            } else {
+                mmap_anon_remote_aslr(
+                    &grants_fd,
+                    ASLR_INTERP_BASE,
+                    ASLR_INTERP_WINDOW,
+                    ASLR_MMAP_BASE,
+                    span_size,
+                    MapFlags::PROT_NONE,
+                    aslr_seed_word(&entropy, 1),
+                )?
+            }
+        } else {
+            mmap_anon_remote(&grants_fd, 0, 0, span_size, MapFlags::PROT_NONE)?
+        };
         update_min_mmap_addr(addr, span_size);
-        addr
+        (addr, addr..addr + span_size)
     } else {
         mmap_anon_remote(
             &grants_fd,
@@ -302,7 +437,7 @@ pub fn fexec_impl(
             MapFlags::MAP_FIXED_NOREPLACE,
         )?;
         update_min_mmap_addr(span.start, span_size);
-        0
+        (0, span.start..span.start + span_size)
     };
 
     let mut phdrs_vaddr = 0;
@@ -402,19 +537,104 @@ pub fn fexec_impl(
                 name: path.into(),
                 min_mmap_addr,
                 grants_fd: grants_fd.take(),
+                exec_range: mapped_range,
+                has_random,
+                entropy,
             },
         }));
     }
 
-    mmap_anon_remote(
-        &grants_fd,
-        0,
-        STACK_TOP - STACK_SIZE,
-        STACK_SIZE,
-        MapFlags::PROT_READ | MapFlags::PROT_WRITE | MapFlags::MAP_FIXED_NOREPLACE,
-    )?;
+    let (exec_range, interp_range) = if let Some(ref interp) = interp_override {
+        (interp.exec_range.clone(), Some(mapped_range.clone()))
+    } else {
+        (mapped_range.clone(), None)
+    };
 
-    let mut sp = STACK_TOP;
+    let (stack_bottom, stack_top, mut sp) = if has_random {
+        let stack_seed = aslr_seed_word(&entropy, 3);
+        let stack_base_min = ASLR_STACK_CEILING - ASLR_STACK_WINDOW - STACK_SIZE;
+        let s_bottom = mmap_anon_remote_aslr(
+            &grants_fd,
+            stack_base_min,
+            ASLR_STACK_WINDOW,
+            ASLR_STACK_CEILING,
+            STACK_SIZE,
+            MapFlags::PROT_READ | MapFlags::PROT_WRITE,
+            stack_seed,
+        )?;
+        let s_top = s_bottom + STACK_SIZE;
+        if s_top < STACK_TOP {
+            mmap_anon_remote(
+                &grants_fd,
+                0,
+                s_top,
+                STACK_TOP - s_top,
+                MapFlags::PROT_NONE | MapFlags::MAP_FIXED_NOREPLACE,
+            )?;
+        }
+        let sub_slots = PAGE_SIZE / ASLR_STACK_ALIGN;
+        let sub_jitter = (((stack_seed >> 56) as usize) % sub_slots) * ASLR_STACK_ALIGN;
+        (s_bottom, s_top, s_top - sub_jitter)
+    } else {
+        let s_bottom = STACK_TOP - STACK_SIZE;
+        mmap_anon_remote(
+            &grants_fd,
+            0,
+            s_bottom,
+            STACK_SIZE,
+            MapFlags::PROT_READ | MapFlags::PROT_WRITE | MapFlags::MAP_FIXED_NOREPLACE,
+        )?;
+        (s_bottom, STACK_TOP, STACK_TOP)
+    };
+
+    let standard_layout = has_random && min_mmap_addr <= ASLR_MMAP_BASE;
+    if has_random {
+        let mmap_seed = aslr_seed_word(&entropy, 2);
+        if standard_layout {
+            min_mmap_addr = aslr_random_page_addr(ASLR_MMAP_BASE, ASLR_MMAP_WINDOW, mmap_seed);
+            if min_mmap_addr
+                .checked_add(ASLR_MMAP_BUDGET)
+                .is_none_or(|end| end > stack_bottom)
+            {
+                return Err(Error::new(ENOMEM));
+            }
+        } else {
+            let Some(avail) = stack_bottom.checked_sub(min_mmap_addr) else {
+                return Err(Error::new(ENOMEM));
+            };
+            if avail < ASLR_HIGH_EXEC_MMAP_BUDGET {
+                return Err(Error::new(ENOMEM));
+            }
+            let max_window = ((avail - ASLR_HIGH_EXEC_MMAP_BUDGET) / PAGE_SIZE) * PAGE_SIZE;
+            let eff_window = cmp::min(ASLR_MMAP_WINDOW, max_window);
+            if eff_window >= PAGE_SIZE {
+                min_mmap_addr = aslr_random_page_addr(min_mmap_addr, eff_window, mmap_seed);
+            }
+        }
+    } else if min_mmap_addr >= stack_bottom {
+        return Err(Error::new(ENOMEM));
+    }
+
+    assert!(exec_range.start < exec_range.end);
+    assert!(stack_bottom < stack_top);
+    assert!(exec_range.end <= stack_bottom);
+    if let Some(ref ir) = interp_range {
+        assert!(ir.start < ir.end);
+        assert!(exec_range.end <= ir.start || ir.end <= exec_range.start);
+        assert!(ir.end <= stack_bottom);
+        assert!(min_mmap_addr >= ir.end);
+    }
+    assert!(min_mmap_addr.is_multiple_of(PAGE_SIZE));
+    assert!(min_mmap_addr >= exec_range.end);
+    if standard_layout {
+        assert!(stack_bottom >= min_mmap_addr + ASLR_MMAP_BUDGET);
+    } else if has_random {
+        assert!(stack_bottom >= min_mmap_addr + ASLR_HIGH_EXEC_MMAP_BUDGET);
+    }
+
+    let mmap_min_fd = grants_fd.dup_into_upper(b"mmap-min-addr")?;
+    mmap_min_fd.write(&usize::to_ne_bytes(min_mmap_addr))?;
+
     let mut stack_page = Option::<MmapGuard>::None;
 
     let mut push = |word: usize| -> Result<()> {
@@ -427,17 +647,15 @@ pub fn fexec_impl(
             && old_page_no == new_page_no
         {
             page
-        } else if let Some(ref mut stack_page) = stack_page {
-            stack_page.remap(new_page_no * PAGE_SIZE, PROT_READ | PROT_WRITE)?;
-            stack_page
         } else {
+            stack_page = None;
             let new = MmapGuard::map(
                 &grants_fd,
                 &Map {
                     offset: new_page_no * PAGE_SIZE,
                     size: PAGE_SIZE,
                     flags: PROT_READ | PROT_WRITE,
-                    address: 0, // let kernel decide
+                    address: 0,
                 },
             )?;
 
@@ -475,18 +693,6 @@ pub fn fexec_impl(
         };
     let execfn = interp_override.as_ref().map_or(path, |o| &o.name);
 
-    let mut random_bytes = [0_u8; AT_RANDOM_BYTES];
-    let has_random = match exec_random_bytes(&mut random_bytes) {
-        Ok(()) => true,
-        Err(err)
-            if (err == Error::new(ENODEV) || cfg!(not(feature = "proc")))
-                && is_early_boot_spawner() =>
-        {
-            false
-        }
-        Err(err) => return Err(err),
-    };
-
     let total_args_envs_auxvpointee_size = args.iter().map(|arg| arg.len() + 1).sum::<usize>()
         + envs.iter().map(|env| env.len() + 1).sum::<usize>()
         + extrainfo.cwd.map_or(0, |s| s.len() + 1)
@@ -501,7 +707,12 @@ pub fn fexec_impl(
         args_envs_size_aligned,
         MapFlags::PROT_READ | MapFlags::PROT_WRITE,
     )?;
-    update_min_mmap_addr(target_args_env_address, args_envs_size_aligned);
+    assert!(target_args_env_address >= min_mmap_addr);
+    assert!(
+        target_args_env_address
+            .checked_add(args_envs_size_aligned)
+            .is_some_and(|end| end <= stack_bottom)
+    );
 
     let mut offset = 0;
 
@@ -529,7 +740,7 @@ pub fn fexec_impl(
         };
 
         let random_addr = if has_random {
-            Some(append(&random_bytes)?)
+            Some(append(&entropy[..AT_RANDOM_BYTES])?)
         } else {
             None
         };
@@ -598,6 +809,7 @@ pub fn fexec_impl(
                 AT_REDOX_FILETABLE_FD,
                 extrainfo.filetable_fd.unwrap_or(usize::MAX),
             )?;
+            push_auxv(AT_REDOX_STACK_BASE, stack_bottom)?;
 
             assert!(auxv_count <= MAX_AUXV_ENTRIES);
         }
@@ -640,11 +852,6 @@ pub fn fexec_impl(
             CallFlags::empty(),
             &[ProcCall::Rename as u64],
         );
-    }
-
-    if interp_override.is_some() {
-        let mmap_min_fd = grants_fd.dup_into_upper(b"mmap-min-addr")?;
-        let _ = mmap_min_fd.write(&usize::to_ne_bytes(min_mmap_addr));
     }
 
     let filetable_fd = if extrainfo.same_process {

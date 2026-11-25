@@ -29,7 +29,12 @@ use crate::sync::{Mutex, waitval::Waitval};
 pub unsafe fn init() {
     //TODO: what is the best way to get these values?
     #[cfg(target_os = "redox")]
-    let (stack_base, stack_size) = ((STACK_TOP - STACK_SIZE) as *mut c_void, STACK_SIZE);
+    let (stack_base, stack_size) = {
+        let base = crate::platform::get_auxv_saved(redox_rt::auxv_defs::AT_REDOX_STACK_BASE)
+            .filter(|&addr| addr != 0)
+            .unwrap_or(STACK_TOP - STACK_SIZE);
+        (base as *mut c_void, STACK_SIZE)
+    };
     #[cfg(target_os = "linux")]
     let (stack_base, stack_size) = (ptr::null_mut(), 0);
 

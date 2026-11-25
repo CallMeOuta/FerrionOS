@@ -14,6 +14,15 @@ use super::ForkScratchpad;
 // Setup a stack starting from the very end of the address space, and then growing downwards.
 pub const STACK_TOP: usize = 1 << 38;
 pub const STACK_SIZE: usize = 1024 * 1024;
+pub const ASLR_PIE_BASE: usize = 0x04_0000_0000;
+pub const ASLR_PIE_WINDOW: usize = 1 << 30;
+pub const ASLR_INTERP_BASE: usize = 0x06_0000_0000;
+pub const ASLR_INTERP_WINDOW: usize = 1 << 30;
+pub const ASLR_MMAP_BASE: usize = 0x08_0000_0000;
+pub const ASLR_MMAP_WINDOW: usize = 1 << 30;
+pub const ASLR_MMAP_BUDGET: usize = 192 * (1 << 30);
+pub const ASLR_STACK_WINDOW: usize = 1 << 30;
+pub const ASLR_STACK_CEILING: usize = STACK_TOP - syscall::KERNEL_METADATA_SIZE;
 
 #[derive(Debug, Default)]
 #[repr(C)]

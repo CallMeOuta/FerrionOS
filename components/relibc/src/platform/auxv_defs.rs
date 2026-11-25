@@ -62,3 +62,6 @@ pub const AT_REDOX_CWD_FD: usize = 44;
 
 #[cfg(target_os = "redox")]
 pub const AT_REDOX_FILETABLE_FD: usize = 45;
+
+#[cfg(target_os = "redox")]
+pub const AT_REDOX_STACK_BASE: usize = 46;
