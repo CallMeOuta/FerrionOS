@@ -883,7 +883,7 @@ where
 
                     *self
                         .ref_counts
-                        .entry(new_handle.socket_handle())
+                        .entry(socket_handle)
                         .or_insert(0) += 1;
 
                     file.socket_handle = socket_handle;
