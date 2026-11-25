@@ -109,7 +109,7 @@ impl Sys {
             let allowset = !*sigmask;
             redox_rt::signal::callback_or_signal_async(allowset, callback)
         } else {
-            callback()
+            redox_rt::signal::call_or_deliver_signal(callback)
         } {
             Ok(b) => b,
             Err(err) => {

@@ -111,7 +111,7 @@ impl Sys {
         if timeout != -1 {
             register_timeout(epfd, timeout)?;
         }
-        let mut callback = || {
+        let callback = || {
             syscall::read(
                 epfd,
                 // SAFETY: the const assert guarantees the same size
@@ -129,7 +129,7 @@ impl Sys {
             let allowset = !sigmask;
             redox_rt::signal::callback_or_signal_async(allowset, callback)
         } else {
-            callback()
+            redox_rt::signal::call_or_deliver_signal(callback)
         }?;
 
         let read = bytes_read as usize / mem::size_of::<syscall::Event>();

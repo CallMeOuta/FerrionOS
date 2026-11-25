@@ -2739,6 +2739,112 @@ def test_daemon_continue(vm, args):
     return ok, f"outcome={outcome} io_errors={io_errors} post_ls_rc={post_ls_rc}; {summary}; {elapsed_s}s; see {vm.out}"
 
 
+RELIBC_SIGNAL_WAIT_CASES = (
+    "epoll_wait",
+    "poll",
+    "select",
+    "epoll_wait_restart",
+    "poll_restart",
+    "select_restart",
+    "epoll_pwait_ctrl",
+    "ppoll_ctrl",
+    "pselect_ctrl",
+)
+
+
+def test_relibc_signal_wait(vm, args):
+    """Checks that epoll_wait, poll, and select deliver pending signals on EINTR without spinning, alongside sigmask controls and POSIX timer stop/continue."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, "no serial login"
+    login_mark = vm.mark()
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no root password prompt"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 20, login_mark):
+        return False, "serial shell did not become ready"
+    bash_mark = vm.mark()
+    vm.type("bash --norc --noprofile --noediting\n")
+    if not vm.wait_serial(r"bash-\d+\.\d+# ", 20, bash_mark):
+        return False, "bash did not become ready"
+
+    seq = 0
+
+    def run(line, timeout):
+        nonlocal seq
+        seq += 1
+        tag = f"RSWRC-{seq}"
+        since = vm.mark()
+        vm.type(f"{line}; echo {tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?){tag}-42=(\d+)\s", timeout, since)
+        if found:
+            return int(found.group(2)), found.group(1)
+        return None, vm.text(since)
+
+    started = time.monotonic()
+    probe_rc, probe_out = run("blocked-wait-probe --signal-wait", 120)
+    elapsed_s = round(time.monotonic() - started, 1)
+    (vm.out / "relibc-signal-wait.txt").write_text(probe_out)
+
+    cases = {}
+    for m in re.finditer(
+        r"(?m)^SIGNAL-WAIT-CASE name=(\S+) handler_ran=(\d+) eintr=(\d+) timed_out=(\d+) err=(-?\d+) elapsed_ms=(\d+) pass=(\d+)\r?$",
+        probe_out,
+    ):
+        cases[m.group(1)] = {
+            "handler_ran": int(m.group(2)),
+            "eintr": int(m.group(3)),
+            "timed_out": int(m.group(4)),
+            "err": int(m.group(5)),
+            "elapsed_ms": int(m.group(6)),
+            "pass": m.group(7) == "1",
+        }
+
+    timer_m = re.search(
+        r"(?m)^SIGNAL-WAIT-TIMER pre_ticks=(\d+) post_ticks=(\d+) err=(-?\d+) elapsed_ms=(\d+) pass=(\d+)\r?$",
+        probe_out,
+    )
+    timer_info = None
+    if timer_m:
+        timer_info = {
+            "pre_ticks": int(timer_m.group(1)),
+            "post_ticks": int(timer_m.group(2)),
+            "err": int(timer_m.group(3)),
+            "elapsed_ms": int(timer_m.group(4)),
+            "pass": timer_m.group(5) == "1",
+        }
+
+    missing = [name for name in RELIBC_SIGNAL_WAIT_CASES if name not in cases]
+    failed = [name for name in RELIBC_SIGNAL_WAIT_CASES if name in cases and not cases[name]["pass"]]
+    timer_ok = timer_info is not None and timer_info["pass"]
+    ok = probe_rc == 0 and not missing and not failed and timer_ok
+
+    results = {
+        "passed": ok,
+        "probe_rc": probe_rc,
+        "cases": cases,
+        "timer": timer_info,
+        "timer_ok": timer_ok,
+        "missing": missing,
+        "failed": failed,
+        "elapsed_s": elapsed_s,
+    }
+    (vm.out / "relibc-signal-wait.json").write_text(json.dumps(results, indent=2) + "\n")
+
+    parts = []
+    for name in RELIBC_SIGNAL_WAIT_CASES:
+        c = cases.get(name)
+        if not c:
+            parts.append(f"{name}(MISSING)")
+        else:
+            parts.append(f"{name}(h={c['handler_ran']} e={c['eintr']} timed_out={c['timed_out']} pass={c['pass']})")
+    if timer_info:
+        parts.append(f"timer(pre={timer_info['pre_ticks']} post={timer_info['post_ticks']} pass={timer_info['pass']})")
+    else:
+        parts.append("timer(MISSING)")
+    return ok, ", ".join(parts) + f"; {elapsed_s}s; see {vm.out}"
+
+
 def test_fd_primitives(vm, args):
     """Runs the public eventfd/timerfd probe as user: counter and timer I/O, errors, poll/epoll, shared dup/fork state and flags across exec; signalfd is not implemented or tested."""
     if not vm.wait_serial(r"login: ", args.timeout):
@@ -11999,6 +12105,7 @@ def test_display_socket(vm, args):
 
 TESTS["display-socket"] = test_display_socket
 TESTS["daemon-continue"] = test_daemon_continue
+TESTS["relibc-signal-wait"] = test_relibc_signal_wait
 TESTS["firefox-js"] = test_firefox_js
 TESTS["fd-primitives"] = test_fd_primitives
 TESTS["foreign-call"] = test_foreign_call

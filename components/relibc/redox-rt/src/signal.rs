@@ -982,6 +982,19 @@ pub fn callback_or_signal_async<T, F: FnOnce() -> Result<T>>(
     res
 }
 
+pub fn call_or_deliver_signal<T, F: FnOnce() -> Result<T>>(callback: F) -> Result<T> {
+    let _guard = tmp_disable_signals();
+    let res = callback();
+    if let Err(err) = &res
+        && err.errno == EINTR
+    {
+        unsafe {
+            manually_enter_trampoline();
+        }
+    }
+    res
+}
+
 /*#[unsafe(no_mangle)]
 pub extern "C" fn __redox_rt_debug_sigctl() {
     let tcb = &RtTcb::current().control;

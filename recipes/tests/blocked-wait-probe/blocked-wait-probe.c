@@ -1,7 +1,8 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -10,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -55,6 +58,16 @@ enum {
     ZERO_CHECK_BYTES = 64,
     RAND_CHECK_BYTES = 32,
     MAX_PROBE_IO_RETRIES = 16,
+    SIGNAL_WAIT_MAX_EINTR = 64,
+    SIGNAL_WAIT_SEND_DELAY_MS = 50,
+    SIGNAL_WAIT_STOP_DELAY_MS = 80,
+    SIGNAL_WAIT_FIRST_TIMEOUT_MS = 400,
+    SIGNAL_WAIT_RETRY_TIMEOUT_MS = 150,
+    SIGNAL_WAIT_TIMER_PERIOD_MS = 50,
+    SIGNAL_WAIT_TIMER_WAIT_MS = 1000,
+    SIGNAL_WAIT_TIMER_POLL_MS = 20,
+    SIGNAL_WAIT_MAX_TIMER_POLLS = 100,
+    SIGNAL_WAIT_WATCHDOG_S = 15,
     NS_PER_SEC = 1000000000LL,
     NS_PER_MS = 1000000LL,
     NS_PER_US = 1000LL
@@ -1400,9 +1413,319 @@ static int run_stop_cont(const char *pid_arg) {
     return 0;
 }
 
+enum {
+    SW_KIND_EPOLL = 1,
+    SW_KIND_POLL = 2,
+    SW_KIND_SELECT = 3
+};
+
+static volatile sig_atomic_t g_sw_handler_ran = 0;
+static volatile sig_atomic_t g_sw_timer_ticks = 0;
+
+static void sw_usr1_handler(int sig) {
+    (void)sig;
+    g_sw_handler_ran++;
+}
+
+static void sw_usr2_handler(int sig) {
+    (void)sig;
+    g_sw_timer_ticks++;
+}
+
+static void sw_sleep_ms(int ms) {
+    struct timespec rem;
+    rem.tv_sec = ms / 1000;
+    rem.tv_nsec = (long)(ms % 1000) * (long)NS_PER_MS;
+    for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+        struct timespec req = rem;
+        if (nanosleep(&req, &rem) == 0) {
+            break;
+        }
+        if (errno != EINTR) {
+            break;
+        }
+    }
+}
+
+static int sw_reap_child(pid_t pid) {
+    int status = 0;
+    for (int i = 0; i < MAX_PROBE_IO_RETRIES; i++) {
+        pid_t w = waitpid(pid, &status, 0);
+        if (w == pid) {
+            return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+        }
+        if (w < 0 && errno != EINTR) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+typedef struct {
+    const char *name;
+    int kind;
+    int sa_flags;
+    int use_sigmask;
+} SwMuxSpec;
+
+static int run_signal_wait_mux_entry(const char *arg) {
+    const SwMuxSpec *spec = (const SwMuxSpec *)arg;
+    g_sw_handler_ran = 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sw_usr1_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = spec->sa_flags;
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
+        printf("SIGNAL-WAIT-CASE name=%s handler_ran=0 eintr=0 timed_out=0 err=%d elapsed_ms=0 pass=0\n",
+               spec->name, errno);
+        fflush(stdout);
+        return 1;
+    }
+
+    int pfd[2] = {-1, -1};
+    if (pipe(pfd) != 0) {
+        printf("SIGNAL-WAIT-CASE name=%s handler_ran=0 eintr=0 timed_out=0 err=%d elapsed_ms=0 pass=0\n",
+               spec->name, errno);
+        fflush(stdout);
+        return 1;
+    }
+
+    int epfd = -1;
+    if (spec->kind == SW_KIND_EPOLL) {
+        epfd = epoll_create1(EPOLL_CLOEXEC);
+        if (epfd < 0) {
+            int saved = errno;
+            (void)close(pfd[0]);
+            (void)close(pfd[1]);
+            printf("SIGNAL-WAIT-CASE name=%s handler_ran=0 eintr=0 timed_out=0 err=%d elapsed_ms=0 pass=0\n",
+                   spec->name, saved);
+            fflush(stdout);
+            return 1;
+        }
+        struct epoll_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.events = EPOLLIN;
+        ev.data.fd = pfd[0];
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, pfd[0], &ev) != 0) {
+            int saved = errno;
+            (void)close(epfd);
+            (void)close(pfd[0]);
+            (void)close(pfd[1]);
+            printf("SIGNAL-WAIT-CASE name=%s handler_ran=0 eintr=0 timed_out=0 err=%d elapsed_ms=0 pass=0\n",
+                   spec->name, saved);
+            fflush(stdout);
+            return 1;
+        }
+    }
+
+    pid_t parent = getpid();
+    pid_t ctrl = fork();
+    if (ctrl < 0) {
+        int saved = errno;
+        if (epfd >= 0) {
+            (void)close(epfd);
+        }
+        (void)close(pfd[0]);
+        (void)close(pfd[1]);
+        printf("SIGNAL-WAIT-CASE name=%s handler_ran=0 eintr=0 timed_out=0 err=%d elapsed_ms=0 pass=0\n",
+               spec->name, saved);
+        fflush(stdout);
+        return 1;
+    }
+    if (ctrl == 0) {
+        sw_sleep_ms(SIGNAL_WAIT_SEND_DELAY_MS);
+        int krc = kill(parent, SIGUSR1);
+        _exit(krc == 0 ? 0 : 1);
+    }
+
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
+    int eintr = 0;
+    int timed_out = 0;
+    int err = 0;
+    int64_t start_ns = monotonic_ns();
+
+    for (int i = 0; i < SIGNAL_WAIT_MAX_EINTR; i++) {
+        int tmo_ms = (i == 0) ? SIGNAL_WAIT_FIRST_TIMEOUT_MS : SIGNAL_WAIT_RETRY_TIMEOUT_MS;
+        int rc = -1;
+        if (spec->kind == SW_KIND_EPOLL) {
+            struct epoll_event out;
+            if (spec->use_sigmask) {
+                rc = epoll_pwait(epfd, &out, 1, tmo_ms, &empty_mask);
+            } else {
+                rc = epoll_wait(epfd, &out, 1, tmo_ms);
+            }
+        } else if (spec->kind == SW_KIND_POLL) {
+            struct pollfd pf;
+            pf.fd = pfd[0];
+            pf.events = POLLIN;
+            pf.revents = 0;
+            if (spec->use_sigmask) {
+                struct timespec ts;
+                ts.tv_sec = tmo_ms / 1000;
+                ts.tv_nsec = (long)(tmo_ms % 1000) * (long)NS_PER_MS;
+                rc = ppoll(&pf, 1, &ts, &empty_mask);
+            } else {
+                rc = poll(&pf, 1, tmo_ms);
+            }
+        } else {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(pfd[0], &rfds);
+            if (spec->use_sigmask) {
+                struct timespec ts;
+                ts.tv_sec = tmo_ms / 1000;
+                ts.tv_nsec = (long)(tmo_ms % 1000) * (long)NS_PER_MS;
+                rc = pselect(pfd[0] + 1, &rfds, NULL, NULL, &ts, &empty_mask);
+            } else {
+                struct timeval tv;
+                tv.tv_sec = tmo_ms / 1000;
+                tv.tv_usec = (long)(tmo_ms % 1000) * 1000L;
+                rc = select(pfd[0] + 1, &rfds, NULL, NULL, &tv);
+            }
+        }
+        if (rc == 0) {
+            timed_out = 1;
+            break;
+        }
+        if (rc < 0 && errno == EINTR) {
+            eintr++;
+            continue;
+        }
+        err = (rc < 0) ? errno : -rc;
+        break;
+    }
+
+    int64_t elapsed_ms = (monotonic_ns() - start_ns) / NS_PER_MS;
+    int handler_ran = (int)g_sw_handler_ran;
+    int ctrl_rc = sw_reap_child(ctrl);
+    if (epfd >= 0) {
+        (void)close(epfd);
+    }
+    (void)close(pfd[0]);
+    (void)close(pfd[1]);
+    int pass = (ctrl_rc == 0 && handler_ran == 1 && eintr == 1 && timed_out == 1 && err == 0);
+    printf("SIGNAL-WAIT-CASE name=%s handler_ran=%d eintr=%d timed_out=%d err=%d elapsed_ms=%lld pass=%d\n",
+           spec->name, handler_ran, eintr, timed_out, err, (long long)elapsed_ms, pass ? 1 : 0);
+    fflush(stdout);
+    return pass ? 0 : 1;
+}
+
+static int run_signal_wait_timer_entry(const char *arg) {
+    (void)arg;
+    g_sw_timer_ticks = 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sw_usr2_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGUSR2, &sa, NULL) != 0) {
+        printf("SIGNAL-WAIT-TIMER pre_ticks=0 post_ticks=0 err=%d elapsed_ms=0 pass=0\n", errno);
+        fflush(stdout);
+        return 1;
+    }
+
+    struct sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGUSR2;
+    timer_t tid;
+    if (timer_create(CLOCK_MONOTONIC, &sev, &tid) != 0) {
+        printf("SIGNAL-WAIT-TIMER pre_ticks=0 post_ticks=0 err=%d elapsed_ms=0 pass=0\n", errno);
+        fflush(stdout);
+        return 1;
+    }
+
+    struct itimerspec its;
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = SIGNAL_WAIT_TIMER_PERIOD_MS * (long)NS_PER_MS;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = SIGNAL_WAIT_TIMER_PERIOD_MS * (long)NS_PER_MS;
+    if (timer_settime(tid, 0, &its, NULL) != 0) {
+        int saved = errno;
+        (void)timer_delete(tid);
+        printf("SIGNAL-WAIT-TIMER pre_ticks=0 post_ticks=0 err=%d elapsed_ms=0 pass=0\n", saved);
+        fflush(stdout);
+        return 1;
+    }
+
+    int64_t start_ns = monotonic_ns();
+    int64_t pre_deadline = start_ns + (int64_t)SIGNAL_WAIT_TIMER_WAIT_MS * NS_PER_MS;
+    for (int i = 0; i < SIGNAL_WAIT_MAX_TIMER_POLLS && g_sw_timer_ticks < 1; i++) {
+        if (monotonic_ns() >= pre_deadline) {
+            break;
+        }
+        sw_sleep_ms(SIGNAL_WAIT_TIMER_POLL_MS);
+    }
+
+    int pre_ticks = (int)g_sw_timer_ticks;
+    int ctrl_rc = -1;
+    if (pre_ticks >= 1) {
+        pid_t parent = getpid();
+        pid_t ctrl = fork();
+        if (ctrl == 0) {
+            int stopped = (kill(parent, SIGSTOP) == 0);
+            sw_sleep_ms(SIGNAL_WAIT_STOP_DELAY_MS);
+            int resumed = stopped ? (kill(parent, SIGCONT) == 0) : 0;
+            _exit((stopped && resumed) ? 0 : 1);
+        }
+        if (ctrl > 0) {
+            int64_t post_deadline = monotonic_ns() + (int64_t)SIGNAL_WAIT_TIMER_WAIT_MS * NS_PER_MS;
+            for (int i = 0; i < SIGNAL_WAIT_MAX_TIMER_POLLS && g_sw_timer_ticks < pre_ticks + 2; i++) {
+                if (monotonic_ns() >= post_deadline) {
+                    break;
+                }
+                sw_sleep_ms(SIGNAL_WAIT_TIMER_POLL_MS);
+            }
+            ctrl_rc = sw_reap_child(ctrl);
+        }
+    }
+
+    int post_ticks = (int)g_sw_timer_ticks - pre_ticks;
+    int64_t elapsed_ms = (monotonic_ns() - start_ns) / NS_PER_MS;
+    (void)timer_delete(tid);
+    int pass = (ctrl_rc == 0 && pre_ticks >= 1 && post_ticks >= 2);
+    printf("SIGNAL-WAIT-TIMER pre_ticks=%d post_ticks=%d err=%d elapsed_ms=%lld pass=%d\n",
+           pre_ticks, post_ticks, ctrl_rc == 0 ? 0 : -1, (long long)elapsed_ms, pass ? 1 : 0);
+    fflush(stdout);
+    return pass ? 0 : 1;
+}
+
+static int run_signal_wait(void) {
+    static const SwMuxSpec mux_specs[] = {
+        {"epoll_wait", SW_KIND_EPOLL, 0, 0},
+        {"poll", SW_KIND_POLL, 0, 0},
+        {"select", SW_KIND_SELECT, 0, 0},
+        {"epoll_wait_restart", SW_KIND_EPOLL, SA_RESTART, 0},
+        {"poll_restart", SW_KIND_POLL, SA_RESTART, 0},
+        {"select_restart", SW_KIND_SELECT, SA_RESTART, 0},
+        {"epoll_pwait_ctrl", SW_KIND_EPOLL, 0, 1},
+        {"ppoll_ctrl", SW_KIND_POLL, 0, 1},
+        {"pselect_ctrl", SW_KIND_SELECT, 0, 1}
+    };
+    int all_ok = 1;
+    int mux_count = (int)(sizeof(mux_specs) / sizeof(mux_specs[0]));
+    for (int i = 0; i < mux_count; i++) {
+        int rc = run_in_child(mux_specs[i].name, SIGNAL_WAIT_WATCHDOG_S,
+                              run_signal_wait_mux_entry, (const char *)&mux_specs[i]);
+        if (rc != 0) {
+            all_ok = 0;
+        }
+    }
+
+    int timer_rc = run_in_child("timer", SIGNAL_WAIT_WATCHDOG_S, run_signal_wait_timer_entry, NULL);
+    if (timer_rc != 0) {
+        all_ok = 0;
+    }
+    printf("SIGNAL-WAIT-DONE ok=%d timer_rc=%d\n", all_ok ? 1 : 0, timer_rc);
+    fflush(stdout);
+    return all_ok ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "BLOCKED-WAIT-ERROR usage: blocked-wait-probe [--zero-dev|--zero-read|--rand-read|--uds-ping|--disk-read <path>|--stop-cont <pid>|<disk-path>]\n");
+        fprintf(stderr, "BLOCKED-WAIT-ERROR usage: blocked-wait-probe [--zero-dev|--zero-read|--rand-read|--uds-ping|--disk-read <path>|--stop-cont <pid>|--signal-wait|<disk-path>]\n");
         return 2;
     }
     if (strcmp(argv[1], "--zero-dev") == 0) {
@@ -1430,6 +1753,9 @@ int main(int argc, char **argv) {
             return 2;
         }
         return run_stop_cont(argv[2]);
+    }
+    if (strcmp(argv[1], "--signal-wait") == 0) {
+        return run_signal_wait();
     }
     const char *disk_path = argv[1];
     if (check_unpartitioned_disk(disk_path) != 0) {
