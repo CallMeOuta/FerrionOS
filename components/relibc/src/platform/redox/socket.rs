@@ -18,8 +18,8 @@ use crate::{
         bits_safamily_t::sa_family_t,
         bits_ucred::ucred,
         errno::{
-            EAFNOSUPPORT, EDOM, EFAULT, EINVAL, EMSGSIZE, ENOMEM, ENOSYS, ENOTSOCK, EOPNOTSUPP,
-            EPIPE, EPROTONOSUPPORT,
+            EAFNOSUPPORT, EDOM, EFAULT, EINPROGRESS, EINVAL, EMSGSIZE, ENOMEM, ENOPROTOOPT,
+            ENOTSOCK, EOPNOTSUPP, EPIPE, EPROTONOSUPPORT,
         },
         fcntl,
         netinet_in::{in_addr, in_port_t, sockaddr_in},
@@ -656,7 +656,17 @@ impl PalSocket for Sys {
 
     fn connect(socket: c_int, address_raw: &[u8]) -> Result<c_int> {
         match extract_sa_family(address_raw)? {
-            AF_INET => bind_or_connect_into(SocketCall::Connect, socket, address_raw),
+            AF_INET => {
+                let is_tcp_nonblock =
+                    matches!(socket_domain_type(socket), Ok((AF_INET, SOCK_STREAM)))
+                        && syscall::fcntl(socket as usize, syscall::F_GETFL, 0)
+                            .is_ok_and(|fl| fl & O_NONBLOCK == O_NONBLOCK);
+                bind_or_connect_into(SocketCall::Connect, socket, address_raw)?;
+                if is_tcp_nonblock {
+                    return Err(Errno(EINPROGRESS));
+                }
+                Ok(0)
+            }
             AF_UNIX => {
                 let path_bytes = address_raw
                     .get(mem::offset_of!(sockaddr_un, sun_path)..)
@@ -712,52 +722,61 @@ impl PalSocket for Sys {
             Ok(plain::from_mut_bytes(bytes).unwrap())
         }
 
-        // TODO convert back to match when we support more levels
+        let (domain, sock_type) = socket_domain_type(socket)?;
         if level == SOL_SOCKET {
             match option_name {
                 SO_DOMAIN => {
                     let option = option_c_int(option_value)?;
-                    *option = socket_domain_type(socket)?.0;
+                    *option = domain;
                     return Ok(size_of::<c_int>() as socklen_t);
                 }
-                SO_ERROR => {
+                SO_ERROR if domain == AF_UNIX => {
                     let option = option_c_int(option_value)?;
-                    //TODO: Socket nonblock connection error
                     *option = 0;
                     return Ok(size_of::<c_int>() as socklen_t);
                 }
                 SO_TYPE => {
                     let option = option_c_int(option_value)?;
-                    *option = socket_domain_type(socket)?.1;
+                    *option = sock_type;
                     return Ok(size_of::<c_int>() as socklen_t);
                 }
-                _ => {
-                    let metadata = [SocketCall::GetSockOpt as u64, option_name as u64];
-                    let true_len = redox_rt::sys::sys_call_ro(
-                        socket as usize,
-                        option_value,
-                        CallFlags::empty(),
-                        &metadata,
-                    )? as socklen_t;
-                    return Ok(true_len);
-                }
+                _ => {}
             }
+        } else if domain == AF_UNIX {
+            return Err(Errno(ENOPROTOOPT));
         }
 
-        todo_skip!(
-            0,
-            "getsockopt({}, {}, {}, {:#x?})",
-            socket,
-            level,
-            option_name,
+        let encoded_level = if level == 0 {
+            u64::MAX
+        } else {
+            u64::try_from(level).map_err(|_| Errno(ENOPROTOOPT))?
+        };
+        let metadata = [
+            SocketCall::GetSockOpt as u64,
+            option_name as u64,
+            encoded_level,
+        ];
+        let true_len = redox_rt::sys::sys_call_ro(
+            socket as usize,
             option_value,
-        );
-        Err(Errno(ENOSYS))
+            CallFlags::empty(),
+            &metadata,
+        )? as socklen_t;
+        Ok(true_len)
     }
 
-    #[expect(unused_variables, reason = "Redox has no need to listen")]
     fn listen(socket: c_int, backlog: c_int) -> Result<()> {
-        Ok(())
+        const SOCKET_CALL_LISTEN: u64 = 10;
+        match socket_domain_type(socket)? {
+            (AF_INET, SOCK_STREAM) => {
+                let capped = u64::try_from(backlog.max(0)).unwrap_or(0);
+                let metadata = [SOCKET_CALL_LISTEN, capped];
+                redox_rt::sys::sys_call_wo(socket as usize, &[], CallFlags::empty(), &metadata)?;
+                Ok(())
+            }
+            (AF_UNIX, SOCK_STREAM) => Ok(()),
+            _ => Err(Errno(EOPNOTSUPP)),
+        }
     }
 
     fn recvfrom(
@@ -1043,32 +1062,43 @@ impl PalSocket for Sys {
             Ok(())
         };
 
-        // TODO convert back to match when we support more levels
-        if level == SOL_SOCKET {
+        let (domain, _) = socket_domain_type(socket)?;
+        if domain == AF_UNIX {
+            if level != SOL_SOCKET {
+                return Err(Errno(ENOPROTOOPT));
+            }
             match option_name {
                 SO_RCVTIMEO => return set_timeout(b"read_timeout"),
                 SO_SNDTIMEO => return set_timeout(b"write_timeout"),
-                _ => {
-                    let metadata = [SocketCall::SetSockOpt as u64, option_name as u64];
-                    redox_rt::sys::sys_call_wo(
-                        socket as usize,
-                        option_value,
-                        CallFlags::empty(),
-                        &metadata,
-                    )?;
-                    return Ok(());
-                }
+                _ => {}
+            }
+        } else if level == SOL_SOCKET && (option_name == SO_RCVTIMEO || option_name == SO_SNDTIMEO)
+        {
+            let bytes = option_value
+                .get(..size_of::<timeval>())
+                .ok_or(Errno(EINVAL))?;
+            let tv: &timeval = plain::from_bytes(bytes).unwrap();
+            if tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1_000_000 {
+                return Err(Errno(EDOM));
             }
         }
 
-        todo_skip!(
-            0,
-            "setsockopt({}, {}, {}, {:?}) - unknown option",
-            socket,
-            level,
-            option_name,
+        let encoded_level = if level == 0 {
+            u64::MAX
+        } else {
+            u64::try_from(level).map_err(|_| Errno(ENOPROTOOPT))?
+        };
+        let metadata = [
+            SocketCall::SetSockOpt as u64,
+            option_name as u64,
+            encoded_level,
+        ];
+        redox_rt::sys::sys_call_wo(
+            socket as usize,
             option_value,
-        );
+            CallFlags::empty(),
+            &metadata,
+        )?;
         Ok(())
     }
 
