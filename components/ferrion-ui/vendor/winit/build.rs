@@ -18,8 +18,8 @@ fn main() {
 
         // Native displays.
         x11_platform: { all(feature = "x11", free_unix, not(redox)) },
-        wayland_platform: { all(feature = "wayland", free_unix, not(redox)) },
-        orbital_platform: { redox },
+        wayland_platform: { all(feature = "wayland", free_unix) },
+        orbital_platform: { all(target_os = "redox", not(feature = "wayland")) },
     }
 
     // Winit defined cfgs.
