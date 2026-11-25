@@ -54,6 +54,9 @@ VERIFIED_BOOT?=1
 VERIFIED_BOOT_KEYS?=build/verified-boot
 ## A PKCS#11 URI of an Ed25519 key on a hardware token, which then signs instead of the development key: release builds (see scripts/verified-boot-sign.sh)
 VERIFIED_BOOT_SIGNER?=
+## Include the image's AAC-LC decoder (libfdk_aac from fdk-aac-free) in FFmpeg, 1 by default. 0 omits fdk-aac-free and libfdk_aac from FFmpeg and the image
+FFMPEG_AAC_LC?=1
+export FFMPEG_AAC_LC
 ## Set to 1 to enable Podman build, any other value will disable it
 PODMAN_BUILD?=1
 ## Set to 1 to put filesystem tools inside podman, any other value will install it to host

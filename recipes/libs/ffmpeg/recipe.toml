@@ -12,7 +12,11 @@ patches = [
 template = "custom"
 dependencies = [
     "dav1d",
+    "fdk-aac-free",
     "zlib",
+]
+env-vars = [
+    "FFMPEG_AAC_LC",
 ]
 compiler = "gcc"
 script = """
@@ -170,6 +174,12 @@ COOKBOOK_CONFIGURE_FLAGS=(
     --enable-libdav1d
     --extra-cflags="-D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600"
 )
+
+if [[ "${FFMPEG_AAC_LC:-1}" != "0" ]]; then
+    DECODERS+=(libfdk_aac)
+    PARSERS+=(aac)
+    COOKBOOK_CONFIGURE_FLAGS+=(--enable-libfdk-aac)
+fi
 
 for name in "${DECODERS[@]}"; do
     COOKBOOK_CONFIGURE_FLAGS+=(--enable-decoder="${name}")

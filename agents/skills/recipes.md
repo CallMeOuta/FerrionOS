@@ -26,6 +26,7 @@ Search the whole tree before creating anything: `rg --files recipes -g recipe.to
 - `patches` are applied in order with `patch --strip=1`, then `[source] script` runs inside `source/`. A patch file is a byte-exact diff against third-party code: change it by regenerating it. For a `tar` recipe, `scripts/patch-tar.sh <name>` rewrites `redox.patch` from your edits in `source/`.
 - `[build] dependencies` are unpacked into the sysroot the build sees. Runtime dependencies are derived from them: the shared libraries the binaries need, and the package dependencies of what was linked statically. `[package] dependencies` therefore lists only what the build cannot reveal, such as data or programs called at run time.
 - `dev-dependencies` are needed for the build alone. A `host:` prefix (`"host:redoxer"`) builds the dependency for the build machine.
+- Each name declared in `[build] env-vars` must also be set in `mk/config.mk` and forwarded in `PODMAN_CONFIG` (`mk/podman.mk`); otherwise it always hashes as absent inside the container and nothing warns.
 
 ## The build script
 
