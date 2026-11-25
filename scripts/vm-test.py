@@ -3462,6 +3462,69 @@ def run_bootloader_edid(args, out):
     return check(args, out, ROOT)
 
 
+def run_display_connectors(args, out):
+    """Boots desktop with two virtio-vga heads (gpu=multi) and runs display-drm-probe --check-virtual across initial (head 1 off), head 1 on, head 1 off, and head 1 back on to verify MODE_GET_CONNECTOR overwrites sentinel (99, 77) and zeroed requests with stable Virtual-1 and Virtual-2."""
+    import display_modes
+    conn_re = re.compile(
+        r"(?m)^CONN id=(\d+) probe_sentinel=\((\d+),(\d+)\) zero_req=\((\d+),(\d+)\) "
+        r"type=(\d+) type_id=(\d+) name=(\S+) status=(\d+) mm=(\d+)x(\d+) modes=(\d+)$"
+    )
+    vm = None
+    with tempfile.TemporaryDirectory(prefix="ferrion-display-connectors-") as directory:
+        head1_sock = Path(directory) / "head1.sock"
+        try:
+            vm = VM(args, out, qemu_flags=f"-vnc unix:{head1_sock},display=gpu0,head=1", make=("gpu=multi",))
+            if not root_shell(vm, args.timeout):
+                return False, "no root serial login"
+            phases = (
+                ("initial-off", None, (1, 0)),
+                ("hotplug-on", (1920, 1080), (1, 1)),
+                ("hotplug-off", (0, 0), (1, 0)),
+                ("hotplug-back-on", (2560, 1600), (1, 1)),
+            )
+            transcript = []
+            baseline = None
+            summaries = []
+            for phase_name, resize_to, want_status in phases:
+                if resize_to is not None:
+                    since = vm.mark()
+                    display_modes.set_head_size(head1_sock, *resize_to)
+                    if not vm.wait_serial(rf"virtio-gpu: display 1 \({resize_to[0]}x{resize_to[1]}px\)", 30, since):
+                        transcript.append(f"=== {phase_name} (no hotplug log for {resize_to}) ===")
+                        (out / "display-connectors.txt").write_text("\n".join(transcript) + "\n")
+                        return False, f"{phase_name}: guest did not log display 1 {resize_to[0]}x{resize_to[1]}px"
+                status, output = run_status(vm, "display-drm-probe --check-virtual", 60)
+                transcript.append(f"=== {phase_name} (exit {status}) ===\n{output}")
+                parsed = [
+                    (int(m[1]), int(m[6]), int(m[7]), m[8], int(m[9]))
+                    for m in conn_re.finditer(output)
+                ]
+                failed = re.findall(r"(?m)^display-drm-probe: FAIL .*$", output)
+                if status != 0 or not re.search(r"(?m)^display-drm-probe: PASS\s*$", output):
+                    (out / "display-connectors.txt").write_text("\n".join(transcript) + "\n")
+                    return False, f"{phase_name} exit {status}; {'; '.join(failed[:4]) or 'no PASS'}; see {out / 'display-connectors.txt'}"
+                if len(parsed) < 2:
+                    (out / "display-connectors.txt").write_text("\n".join(transcript) + "\n")
+                    return False, f"{phase_name}: expected >= 2 connectors, got {parsed}"
+                identities = [(c[0], c[1], c[2], c[3]) for c in parsed[:2]]
+                statuses = (parsed[0][4], parsed[1][4])
+                if statuses != want_status:
+                    (out / "display-connectors.txt").write_text("\n".join(transcript) + "\n")
+                    return False, f"{phase_name}: status {statuses} != expected {want_status}; identities {identities}"
+                if baseline is None:
+                    baseline = identities
+                elif identities != baseline:
+                    (out / "display-connectors.txt").write_text("\n".join(transcript) + "\n")
+                    return False, f"{phase_name}: connector identities drifted {identities} != {baseline}"
+                summaries.append(f"{phase_name}:{identities[0][3]}(id={identities[0][0]},s={statuses[0]}),{identities[1][3]}(id={identities[1][0]},s={statuses[1]})")
+            log = out / "display-connectors.txt"
+            log.write_text("\n".join(transcript) + "\n")
+            return True, f"4/4 hotplug phases stable ({'; '.join(summaries)}); see {log}"
+        finally:
+            if vm is not None:
+                vm.close()
+
+
 def run_display_modes(args, out):
     """Boots the desktop at 1280x800, 1920x1080, 2560x1600 and 3840x2160; each must fill exactly that size with its taskbar on the bottom edge and follow a host resize."""
     from display_modes import run_display_modes as check
@@ -10764,6 +10827,7 @@ OWN_IMAGE["desktop-columns"] = run_desktop_columns
 OWN_IMAGE["desktop-columns-timing"] = run_desktop_columns_timing
 OWN_IMAGE["display-handoff"] = run_display_handoff
 OWN_IMAGE["bootloader-edid"] = run_bootloader_edid
+OWN_IMAGE["display-connectors"] = run_display_connectors
 OWN_IMAGE["display-modes"] = run_display_modes
 OWN_IMAGE["display-heads"] = run_display_heads
 OWN_IMAGE["gpu-heads"] = run_gpu_heads
