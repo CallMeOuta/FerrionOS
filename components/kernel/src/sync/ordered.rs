@@ -411,12 +411,10 @@ impl<L: Level, T> RwLock<L, T> {
             return None;
         }
         if ptr_a < ptr_b {
-            assert!(ptr_a < ptr_b);
             let first = a.write(lock_token);
             let second = unsafe { b.rewrite(LockToken(PhantomData)) };
             Some((first, second))
         } else {
-            assert!(ptr_b < ptr_a);
             let first = b.write(lock_token);
             let second = unsafe { a.rewrite(LockToken(PhantomData)) };
             Some((second, first))
