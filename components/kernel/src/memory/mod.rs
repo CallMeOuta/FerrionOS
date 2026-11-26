@@ -1647,8 +1647,11 @@ pub fn page_fault_handler(
                 Err(PfError::Killed) => {
                     crate::syscall::exit_this_context(None, &mut token);
                 }
-                Err(PfError::Segv | PfError::RecursionLimitExceeded) => break,
-                Err(PfError::NonfatalInternalError) => todo!(),
+                Err(
+                    PfError::Segv
+                    | PfError::RecursionLimitExceeded
+                    | PfError::NonfatalInternalError,
+                ) => break,
             }
         }
     }
