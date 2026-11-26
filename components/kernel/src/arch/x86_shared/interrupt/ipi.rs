@@ -21,7 +21,11 @@ interrupt!(switch, || {
     unsafe { the_local_apic().eoi() };
 
     let mut token = unsafe { CleanLockToken::new() };
+    if context::current().read(token.token()).being_sigkilled {
+        crate::syscall::exit_this_context(None, &mut token);
+    }
     let _ = context::switch(&mut token);
+    context::signal::signal_handler(&mut token);
 });
 
 interrupt!(pit, || {

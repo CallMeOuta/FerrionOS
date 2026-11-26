@@ -1397,6 +1397,95 @@ pub trait ArchIntCtx {
     fn recover_and_efault(&mut self);
 }
 
+const MAX_OOM_RETRIES: usize = 1000;
+const MAX_OOM_VICTIM_THREADS: usize = 1024;
+const OOM_WAIT_SLICE_NS: u128 = 1_000_000;
+const MAX_OOM_SPIN_PER_SLICE: usize = 200_000;
+
+static OOM_VICTIM_PID: AtomicUsize = AtomicUsize::new(0);
+
+pub fn is_oom_victim_pid(pid: usize) -> bool {
+    pid != 0 && OOM_VICTIM_PID.load(Ordering::Acquire) == pid
+}
+
+pub fn clear_oom_victim_if_gone(pid: usize, token: &mut CleanLockToken) {
+    if pid != 0
+        && OOM_VICTIM_PID.load(Ordering::Acquire) == pid
+        && !has_live_context_for_pid(pid, token)
+    {
+        let _ = OOM_VICTIM_PID.compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+fn handle_oom_unrecoverable(
+    caused_by_user: bool,
+    caused_by_kernel: bool,
+    is_usercopy: bool,
+    token: &mut CleanLockToken,
+) {
+    if caused_by_kernel && is_usercopy {
+        assert!(!caused_by_user);
+        return;
+    }
+    assert!(caused_by_user && !caused_by_kernel);
+    let current_lock = context::current();
+    let current_pid = {
+        let mut guard = current_lock.write(token.token());
+        let pid = guard.pid;
+        if pid != 1 {
+            guard.being_sigkilled = true;
+        }
+        pid
+    };
+    drop(current_lock);
+    if current_pid == 1 {
+        panic!(
+            "OUT OF MEMORY: init faulted and no victim exited within MAX_OOM_RETRIES (1000 x 1 ms)"
+        );
+    }
+    crate::syscall::exit_this_context(None, token);
+}
+
+fn wait_for_oom_victim(
+    oom_pid: usize,
+    caused_by_user: bool,
+    caused_by_kernel: bool,
+    is_usercopy: bool,
+    token: &mut CleanLockToken,
+) {
+    if caused_by_kernel && is_usercopy {
+        assert!(!caused_by_user);
+        let deadline = crate::time::monotonic(token).saturating_add(OOM_WAIT_SLICE_NS);
+        for _ in 0..MAX_OOM_SPIN_PER_SLICE {
+            crate::percpu::PercpuBlock::current().maybe_handle_tlb_shootdown();
+            if crate::time::monotonic(token) >= deadline {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        return;
+    }
+    assert!(caused_by_user && !caused_by_kernel);
+    if context::current().read(token.token()).being_sigkilled {
+        crate::syscall::exit_this_context(None, token);
+    }
+    context::switch(token);
+    if context::current().read(token.token()).being_sigkilled {
+        crate::syscall::exit_this_context(None, token);
+    }
+    if !has_live_context_for_pid(oom_pid, token) {
+        return;
+    }
+    let deadline = crate::time::monotonic(token).saturating_add(OOM_WAIT_SLICE_NS);
+    for _ in 0..MAX_OOM_SPIN_PER_SLICE {
+        crate::percpu::PercpuBlock::current().maybe_handle_tlb_shootdown();
+        if crate::time::monotonic(token) >= deadline {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 pub fn page_fault_handler(
     stack: &mut impl ArchIntCtx,
     code: GenericPfFlags,
@@ -1433,35 +1522,130 @@ pub fn page_fault_handler(
 
     if address_is_user && (caused_by_user || is_usercopy) {
         let mut token = unsafe { CleanLockToken::new() };
-        loop {
+        for attempt in 0..=MAX_OOM_RETRIES {
             match context::memory::try_correcting_page_tables(faulting_page, mode, &mut token) {
                 Ok(()) => return Ok(()),
                 Err(PfError::Oom) => {
-                    let Some(ctx_lock) = find_newest_killable_context(&mut token) else {
-                        todo!("No more context to kill");
+                    let active_pid = OOM_VICTIM_PID.load(Ordering::Acquire);
+                    if active_pid != 0 {
+                        if has_live_context_for_pid(active_pid, &mut token) {
+                            if attempt == MAX_OOM_RETRIES {
+                                error!(
+                                    "OUT OF MEMORY: victim PID {} did not exit within {} retries (1 ms slices)",
+                                    active_pid, MAX_OOM_RETRIES
+                                );
+                                let _ = OOM_VICTIM_PID.compare_exchange(
+                                    active_pid,
+                                    0,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
+                                handle_oom_unrecoverable(
+                                    caused_by_user,
+                                    caused_by_kernel,
+                                    is_usercopy,
+                                    &mut token,
+                                );
+                                break;
+                            }
+                            wait_for_oom_victim(
+                                active_pid,
+                                caused_by_user,
+                                caused_by_kernel,
+                                is_usercopy,
+                                &mut token,
+                            );
+                            continue;
+                        }
+                        let _ = OOM_VICTIM_PID.compare_exchange(
+                            active_pid,
+                            0,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                    }
+                    if attempt == MAX_OOM_RETRIES {
+                        error!(
+                            "OUT OF MEMORY: allocation did not recover within {} retries (1 ms slices)",
+                            MAX_OOM_RETRIES
+                        );
+                        handle_oom_unrecoverable(
+                            caused_by_user,
+                            caused_by_kernel,
+                            is_usercopy,
+                            &mut token,
+                        );
+                        break;
+                    }
+                    let Some((victim_pid, victim_name)) = find_newest_killable_pid(&mut token)
+                    else {
+                        handle_oom_unrecoverable(
+                            caused_by_user,
+                            caused_by_kernel,
+                            is_usercopy,
+                            &mut token,
+                        );
+                        break;
                     };
-                    let mut ctx_guard = ctx_lock.write(token.token());
+                    if let Err(other_pid) = OOM_VICTIM_PID.compare_exchange(
+                        0,
+                        victim_pid,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        wait_for_oom_victim(
+                            other_pid,
+                            caused_by_user,
+                            caused_by_kernel,
+                            is_usercopy,
+                            &mut token,
+                        );
+                        continue;
+                    }
                     error!(
                         "OUT OF MEMORY! Killing PID {} {:?}",
-                        ctx_guard.pid, ctx_guard.name
+                        victim_pid, victim_name
                     );
-                    if context::is_current(&ctx_lock) {
-                        drop(ctx_guard);
-                        crate::syscall::exit_this_context(None, &mut token);
-                        unreachable!();
-                    } else {
-                        ctx_guard.being_sigkilled = true;
-                        ctx_guard.status = context::Status::Runnable;
-                        let cpu_id = ctx_guard.cpu_id;
-                        drop(ctx_guard);
-                        context::notify_sigkilled(cpu_id);
-                        crate::syscall::exit_context(None, &mut token, ctx_lock);
+                    let mut self_in_victim = false;
+                    let mut marked = 0usize;
+                    for _ in 0..MAX_OOM_VICTIM_THREADS {
+                        let Some(ctx_lock) = find_unmarked_context_for_pid(victim_pid, &mut token)
+                        else {
+                            break;
+                        };
+                        if context::is_current(&ctx_lock) {
+                            ctx_lock.write(token.token()).being_sigkilled = true;
+                            self_in_victim = true;
+                            marked += 1;
+                        } else if context::request_forcekill(&ctx_lock, &mut token.downgrade()) {
+                            marked += 1;
+                        }
                     }
+                    if find_unmarked_context_for_pid(victim_pid, &mut token).is_some() {
+                        error!(
+                            "OUT OF MEMORY: PID {} exceeded MAX_OOM_VICTIM_THREADS ({}); marked first {}",
+                            victim_pid, MAX_OOM_VICTIM_THREADS, marked
+                        );
+                    }
+                    if self_in_victim {
+                        if caused_by_kernel && is_usercopy {
+                            assert!(!caused_by_user);
+                            break;
+                        }
+                        assert!(caused_by_user && !caused_by_kernel);
+                        crate::syscall::exit_this_context(None, &mut token);
+                    }
+                    wait_for_oom_victim(
+                        victim_pid,
+                        caused_by_user,
+                        caused_by_kernel,
+                        is_usercopy,
+                        &mut token,
+                    );
                 }
                 Err(PfError::Killed) if caused_by_kernel && is_usercopy => break,
                 Err(PfError::Killed) => {
                     crate::syscall::exit_this_context(None, &mut token);
-                    unreachable!();
                 }
                 Err(PfError::Segv | PfError::RecursionLimitExceeded) => break,
                 Err(PfError::NonfatalInternalError) => todo!(),
@@ -1477,25 +1661,59 @@ pub fn page_fault_handler(
     Err(Segv)
 }
 
-fn find_newest_killable_context(token: &mut CleanLockToken) -> Option<Arc<ContextLock>> {
-    let mut newest_ctx = None;
-    let mut newest_pid = 0;
-    {
-        let mut contexts_guard = context::contexts(token.downgrade());
-        let (contexts_guard, mut token_lock) = contexts_guard.token_split();
-        for ctx_lock in contexts_guard.iter() {
-            let ctx_guard = ctx_lock.read(token_lock.token());
-            if ctx_guard.being_sigkilled || ctx_guard.euid == 0 {
-                continue;
-            }
-            if ctx_guard.pid > newest_pid {
-                newest_pid = ctx_guard.pid;
-                drop(ctx_guard);
-                newest_ctx = Some(ctx_lock.0.clone());
-            }
+fn has_live_context_for_pid(pid: usize, token: &mut CleanLockToken) -> bool {
+    let mut contexts_guard = context::contexts(token.downgrade());
+    let (contexts_guard, mut token_lock) = contexts_guard.token_split();
+    for ctx_lock in contexts_guard.iter() {
+        let ctx_guard = ctx_lock.read(token_lock.token());
+        if ctx_guard.pid == pid && !ctx_guard.status.is_dead() {
+            return true;
         }
     }
-    newest_ctx
+    false
+}
+
+fn find_newest_killable_pid(
+    token: &mut CleanLockToken,
+) -> Option<(
+    usize,
+    arrayvec::ArrayString<{ context::context::CONTEXT_NAME_CAPAC }>,
+)> {
+    let mut newest_pid = 0usize;
+    let mut newest_name = None;
+    let mut contexts_guard = context::contexts(token.downgrade());
+    let (contexts_guard, mut token_lock) = contexts_guard.token_split();
+    for ctx_lock in contexts_guard.iter() {
+        let ctx_guard = ctx_lock.read(token_lock.token());
+        if ctx_guard.being_sigkilled
+            || ctx_guard.status.is_dead()
+            || ctx_guard.euid == 0
+            || ctx_guard.pid == 0
+        {
+            continue;
+        }
+        if ctx_guard.pid > newest_pid {
+            newest_pid = ctx_guard.pid;
+            newest_name = Some(ctx_guard.name);
+        }
+    }
+    newest_name.map(|name| (newest_pid, name))
+}
+
+fn find_unmarked_context_for_pid(
+    pid: usize,
+    token: &mut CleanLockToken,
+) -> Option<Arc<ContextLock>> {
+    let mut contexts_guard = context::contexts(token.downgrade());
+    let (contexts_guard, mut token_lock) = contexts_guard.token_split();
+    for ctx_lock in contexts_guard.iter() {
+        let ctx_guard = ctx_lock.read(token_lock.token());
+        if ctx_guard.pid == pid && !ctx_guard.being_sigkilled && !ctx_guard.status.is_dead() {
+            drop(ctx_guard);
+            return Some(ctx_lock.0.clone());
+        }
+    }
+    None
 }
 
 static THE_ZEROED_FRAME: SyncUnsafeCell<Option<(Frame, &'static PageInfo)>> =

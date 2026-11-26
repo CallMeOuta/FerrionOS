@@ -40,13 +40,16 @@ pub fn exit_this_context(excp: Option<syscall::Exception>, token: &mut CleanLock
     unreachable!();
 }
 
-pub fn exit_context(
+fn exit_context(
     excp: Option<syscall::Exception>,
     token: &mut CleanLockToken,
     context_lock: Arc<RwLock<crate::sync::L4, context::Context>>,
 ) {
-    let (addrspace_opt, mut close_files) = {
+    assert!(context::is_current(&context_lock));
+    let (addrspace_opt, mut close_files, exit_pid, exit_debug_id) = {
         let mut context = context_lock.write(token.token());
+        let exit_pid = context.pid;
+        let exit_debug_id = context.debug_id;
         context.files_closed = true;
         let (context, token) = context.token_split();
         let close_files = Arc::try_unwrap(mem::take(&mut context.files))
@@ -56,8 +59,9 @@ pub fn exit_context(
             .and_then(|a| Arc::try_unwrap(a).ok());
         drop(mem::replace(&mut context.syscall_head, SyscallFrame::Dummy));
         drop(mem::replace(&mut context.syscall_tail, SyscallFrame::Dummy));
-        (addrspace_opt, close_files)
+        (addrspace_opt, close_files, exit_pid, exit_debug_id)
     };
+    let was_oom_victim = crate::memory::is_oom_victim_pid(exit_pid);
 
     // Files must be closed while context is valid so that messages can be passed
     close_files.force_close_all(token);
@@ -88,6 +92,13 @@ pub fn exit_context(
             }
         }
         drop(context_ref);
+    }
+    if was_oom_victim {
+        info!(
+            "OUT OF MEMORY: PID {} context {} exited",
+            exit_pid, exit_debug_id
+        );
+        crate::memory::clear_oom_victim_if_gone(exit_pid, token);
     }
     drop(close_files);
 }

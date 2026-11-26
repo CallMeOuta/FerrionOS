@@ -12,7 +12,7 @@ use crate::{
     context::memory::AddrSpaceWrapper,
     cpu_set::{LogicalCpuId, LogicalCpuSet},
     cpu_stats::{CpuState, CpuStatsData},
-    ipi::{ipi, IpiKind, IpiTarget},
+    ipi::{ipi, ipi_single, IpiKind, IpiTarget},
     memory::{RmmA, RmmArch, TableKind},
     percpu::{self, get_percpu_block, PercpuBlock},
     sync::{
@@ -173,6 +173,29 @@ pub fn notify_sigkilled(cpu_id: Option<LogicalCpuId>) {
             .sigkill_pending
             .store(true, core::sync::atomic::Ordering::Release);
     }
+}
+
+pub fn request_forcekill(context_lock: &Arc<ContextLock>, token: &mut LockToken<'_, L3>) -> bool {
+    assert!(!is_current(context_lock));
+    let (cpu_id, running) = {
+        let mut ctxt = context_lock.write(token.token());
+        if ctxt.status.is_dead() {
+            return false;
+        }
+        ctxt.status = Status::Runnable;
+        ctxt.being_sigkilled = true;
+        (ctxt.cpu_id, ctxt.running)
+    };
+    notify_sigkilled(cpu_id);
+    wakeup_context(context_lock, cpu_id, token);
+    if running
+        && let Some(target_cpu) = cpu_id
+        && target_cpu != crate::cpu_id()
+        && let Some(percpu) = get_percpu_block(target_cpu)
+    {
+        ipi_single(IpiKind::Switch, percpu);
+    }
+    true
 }
 
 pub fn wakeup_context(

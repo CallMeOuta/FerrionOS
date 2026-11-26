@@ -1629,18 +1629,7 @@ impl ContextHandle {
                             drop(context);
                             crate::syscall::exit_this_context(None, token);
                         } else {
-                            let cpu_id = {
-                                let mut ctxt = context.write(token.token());
-                                //trace!("FORCEKILL NONSELF={} {}, SELF={}", ctxt.debug_id, ctxt.pid, context::current().read().debug_id);
-                                if ctxt.status.is_dead() {
-                                    return Ok(size_of::<usize>());
-                                }
-                                ctxt.status = context::Status::Runnable;
-                                ctxt.being_sigkilled = true;
-                                ctxt.cpu_id
-                            };
-                            context::notify_sigkilled(cpu_id);
-                            wakeup_context(&context, cpu_id, &mut token.downgrade());
+                            context::request_forcekill(&context, &mut token.downgrade());
                             Ok(size_of::<usize>())
                         }
                     }
