@@ -322,7 +322,7 @@ pub unsafe fn exit_current_thread(retval: Retval) -> ! {
     let status_fd = {
         let _guard = redox_rt::signal::tmp_disable_signals();
         let thread_fd = RtTcb::current().thread_fd();
-        thread_fd.dup_into_upper(b"status").unwrap()
+        redox_rt::thread::open_thread_status_for_exit(thread_fd)
     };
 
     if this.flags.load(Ordering::Acquire) & PthreadFlags::DETACHED.bits() != 0 {
@@ -350,13 +350,27 @@ unsafe fn dealloc_thread(thread: &Pthread) {
     unsafe {
         let tcb = thread.tcb_selfref.get().read();
         if !tcb.is_null() {
-            loop {
+            const MAX_FUNMAP_EINTR_RETRIES: usize = 64;
+            let mut finished = false;
+            for _ in 0..MAX_FUNMAP_EINTR_RETRIES {
                 match syscall::funmap(tcb as usize, syscall::PAGE_SIZE) {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        finished = true;
+                        break;
+                    }
                     // might be not guarded by tmp_disable_signals()
                     Err(syscall::Error { errno: EINTR }) => continue,
-                    Err(e) => log::warn!("Cannot dealloc_thread: {e:?}"),
+                    Err(e) => {
+                        log::warn!("Cannot dealloc_thread: {e:?}");
+                        finished = true;
+                        break;
+                    }
                 }
+            }
+            if !finished {
+                log::warn!(
+                    "Cannot dealloc_thread: funmap interrupted {MAX_FUNMAP_EINTR_RETRIES} times"
+                );
             }
         }
     }

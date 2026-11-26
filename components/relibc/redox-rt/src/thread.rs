@@ -51,12 +51,46 @@ pub unsafe fn rlct_clone_impl(stack: *mut usize, tcb: &RtTcb) -> Result<usize> {
     Ok(fd)
 }
 
+const MAX_TEARDOWN_YIELDS: usize = 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThreadExitError {
+    Teardown,
+    Fatal,
+}
+
+pub fn classify_thread_exit_error(err: syscall::Error) -> ThreadExitError {
+    match err.errno {
+        syscall::EBADF | syscall::EOWNERDEAD => ThreadExitError::Teardown,
+        _ => ThreadExitError::Fatal,
+    }
+}
+
+pub fn wait_for_teardown(step: &str, err: syscall::Error) -> ! {
+    for _ in 0..MAX_TEARDOWN_YIELDS {
+        let _ = syscall::sched_yield();
+    }
+    panic!(
+        "thread exit {step} hit teardown error {err:?} without process exit after {MAX_TEARDOWN_YIELDS} yields"
+    );
+}
+
+pub fn open_thread_status_for_exit(thread_fd: &FdGuardUpper) -> FdGuardUpper {
+    match thread_fd.dup_into_upper(b"status") {
+        Ok(fd) => fd,
+        Err(err) => match classify_thread_exit_error(err) {
+            ThreadExitError::Teardown => wait_for_teardown("dup(status)", err),
+            ThreadExitError::Fatal => panic!("thread exit dup(status) failed: {err:?}"),
+        },
+    }
+}
+
 pub unsafe fn exit_this_thread(stack_base: *mut (), stack_size: usize) -> ! {
     let _guard = crate::signal::tmp_disable_signals();
     let thread_fd = RtTcb::current().thread_fd();
 
     // TODO: modify interface so it writes directly to the thread fd?
-    let status_fd = thread_fd.dup_into_upper(b"status").unwrap();
+    let status_fd = open_thread_status_for_exit(thread_fd);
     unsafe { exit_this_thread_inner(stack_base, stack_size, status_fd) }
 }
 
@@ -71,6 +105,11 @@ pub unsafe fn exit_this_thread_inner(
         .unwrap()
         .copy_from_slice(&[usize::MAX, stack_base as usize, stack_size]);
     // TODO: SYS_CALL w/CONSUME
-    status_fd.write(&buf).unwrap();
+    if let Err(err) = status_fd.write(&buf) {
+        match classify_thread_exit_error(err) {
+            ThreadExitError::Teardown => wait_for_teardown("write(status)", err),
+            ThreadExitError::Fatal => panic!("thread exit write(status) failed: {err:?}"),
+        }
+    }
     unreachable!()
 }
