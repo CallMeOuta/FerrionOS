@@ -1,0 +1,45 @@
+FerrionOS change to pop-os winit 0.31.0-beta.2 (Apache-2.0 license, kept), made against pinned commits 9567503d34130113e36b0167a2b8829c3756e429 and 71ce08c043814514a8fd92d9d0599f115ae854e8.
+
+Enable the Wayland backend on FerrionOS when the wayland feature is selected, keep the Orbital backend active only when wayland is not enabled, and split winit/Cargo.toml's Unix dependency table so winit-x11 stays excluded on redox.
+
+--- a/winit/Cargo.toml
++++ b/winit/Cargo.toml
+@@ -95,11 +95,13 @@
+ winit-win32.workspace = true
+ 
+ # Linux
+-[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+ libc.workspace = true
+ rustix = { workspace = true, features = ["std", "thread"] }
+ winit-common = { workspace = true, features = ["xkb"] }
+ winit-wayland = { workspace = true, optional = true, default-features = false }
++
++[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+ winit-x11 = { workspace = true, optional = true }
+ 
+ [target.'cfg(target_os = "redox")'.dependencies]
+--- a/winit/build.rs
++++ b/winit/build.rs
+@@ -17,8 +17,8 @@
+ 
+         // Native displays.
+         x11_platform: { all(feature = "x11", free_unix, not(redox)) },
+-        wayland_platform: { all(feature = "wayland", free_unix, not(redox)) },
+-        orbital_platform: { redox },
++        wayland_platform: { all(feature = "wayland", free_unix) },
++        orbital_platform: { all(redox, not(feature = "wayland")) },
+     }
+ 
+     // Winit defined cfgs.
+--- a/winit/src/platform_impl/linux/mod.rs
++++ b/winit/src/platform_impl/linux/mod.rs
+@@ -191,7 +191,7 @@
+     unsafe { pthread_main_np() == 1 }
+ }
+ 
+-#[cfg(target_os = "netbsd")]
++#[cfg(any(target_os = "netbsd", target_os = "redox"))]
+ fn is_main_thread() -> bool {
+     std::thread::current().name() == Some("main")
+ }
