@@ -26,10 +26,7 @@ use crate::{
     },
     percpu::PercpuBlock,
     scheme::KernelSchemes,
-    sync::{
-        CleanLockToken, LockToken, RwLock, RwLockReadGuard, RwLockUpgradableGuard,
-        RwLockWriteGuard, L4, L5,
-    },
+    sync::{CleanLockToken, LockToken, RwLock, RwLockReadGuard, RwLockWriteGuard, L4, L5},
 };
 
 use super::context::HardBlockedReason;
@@ -169,12 +166,6 @@ impl AddrSpaceWrapper {
     ) -> RwLockReadGuard<'a, L5, AddrSpace> {
         self.inner.read(lock_token)
     }
-    pub fn acquire_upgradeable_read<'a>(
-        &'a self,
-        lock_token: LockToken<'a, L4>,
-    ) -> RwLockUpgradableGuard<'a, L5, AddrSpace> {
-        self.inner.upgradeable_read(lock_token)
-    }
     pub fn acquire_write<'a>(
         &'a self,
         lock_token: LockToken<'a, L4>,
@@ -190,12 +181,6 @@ impl AddrSpaceWrapper {
         RwLockWriteGuard<'a, L5, AddrSpace>,
     )> {
         RwLock::write_pair(&a.inner, &b.inner, lock_token).ok_or(Error::new(EBUSY))
-    }
-    pub unsafe fn acquire_reupgradeable_read<'a>(
-        &'a self,
-        lock_token: LockToken<'a, L5>,
-    ) -> RwLockUpgradableGuard<'a, L5, AddrSpace> {
-        unsafe { self.inner.reupgradeable_read(lock_token) }
     }
     pub unsafe fn acquire_rewrite<'a>(
         &'a self,
@@ -633,8 +618,9 @@ impl AddrSpaceWrapper {
         {
             Frame::containing(f)
         } else {
-            let (frame, flush, new_guard) = correct_inner(self, guard, page, AccessMode::Write, 0)
-                .map_err(|_| Error::new(ENOMEM))?;
+            let (frame, flush, new_guard) =
+                correct_inner_locked(self, guard, page, AccessMode::Write)
+                    .map_err(|_| Error::new(ENOMEM))?;
             flush.flush();
             guard_lock = Some(new_guard);
 
@@ -1598,12 +1584,11 @@ impl Grant {
                             Some((phys, page_flags)) => (Frame::containing(phys), page_flags),
                             None => {
                                 reject_unmapped_borrow_source(&guard, src_page)?;
-                                let (frame, _, new_guard) = correct_inner(
+                                let (frame, _, new_guard) = correct_inner_locked(
                                     src.addr_space_lock,
                                     guard,
                                     src_page,
                                     AccessMode::Read,
-                                    0,
                                 )
                                 .map_err(|_| Error::new(EIO))?;
                                 let page_flags = new_guard
@@ -1628,12 +1613,11 @@ impl Grant {
                             Some((page_flags, phys, _)) => (Frame::containing(phys), page_flags),
                             None => {
                                 reject_unmapped_borrow_source(&guard, src_page)?;
-                                let (frame, _, new_guard) = correct_inner(
+                                let (frame, _, new_guard) = correct_inner_locked(
                                     src.addr_space_lock,
                                     guard,
                                     src_page,
                                     AccessMode::Read,
-                                    0,
                                 )
                                 .map_err(|_| Error::new(EIO))?;
                                 // FIXME correct_inner should read the page flags instead
@@ -2808,6 +2792,9 @@ pub unsafe fn copy_frame_to_frame_directly(dst: Frame, src: Frame) {
     }
 }
 
+const MAX_PF_RECURSION: u32 = 16;
+const MAX_EXTERNAL_PF_RETRIES: usize = 16;
+
 fn reject_unmapped_borrow_source(addr_space: &AddrSpace, src_page: Page) -> Result<()> {
     if matches!(
         addr_space.grants.contains(src_page),
@@ -2822,6 +2809,36 @@ fn reject_unmapped_borrow_source(addr_space: &AddrSpace, src_page: Page) -> Resu
     Ok(())
 }
 
+fn pte_satisfies_access(flags: PageFlags<RmmA>, access: AccessMode) -> bool {
+    if !flags.has_user() {
+        return false;
+    }
+    match access {
+        AccessMode::Read => true,
+        AccessMode::Write => flags.has_write(),
+        AccessMode::InstrFetch => flags.has_execute(),
+    }
+}
+
+fn grant_permits_access(grant_flags: PageFlags<RmmA>, access: AccessMode) -> bool {
+    if !grant_flags.has_user() {
+        debug!("Access, but grant was PROT_NONE.");
+        return false;
+    }
+    match access {
+        AccessMode::Read => true,
+        AccessMode::Write if !grant_flags.has_write() => {
+            debug!("Write, but grant was not PROT_WRITE.");
+            false
+        }
+        AccessMode::InstrFetch if !grant_flags.has_execute() => {
+            debug!("Instuction fetch, but grant was not PROT_EXEC.");
+            false
+        }
+        _ => true,
+    }
+}
+
 pub fn try_correcting_page_tables(
     faulting_page: Page,
     access: AccessMode,
@@ -2832,27 +2849,235 @@ pub fn try_correcting_page_tables(
         return Err(PfError::Segv);
     };
 
-    let mut lock_token = token.token();
-    let addr_space_lock = addr_space.acquire_write(lock_token.downgrade());
-
-    let (_, flush, _) = correct_inner(&addr_space, addr_space_lock, faulting_page, access, 0)?;
-
-    flush.flush();
+    let _ = correct_page_fault(&addr_space, faulting_page, access, 0, token)?;
 
     Ok(())
 }
 
-// TODO: maybe refactor the return type into a struct/typedef?
+fn correct_page_fault(
+    addr_space_lock: &Arc<AddrSpaceWrapper>,
+    faulting_page: Page,
+    access: AccessMode,
+    recursion_level: u32,
+    token: &mut CleanLockToken,
+) -> Result<Frame, PfError> {
+    let mut pending_external: Option<(Arc<AddrSpaceWrapper>, Page, PageFlags<RmmA>)> = None;
+
+    for _ in 0..MAX_EXTERNAL_PF_RETRIES {
+        let (foreign_address_space, src_page, grant_flags) = match pending_external.take() {
+            Some(target) => target,
+            None => {
+                let mut lock_token = token.token();
+                let addr_space = addr_space_lock.acquire_write(lock_token.downgrade());
+
+                let Some((grant_base, grant_info)) = addr_space.grants.contains(faulting_page)
+                else {
+                    debug!("Lacks grant");
+                    return Err(PfError::Segv);
+                };
+
+                let grant_flags = grant_info.flags();
+                if !grant_permits_access(grant_flags, access) {
+                    return Err(PfError::Segv);
+                }
+
+                let Provider::External {
+                    address_space: ref foreign_address_space,
+                    src_base,
+                    ..
+                } = grant_info.provider
+                else {
+                    let (frame, flush, _guard) =
+                        correct_inner_locked(addr_space_lock, addr_space, faulting_page, access)?;
+                    flush.flush();
+                    return Ok(frame);
+                };
+
+                if let Some((phys, existing_flags)) = addr_space
+                    .table
+                    .utable
+                    .translate(faulting_page.start_address())
+                    && pte_satisfies_access(existing_flags, access)
+                {
+                    return Ok(Frame::containing(phys));
+                }
+
+                let foreign_address_space = Arc::clone(foreign_address_space);
+                let pages_from_grant_start = faulting_page.offset_from(grant_base);
+                let src_page = src_base.next_by(pages_from_grant_start);
+                drop(addr_space);
+                (foreign_address_space, src_page, grant_flags)
+            }
+        };
+
+        let mut lock_token = token.token();
+        let (mut own_guard, mut foreign_guard) = AddrSpaceWrapper::acquire_write_pair(
+            addr_space_lock,
+            &foreign_address_space,
+            lock_token.downgrade(),
+        )
+        .map_err(|_| PfError::Segv)?;
+        assert!(core::ptr::eq(
+            &*own_guard as *const AddrSpace,
+            addr_space_lock.inner.as_mut_ptr(),
+        ));
+        assert!(core::ptr::eq(
+            &*foreign_guard as *const AddrSpace,
+            foreign_address_space.inner.as_mut_ptr(),
+        ));
+
+        let Some((grant_base, grant_info)) = own_guard.grants.contains(faulting_page) else {
+            continue;
+        };
+        let current_flags = grant_info.flags();
+        let same_external = matches!(
+            grant_info.provider,
+            Provider::External {
+                address_space: ref current_foreign,
+                src_base,
+                ..
+            } if Arc::ptr_eq(current_foreign, &foreign_address_space)
+                && src_base.next_by(faulting_page.offset_from(grant_base)) == src_page
+                && current_flags.data() == grant_flags.data()
+        );
+        if !same_external {
+            continue;
+        }
+
+        if let Some((phys, existing_flags)) = own_guard
+            .table
+            .utable
+            .translate(faulting_page.start_address())
+            && pte_satisfies_access(existing_flags, access)
+        {
+            return Ok(Frame::containing(phys));
+        }
+
+        let Some(_) = foreign_guard.grants.contains(src_page) else {
+            return Err(PfError::Segv);
+        };
+
+        let (src_frame, src_pte_flags) = match foreign_guard
+            .table
+            .utable
+            .translate(src_page.start_address())
+        {
+            Some((phys, pte_flags)) => (Frame::containing(phys), pte_flags),
+            None => {
+                let new_recursion_level = recursion_level
+                    .checked_add(1)
+                    .filter(|new_lvl| *new_lvl < MAX_PF_RECURSION)
+                    .ok_or(PfError::RecursionLimitExceeded)?;
+
+                drop(foreign_guard);
+                drop(own_guard);
+
+                let _ = correct_page_fault(
+                    &foreign_address_space,
+                    src_page,
+                    AccessMode::Read,
+                    new_recursion_level,
+                    token,
+                )?;
+
+                pending_external = Some((foreign_address_space, src_page, grant_flags));
+                continue;
+            }
+        };
+
+        let cow_fmap_flags = if grant_flags.has_write() && !src_pte_flags.has_write() {
+            foreign_guard.grants.contains(src_page).and_then(|(_, g)| {
+                matches!(g.provider, Provider::FmapBorrowed { is_cow: true, .. }).then_some(g.flags)
+            })
+        } else {
+            None
+        };
+
+        let frame = if let Some(src_grant_flags) = cow_fmap_flags {
+            let info = get_page_info(src_frame).ok_or(PfError::Segv)?;
+            let CowResult {
+                new_frame,
+                old_frame,
+            } = cow(src_frame, info, RefKind::Shared)?;
+            let mut src_flusher = Flusher::with_cpu_set(
+                &foreign_address_space.used_by,
+                &foreign_address_space.tlb_ack,
+            );
+            unsafe {
+                if let Some((_, _, flush)) = foreign_guard
+                    .table
+                    .utable
+                    .remap_with_full(src_page.start_address(), |_, _| {
+                        Some((new_frame.base(), src_grant_flags))
+                    })
+                {
+                    flush.flush();
+                }
+            }
+            if let Some(old_frame) = old_frame {
+                src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+            }
+            drop(src_flusher);
+            new_frame
+        } else {
+            let info = get_page_info(src_frame).expect("all allocated frames need a PageInfo");
+
+            match info.add_ref(RefKind::Shared) {
+                Ok(()) => src_frame,
+                Err(AddRefError::CowToShared) => {
+                    let CowResult {
+                        new_frame,
+                        old_frame,
+                    } = cow(src_frame, info, RefKind::Shared)?;
+                    let mut src_flusher = Flusher::with_cpu_set(
+                        &foreign_address_space.used_by,
+                        &foreign_address_space.tlb_ack,
+                    );
+                    unsafe {
+                        if let Some((_, _, flush)) = foreign_guard
+                            .table
+                            .utable
+                            .remap_with_full(src_page.start_address(), |_, f| {
+                                Some((new_frame.base(), f))
+                            })
+                        {
+                            flush.flush();
+                        }
+                    }
+                    if let Some(old_frame) = old_frame {
+                        src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+                    }
+                    drop(src_flusher);
+                    new_frame
+                }
+                Err(AddRefError::SharedToCow) => unreachable!(),
+                Err(AddRefError::RcOverflow) => return Err(PfError::Oom),
+            }
+        };
+
+        let Some(flush) = (unsafe {
+            own_guard.table.utable.map_phys(
+                faulting_page.start_address(),
+                frame.base(),
+                grant_flags,
+                0,
+            )
+        }) else {
+            return Err(PfError::Oom);
+        };
+        flush.flush();
+        return Ok(frame);
+    }
+
+    Err(PfError::Segv)
+}
+
 #[expect(clippy::type_complexity)]
-/// XXX: This require passing L5 addr_space_guard.
-/// Caller must ensure there's no other lock being held at this point.
-/// Caller also need to provide clean token for the new AddrSpace.
-fn correct_inner<'l>(
+fn correct_inner_locked<'l>(
     addr_space_lock: &'l Arc<AddrSpaceWrapper>,
     mut addr_space: RwLockWriteGuard<'l, L5, AddrSpace>,
     faulting_page: Page,
     access: AccessMode,
-    recursion_level: u32,
 ) -> Result<(Frame, PageFlush<RmmA>, RwLockWriteGuard<'l, L5, AddrSpace>), PfError> {
     let mut flusher = Flusher::with_cpu_set(&addr_space_lock.used_by, &addr_space_lock.tlb_ack);
 
@@ -2861,30 +3086,17 @@ fn correct_inner<'l>(
         return Err(PfError::Segv);
     };
 
+    assert!(
+        !matches!(grant_info.provider, Provider::External { .. }),
+        "correct_inner_locked must not be called for Provider::External"
+    );
+
     let pages_from_grant_start = faulting_page.offset_from(grant_base);
 
     let grant_flags = grant_info.flags();
-    match access {
-        _ if !grant_flags.has_user() => {
-            debug!("Access, but grant was PROT_NONE.");
-            return Err(PfError::Segv);
-        }
-        AccessMode::Read => (),
-
-        AccessMode::Write if !grant_flags.has_write() => {
-            debug!("Write, but grant was not PROT_WRITE.");
-            return Err(PfError::Segv);
-        }
-        AccessMode::InstrFetch if !grant_flags.has_execute() => {
-            debug!("Instuction fetch, but grant was not PROT_EXEC.");
-            return Err(PfError::Segv);
-        }
-
-        _ => (),
+    if !grant_permits_access(grant_flags, access) {
+        return Err(PfError::Segv);
     }
-
-    // By now, the memory at the faulting page is actually valid, but simply not yet mapped, either
-    // at all, or with the required flags.
 
     let faulting_entry_opt = addr_space
         .table
@@ -2893,13 +3105,6 @@ fn correct_inner<'l>(
         .map(|(phys, page_flags)| (Frame::containing(phys), page_flags));
     let faulting_frame_opt = faulting_entry_opt.map(|(frame, _)| frame);
     let faulting_pageinfo_opt = faulting_frame_opt.map(|frame| (frame, get_page_info(frame)));
-
-    // TODO: Aligned readahead? AMD Zen3+ CPUs can smash 4 4k pages that are 16k-aligned, into a
-    // single TLB entry, thus emulating 16k pages albeit with higher page table overhead. With the
-    // correct madvise information, allocating 4 contiguous pages and mapping them together, might
-    // be a useful future optimization.
-    //
-    // TODO: Readahead backwards, i.e. MAP_GROWSDOWN.
 
     let mut allow_writable = true;
     let mut override_flags: Option<PageFlags<RmmA>> = None;
@@ -2934,195 +3139,22 @@ fn correct_inner<'l>(
             match faulting_pageinfo_opt {
                 Some((_, None)) => unreachable!("allocated page needs frame to be valid"),
 
-                // TODO: Can this match arm even be reached? In other words, can the TLB cache
-                // remember that pages are not present?
                 Some((frame, Some(page_info))) => {
-                    // Keep in mind that allow_writable must always be true if this code is reached
-                    // for AllocatedShared, since shared pages cannot be mapped lazily (without
-                    // using AddrSpace backrefs).
                     allow_writable = page_info.allows_writable();
 
                     frame
                 }
 
-                None => {
-                    // TODO: the zeroed page first, readonly?
-                    map_zeroed(
-                        &mut addr_space.table.utable,
-                        faulting_page,
-                        grant_flags,
-                        false,
-                    )?
-                }
+                None => map_zeroed(
+                    &mut addr_space.table.utable,
+                    faulting_page,
+                    grant_flags,
+                    false,
+                )?,
             }
         }
         Provider::PhysBorrowed { base } => base.next_by(pages_from_grant_start),
-        Provider::External {
-            address_space: ref foreign_address_space,
-            src_base,
-            ..
-        } => {
-            let foreign_address_space = Arc::clone(foreign_address_space);
-
-            if Arc::ptr_eq(addr_space_lock, &foreign_address_space) {
-                return Err(PfError::NonfatalInternalError);
-            }
-
-            // XXX: This is cheating, but guaranteed from Arc::ptr_eq above we won't deadlock
-            let mut free_token = unsafe { CleanLockToken::new() };
-            let mut guard = foreign_address_space.acquire_upgradeable_read(free_token.downgrade());
-            let src_page = src_base.next_by(pages_from_grant_start);
-
-            match guard.grants.contains(src_page) {
-                Some(_) => {
-                    let (src_frame, src_pte_flags) =
-                        match guard.table.utable.translate(src_page.start_address()) {
-                            Some((phys, pte_flags)) => (Frame::containing(phys), pte_flags),
-                            _ => {
-                                // Grant was valid (TODO check), but we need to correct the underlying page.
-                                // TODO: Access mode
-
-                                // TODO: Reasonable maximum?
-                                let new_recursion_level = recursion_level
-                                    .checked_add(1)
-                                    .filter(|new_lvl| *new_lvl < 16)
-                                    .ok_or(PfError::RecursionLimitExceeded)?;
-
-                                let guard_token = guard.into_token();
-                                let addr_space_guard_token = addr_space.into_token();
-                                drop(flusher);
-
-                                // FIXME: Can this result in invalid address space state?
-                                let ext_addrspace = &foreign_address_space;
-                                let mut free_token = unsafe { CleanLockToken::new() };
-                                let (frame, _, _) = {
-                                    let g = ext_addrspace.acquire_write(free_token.downgrade());
-                                    correct_inner(
-                                        ext_addrspace,
-                                        g,
-                                        src_page,
-                                        AccessMode::Read,
-                                        new_recursion_level,
-                                    )?
-                                };
-
-                                // SAFETY: Caller guarantees addr_space_guard is coming from this addr_space_lock
-                                addr_space = unsafe {
-                                    addr_space_lock.acquire_rewrite(addr_space_guard_token)
-                                };
-                                flusher = Flusher::with_cpu_set(
-                                    &addr_space_lock.used_by,
-                                    &addr_space_lock.tlb_ack,
-                                );
-
-                                // SAFETY: We guarantee that guard is coming from foreign_address_space
-                                guard = unsafe {
-                                    foreign_address_space.acquire_reupgradeable_read(guard_token)
-                                };
-
-                                let pte_flags = guard
-                                    .table
-                                    .utable
-                                    .translate(src_page.start_address())
-                                    .map_or(PageFlags::new(), |(_, f)| f);
-
-                                (frame, pte_flags)
-                            }
-                        };
-
-                    let cow_fmap_flags = if grant_flags.has_write() && !src_pte_flags.has_write() {
-                        guard.grants.contains(src_page).and_then(|(_, g)| {
-                            matches!(g.provider, Provider::FmapBorrowed { is_cow: true, .. })
-                                .then_some(g.flags)
-                        })
-                    } else {
-                        None
-                    };
-
-                    if let Some(src_grant_flags) = cow_fmap_flags {
-                        let info = get_page_info(src_frame).ok_or(PfError::Segv)?;
-                        let CowResult {
-                            new_frame,
-                            old_frame,
-                        } = cow(src_frame, info, RefKind::Shared)?;
-                        let mut guard = RwLockUpgradableGuard::upgrade(guard);
-                        let mut src_flusher = Flusher::with_cpu_set(
-                            &foreign_address_space.used_by,
-                            &foreign_address_space.tlb_ack,
-                        );
-                        unsafe {
-                            if let Some((_, _, flush)) = guard
-                                .table
-                                .utable
-                                .remap_with_full(src_page.start_address(), |_, _| {
-                                    Some((new_frame.base(), src_grant_flags))
-                                })
-                            {
-                                flush.flush();
-                            }
-                        }
-                        if let Some(old_frame) = old_frame {
-                            src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
-                        }
-                        drop(src_flusher);
-                        new_frame
-                    } else {
-                        let info =
-                            get_page_info(src_frame).expect("all allocated frames need a PageInfo");
-
-                        match info.add_ref(RefKind::Shared) {
-                            Ok(()) => src_frame,
-                            Err(AddRefError::CowToShared) => {
-                                let CowResult {
-                                    new_frame,
-                                    old_frame,
-                                } = cow(src_frame, info, RefKind::Shared)?;
-                                let mut guard = RwLockUpgradableGuard::upgrade(guard);
-                                let mut src_flusher = Flusher::with_cpu_set(
-                                    &foreign_address_space.used_by,
-                                    &foreign_address_space.tlb_ack,
-                                );
-                                unsafe {
-                                    if let Some((_, _, flush)) = guard
-                                        .table
-                                        .utable
-                                        .remap_with_full(src_page.start_address(), |_, f| {
-                                            Some((new_frame.base(), f))
-                                        })
-                                    {
-                                        flush.flush();
-                                    }
-                                }
-                                if let Some(old_frame) = old_frame {
-                                    src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
-                                }
-                                drop(src_flusher);
-
-                                new_frame
-                            }
-                            Err(AddRefError::SharedToCow) => unreachable!(),
-                            Err(AddRefError::RcOverflow) => return Err(PfError::Oom),
-                        }
-                    }
-                }
-                _ => {
-                    // Grant did not exist, but we did own a Provider::External mapping, and cannot
-                    // simply let the current context fail. TODO: But all borrowed memory shouldn't
-                    // really be lazy though? TODO: Should a grant be created?
-
-                    let mut guard = RwLockUpgradableGuard::upgrade(guard);
-
-                    // TODO: Should this be called?
-                    warn!("Mapped zero page since grant didn't exist");
-                    map_zeroed(
-                        &mut guard.table.utable,
-                        src_page,
-                        grant_flags,
-                        access == AccessMode::Write,
-                    )?
-                }
-            }
-        }
+        Provider::External { .. } => unreachable!(),
         // TODO: NonfatalInternalError if !MAP_LAZY and this page fault occurs.
         Provider::FmapBorrowed {
             ref file_ref,
