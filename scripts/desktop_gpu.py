@@ -24,7 +24,11 @@ INPUT_STEPS = 40
 MIN_FLIP_FRAMES = 10
 FRAME_DIFF_CHANNEL_TOL = 2
 FRAME_DIFF_MAX_FRACTION = 0.005
-VENUS_TRACE_EVENTS = ("virtio_gpu_cmd_ctx_submit", "virtio_gpu_fence_resp")
+VENUS_TRACE_EVENTS = (
+    "virtio_gpu_cmd_ctx_submit",
+    "virtio_gpu_fence_resp",
+    "virtio_gpu_cmd_set_scanout_blob",
+)
 EXPECTED_WIDTH = 1280
 EXPECTED_HEIGHT = 800
 
@@ -60,6 +64,8 @@ def parse_wm_log(text, client_logs=""):
     renderer = renderer_match.group(1) if renderer_match else None
     present_mode_match = re.search(r"FERRION_PRESENTER\s+mode=(\w+)", text)
     presenter_mode = present_mode_match.group(1) if present_mode_match else None
+    swapchain_match = re.search(r"FERRION_PRESENTER\b[^\n]*\bswapchain=(\w+)", text)
+    presenter_swapchain = swapchain_match.group(1) if swapchain_match else None
     ready_match = re.search(r"FERRION_READY\s+width=(\d+)\s+height=(\d+)\s+vt=(\d+)", text)
     ready_vt = int(ready_match.group(3)) if ready_match else None
     frames = []
@@ -140,6 +146,7 @@ def parse_wm_log(text, client_logs=""):
     return {
         "renderer": renderer,
         "presenter_mode": presenter_mode,
+        "presenter_swapchain": presenter_swapchain,
         "ready_vt": ready_vt,
         "frame_count": len(frames),
         "flip_frame_count": len(flip_frames),
@@ -456,6 +463,7 @@ def run_venus_dual_boot(args, out, vm_cls, root_shell, run_status):
     default_frames = {}
     gpu_frames = {}
     default_submits_before_restart = 0
+    default_blobs_before_restart = 0
     try:
         directory, vm, qmp_sock, qmp_stream, qmp_send = open_vm_and_shell(
             args, out, "venus", VENUS_TRACE_EVENTS, vm_cls, root_shell
@@ -464,7 +472,11 @@ def run_venus_dual_boot(args, out, vm_cls, root_shell, run_status):
             vm, qmp_send, run_status, args, out / "venus-default", "venus-default", "venus", True
         )
         default_submits_before_restart = len(vm.trace("virtio_gpu_cmd_ctx_submit"))
-        default_rec["trace"] = {"ctx_submit_count": default_submits_before_restart}
+        default_blobs_before_restart = len(vm.trace("virtio_gpu_cmd_set_scanout_blob"))
+        default_rec["trace"] = {
+            "ctx_submit_count": default_submits_before_restart,
+            "set_scanout_blob_count": default_blobs_before_restart,
+        }
 
         old_pid = default_rec.get("wm_pid")
         if old_pid is None:
@@ -535,13 +547,19 @@ def run_venus_dual_boot(args, out, vm_cls, root_shell, run_status):
             vm.close()
             submits = vm.trace("virtio_gpu_cmd_ctx_submit")
             fences = vm.trace("virtio_gpu_fence_resp")
+            blobs = vm.trace("virtio_gpu_cmd_set_scanout_blob")
             (out / "qemu-trace-submits.txt").write_text(
                 "\n".join(submits) + ("\n" if submits else "")
+            )
+            (out / "qemu-trace-scanout-blobs.txt").write_text(
+                "\n".join(blobs) + ("\n" if blobs else "")
             )
             gpu_rec["trace"] = {
                 "ctx_submit_count": len(submits) - default_submits_before_restart,
                 "total_ctx_submit_count": len(submits),
                 "fence_resp_count": len(fences),
+                "set_scanout_blob_count": len(blobs) - default_blobs_before_restart,
+                "total_set_scanout_blob_count": len(blobs),
             }
         if directory is not None:
             directory.cleanup()
@@ -658,6 +676,11 @@ def run_desktop_gpu(args, out, vm_cls, root_shell, run_status):
         problems.append(
             f"venus-default: expected 0 ctx_submit events under llvmpipe default, got {vdef_submits}"
         )
+    vdef_blobs = (venus_default_rec.get("trace") or {}).get("set_scanout_blob_count", 0)
+    if vdef_blobs != 0:
+        problems.append(
+            f"venus-default: expected 0 set_scanout_blob events under llvmpipe default, got {vdef_blobs}"
+        )
 
     vgpu_renderer = (vgpu_wm.get("renderer") or "").lower()
     if not vgpu_renderer:
@@ -669,9 +692,26 @@ def run_desktop_gpu(args, out, vm_cls, root_shell, run_status):
     vgpu_mode = vgpu_wm.get("presenter_mode")
     if vgpu_mode != "flip":
         problems.append(f"venus-gpu-restart: expected presenter mode=flip, got {vgpu_mode!r}")
+    vgpu_swapchain = vgpu_wm.get("presenter_swapchain")
+    if vgpu_swapchain != "gbm":
+        problems.append(
+            f"venus-gpu-restart: expected presenter swapchain=gbm, got {vgpu_swapchain!r}"
+        )
     submit_count = (venus_gpu_rec.get("trace") or {}).get("ctx_submit_count", 0)
     if submit_count == 0:
         problems.append("venus-gpu-restart: QEMU trace has 0 virtio_gpu_cmd_ctx_submit events")
+    blob_count = (venus_gpu_rec.get("trace") or {}).get("set_scanout_blob_count", 0)
+    if blob_count < MIN_FLIP_FRAMES:
+        problems.append(
+            f"venus-gpu-restart: QEMU trace has {blob_count} virtio_gpu_cmd_set_scanout_blob events "
+            f"(expected >= {MIN_FLIP_FRAMES})"
+        )
+    vgpu_copy_summary = vgpu_wm.get("copy_us") or {}
+    vgpu_copy_max = vgpu_copy_summary.get("max")
+    if vgpu_copy_max is None or vgpu_copy_max != 0:
+        problems.append(
+            f"venus-gpu-restart: expected zero-copy copy_us max=0, got {vgpu_copy_max!r}"
+        )
     flip_count = vgpu_wm.get("flip_frame_count", 0)
     if flip_count < MIN_FLIP_FRAMES:
         problems.append(
@@ -732,7 +772,8 @@ def run_desktop_gpu(args, out, vm_cls, root_shell, run_status):
         f"cpu=llvmpipe({cpu_mode}:{cpu_flips}) "
         f"vga=llvmpipe({vga_mode}:{vga_dirty}) "
         f"venus-default=llvmpipe({vdef_mode}:{vdef_flips},vt={vdef_wm.get('ready_vt')}) "
-        f"venus-gpu-restart=zink-venus({vgpu_mode}:{flip_count},vt={vgpu_wm.get('ready_vt')},submits={submit_count}) "
+        f"venus-gpu-restart=zink-venus({vgpu_mode}:{flip_count},vt={vgpu_wm.get('ready_vt')},"
+        f"submits={submit_count},blobs={blob_count},copy_max={vgpu_copy_max}) "
         f"max_diff_cpu={max_diff_cpu} max_diff_vdef={max_diff_vdef}; "
         f"see {out / 'desktop-gpu.json'}",
     )

@@ -21,6 +21,8 @@ MAX_QMP_REPLIES = 256
 MAX_JSON_SCAN_MATCHES = 128
 SESSION_POLL_LIMIT = 900
 WINDOW_POLL_LIMIT = 150
+STOP_POLL_LIMIT = 50
+STOP_POLL_INTERVAL_S = 0.1
 RESIZE_WIDTH = 1024
 RESIZE_HEIGHT = 768
 BASE_WIDTH = 1280
@@ -155,9 +157,13 @@ def parse_json_value(output, expect_type):
 def run_display_handoff(args, out, vm_cls, root_shell, run_status):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
+    use_venus = bool(getattr(args, "venus", False))
+    gpu_mode = "venus" if use_venus else "virtio"
     results = {
         "load_before": list(os.getloadavg()),
         "handoffs_requested": HANDOFF_COUNT,
+        "gpu": gpu_mode,
+        "ferrion_wm_gpu": use_venus,
     }
     problems = []
 
@@ -178,7 +184,7 @@ def run_display_handoff(args, out, vm_cls, root_shell, run_status):
             args,
             out,
             qemu_flags=f"-vnc unix:{vnc_path} -qmp unix:{qmp_path},server=on,wait=off",
-            make=("gpu=virtio",),
+            make=(f"gpu={gpu_mode}",),
         )
         qmp_sock = None
         qmp_stream = None
@@ -224,6 +230,44 @@ def run_display_handoff(args, out, vm_cls, root_shell, run_status):
                 time.sleep(0.2)
             if not session_ready:
                 return False, "no /tmp/ferrion-wm-session"
+
+            if use_venus:
+                st_pid, raw_pid = run_status(vm, "cat /tmp/ferrion-wm.pid 2>/dev/null || true", args.timeout)
+                pid_match = re.search(r"(?m)^\s*(\d+)\s*$", raw_pid) if st_pid == 0 else None
+                if not pid_match:
+                    return False, "missing /tmp/ferrion-wm.pid before GPU restart"
+                old_pid = int(pid_match.group(1))
+                guest_cmd(vm, "ferrion-wm msg action quit --skip-confirmation", check=False)
+                st_old, _ = run_status(vm, f"kill -0 {old_pid} 2>/dev/null", args.timeout)
+                if st_old == 0:
+                    run_status(vm, f"kill {old_pid} 2>/dev/null || true", args.timeout)
+                stopped = False
+                for _ in range(STOP_POLL_LIMIT):
+                    st_old, _ = run_status(vm, f"kill -0 {old_pid} 2>/dev/null", args.timeout)
+                    if st_old != 0:
+                        stopped = True
+                        break
+                    time.sleep(STOP_POLL_INTERVAL_S)
+                if not stopped:
+                    return False, f"initial ferrion-wm PID {old_pid} did not exit before GPU restart"
+                run_status(vm, "rm -f /tmp/ferrion-wm-session /tmp/ferrion-wm.log /tmp/ferrion-wm.pid", args.timeout)
+                run_status(
+                    vm,
+                    "(FERRION_WM_GPU=1 /bin/bash /usr/lib/ferrion-wm-test-session </dev/null >/dev/null 2>&1 &)",
+                    args.timeout,
+                )
+                gpu_ready = False
+                gpu_deadline = time.monotonic() + args.timeout
+                for _ in range(SESSION_POLL_LIMIT):
+                    st_sess, _ = run_status(vm, "test -s /tmp/ferrion-wm-session", args.timeout)
+                    if st_sess == 0:
+                        gpu_ready = True
+                        break
+                    if time.monotonic() >= gpu_deadline:
+                        break
+                    time.sleep(0.2)
+                if not gpu_ready:
+                    return False, "no /tmp/ferrion-wm-session after FERRION_WM_GPU=1 restart"
 
             guest_cmd(vm, "desktop-layout-probe files > /tmp/handoff-files.log 2>&1 &")
             wid = None
@@ -371,6 +415,35 @@ def run_display_handoff(args, out, vm_cls, root_shell, run_status):
                 had_frame_fail = "frame presentation failed" in wm_log
                 had_reader_fail = "input reader failed" in wm_log
                 had_handoff_fail = "display handoff failed" in wm_log
+                if use_venus:
+                    renderer_match = re.search(r'FERRION_RENDERER\s+renderer="([^"]*)"', wm_log)
+                    renderer_str = (renderer_match.group(1) if renderer_match else "").lower()
+                    if "zink" not in renderer_str or "venus" not in renderer_str or "llvmpipe" in renderer_str:
+                        problems.append(
+                            f"expected Zink+Venus renderer under FERRION_WM_GPU=1, got {renderer_match.group(1) if renderer_match else None!r}"
+                        )
+                    gbm_lines = re.findall(r"FERRION_PRESENTER\b[^\n]*\bswapchain=gbm\b", wm_log)
+                    cpu_lines = re.findall(r"FERRION_PRESENTER\b[^\n]*\bswapchain=cpu\b", wm_log)
+                    if len(gbm_lines) < 2:
+                        problems.append(
+                            f"expected swapchain=gbm before and after handoffs, saw {len(gbm_lines)}"
+                        )
+                    if cpu_lines:
+                        problems.append(
+                            f"unexpected swapchain=cpu fallback during Venus handoffs ({len(cpu_lines)}x)"
+                        )
+                    nonzero_copy = [
+                        int(v)
+                        for v in re.findall(r"FERRION_FRAME\b[^\n]*\bcopy_us=(\d+)", wm_log)
+                        if int(v) != 0
+                    ]
+                    if nonzero_copy:
+                        problems.append(
+                            f"expected copy_us=0 on Venus GBM handoffs, saw {len(nonzero_copy)} nonzero frames (max {max(nonzero_copy)})"
+                        )
+                    results["gbm_presenter_lines"] = len(gbm_lines)
+                    results["cpu_fallback_lines"] = len(cpu_lines)
+                    results["nonzero_copy_frames"] = len(nonzero_copy)
                 if ptr_thread_alive:
                     problems.append("pointer motion thread did not stop before post-handoff check")
                 if st_alive != 0:
