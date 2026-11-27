@@ -1,0 +1,241 @@
+FerrionOS change to pop-os window_clipboard 0.4.1 (MIT license, kept), made against pinned commit f68595ee0e62fbd6589f4709b5aaa5c3c7ea5f6c.
+
+Enable the Wayland clipboard and drag-and-drop backend (wl_data_device and zwp_primary_selection_device_v1 via smithay-clipboard) on FerrionOS while splitting Cargo.toml and gating src/platform/linux.rs so clipboard_x11 stays excluded on redox.
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -23,9 +23,11 @@
+ [target.'cfg(target_os = "macos")'.dependencies]
+ clipboard_macos = { version = "0.1", path = "./macos" }
+ 
++[target.'cfg(all(unix, not(any(target_os="macos", target_os="android", target_os="emscripten", target_os="ios"))))'.dependencies]
++clipboard_wayland = { version = "0.2.2", path = "./wayland" }
++
+ [target.'cfg(all(unix, not(any(target_os="macos", target_os="android", target_os="emscripten", target_os="ios", target_os="redox"))))'.dependencies]
+ clipboard_x11 = { version = "0.4.2", path = "./x11" }
+-clipboard_wayland = { version = "0.2.2", path = "./wayland" }
+ 
+ [dev-dependencies]
+ rand = "0.8"
+--- a/dnd/Cargo.toml
++++ b/dnd/Cargo.toml
+@@ -8,7 +8,7 @@
+ bitflags = "2.5.0"
+ raw-window-handle = "0.6"
+ 
+-[target.'cfg(all(unix, not(any(target_os="macos", target_os="android", target_os="emscripten", target_os="ios", target_os="redox"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_os="macos", target_os="android", target_os="emscripten", target_os="ios"))))'.dependencies]
+ smithay-clipboard = { git = "https://github.com/pop-os/smithay-clipboard", tag = "sctk-0.20", features = [
+     "dnd",
+ ] }
+--- a/dnd/src/lib.rs
++++ b/dnd/src/lib.rs
+@@ -13,8 +13,7 @@
+         target_os = "macos",
+         target_os = "ios",
+         target_os = "android",
+-        target_os = "emscripten",
+-        target_os = "redox"
++        target_os = "emscripten"
+     ))
+ ))]
+ #[path = "platform/linux.rs"]
+--- a/mime/Cargo.toml
++++ b/mime/Cargo.toml
+@@ -5,5 +5,5 @@
+ 
+ # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+ 
+-[target.'cfg(all(unix, not(any(target_os="macos", target_os="android", target_os="emscripten", target_os="ios", target_os="redox"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_os="macos", target_os="android", target_os="emscripten", target_os="ios"))))'.dependencies]
+ smithay-clipboard = { git = "https://github.com/pop-os/smithay-clipboard", tag = "sctk-0.20" }
+--- a/mime/src/platform/mod.rs
++++ b/mime/src/platform/mod.rs
+@@ -4,8 +4,7 @@
+         target_os = "macos",
+         target_os = "ios",
+         target_os = "android",
+-        target_os = "emscripten",
+-        target_os = "redox"
++        target_os = "emscripten"
+     ))
+ ))]
+ pub mod linux;
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -6,8 +6,7 @@
+         target_os = "macos",
+         target_os = "ios",
+         target_os = "android",
+-        target_os = "emscripten",
+-        target_os = "redox"
++        target_os = "emscripten"
+     ))
+ ))]
+ #[path = "platform/linux.rs"]
+@@ -36,8 +35,7 @@
+             target_os = "macos",
+             target_os = "ios",
+             target_os = "android",
+-            target_os = "emscripten",
+-            target_os = "redox"
++            target_os = "emscripten"
+         ))
+     ),
+     target_os = "windows",
+--- a/src/platform/linux.rs
++++ b/src/platform/linux.rs
+@@ -11,10 +11,12 @@
+ use wayland::DndSender;
+ 
+ pub use clipboard_wayland as wayland;
++#[cfg(not(target_os = "redox"))]
+ pub use clipboard_x11 as x11;
+ 
+ pub enum Clipboard {
+     Wayland(wayland::Clipboard),
++    #[cfg(not(target_os = "redox"))]
+     X11(x11::Clipboard),
+ }
+ 
+@@ -22,6 +24,7 @@
+     fn read(&self) -> Result<String, Box<dyn Error>> {
+         match self {
+             Clipboard::Wayland(c) => c.read(),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(c) => c.read().map_err(Box::from),
+         }
+     }
+@@ -29,6 +32,7 @@
+     fn write(&mut self, contents: String) -> Result<(), Box<dyn Error>> {
+         match self {
+             Clipboard::Wayland(c) => c.write(contents),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(c) => c.write(contents).map_err(Box::from),
+         }
+     }
+@@ -36,6 +40,7 @@
+     fn read_primary(&self) -> Option<Result<String, Box<dyn Error>>> {
+         match self {
+             Clipboard::Wayland(c) => Some(c.read_primary()),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(c) => Some(c.read_primary().map_err(Box::from)),
+         }
+     }
+@@ -46,6 +51,7 @@
+     ) -> Option<Result<(), Box<dyn Error>>> {
+         match self {
+             Clipboard::Wayland(c) => Some(c.write_primary(contents)),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(c) => {
+                 Some(c.write_primary(contents).map_err(Box::from))
+             }
+@@ -61,6 +67,7 @@
+                 let ret = c.read_data::<ClipboardLoadData<T>>();
+                 Some(ret.map(|ret| ret.0))
+             }
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => None,
+         }
+     }
+@@ -76,6 +83,7 @@
+             Clipboard::Wayland(c) => {
+                 Some(c.write_data::<ClipboardStoreData<T>>(contents))
+             }
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => None,
+         }
+     }
+@@ -89,6 +97,7 @@
+                 let ret = c.read_primary_data::<ClipboardLoadData<T>>();
+                 Some(ret.map(|ret| ret.0))
+             }
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => None,
+         }
+     }
+@@ -99,6 +108,7 @@
+     ) -> Option<Result<(Vec<u8>, String), Box<dyn Error>>> {
+         match self {
+             Clipboard::Wayland(c) => Some(c.read_primary_raw(allowed)),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => None,
+         }
+     }
+@@ -109,6 +119,7 @@
+     ) -> Option<Result<(Vec<u8>, String), Box<dyn Error>>> {
+         match self {
+             Clipboard::Wayland(c) => Some(c.read_raw(allowed)),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => None,
+         }
+     }
+@@ -124,6 +135,7 @@
+             Clipboard::Wayland(c) => {
+                 Some(c.write_primary_data::<ClipboardStoreData<T>>(contents))
+             }
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => None,
+         }
+     }
+@@ -136,6 +148,7 @@
+     ) {
+         match self {
+             Clipboard::Wayland(c) => c.init_dnd(DndSender(Arc::from(tx))),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => {}
+         }
+     }
+@@ -156,6 +169,7 @@
+                 content,
+                 actions,
+             ),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => {}
+         }
+     }
+@@ -163,6 +177,7 @@
+     fn end_dnd(&self) {
+         match self {
+             Clipboard::Wayland(c) => c.end_dnd(),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => {}
+         }
+     }
+@@ -176,6 +191,7 @@
+             Clipboard::Wayland(c) => {
+                 c.register_dnd_destination(surface, rectangles)
+             }
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => {}
+         }
+     }
+@@ -183,6 +199,7 @@
+     fn set_action(&self, action: DndAction) {
+         match self {
+             Clipboard::Wayland(c) => c.set_action(action),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => {}
+         }
+     }
+@@ -193,6 +210,7 @@
+     ) -> std::io::Result<D> {
+         match self {
+             Clipboard::Wayland(c) => c.peek_offer::<D>(mime_type),
++            #[cfg(not(target_os = "redox"))]
+             Clipboard::X11(_) => Err(std::io::Error::new(
+                 std::io::ErrorKind::Other,
+                 "DnD not supported",
+@@ -208,7 +226,12 @@
+         RawDisplayHandle::Wayland(handle) => Clipboard::Wayland(
+             wayland::Clipboard::connect(handle.display.as_ptr()),
+         ) as _,
++        #[cfg(not(target_os = "redox"))]
+         _ => Clipboard::X11(x11::Clipboard::connect()?) as _,
++        #[cfg(target_os = "redox")]
++        _ => {
++            return Err("only Wayland clipboard is supported on this platform".into());
++        }
+     };
+ 
+     Ok(clipboard)
