@@ -25,7 +25,8 @@ if [ ! -d ferrion-vendor/smithay/.git ]; then
     git clone https://github.com/Smithay/smithay.git ferrion-vendor/smithay
 fi
 git -C ferrion-vendor/smithay checkout --force 65aa86fa5236e41775c313408102a5d5c2d1e2ca
-patch --directory=ferrion-vendor/smithay --strip=1 < "../smithay-platform.patch"
+patch --fuzz=0 --directory=ferrion-vendor/smithay --strip=1 < "../smithay-platform.patch"
+patch --fuzz=0 --directory=ferrion-vendor/smithay --strip=1 < "../smithay-idle-notify-filter.patch"
 mkdir -p ferrion-vendor/backend
 cp -a "${COOKBOOK_ROOT}/recipes/core/ferrion-wm-backend/crate/." ferrion-vendor/backend/
 sed -i -E 's|path = "([.][.]/)+components/base/|path = "'"${COOKBOOK_ROOT}"'/components/base/|g' ferrion-vendor/backend/Cargo.toml
