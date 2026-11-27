@@ -1,0 +1,836 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FerrionOS contributors <contributors@ferrion.invalid>
+Date: Wed, 25 Nov 2026 14:33:00 -0800
+Subject: [PATCH] backend: Add per-head zero-copy GBM swapchain presenter (Stage B1)
+
+Create the GBM device once during backend init before WAYLAND_DISPLAY
+is set (asserted at creation) and keep it for the compositor's lifetime
+so Mesa's device-select layer cannot self-connect to ferrion-wm's
+Wayland socket on reconfigure once Mesa's Wayland platform is enabled.
+Open a per-head LINEAR GBM swapchain (SWAPCHAIN_SLOTS = 2 <=
+MAX_DMABUF_FBS_PER_HEAD = 3, MAX_IN_FLIGHT_FLIPS = 1) only when
+present_mode is PageFlip, the GlesRenderer EGLDisplay advertises a
+LINEAR dma-buf render format, /scheme/gpu.* exists, gbm_create_device
+succeeds, and every BO binds into GlesRenderer and registers with
+DRM_IOCTL_MODE_ADDFB2. Any failure logs FERRION_PRESENTER with
+swapchain=cpu and the failing step and stays on Stage A's CPU readback
+path. If another display change arrives mid-setup, stay ChangePending
+until the queued DisplayChanged reconfigures.
+
+Track per-slot Free/InFlight/OnScreen state with assertions so only a
+Free slot is rendered into and the OnScreen slot becomes Free only on
+FlipComplete. Wait on result.sync before present_dmabuf_for, log
+copy_us=0, and tear down every head's FBs, GEM handles, and BOs (while
+keeping the GBM device) on ChangePending and reconfigure, dropping the
+GBM device only when Ferrion drops.
+---
+--- a/src/backend/ferrion.rs
++++ b/src/backend/ferrion.rs
+@@ -1,11 +1,15 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+-// Added for FerrionOS on 2026-11-21, modified 2026-11-22, 2026-11-23 and 2026-11-24, to niri's backend interface.
++// Added for FerrionOS on 2026-11-21, modified 2026-11-22, 2026-11-23, 2026-11-24 and 2026-11-25, to niri's backend interface.
+ // Input adapter follows FerrionOS's MIT ferrion-wm-backend; its notices are
+ // retained in ferrion-vendor/backend/LICENSE.
+ use std::collections::{HashMap, VecDeque};
+ use std::ffi::{c_char, CStr};
++use std::fs::{self, File, OpenOptions};
+ use std::io;
+ use std::mem;
++use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
++use std::os::unix::fs::OpenOptionsExt;
++use std::ptr::NonNull;
+ use std::sync::{Arc, Mutex};
+ use std::time::{Duration, Instant};
+ 
+@@ -14,12 +18,12 @@
+ use calloop::timer::{TimeoutAction, Timer};
+ use calloop::{LoopHandle, RegistrationToken};
+ use ferrion_wm_backend::{
+-    self as native, BackendEvent, FlipCompletion, FrameScheduler, Input, OutputInfo, PresentMode,
+-    PresentPreference,
++    self as native, BackendEvent, DmabufFb, DmabufFbDesc, FlipCompletion, FrameScheduler, Input,
++    OutputInfo, PresentMode, PresentPreference, MAX_DMABUF_FBS_PER_HEAD, MAX_IN_FLIGHT_FLIPS,
+ };
+ use niri_config::OutputName;
+-use smithay::backend::allocator::dmabuf::Dmabuf;
+-use smithay::backend::allocator::Fourcc;
++use smithay::backend::allocator::dmabuf::{Dmabuf, DmabufFlags};
++use smithay::backend::allocator::{Format, Fourcc, Modifier};
+ use smithay::backend::egl::native::EGLSurfacelessDisplay;
+ use smithay::backend::egl::{EGLContext, EGLDisplay};
+ use smithay::backend::input::{self as sm, InputBackend, InputTime, UnusedEvent};
+@@ -44,11 +48,348 @@
+ const MAX_EVENTS_PER_DISPATCH: usize = 256;
+ const MAX_PENDING_INPUTS: usize = 512;
+ const MAX_CONSECUTIVE_FLIP_BUSY: u32 = 8;
++const MAX_SCHEME_ENTRIES: usize = 4096;
++const SWAPCHAIN_SLOTS: usize = 2;
++const GBM_BO_USE_SCANOUT: u32 = 1 << 0;
++const GBM_BO_USE_RENDERING: u32 = 1 << 2;
++const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+ const DEFAULT_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
+ const DEFAULT_REFRESH_MHZ: i32 = 60_000;
+ const FRAME_MARGIN: Duration = Duration::from_micros(500);
+ const DISPLAY_CHANGE_PENDING_ERR: &str = "display change pending";
+ 
++const _: () = assert!(SWAPCHAIN_SLOTS >= 2);
++const _: () = assert!(SWAPCHAIN_SLOTS <= MAX_DMABUF_FBS_PER_HEAD);
++
++#[repr(C)]
++struct GbmDeviceRaw {
++    _private: [u8; 0],
++}
++
++#[repr(C)]
++struct GbmBoRaw {
++    _private: [u8; 0],
++}
++
++#[link(name = "gbm")]
++extern "C" {
++    fn gbm_create_device(fd: libc::c_int) -> *mut GbmDeviceRaw;
++    fn gbm_device_destroy(gbm: *mut GbmDeviceRaw);
++    fn gbm_bo_create_with_modifiers2(
++        gbm: *mut GbmDeviceRaw,
++        width: u32,
++        height: u32,
++        format: u32,
++        modifiers: *const u64,
++        count: libc::c_uint,
++        flags: u32,
++    ) -> *mut GbmBoRaw;
++    fn gbm_bo_destroy(bo: *mut GbmBoRaw);
++    fn gbm_bo_get_fd(bo: *mut GbmBoRaw) -> libc::c_int;
++    fn gbm_bo_get_stride(bo: *mut GbmBoRaw) -> u32;
++    fn gbm_bo_get_offset(bo: *mut GbmBoRaw, plane: libc::c_int) -> u32;
++    fn gbm_bo_get_modifier(bo: *mut GbmBoRaw) -> u64;
++}
++
++struct GbmDevice {
++    raw: NonNull<GbmDeviceRaw>,
++    _render_fd: File,
++}
++
++impl GbmDevice {
++    fn open(path: &str) -> io::Result<Self> {
++        assert!(
++            std::env::var_os("WAYLAND_DISPLAY").is_none(),
++            "GBM device must be created once before WAYLAND_DISPLAY is set"
++        );
++        let render_fd = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .custom_flags(libc::O_CLOEXEC)
++            .open(path)?;
++        let raw = unsafe { gbm_create_device(render_fd.as_raw_fd()) };
++        let Some(raw) = NonNull::new(raw) else {
++            return Err(io::Error::last_os_error());
++        };
++        Ok(Self {
++            raw,
++            _render_fd: render_fd,
++        })
++    }
++
++    fn create_linear_scanout_bo(
++        &self,
++        width: u32,
++        height: u32,
++        fourcc: u32,
++    ) -> io::Result<(GbmBo, OwnedFd, u32, u32, u64)> {
++        let linear_mod = DRM_FORMAT_MOD_LINEAR;
++        let raw = unsafe {
++            gbm_bo_create_with_modifiers2(
++                self.raw.as_ptr(),
++                width,
++                height,
++                fourcc,
++                &linear_mod,
++                1,
++                GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING,
++            )
++        };
++        let Some(raw) = NonNull::new(raw) else {
++            return Err(io::Error::last_os_error());
++        };
++        let bo = GbmBo { raw };
++        let stride = unsafe { gbm_bo_get_stride(bo.raw.as_ptr()) };
++        let offset = unsafe { gbm_bo_get_offset(bo.raw.as_ptr(), 0) };
++        let modifier = unsafe { gbm_bo_get_modifier(bo.raw.as_ptr()) };
++        let min_stride = width.checked_mul(4).ok_or_else(|| {
++            io::Error::new(io::ErrorKind::InvalidInput, "GBM width overflows stride")
++        })?;
++        if modifier != DRM_FORMAT_MOD_LINEAR || stride < min_stride {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "GBM BO layout is not LINEAR with expected stride",
++            ));
++        }
++        let fd = unsafe { gbm_bo_get_fd(bo.raw.as_ptr()) };
++        if fd < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
++        Ok((bo, owned_fd, stride, offset, modifier))
++    }
++}
++
++impl Drop for GbmDevice {
++    fn drop(&mut self) {
++        unsafe {
++            gbm_device_destroy(self.raw.as_ptr());
++        }
++    }
++}
++
++struct GbmBo {
++    raw: NonNull<GbmBoRaw>,
++}
++
++impl Drop for GbmBo {
++    fn drop(&mut self) {
++        unsafe {
++            gbm_bo_destroy(self.raw.as_ptr());
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum SlotState {
++    Free,
++    InFlight,
++    OnScreen,
++}
++
++struct GbmSwapSlot {
++    dmabuf: Dmabuf,
++    _bo: GbmBo,
++    fb: DmabufFb,
++    state: SlotState,
++    age: usize,
++}
++
++struct GbmSwapchain {
++    generation: u64,
++    slots: Vec<GbmSwapSlot>,
++}
++
++impl GbmSwapchain {
++    fn assert_invariants(&self) {
++        assert!(self.slots.len() >= 2 && self.slots.len() <= MAX_DMABUF_FBS_PER_HEAD);
++        let in_flight = self
++            .slots
++            .iter()
++            .filter(|slot| slot.state == SlotState::InFlight)
++            .count();
++        let on_screen = self
++            .slots
++            .iter()
++            .filter(|slot| slot.state == SlotState::OnScreen)
++            .count();
++        assert!(in_flight <= MAX_IN_FLIGHT_FLIPS);
++        assert!(on_screen <= 1);
++    }
++
++    fn pick_free_slot(&self) -> usize {
++        self.assert_invariants();
++        let idx = self
++            .slots
++            .iter()
++            .position(|slot| slot.state == SlotState::Free)
++            .expect("swapchain has a free slot when no flip is in flight");
++        assert_eq!(self.slots[idx].state, SlotState::Free);
++        idx
++    }
++
++    fn mark_presented(&mut self, idx: usize) {
++        assert!(idx < self.slots.len());
++        assert_eq!(self.slots[idx].state, SlotState::Free);
++        self.slots[idx].state = SlotState::InFlight;
++        self.slots[idx].age = 1;
++        for (i, slot) in self.slots.iter_mut().enumerate() {
++            if i != idx && slot.age > 0 {
++                slot.age = slot.age.saturating_add(1);
++            }
++        }
++        self.assert_invariants();
++    }
++
++    fn on_flip_complete(&mut self, presented_idx: usize) {
++        assert!(presented_idx < self.slots.len());
++        assert_eq!(self.slots[presented_idx].state, SlotState::InFlight);
++        for (i, slot) in self.slots.iter_mut().enumerate() {
++            if i != presented_idx && slot.state == SlotState::OnScreen {
++                slot.state = SlotState::Free;
++            }
++        }
++        self.slots[presented_idx].state = SlotState::OnScreen;
++        self.assert_invariants();
++    }
++}
++
++fn find_render_scheme_path() -> Option<String> {
++    let entries = fs::read_dir("/scheme").ok()?;
++    let mut best: Option<String> = None;
++    for entry in entries.take(MAX_SCHEME_ENTRIES) {
++        let Ok(entry) = entry else {
++            continue;
++        };
++        let name = entry.file_name();
++        let Some(name) = name.to_str() else {
++            continue;
++        };
++        if name.starts_with("gpu.") && best.as_deref().is_none_or(|cur| name < cur) {
++            best = Some(name.to_owned());
++        }
++    }
++    best.map(|name| format!("/scheme/{name}"))
++}
++
++fn pick_dmabuf_render_fourcc(renderer: &GlesRenderer) -> Option<Fourcc> {
++    let formats = renderer.egl_context().display().dmabuf_render_formats();
++    for fourcc in [Fourcc::Xrgb8888, Fourcc::Argb8888] {
++        if formats.contains(&Format {
++            code: fourcc,
++            modifier: Modifier::Linear,
++        }) {
++            return Some(fourcc);
++        }
++    }
++    None
++}
++
++enum SwapchainSetupErr {
++    ChangePending,
++    Failed(&'static str, String),
++}
++
++fn build_head_swapchain(
++    gbm: &GbmDevice,
++    renderer: &mut GlesRenderer,
++    native: &mut native::Backend,
++    head_id: u32,
++    width: u32,
++    height: u32,
++    fourcc: Fourcc,
++    generation: u64,
++) -> Result<GbmSwapchain, SwapchainSetupErr> {
++    let mut slots: Vec<GbmSwapSlot> = Vec::with_capacity(SWAPCHAIN_SLOTS);
++    for _ in 0..SWAPCHAIN_SLOTS {
++        let (bo, dmabuf_fd, stride, offset, modifier) =
++            match gbm.create_linear_scanout_bo(width, height, fourcc as u32) {
++                Ok(values) => values,
++                Err(err) => {
++                    for slot in &slots {
++                        let _ = native.destroy_dmabuf_fb_for(head_id, slot.fb);
++                    }
++                    return Err(SwapchainSetupErr::Failed(
++                        "gbm_bo_create_failed",
++                        err.to_string(),
++                    ));
++                }
++            };
++        let fb = match native.import_dmabuf_fb_for(
++            head_id,
++            dmabuf_fd.as_fd(),
++            DmabufFbDesc {
++                width,
++                height,
++                fourcc: fourcc as u32,
++                stride,
++                offset,
++                modifier,
++            },
++        ) {
++            Ok(fb) => fb,
++            Err(err) => {
++                for slot in &slots {
++                    let _ = native.destroy_dmabuf_fb_for(head_id, slot.fb);
++                }
++                if is_change_pending(&err) {
++                    return Err(SwapchainSetupErr::ChangePending);
++                }
++                return Err(SwapchainSetupErr::Failed(
++                    "drm_addfb2_failed",
++                    err.to_string(),
++                ));
++            }
++        };
++        let mut builder = Dmabuf::builder(
++            (width as i32, height as i32),
++            fourcc,
++            Modifier::Linear,
++            DmabufFlags::empty(),
++        );
++        if !builder.add_plane(dmabuf_fd, offset, stride) {
++            let _ = native.destroy_dmabuf_fb_for(head_id, fb);
++            for slot in &slots {
++                let _ = native.destroy_dmabuf_fb_for(head_id, slot.fb);
++            }
++            return Err(SwapchainSetupErr::Failed(
++                "dmabuf_plane_failed",
++                String::from("add_plane rejected"),
++            ));
++        }
++        let Some(mut dmabuf) = builder.build() else {
++            let _ = native.destroy_dmabuf_fb_for(head_id, fb);
++            for slot in &slots {
++                let _ = native.destroy_dmabuf_fb_for(head_id, slot.fb);
++            }
++            return Err(SwapchainSetupErr::Failed(
++                "dmabuf_build_failed",
++                String::from("Dmabuf::build returned None"),
++            ));
++        };
++        if let Err(err) = renderer.bind(&mut dmabuf) {
++            let _ = native.destroy_dmabuf_fb_for(head_id, fb);
++            for slot in &slots {
++                let _ = native.destroy_dmabuf_fb_for(head_id, slot.fb);
++            }
++            return Err(SwapchainSetupErr::Failed(
++                "egl_dmabuf_bind_failed",
++                err.to_string(),
++            ));
++        }
++        slots.push(GbmSwapSlot {
++            dmabuf,
++            _bo: bo,
++            fb,
++            state: SlotState::Free,
++            age: 0,
++        });
++    }
++    let swapchain = GbmSwapchain { generation, slots };
++    swapchain.assert_invariants();
++    Ok(swapchain)
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ struct DisplayMode {
+     width: u32,
+@@ -108,6 +449,7 @@
+     readback_us: u64,
+     inputs: Vec<u64>,
+     feedbacks: OutputPresentationFeedback,
++    swapchain_slot: Option<(u64, usize)>,
+ }
+ 
+ enum Pacing {
+@@ -129,6 +471,7 @@
+     output: Output,
+     mode: DisplayMode,
+     texture: GlesTexture,
++    swapchain: Option<GbmSwapchain>,
+     damage: OutputDamageTracker,
+     buffer_valid: bool,
+     cursor: CursorPlane,
+@@ -159,8 +502,7 @@
+ }
+ 
+ fn is_change_pending(err: &io::Error) -> bool {
+-    err.kind() == io::ErrorKind::WouldBlock
+-        && err.to_string() == DISPLAY_CHANGE_PENDING_ERR
++    err.kind() == io::ErrorKind::WouldBlock && err.to_string() == DISPLAY_CHANGE_PENDING_ERR
+ }
+ 
+ fn anyhow_is_change_pending(err: &anyhow::Error) -> bool {
+@@ -221,8 +563,8 @@
+     let ipc_width: u16 = mode.width.try_into()?;
+     let ipc_height: u16 = mode.height.try_into()?;
+     let ipc_refresh = output_mode.refresh as u32;
+-    let physical_size = (info.mm_width > 0 && info.mm_height > 0)
+-        .then_some((info.mm_width, info.mm_height));
++    let physical_size =
++        (info.mm_width > 0 && info.mm_height > 0).then_some((info.mm_width, info.mm_height));
+     let logical = logical_output(&output);
+     ipc_outputs.lock().unwrap().insert(
+         ipc_id,
+@@ -253,6 +595,7 @@
+         output,
+         mode,
+         texture,
++        swapchain: None,
+         damage,
+         buffer_valid: false,
+         cursor: CursorPlane::Unknown,
+@@ -268,7 +611,9 @@
+     renderer: GlesRenderer,
+     change_pending: bool,
+     display_generation: u64,
++    swapchain_generation: u64,
+     heads: Vec<HeadState>,
++    gbm: Option<GbmDevice>,
+     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
+     input_epoch: u64,
+     pending_inputs: VecDeque<u64>,
+@@ -301,12 +646,14 @@
+         let primary_height = heads[0].mode.height;
+         let output_count = heads.len();
+         let display_generation = native.display_generation();
+-        let backend = Self {
++        let mut backend = Self {
+             native,
+             renderer,
+             change_pending: false,
+             display_generation,
++            swapchain_generation: 0,
+             heads,
++            gbm: None,
+             ipc_outputs,
+             input_epoch,
+             pending_inputs: VecDeque::new(),
+@@ -385,10 +732,8 @@
+             }
+         })?;
+         info!("FERRION_RENDERER renderer=\"{}\"", gl_renderer);
+-        info!(
+-            "FERRION_PRESENTER mode={}",
+-            present_mode_name(backend.native.present_mode())
+-        );
++        backend.init_gbm_device_once();
++        backend.try_enable_swapchains();
+         info!(
+             "FERRION_READY width={} height={} vt={} outputs={}",
+             primary_width,
+@@ -399,6 +744,112 @@
+         Ok(backend)
+     }
+ 
++    fn init_gbm_device_once(&mut self) {
++        assert!(self.gbm.is_none());
++        assert!(
++            std::env::var_os("WAYLAND_DISPLAY").is_none(),
++            "GBM device must be initialized before WAYLAND_DISPLAY is set"
++        );
++        if self.native.present_mode() != PresentMode::PageFlip {
++            return;
++        }
++        if pick_dmabuf_render_fourcc(&self.renderer).is_none() {
++            return;
++        }
++        let Some(render_path) = find_render_scheme_path() else {
++            return;
++        };
++        match GbmDevice::open(&render_path) {
++            Ok(gbm) => {
++                self.gbm = Some(gbm);
++            }
++            Err(err) => {
++                warn!("GBM device open failed on {}: {err}", render_path);
++            }
++        }
++    }
++
++    fn teardown_all_swapchains(&mut self) {
++        self.native.destroy_all_dmabuf_fbs();
++        for head in &mut self.heads {
++            head.swapchain = None;
++        }
++    }
++
++    fn try_enable_swapchains(&mut self) {
++        self.teardown_all_swapchains();
++        let mode = self.native.present_mode();
++        if mode != PresentMode::PageFlip {
++            info!(
++                "FERRION_PRESENTER mode={} swapchain=cpu reason=dirtyfb_mode",
++                present_mode_name(mode)
++            );
++            return;
++        }
++        let Some(fourcc) = pick_dmabuf_render_fourcc(&self.renderer) else {
++            info!("FERRION_PRESENTER mode=flip swapchain=cpu reason=no_egl_dmabuf_render_format");
++            return;
++        };
++        let Some(gbm) = self.gbm.as_ref() else {
++            let reason = if find_render_scheme_path().is_none() {
++                "no_render_scheme"
++            } else {
++                "gbm_create_device_failed"
++            };
++            info!(
++                "FERRION_PRESENTER mode=flip swapchain=cpu reason={}",
++                reason
++            );
++            return;
++        };
++        self.swapchain_generation = self.swapchain_generation.wrapping_add(1);
++        let generation = self.swapchain_generation;
++        for head in &mut self.heads {
++            match build_head_swapchain(
++                gbm,
++                &mut self.renderer,
++                &mut self.native,
++                head.id,
++                head.mode.width,
++                head.mode.height,
++                fourcc,
++                generation,
++            ) {
++                Ok(swapchain) => {
++                    head.swapchain = Some(swapchain);
++                    head.damage = OutputDamageTracker::from_output(&head.output);
++                    head.buffer_valid = false;
++                }
++                Err(SwapchainSetupErr::ChangePending) => {
++                    self.native.destroy_all_dmabuf_fbs();
++                    for other in &mut self.heads {
++                        other.swapchain = None;
++                    }
++                    self.change_pending = true;
++                    return;
++                }
++                Err(SwapchainSetupErr::Failed(step, detail)) => {
++                    warn!(
++                        "GBM swapchain setup failed on {} at {}: {}",
++                        head.output.name(),
++                        step,
++                        detail
++                    );
++                    self.native.destroy_all_dmabuf_fbs();
++                    for other in &mut self.heads {
++                        other.swapchain = None;
++                    }
++                    info!("FERRION_PRESENTER mode=flip swapchain=cpu reason={}", step);
++                    return;
++                }
++            }
++        }
++        info!(
++            "FERRION_PRESENTER mode=flip swapchain=gbm slots={} fourcc={:?}",
++            SWAPCHAIN_SLOTS, fourcc
++        );
++    }
++
+     pub fn init(&mut self, niri: &mut Niri) {
+         resources::init(&mut self.renderer);
+         shaders::init(&mut self.renderer);
+@@ -492,20 +943,14 @@
+ 
+     fn reconfigure(&mut self, niri: &mut Niri) -> anyhow::Result<()> {
+         assert!(self.change_pending);
++        self.teardown_all_swapchains();
+         self.native.reconfigure()?;
+-        info!(
+-            "FERRION_PRESENTER mode={}",
+-            present_mode_name(self.native.present_mode())
+-        );
+         let generation = self.native.display_generation();
+         let reset_all = generation != self.display_generation;
+         self.display_generation = generation;
+         let new_infos = self.native.outputs().to_vec();
+-        let mut old_by_id: HashMap<u32, HeadState> = self
+-            .heads
+-            .drain(..)
+-            .map(|head| (head.id, head))
+-            .collect();
++        let mut old_by_id: HashMap<u32, HeadState> =
++            self.heads.drain(..).map(|head| (head.id, head)).collect();
+ 
+         let new_ids: Vec<u32> = new_infos.iter().map(|info| info.id).collect();
+         let removed_ids: Vec<u32> = old_by_id
+@@ -594,6 +1039,7 @@
+         }
+         self.heads = next_heads;
+         self.change_pending = false;
++        self.try_enable_swapchains();
+         self.sync_ipc_logical();
+         niri.ipc_outputs_changed = true;
+         niri.queue_redraw_all();
+@@ -613,6 +1059,13 @@
+         let Pacing::FlipPending(mut pending) = mem::replace(&mut head.pacing, Pacing::Idle) else {
+             unreachable!();
+         };
++        if let Some((swapchain_gen, slot_idx)) = pending.swapchain_slot {
++            if let Some(swapchain) = head.swapchain.as_mut() {
++                if swapchain.generation == swapchain_gen {
++                    swapchain.on_flip_complete(slot_idx);
++                }
++            }
++        }
+         head.consecutive_flip_busy = 0;
+         let present_us = flip.completed_us.saturating_sub(pending.started_us);
+         info!(
+@@ -634,17 +1087,15 @@
+             );
+         }
+         let presentation_time = Duration::from_micros(flip.tv_us);
+-        pending
+-            .feedbacks
+-            .presented::<_, smithay::utils::Monotonic>(
+-                presentation_time,
+-                head.mode
+-                    .refresh_interval
+-                    .map(Refresh::Fixed)
+-                    .unwrap_or(Refresh::Unknown),
+-                pending.frame,
+-                wp_presentation_feedback::Kind::HwCompletion,
+-            );
++        pending.feedbacks.presented::<_, smithay::utils::Monotonic>(
++            presentation_time,
++            head.mode
++                .refresh_interval
++                .map(Refresh::Fixed)
++                .unwrap_or(Refresh::Unknown),
++            pending.frame,
++            wp_presentation_feedback::Kind::HwCompletion,
++        );
+         head.scheduler.record_render(pending.started.elapsed());
+         Ok(())
+     }
+@@ -761,7 +1212,9 @@
+         match result {
+             Ok(result) => {
+                 if !matches!(self.heads[head_idx].pacing, Pacing::FlipPending(_)) {
+-                    self.heads[head_idx].scheduler.record_render(started.elapsed());
++                    self.heads[head_idx]
++                        .scheduler
++                        .record_render(started.elapsed());
+                 }
+                 self.heads[head_idx].consecutive_flip_busy = 0;
+                 let output_state = niri.output_state.get_mut(output).unwrap();
+@@ -776,6 +1229,7 @@
+             }
+             Err(err) if anyhow_is_change_pending(&err) => {
+                 self.change_pending = true;
++                self.teardown_all_swapchains();
+                 let output_state = niri.output_state.get_mut(output).unwrap();
+                 output_state.redraw_state = RedrawState::Queued;
+                 RenderResult::Skipped
+@@ -827,10 +1281,88 @@
+             output,
+             software_cursor,
+         );
+-        let (head_id, width, height, output_name) = {
++        let (head_id, width, height, output_name, has_swapchain) = {
+             let head = &self.heads[head_idx];
+-            (head.id, head.mode.width, head.mode.height, head.output.name())
++            (
++                head.id,
++                head.mode.width,
++                head.mode.height,
++                head.output.name(),
++                head.swapchain.is_some(),
++            )
+         };
++        if has_swapchain {
++            let (slot_idx, slot_fb, swapchain_gen, feedbacks, composite_us, sync_wait_us) = {
++                let head = &mut self.heads[head_idx];
++                let swapchain = head.swapchain.as_mut().unwrap();
++                let slot_idx = swapchain.pick_free_slot();
++                let slot_age = swapchain.slots[slot_idx].age;
++                let slot_fb = swapchain.slots[slot_idx].fb;
++                let swapchain_gen = swapchain.generation;
++                let mut target = self.renderer.bind(&mut swapchain.slots[slot_idx].dmabuf)?;
++                let result = head.damage.render_output(
++                    &mut self.renderer,
++                    &mut target,
++                    slot_age,
++                    &elements,
++                    [0.; 4],
++                )?;
++                niri.update_primary_scanout_output(output, &result.states);
++                if result.damage.is_none() {
++                    self.pending_inputs.clear();
++                    return Ok(RenderResult::NoDamage);
++                }
++                let composite_us = composite_started
++                    .elapsed()
++                    .as_micros()
++                    .min(u128::from(u64::MAX)) as u64;
++                let sync_started = Instant::now();
++                result.sync.wait()?;
++                let sync_wait_us =
++                    sync_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
++                drop(target);
++                let feedbacks = niri.take_presentation_feedbacks(output, &result.states);
++                (
++                    slot_idx,
++                    slot_fb,
++                    swapchain_gen,
++                    feedbacks,
++                    composite_us,
++                    sync_wait_us,
++                )
++            };
++            let copy_us = 0_u64;
++            let readback_us = sync_wait_us;
++            let presented = match self.native.present_dmabuf_for(head_id, slot_fb) {
++                Ok(presented) => presented,
++                Err(err) => {
++                    if let Some(swapchain) = self.heads[head_idx].swapchain.as_mut() {
++                        swapchain.slots[slot_idx].age = 0;
++                    }
++                    return Err(err.into());
++                }
++            };
++            assert!(presented.pending);
++            assert_eq!(presented.mode, PresentMode::PageFlip);
++            let head = &mut self.heads[head_idx];
++            head.swapchain.as_mut().unwrap().mark_presented(slot_idx);
++            head.frame += 1;
++            let frame_no = head.frame;
++            let inputs = self.pending_inputs.drain(..).collect();
++            head.pacing = Pacing::FlipPending(PendingFlip {
++                frame: frame_no,
++                started: frame_started,
++                started_us: presented.started_us,
++                composite_us,
++                sync_wait_us,
++                copy_us,
++                readback_us,
++                inputs,
++                feedbacks,
++                swapchain_slot: Some((swapchain_gen, slot_idx)),
++            });
++            return Ok(RenderResult::Submitted);
++        }
+         let (feedbacks, composite_us, sync_wait_us, copy_us) = {
+             let head = &mut self.heads[head_idx];
+             let mut target = self.renderer.bind(&mut head.texture)?;
+@@ -852,10 +1384,7 @@
+                 .min(u128::from(u64::MAX)) as u64;
+             let sync_started = Instant::now();
+             result.sync.wait()?;
+-            let sync_wait_us = sync_started
+-                .elapsed()
+-                .as_micros()
+-                .min(u128::from(u64::MAX)) as u64;
++            let sync_wait_us = sync_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+             let copy_started = Instant::now();
+             let mapping = self.renderer.copy_framebuffer(
+                 &target,
+@@ -873,10 +1402,7 @@
+             {
+                 buffer[row * stride..row * stride + row_bytes].copy_from_slice(source);
+             }
+-            let copy_us = copy_started
+-                .elapsed()
+-                .as_micros()
+-                .min(u128::from(u64::MAX)) as u64;
++            let copy_us = copy_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+             let feedbacks = niri.take_presentation_feedbacks(output, &result.states);
+             (feedbacks, composite_us, sync_wait_us, copy_us)
+         };
+@@ -899,6 +1425,7 @@
+                 readback_us,
+                 inputs,
+                 feedbacks,
++                swapchain_slot: None,
+             });
+             return Ok(RenderResult::Submitted);
+         }
+@@ -934,6 +1461,12 @@
+     }
+ }
+ 
++impl Drop for Ferrion {
++    fn drop(&mut self) {
++        self.teardown_all_swapchains();
++    }
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+ pub struct InputdDevice;
+ impl sm::Device for InputdDevice {

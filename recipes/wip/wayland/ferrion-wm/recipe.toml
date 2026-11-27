@@ -17,6 +17,7 @@ patches = [
     "F2-default-deny.patch",
     "0005-ferrion-gpu-present.patch",
     "0006-ferrion-multi-output.patch",
+    "0007-ferrion-gbm-swapchain.patch",
 ]
 script = """
 mkdir -p ferrion-vendor
