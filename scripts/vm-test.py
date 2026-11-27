@@ -1825,6 +1825,184 @@ def test_spawn_failure(vm, args):
     )
 
 
+EXEC_FORK_WAIT_LIMIT_S = 180
+EXIT_FORK_WAIT_LIMIT_S = 180
+EXEC_FORK_NAME_RE = re.compile(r"exec-handles-(probe|checker)")
+
+
+def _run_fork_race_check(vm, args, tag, probe_flag, expected_passes, wait_limit_s, log_prefix, success_msg):
+    if not user_bash(vm, args.timeout):
+        return False, "no user Bash prompt after login"
+
+    def run_watch_init():
+        since_w = vm.mark()
+        vm.type(f"{GUEST_WATCH}; echo FWR-{tag}-$((40+2))=$?\n")
+        found = vm.wait_serial(rf"(?s)\n(.*?)FWR-{tag}-42=(\d+)\s", 30, since_w)
+        return int(found.group(2)) if found else None
+
+    def capture_watch():
+        guest_watch(vm, "watch-failed-1", "context syscall", 60)
+        time.sleep(3)
+        guest_watch(vm, "watch-failed-2", "context syscall", 60)
+        guest_watch(vm, "watch-failed-iostat", "iostat", 60)
+
+    watch_rc = run_watch_init()
+    if watch_rc != 0:
+        return False, f"failed to start guest watcher (status {watch_rc})"
+
+    user_uid = read_user_uid(vm, f"{tag}-uid")
+    if user_uid is None:
+        return False, f"could not read user uid; see {vm.out / 'serial.log'}"
+
+    since = vm.mark()
+    start = guest_run(
+        vm,
+        f"{tag}-start",
+        f"rm -f /tmp/{tag}.pid /tmp/{tag}.rc /tmp/{tag}.out; "
+        f"(exec-handles-probe {probe_flag} >/tmp/{tag}.out 2>&1 & p=$!; echo $p >/tmp/{tag}.pid; wait $p; echo $? >/tmp/{tag}.rc) "
+        f"</dev/null >/dev/null 2>&1 & "
+        f"for i in $(seq 20); do [ -s /tmp/{tag}.pid ] && break; sleep 0.2; done; cat /tmp/{tag}.pid",
+        30,
+    )
+    pid_match = re.search(r"(?m)^\s*(\d+)\s*$", start.out) if not isinstance(start, NoAnswer) else None
+    if not pid_match:
+        return False, f"exec-handles-probe {probe_flag} did not record its pid; see {vm.out / 'serial.log'}"
+    probe_pid = int(pid_match.group(1))
+
+    seen_live = False
+    for poll in range(POSITIVE_CONTROL_MAX_POLLS):
+        ctrl = read_root_contexts(vm, f"{tag}-ctrl-{poll}", timeout=60)
+        if ctrl is not None:
+            ctrl_rows, _ = ctrl
+            if any(
+                row.pid == probe_pid
+                and row.euid == user_uid
+                and "exec-handles-probe" in row.name
+                for row in ctrl_rows
+            ):
+                seen_live = True
+                break
+        rc_check = guest_run(vm, f"{tag}-done-{poll}", f"test -f /tmp/{tag}.rc && echo DONE || echo LIVE", 15)
+        if not isinstance(rc_check, NoAnswer) and "DONE" in rc_check.out:
+            break
+        time.sleep(0.5)
+
+    wait_res = guest_run(
+        vm,
+        f"{tag}-wait",
+        f"for i in $(seq {wait_limit_s}); do [ -f /tmp/{tag}.rc ] && break; sleep 1; done; "
+        f"if [ -f /tmp/{tag}.rc ]; then cat /tmp/{tag}.rc; else printf '%s\\n' TIME''OUT; fi",
+        wait_limit_s + 30,
+    )
+    serial_during = vm.text(since)
+    out_res = guest_run(vm, f"{tag}-out", f"cat /tmp/{tag}.out 2>/dev/null || true", 30)
+    output = out_res.out if not isinstance(out_res, NoAnswer) else ""
+    rc_match = re.search(r"(?m)^\s*(\d+)\s*$", wait_res.out) if not isinstance(wait_res, NoAnswer) else None
+    rc = int(rc_match.group(1)) if rc_match else None
+    timed_out = rc is None or (
+        not isinstance(wait_res, NoAnswer) and bool(re.search(r"(?m)^TIMEOUT\r?$", wait_res.out))
+    )
+
+    after = read_root_contexts(vm, f"{tag}-after", timeout=60)
+    after_rows = []
+    if after is not None:
+        after_rows, ctx_out = after
+        (vm.out / f"{log_prefix}-context.txt").write_text(ctx_out)
+    leftover_rule = "rows matching exec-handles-(probe|checker) in root /scheme/sys/context after probe exit"
+    leftover_rows = [row for row in after_rows if EXEC_FORK_NAME_RE.search(row.name)]
+    leftover_kb = sum(1 for row in leftover_rows if row.stat.startswith("K"))
+    leftover_ub = sum(1 for row in leftover_rows if row.stat.startswith("U"))
+    leftover_summary = [f"pid={row.pid} name={row.name} stat={row.stat}" for row in leftover_rows]
+
+    (vm.out / f"{log_prefix}-probe.txt").write_text(
+        f"exit {rc}\n"
+        f"probe_pid {probe_pid}\n"
+        f"positive_control_seen_live {seen_live}\n"
+        f"leftover_rule: {leftover_rule}\n"
+        f"leftovers ({len(leftover_rows)}, kb={leftover_kb}, ub={leftover_ub}): {leftover_summary}\n"
+        f"{output}\n"
+    )
+
+    null_rip = count_null_rip_exceptions(serial_during)
+    problems = []
+    if "KERNEL PANIC" in vm.text(0):
+        problems.append("KERNEL PANIC on serial")
+    if timed_out:
+        problems.append(f"probe timed out after {wait_limit_s}s")
+    missing = [p for p in expected_passes if f"exec-handles-probe: pass {p}" not in output]
+    if rc != 0 or missing or "exec-handles-probe: PASS" not in output:
+        summary = [
+            line.strip()
+            for line in output.splitlines()
+            if "exec-handles-probe: case=" in line
+            or "exec-handles-probe: eof-timeout" in line
+            or "exec-handles-checker: fork-orphan" in line
+        ]
+        detail = "; ".join(summary[:6]) if summary else f"exit {rc}"
+        problems.append(f"probe failed ({detail})")
+    if not seen_live:
+        problems.append(f"positive control failed: root context read did not observe exec-handles-probe pid {probe_pid}")
+    if after is None:
+        problems.append(f"root context read failed after {log_prefix}")
+    elif leftover_rows:
+        problems.append(
+            f"{len(leftover_rows)} leftover context(s) (kb={leftover_kb}, ub={leftover_ub}; {leftover_rule}): {leftover_summary[:4]}"
+        )
+    if null_rip != 0:
+        problems.append(f"{null_rip} null-RIP UNHANDLED EXCEPTION dump(s)")
+
+    if problems:
+        capture_watch()
+        return False, "; ".join(problems) + f"; see {vm.out}"
+    return (
+        True,
+        f"{success_msg}; positive control saw pid {probe_pid}, 0 null-RIP exceptions, "
+        f"and 0 leftover contexts (root read, {len(after_rows)} total)",
+    )
+
+
+def test_exec_during_fork(vm, args):
+    """Checks that exec while a sibling thread loops on fork() leaves no never-started child in root /scheme/sys/context and waitpid(-1) returns within its bound (use --config desktop)."""
+    return _run_fork_race_check(
+        vm,
+        args,
+        tag="edf",
+        probe_flag="--exec-during-fork",
+        expected_passes=("exec-during-fork",),
+        wait_limit_s=EXEC_FORK_WAIT_LIMIT_S,
+        log_prefix="exec-during-fork",
+        success_msg="40 exec-during-fork rounds completed with waitpid(-1) returning ECHILD",
+    )
+
+
+def test_exec_during_fork_two_forkers(vm, args):
+    """Checks that exec while two sibling threads loop on fork() concurrently leaves no never-started child in root /scheme/sys/context and waitpid(-1) returns within its bound (use --config desktop)."""
+    return _run_fork_race_check(
+        vm,
+        args,
+        tag="edf2",
+        probe_flag="--exec-during-fork-two-forkers",
+        expected_passes=("exec-during-fork-two-forkers",),
+        wait_limit_s=EXEC_FORK_WAIT_LIMIT_S,
+        log_prefix="exec-during-fork-two-forkers",
+        success_msg="40 two-forker exec-during-fork rounds completed with waitpid(-1) returning ECHILD",
+    )
+
+
+def test_exit_during_fork(vm, args):
+    """Checks that process exit (sibling _exit or outside SIGKILL) while a thread loops on fork() leaves no never-started child holding pipe fds open past EOF bound (use --config desktop)."""
+    return _run_fork_race_check(
+        vm,
+        args,
+        tag="xdf",
+        probe_flag="--exit-during-fork",
+        expected_passes=("exit-during-fork-exit", "exit-during-fork-kill"),
+        wait_limit_s=EXIT_FORK_WAIT_LIMIT_S,
+        log_prefix="exit-during-fork",
+        success_msg="exit-during-fork (sibling _exit and outside SIGKILL) closed pipe write ends within bound",
+    )
+
+
 def test_forcekill_wakeup(vm, args):
     """Checks that SIGKILL wakes multithreaded children entering futex, pipe, nanosleep, and UNIX socket waits within a bounded deadline (use --config desktop)."""
     if not user_bash(vm, args.timeout):
@@ -12508,6 +12686,9 @@ TESTS["exec-handles"] = test_exec_handles
 TESTS["forcekill-wakeup"] = test_forcekill_wakeup
 TESTS["sigkill-exit"] = test_sigkill_exit
 TESTS["spawn-failure"] = test_spawn_failure
+TESTS["exec-during-fork"] = test_exec_during_fork
+TESTS["exec-during-fork-two-forkers"] = test_exec_during_fork_two_forkers
+TESTS["exit-during-fork"] = test_exit_during_fork
 TESTS["nvme-queue"] = test_nvme_queue
 TESTS["ring-wake"] = test_ring_wake
 TESTS["blocked-wait"] = test_blocked_wait

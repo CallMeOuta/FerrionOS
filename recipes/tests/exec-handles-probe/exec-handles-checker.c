@@ -1,11 +1,13 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -29,7 +31,21 @@
 #define SIBLING_SAMPLE_COUNT 20
 #define SIBLING_MID_SAMPLE 10
 #define SIBLING_SAMPLE_NS 50000000L
+#define FORK_REAP_POLLS 30
+#define FORK_REAP_POLL_NS 10000000L
+#define FORK_WAIT_BLOCK_TRIES 4
+#define FORK_ALARM_SEC 1
+#define MAX_ORPHAN_PIDS 16
+#define MAX_TIMING_REAPS 256
 #define ERRNO_CUTOFF ((size_t)-4096)
+
+static volatile sig_atomic_t g_alarm_fired = 0;
+
+static void on_sigalrm(int sig)
+{
+    (void)sig;
+    g_alarm_fired = 1;
+}
 
 extern size_t redox_cur_thrfd_v0(void);
 extern size_t redox_dup_v1(size_t fd, const uint8_t *buf, size_t len);
@@ -248,8 +264,202 @@ static int read_self_nthrd(void)
     return found;
 }
 
+static int find_ps_children(long parent_pid, pid_t *out_pids, int max_pids, char *first_status, size_t status_cap)
+{
+    int fd = open("/scheme/proc/ps", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    char *buf = malloc(PS_BUF_SIZE);
+    if (!buf) {
+        (void)close(fd);
+        return -1;
+    }
+    size_t total = 0;
+    for (int i = 0; i < PS_MAX_READS && total + 1 < PS_BUF_SIZE; i++) {
+        ssize_t n = read(fd, buf + total, PS_BUF_SIZE - 1 - total);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(buf);
+            (void)close(fd);
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += (size_t)n;
+    }
+    (void)close(fd);
+    buf[total] = '\0';
+
+    int count = 0;
+    if (status_cap > 0) {
+        first_status[0] = '\0';
+    }
+    char *p = buf;
+    for (size_t line_no = 0; line_no < 4096 && *p != '\0'; line_no++) {
+        char *nl = strchr(p, '\n');
+        if (nl) {
+            *nl = '\0';
+        }
+        long pid = -1;
+        long pgid = 0, ppid = 0, sid = 0, ruid = 0, rgid = 0, euid = 0, egid = 0;
+        int nthrd = -1;
+        char status_tok[16];
+        status_tok[0] = '\0';
+        if (sscanf(p, "%ld %ld %ld %ld %ld %ld %ld %ld %d %15s",
+                &pid, &pgid, &ppid, &sid, &ruid, &rgid, &euid, &egid, &nthrd, status_tok) == 10) {
+            if (ppid == parent_pid && pid != parent_pid) {
+                if (count < max_pids) {
+                    out_pids[count] = (pid_t)pid;
+                }
+                if (count == 0 && status_cap > 0) {
+                    snprintf(first_status, status_cap, "%s", status_tok);
+                }
+                count++;
+            }
+        }
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    free(buf);
+    return count;
+}
+
+static int run_fork_orphan_check(const char *round_str)
+{
+    int nthrd = read_self_nthrd();
+    if (nthrd != 1) {
+        fprintf(stdout, "exec-handles-checker: fork-orphan-nthrd round=%s nthrd=%d\n", round_str, nthrd);
+        fflush(stdout);
+        return 44;
+    }
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigalrm;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    int sra = sigaction(SIGALRM, &sa, NULL);
+    assert(sra == 0);
+
+    int reaped_started = 0;
+    struct timespec poll_req;
+    poll_req.tv_sec = 0;
+    poll_req.tv_nsec = FORK_REAP_POLL_NS;
+    for (int i = 0; i < FORK_REAP_POLLS; i++) {
+        int st = 0;
+        pid_t w = waitpid(-1, &st, WNOHANG);
+        if (w > 0) {
+            reaped_started++;
+            continue;
+        }
+        if (w < 0 && errno == ECHILD) {
+            break;
+        }
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        (void)nanosleep(&poll_req, NULL);
+    }
+
+    pid_t orphan_pids[MAX_ORPHAN_PIDS];
+    char orphan_status[16];
+    int ps_children = find_ps_children((long)getpid(), orphan_pids, MAX_ORPHAN_PIDS, orphan_status, sizeof(orphan_status));
+
+    int waitpid_blocked = 0;
+    int waitpid_echild = 0;
+    for (int k = 0; k < FORK_WAIT_BLOCK_TRIES; k++) {
+        g_alarm_fired = 0;
+        (void)alarm(FORK_ALARM_SEC);
+        int bst = 0;
+        pid_t bw = waitpid(-1, &bst, 0);
+        int berr = errno;
+        (void)alarm(0);
+        if (bw > 0) {
+            reaped_started++;
+            continue;
+        }
+        if (bw < 0 && berr == ECHILD) {
+            waitpid_echild = 1;
+            break;
+        }
+        if (bw < 0 && berr == EINTR && g_alarm_fired) {
+            waitpid_blocked = 1;
+            break;
+        }
+    }
+
+    if (ps_children > 0 && waitpid_echild) {
+        ps_children = find_ps_children((long)getpid(), orphan_pids, MAX_ORPHAN_PIDS, orphan_status, sizeof(orphan_status));
+    }
+
+    if (ps_children != 0 || !waitpid_echild || waitpid_blocked) {
+        long first_pid = (ps_children > 0) ? (long)orphan_pids[0] : -1L;
+        const char *st_str = (ps_children > 0 && orphan_status[0] != '\0') ? orphan_status : "none";
+        fprintf(stdout,
+            "exec-handles-checker: fork-orphan round=%s pid=%ld ps_children=%d orphan_pid=%ld orphan_status=%s waitpid_blocked=%d waitpid_echild=%d reaped_started=%d\n",
+            round_str, (long)getpid(), ps_children, first_pid, st_str, waitpid_blocked, waitpid_echild, reaped_started);
+        fflush(stdout);
+        return 47;
+    }
+
+    return 0;
+}
+
+static uint64_t checker_now_us(void)
+{
+    struct timespec ts;
+    int rc = clock_gettime(CLOCK_MONOTONIC, &ts);
+    assert(rc == 0);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000L);
+}
+
+static int run_timing_stamp(const char *t0_str, const char *fork_us_str)
+{
+    uint64_t t1 = checker_now_us();
+    uint64_t t0 = strtoull(t0_str, NULL, 10);
+    uint64_t dt = (t1 >= t0) ? (t1 - t0) : 0ULL;
+    if (fork_us_str != NULL) {
+        fprintf(stdout, "exec-handles-checker: timing_us=%llu fork_100_us=%s\n",
+            (unsigned long long)dt, fork_us_str);
+    } else {
+        fprintf(stdout, "exec-handles-checker: timing_us=%llu\n", (unsigned long long)dt);
+    }
+    fflush(stdout);
+    int reaped = 0;
+    for (int i = 0; i < MAX_TIMING_REAPS; i++) {
+        int st = 0;
+        pid_t w = waitpid(-1, &st, 0);
+        if (w > 0) {
+            reaped++;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        if (w < 0 && errno == ECHILD) {
+            break;
+        }
+        return 1;
+    }
+    fprintf(stdout, "exec-handles-checker: timing_reaped=%d\n", reaped);
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 3 && strcmp(argv[1], "--timing-stamp") == 0) {
+        return run_timing_stamp(argv[2], argc >= 4 ? argv[3] : NULL);
+    }
+    if (argc >= 3 && strcmp(argv[1], "--fork-orphan-check") == 0) {
+        return run_fork_orphan_check(argv[2]);
+    }
     const char *mode = argc > 1 ? argv[1] : "unknown";
     const char *threads = argc > 2 ? argv[2] : "0";
     int verbose = argc > 3 && strcmp(argv[3], "1") == 0;

@@ -1,7 +1,9 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,6 +31,24 @@
 #define BLOCKED_SETTLE_NS 20000000L
 #define BLOCKED_SLEEP_SEC 30
 #define BLOCKED_SIBLINGS 4
+#define FORK_EXEC_ROUNDS 40
+#define TWO_FORKER_THREADS 2
+#define FORK_LOOP_MAX_ITERS 2000
+#define FORK_JITTER_STEPS 8
+#define FORK_JITTER_STEP_NS 200000L
+#define PROBE_HOLD_MS 2000
+#define HOLD_STEP_MS 100
+#define HOLD_MAX_STEPS (PROBE_HOLD_MS / HOLD_STEP_MS)
+#define EXIT_FORK_ROUNDS 40
+#define MAX_EXIT_FAILS_PER_TRIGGER 3
+#define EXIT_READY_TIMEOUT_MS 5000
+#define EXIT_EOF_TIMEOUT_MS 5000
+#define EXIT_KILL_SLEEP_NS 50000000L
+#define EXIT_KILL_MAX_SLEEPS 200
+#define EXIT_PIPE_FD 3
+#define EXEC_TIMING_CHILDREN 100
+#define EXEC_TIMING_ROUNDS 5
+#define EXEC_TIMING_BUF_CAP 256
 
 extern char **environ;
 
@@ -511,9 +531,558 @@ static int run_case(const char *case_name, const char *mode, int mode_kind, int 
     return failed;
 }
 
+static void *fork_loop_worker_fn(void *arg)
+{
+    struct worker_state *st = (struct worker_state *)arg;
+    for (int i = 0; i < FORK_LOOP_MAX_ITERS; i++) {
+        pid_t child = fork();
+        if (child == 0) {
+            _exit(0);
+        }
+        if (child > 0) {
+            int cst = 0;
+            for (int w = 0; w < MAX_WAIT_ITERS; w++) {
+                pid_t r = waitpid(child, &cst, 0);
+                if (r == child) {
+                    break;
+                }
+                if (r < 0 && errno != EINTR) {
+                    break;
+                }
+            }
+        }
+        if (i == 0) {
+            pthread_mutex_lock(&st->mu);
+            st->ready++;
+            pthread_cond_broadcast(&st->cv);
+            pthread_mutex_unlock(&st->mu);
+        }
+    }
+    return NULL;
+}
+
+static int exec_during_fork_helper_n(const char *round_str, int forker_count)
+{
+    assert(forker_count >= 1 && forker_count <= TWO_FORKER_THREADS);
+    int round_idx = atoi(round_str);
+    struct worker_state st;
+    int rc = pthread_mutex_init(&st.mu, NULL);
+    assert(rc == 0);
+    rc = pthread_cond_init(&st.cv, NULL);
+    assert(rc == 0);
+    st.ready = 0;
+    st.stop = 0;
+
+    pthread_t forkers[TWO_FORKER_THREADS];
+    for (int f = 0; f < forker_count; f++) {
+        rc = pthread_create(&forkers[f], NULL, fork_loop_worker_fn, &st);
+        assert(rc == 0);
+    }
+
+    pthread_mutex_lock(&st.mu);
+    for (int i = 0; i < MAX_COND_WAITS && st.ready < forker_count; i++) {
+        pthread_cond_wait(&st.cv, &st.mu);
+    }
+    assert(st.ready == forker_count);
+    pthread_mutex_unlock(&st.mu);
+
+    long jitter_ns = (long)(round_idx % FORK_JITTER_STEPS) * FORK_JITTER_STEP_NS;
+    if (jitter_ns > 0) {
+        struct timespec req;
+        req.tv_sec = 0;
+        req.tv_nsec = jitter_ns;
+        (void)nanosleep(&req, NULL);
+    }
+
+    char *argv[] = {
+        (char *)CHECKER_PATH,
+        (char *)"--fork-orphan-check",
+        (char *)round_str,
+        NULL
+    };
+    execve(CHECKER_PATH, argv, environ);
+    fprintf(stderr, "exec-handles-probe: exec-during-fork execve failed errno=%d\n", errno);
+    _exit(127);
+}
+
+static void hold_for_control(void)
+{
+    struct timespec step_ts;
+    step_ts.tv_sec = 0;
+    step_ts.tv_nsec = HOLD_STEP_MS * 1000000L;
+    for (int s = 0; s < HOLD_MAX_STEPS; s++) {
+        (void)nanosleep(&step_ts, NULL);
+    }
+}
+
+static int run_exec_during_fork_suite_mode(const char *case_name, const char *helper_flag)
+{
+    int failed = 0;
+    int orphan_hits = 0;
+    int last_fail_rc = 0;
+    for (int i = 0; i < FORK_EXEC_ROUNDS; i++) {
+        char round_str[16];
+        snprintf(round_str, sizeof(round_str), "%d", i);
+        char *argv[] = {
+            (char *)PROBE_PATH,
+            (char *)helper_flag,
+            round_str,
+            NULL
+        };
+        pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "exec-handles-probe: %s fork failed round=%d errno=%d\n", case_name, i, errno);
+            failed++;
+            last_fail_rc = -1;
+            continue;
+        }
+        if (pid == 0) {
+            execve(PROBE_PATH, argv, environ);
+            _exit(127);
+        }
+        int st = 0;
+        if (wait_child(pid, &st) != 0) {
+            fprintf(stderr, "exec-handles-probe: %s waitpid failed round=%d errno=%d\n", case_name, i, errno);
+            failed++;
+            last_fail_rc = -1;
+            continue;
+        }
+        int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+        if (rc != 0) {
+            failed++;
+            last_fail_rc = rc;
+            if (rc == 47) {
+                orphan_hits++;
+            }
+        }
+    }
+    fprintf(stdout, "exec-handles-probe: case=%s rounds=%d failed=%d orphan_hits=%d last_rc=%d\n",
+        case_name, FORK_EXEC_ROUNDS, failed, orphan_hits, last_fail_rc);
+    fflush(stdout);
+    hold_for_control();
+    if (failed == 0) {
+        fprintf(stdout, "exec-handles-probe: pass %s\n", case_name);
+        fprintf(stdout, "exec-handles-probe: PASS\n");
+        fflush(stdout);
+        return 0;
+    }
+    fprintf(stdout, "exec-handles-probe: FAIL total_failures=%d\n", failed);
+    fflush(stdout);
+    return 1;
+}
+
+static int exit_during_fork_helper(const char *mode, const char *round_str)
+{
+    int round_idx = atoi(round_str);
+    struct worker_state st;
+    int rc = pthread_mutex_init(&st.mu, NULL);
+    assert(rc == 0);
+    rc = pthread_cond_init(&st.cv, NULL);
+    assert(rc == 0);
+    st.ready = 0;
+    st.stop = 0;
+
+    pthread_t forker;
+    rc = pthread_create(&forker, NULL, fork_loop_worker_fn, &st);
+    assert(rc == 0);
+
+    pthread_mutex_lock(&st.mu);
+    for (int i = 0; i < MAX_COND_WAITS && st.ready == 0; i++) {
+        pthread_cond_wait(&st.cv, &st.mu);
+    }
+    assert(st.ready == 1);
+    pthread_mutex_unlock(&st.mu);
+
+    char ready_byte = 'R';
+    ssize_t wr = write(EXIT_PIPE_FD, &ready_byte, 1);
+    assert(wr == 1);
+
+    if (strcmp(mode, "exit") == 0) {
+        long jitter_ns = (long)(round_idx % FORK_JITTER_STEPS) * FORK_JITTER_STEP_NS;
+        if (jitter_ns > 0) {
+            struct timespec req;
+            req.tv_sec = 0;
+            req.tv_nsec = jitter_ns;
+            (void)nanosleep(&req, NULL);
+        }
+        _exit(0);
+    }
+
+    struct timespec wait_ts;
+    wait_ts.tv_sec = 0;
+    wait_ts.tv_nsec = EXIT_KILL_SLEEP_NS;
+    for (int i = 0; i < EXIT_KILL_MAX_SLEEPS; i++) {
+        (void)nanosleep(&wait_ts, NULL);
+    }
+    _exit(99);
+}
+
+static int run_exit_during_fork_trigger(const char *trigger)
+{
+    int is_kill = (strcmp(trigger, "kill") == 0);
+    int rounds_run = 0;
+    int failed = 0;
+    int eof_timeouts = 0;
+
+    for (int i = 0; i < EXIT_FORK_ROUNDS; i++) {
+        rounds_run++;
+        int pfd[2];
+        if (pipe(pfd) != 0) {
+            fprintf(stdout, "exec-handles-probe: exit-during-fork pipe failed trigger=%s round=%d errno=%d\n",
+                trigger, i, errno);
+            failed++;
+            if (failed >= MAX_EXIT_FAILS_PER_TRIGGER) {
+                break;
+            }
+            continue;
+        }
+        int rflags = fcntl(pfd[0], F_GETFD, 0);
+        assert(rflags >= 0);
+        int frc = fcntl(pfd[0], F_SETFD, rflags | FD_CLOEXEC);
+        assert(frc == 0);
+
+        char round_str[16];
+        snprintf(round_str, sizeof(round_str), "%d", i);
+        char *argv[] = {
+            (char *)PROBE_PATH,
+            (char *)"--exit-during-fork-helper",
+            (char *)trigger,
+            round_str,
+            NULL
+        };
+
+        pid_t victim = fork();
+        if (victim < 0) {
+            fprintf(stdout, "exec-handles-probe: exit-during-fork fork failed trigger=%s round=%d errno=%d\n",
+                trigger, i, errno);
+            (void)close(pfd[0]);
+            (void)close(pfd[1]);
+            failed++;
+            if (failed >= MAX_EXIT_FAILS_PER_TRIGGER) {
+                break;
+            }
+            continue;
+        }
+        if (victim == 0) {
+            (void)close(pfd[0]);
+            if (pfd[1] != EXIT_PIPE_FD) {
+                if (dup2(pfd[1], EXIT_PIPE_FD) != EXIT_PIPE_FD) {
+                    _exit(126);
+                }
+                (void)close(pfd[1]);
+            }
+            int wflags = fcntl(EXIT_PIPE_FD, F_GETFD, 0);
+            if (wflags >= 0) {
+                (void)fcntl(EXIT_PIPE_FD, F_SETFD, wflags & ~FD_CLOEXEC);
+            }
+            execve(PROBE_PATH, argv, environ);
+            _exit(127);
+        }
+
+        (void)close(pfd[1]);
+
+        int ready_ok = 0;
+        struct pollfd rpf;
+        rpf.fd = pfd[0];
+        rpf.events = POLLIN;
+        rpf.revents = 0;
+        for (int tries = 0; tries < 4; tries++) {
+            int prc = poll(&rpf, 1, EXIT_READY_TIMEOUT_MS);
+            if (prc > 0) {
+                char ch = 0;
+                if (read(pfd[0], &ch, 1) == 1 && ch == 'R') {
+                    ready_ok = 1;
+                }
+                break;
+            }
+            if (prc < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
+        if (!ready_ok) {
+            fprintf(stdout, "exec-handles-probe: exit-during-fork ready-timeout trigger=%s round=%d victim=%ld\n",
+                trigger, i, (long)victim);
+            (void)kill(victim, SIGKILL);
+            int dst = 0;
+            (void)wait_child(victim, &dst);
+            (void)close(pfd[0]);
+            failed++;
+            if (failed >= MAX_EXIT_FAILS_PER_TRIGGER) {
+                break;
+            }
+            continue;
+        }
+
+        if (is_kill) {
+            long jitter_ns = (long)(i % FORK_JITTER_STEPS) * FORK_JITTER_STEP_NS;
+            if (jitter_ns > 0) {
+                struct timespec req;
+                req.tv_sec = 0;
+                req.tv_nsec = jitter_ns;
+                (void)nanosleep(&req, NULL);
+            }
+            (void)kill(victim, SIGKILL);
+        }
+
+        int vst = 0;
+        if (wait_child(victim, &vst) != 0) {
+            fprintf(stdout, "exec-handles-probe: exit-during-fork waitpid failed trigger=%s round=%d errno=%d\n",
+                trigger, i, errno);
+            (void)close(pfd[0]);
+            failed++;
+            if (failed >= MAX_EXIT_FAILS_PER_TRIGGER) {
+                break;
+            }
+            continue;
+        }
+
+        int eof_ok = 0;
+        struct pollfd epf;
+        epf.fd = pfd[0];
+        epf.events = POLLIN;
+        epf.revents = 0;
+        for (int tries = 0; tries < 4; tries++) {
+            int prc = poll(&epf, 1, EXIT_EOF_TIMEOUT_MS);
+            if (prc > 0) {
+                char b = 0;
+                ssize_t n = read(pfd[0], &b, 1);
+                if (n == 0) {
+                    eof_ok = 1;
+                    break;
+                }
+                if (n < 0 && errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if (prc < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        (void)close(pfd[0]);
+
+        if (!eof_ok) {
+            eof_timeouts++;
+            failed++;
+            fprintf(stdout, "exec-handles-probe: eof-timeout trigger=%s round=%d victim_pid=%ld timeout_ms=%d\n",
+                trigger, i, (long)victim, EXIT_EOF_TIMEOUT_MS);
+            fflush(stdout);
+            if (failed >= MAX_EXIT_FAILS_PER_TRIGGER) {
+                break;
+            }
+        }
+    }
+
+    fprintf(stdout, "exec-handles-probe: case=exit-during-fork-%s rounds=%d failed=%d eof_timeouts=%d\n",
+        trigger, rounds_run, failed, eof_timeouts);
+    if (failed == 0) {
+        fprintf(stdout, "exec-handles-probe: pass exit-during-fork-%s\n", trigger);
+    }
+    fflush(stdout);
+    return failed;
+}
+
+static int run_exit_during_fork_suite(void)
+{
+    int failed = 0;
+    failed += run_exit_during_fork_trigger("exit");
+    failed += run_exit_during_fork_trigger("kill");
+    hold_for_control();
+    if (failed == 0) {
+        fprintf(stdout, "exec-handles-probe: PASS\n");
+        fflush(stdout);
+        return 0;
+    }
+    fprintf(stdout, "exec-handles-probe: FAIL total_failures=%d\n", failed);
+    fflush(stdout);
+    return 1;
+}
+
+static int exec_timing_helper(void)
+{
+    int ready_pipe[2];
+    int stop_pipe[2];
+    if (pipe(ready_pipe) != 0 || pipe(stop_pipe) != 0) {
+        fprintf(stderr, "exec-handles-probe: timing pipe failed errno=%d\n", errno);
+        return 1;
+    }
+    int r0 = fcntl(ready_pipe[0], F_GETFD, 0);
+    int s1 = fcntl(stop_pipe[1], F_GETFD, 0);
+    assert(r0 >= 0 && s1 >= 0);
+    assert(fcntl(ready_pipe[0], F_SETFD, r0 | FD_CLOEXEC) == 0);
+    assert(fcntl(stop_pipe[1], F_SETFD, s1 | FD_CLOEXEC) == 0);
+
+    uint64_t fork_t0 = now_us();
+    for (int i = 0; i < EXEC_TIMING_CHILDREN; i++) {
+        pid_t p = fork();
+        if (p < 0) {
+            fprintf(stderr, "exec-handles-probe: timing fork failed child=%d errno=%d\n", i, errno);
+            _exit(2);
+        }
+        if (p == 0) {
+            (void)close(STDOUT_FILENO);
+            (void)close(ready_pipe[0]);
+            (void)close(stop_pipe[1]);
+            char ch = 'R';
+            ssize_t w = write(ready_pipe[1], &ch, 1);
+            (void)close(ready_pipe[1]);
+            if (w == 1) {
+                char b = 0;
+                (void)read(stop_pipe[0], &b, 1);
+            }
+            (void)close(stop_pipe[0]);
+            _exit(0);
+        }
+    }
+    uint64_t fork_us = now_us() - fork_t0;
+    (void)close(ready_pipe[1]);
+    (void)close(stop_pipe[0]);
+
+    int got = 0;
+    for (int i = 0; i < EXEC_TIMING_CHILDREN * 4 && got < EXEC_TIMING_CHILDREN; i++) {
+        char buf[64];
+        ssize_t n = read(ready_pipe[0], buf, sizeof(buf));
+        if (n > 0) {
+            got += (int)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    (void)close(ready_pipe[0]);
+    if (got != EXEC_TIMING_CHILDREN) {
+        fprintf(stderr, "exec-handles-probe: timing ready got=%d expected=%d\n", got, EXEC_TIMING_CHILDREN);
+        _exit(3);
+    }
+
+    uint64_t t0 = now_us();
+    char t0_str[32];
+    char fork_us_str[32];
+    snprintf(t0_str, sizeof(t0_str), "%llu", (unsigned long long)t0);
+    snprintf(fork_us_str, sizeof(fork_us_str), "%llu", (unsigned long long)fork_us);
+    char *argv[] = {
+        (char *)CHECKER_PATH,
+        (char *)"--timing-stamp",
+        t0_str,
+        fork_us_str,
+        NULL
+    };
+    execve(CHECKER_PATH, argv, environ);
+    fprintf(stderr, "exec-handles-probe: timing execve failed errno=%d\n", errno);
+    _exit(127);
+}
+
+static int run_exec_timing_suite(void)
+{
+    uint64_t samples[EXEC_TIMING_ROUNDS];
+    uint64_t fork_samples[EXEC_TIMING_ROUNDS];
+    int completed = 0;
+    for (int i = 0; i < EXEC_TIMING_ROUNDS; i++) {
+        int out_pipe[2];
+        if (pipe(out_pipe) != 0) {
+            return 1;
+        }
+        pid_t p = fork();
+        if (p < 0) {
+            (void)close(out_pipe[0]);
+            (void)close(out_pipe[1]);
+            return 1;
+        }
+        if (p == 0) {
+            (void)close(out_pipe[0]);
+            if (dup2(out_pipe[1], STDOUT_FILENO) != STDOUT_FILENO) {
+                _exit(126);
+            }
+            (void)close(out_pipe[1]);
+            char *argv[] = {
+                (char *)PROBE_PATH,
+                (char *)"--exec-timing-helper",
+                NULL
+            };
+            execve(PROBE_PATH, argv, environ);
+            _exit(127);
+        }
+        (void)close(out_pipe[1]);
+        char buf[EXEC_TIMING_BUF_CAP];
+        size_t pos = 0;
+        for (int k = 0; k < 32 && pos + 1 < sizeof(buf); k++) {
+            ssize_t n = read(out_pipe[0], buf + pos, sizeof(buf) - 1 - pos);
+            if (n > 0) {
+                pos += (size_t)n;
+            } else if (n < 0 && errno == EINTR) {
+                continue;
+            } else {
+                break;
+            }
+        }
+        (void)close(out_pipe[0]);
+        buf[pos] = '\0';
+        int st = 0;
+        if (wait_child(p, &st) != 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            fprintf(stdout, "exec-handles-probe: timing round=%d failed st=0x%x out=%s\n", i, st, buf);
+            return 1;
+        }
+        char *m = strstr(buf, "timing_us=");
+        char *fm = strstr(buf, "fork_100_us=");
+        if (!m || !fm) {
+            fprintf(stdout, "exec-handles-probe: timing round=%d missing timing fields out=%s\n", i, buf);
+            return 1;
+        }
+        unsigned long long dt = strtoull(m + strlen("timing_us="), NULL, 10);
+        unsigned long long fdt = strtoull(fm + strlen("fork_100_us="), NULL, 10);
+        samples[completed] = (uint64_t)dt;
+        fork_samples[completed] = (uint64_t)fdt;
+        completed++;
+    }
+    assert(completed == EXEC_TIMING_ROUNDS);
+    qsort(samples, (size_t)completed, sizeof(uint64_t), cmp_u64);
+    qsort(fork_samples, (size_t)completed, sizeof(uint64_t), cmp_u64);
+    fprintf(stdout, "exec-handles-probe: case=exec-timing-100-children rounds=%d median_us=%llu min_us=%llu max_us=%llu\n",
+        completed,
+        (unsigned long long)samples[completed / 2],
+        (unsigned long long)samples[0],
+        (unsigned long long)samples[completed - 1]);
+    fprintf(stdout, "exec-handles-probe: case=fork-100-children rounds=%d median_us=%llu min_us=%llu max_us=%llu\n",
+        completed,
+        (unsigned long long)fork_samples[completed / 2],
+        (unsigned long long)fork_samples[0],
+        (unsigned long long)fork_samples[completed - 1]);
+    fprintf(stdout, "exec-handles-probe: PASS\n");
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (argc >= 2 && strcmp(argv[1], "--exec-during-fork") == 0) {
+        return run_exec_during_fork_suite_mode("exec-during-fork", "--exec-during-fork-helper");
+    }
+    if (argc >= 3 && strcmp(argv[1], "--exec-during-fork-helper") == 0) {
+        return exec_during_fork_helper_n(argv[2], 1);
+    }
+    if (argc >= 2 && strcmp(argv[1], "--exec-during-fork-two-forkers") == 0) {
+        return run_exec_during_fork_suite_mode("exec-during-fork-two-forkers", "--exec-during-fork-two-forkers-helper");
+    }
+    if (argc >= 3 && strcmp(argv[1], "--exec-during-fork-two-forkers-helper") == 0) {
+        return exec_during_fork_helper_n(argv[2], TWO_FORKER_THREADS);
+    }
+    if (argc >= 2 && strcmp(argv[1], "--exit-during-fork") == 0) {
+        return run_exit_during_fork_suite();
+    }
+    if (argc >= 4 && strcmp(argv[1], "--exit-during-fork-helper") == 0) {
+        return exit_during_fork_helper(argv[2], argv[3]);
+    }
+    if (argc >= 2 && strcmp(argv[1], "--exec-timing") == 0) {
+        return run_exec_timing_suite();
+    }
+    if (argc >= 2 && strcmp(argv[1], "--exec-timing-helper") == 0) {
+        return exec_timing_helper();
+    }
     if (argc >= 4 && strcmp(argv[1], "--direct-exec-helper") == 0) {
         return direct_exec_helper(argv[2], argv[3]);
     }
