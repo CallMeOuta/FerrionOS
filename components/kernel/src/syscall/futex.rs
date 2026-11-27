@@ -299,25 +299,13 @@ pub fn futex(
                 return Ok(0);
             };
             if remove_futex_entry(futexes).is_none() {
-                drop(futexes_lock);
-                // Signal can still arrive even if already woken up, in that case we want to assume EINTR happened
-                let current_context_ref = context::current();
-                let context = current_context_ref.read(token.token());
-                if !context.being_sigkilled
-                    && context.sigcontrol().is_none_or(|(control, pctl, _)| {
-                        control.currently_pending_unblocked(pctl) == 0
-                    })
-                {
-                    return Ok(0);
-                }
-                return Err(Error::new(EINTR));
+                return Ok(0);
             }
 
             if timed_out {
                 return Err(Error::new(ETIMEDOUT));
             }
 
-            // Not woken up by FUTEX_WAKE, likely by signal
             Err(Error::new(EINTR))
         }
         FUTEX_WAKE => {
