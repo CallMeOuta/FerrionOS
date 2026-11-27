@@ -1,0 +1,154 @@
+FerrionOS change to pop-os libcosmic 1.0.0 (MPL-2.0 license, kept), made against pinned commits dd108aa99d7306110eef06da43eafc109e1ab151 and 430f3d48a97d8779f9c1985473912e594ccca1ae.
+
+Enable wayland_platform on FerrionOS when the wayland feature is selected and keep orbital_platform active only when wayland is not enabled, keep x11_platform, xdg_portal and DBus crates excluded on redox, expose cctk and Wayland dependencies in the iced crates on redox, and populate PlatformSpecific::application_id on wayland_platform so windows carry their Wayland app_id.
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -171,4 +171,6 @@
++[target.'cfg(all(unix, not(any(target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
++cctk = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit", rev = "c0cff4d", optional = true }
++
+ # Enable DBus feature on Linux targets
+ [target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+-cctk = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit", rev = "c0cff4d", optional = true }
+ cosmic-config = { path = "cosmic-config", features = ["dbus"] }
+--- a/iced/build_helpers/src/lib.rs
++++ b/iced/build_helpers/src/lib.rs
+@@ -17,9 +17,9 @@
+         redox: { target_os = "redox" },
+ 
+         // Native displays.
+-        wayland_platform: { all(feature = "wayland", free_unix, not(wasm), not(redox)) },
++        wayland_platform: { all(feature = "wayland", free_unix, not(wasm)) },
+         x11_platform: { all(feature = "x11", free_unix, not(wasm), not(redox)) },
+         xdg_portal: { all(feature = "xdg-portal", free_unix, not(wasm), not(redox)) },
+-        orbital_platform: { redox },
++        orbital_platform: { all(redox, not(feature = "wayland")) },
+     }
+ }
+--- a/iced/core/Cargo.toml
++++ b/iced/core/Cargo.toml
+@@ -56,7 +56,7 @@
+ [dev-dependencies]
+ approx = "0.5"
+ 
+-[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+ cctk.workspace = true
+ cctk.optional = true
+ 
+--- a/iced/core/src/window/settings.rs
++++ b/iced/core/src/window/settings.rs
+@@ -7,7 +7,7 @@
+ #[path = "settings/macos.rs"]
+ mod platform;
+ 
+-#[cfg(all(free_unix, not(target_os = "redox")))]
++#[cfg(all(free_unix, not(orbital_platform)))]
+ #[path = "settings/unix.rs"]
+ mod platform;
+ 
+@@ -16,7 +16,7 @@
+ mod platform;
+ 
+ #[cfg(any(
+-    target_os = "redox",
++    orbital_platform,
+     not(any(
+         free_unix,
+         target_os = "windows",
+--- a/iced/runtime/Cargo.toml
++++ b/iced/runtime/Cargo.toml
+@@ -38,7 +38,7 @@
+ window_clipboard.workspace = true
+ dnd.workspace = true
+ 
+-[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+ cctk.workspace = true
+ cctk.optional = true
+ 
+--- a/iced/widget/Cargo.toml
++++ b/iced/widget/Cargo.toml
+@@ -56,7 +56,7 @@
+ iced_highlighter.workspace = true
+ iced_highlighter.optional = true
+ 
+-[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+ cctk.workspace = true
+ cctk.optional = true
+ 
+--- a/iced/winit/Cargo.toml
++++ b/iced/winit/Cargo.toml
+@@ -64,7 +64,7 @@
+ iced_program.workspace = true
+ 
+ 
+-[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+ 
+ mundy.workspace = true
+ mundy.optional = true
+--- a/src/app/mod.rs
++++ b/src/app/mod.rs
+@@ -64,7 +64,7 @@
+     let mut window_settings = iced::window::Settings::default();
+     window_settings.exit_on_close_request = exit_on_close;
+     iced.id = Some(App::APP_ID.to_owned());
+-    #[cfg(target_os = "linux")]
++    #[cfg(any(target_os = "linux", wayland_platform))]
+     {
+         window_settings.platform_specific.application_id = App::APP_ID.to_string();
+     }
+--- a/iced/wgpu/src/window.rs
++++ b/iced/wgpu/src/window.rs
+@@ -1,6 +1,6 @@
+ //! Display rendering results on windows.
+ pub mod compositor;
+-#[cfg(wayland_platform)]
++#[cfg(all(wayland_platform, not(target_os = "redox")))]
+ mod wayland;
+ #[cfg(all(unix, not(target_os = "macos"), not(target_os = "redox")))]
+ mod x11;
+--- a/iced/wgpu/src/window/compositor.rs
++++ b/iced/wgpu/src/window/compositor.rs
+@@ -9,9 +9,9 @@
+ use crate::settings::{self, Settings};
+ use crate::{Engine, Renderer};
+ 
+-#[cfg(wayland_platform)]
++#[cfg(all(wayland_platform, not(target_os = "redox")))]
+ use super::wayland::get_wayland_device_ids;
+-#[cfg(wayland_platform)]
++#[cfg(all(wayland_platform, not(target_os = "redox")))]
+ use super::x11::get_x11_device_ids;
+ 
+ /// A window graphics backend for iced powered by `wgpu`.
+@@ -59,7 +59,7 @@
+         compatible_window: Option<W>,
+         shell: Shell,
+     ) -> Result<Self, Error> {
+-        #[cfg(wayland_platform)]
++        #[cfg(all(wayland_platform, not(target_os = "redox")))]
+         let ids = compatible_window.as_ref().and_then(|window| {
+             get_wayland_device_ids(window)
+                 .or_else(|| get_x11_device_ids(window))
+@@ -71,7 +71,7 @@
+         //  3. and the user didn't set an adapter name,
+         //  4. and the user didn't request the high power pref
+         // => don't load the nvidia icd, as it might power on the gpu in hybrid setups causing severe delays
+-        #[cfg(wayland_platform)]
++        #[cfg(all(wayland_platform, not(target_os = "redox")))]
+         if !matches!(ids, Some((0x10de, _)))
+             && std::env::var_os("__NV_PRIME_RENDER_OFFLOAD")
+                 .is_none_or(|var| var == "0")
+@@ -131,7 +131,7 @@
+         let mut adapter = None;
+         #[cfg_attr(not(unix), allow(dead_code))]
+         if std::env::var_os("WGPU_ADAPTER_NAME").is_none() {
+-            #[cfg(wayland_platform)]
++            #[cfg(all(wayland_platform, not(target_os = "redox")))]
+             if let Some((vendor_id, device_id)) = ids {
+                 adapter = instance
+                     .enumerate_adapters(settings.backends)
