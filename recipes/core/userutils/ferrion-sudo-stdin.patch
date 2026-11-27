@@ -1,0 +1,141 @@
+FerrionOS change to upstream userutils (MIT license, kept), made against upstream commit 641a5aa81574db79d883151bc3438d3e59f90b88 after the existing recipe patches.
+
+Add -S to sudo so a non-interactive caller can authenticate by passing one password line on standard input. The password is read directly from file descriptor 0 one byte at a time up to MAX_STDIN_PASSWORD_BYTES (1024 bytes), stopping immediately at the newline so any remaining bytes on standard input stay aligned for the executed command, and wiped via WipedString and wipe_bytes after use. Without -S, sudo keeps its existing refusal when standard input is not a terminal.
+
+--- a/src/bin/sudo.rs
++++ b/src/bin/sudo.rs
+@@ -18,16 +18,18 @@
+ use syscall::flag::*;
+ use syscall::schemev2::NewFdFlags;
+ use termion::input::TermRead;
+-use userutils::unlock::{RewrapError, RewrapResult, WipedString};
++use userutils::unlock::{RewrapError, RewrapResult, WipedString, wipe_bytes};
+ 
+ const MAX_ATTEMPTS: u16 = 3;
++const MAX_STDIN_PASSWORD_BYTES: usize = 1024;
++const MAX_EINTR_RETRIES: usize = 16;
+ const _MAN_PAGE: &'static str = /* @MANSTART{sudo} */
+     r#"
+ NAME
+     sudo - execute a command as another user
+ 
+ SYNOPSIS
+-    sudo command
++    sudo [ -S ] [ -- ] command
+     sudo [ -h | --help ]
+ 
+ DESCRIPTION
+@@ -38,6 +40,8 @@
+     is not asked for it. Any other member is asked for their password on
+     the terminal that is standard input; when standard input is not a
+     terminal, sudo refuses without reading it and exits with status 1.
++    With -S, sudo reads a single password line (at most 1024 bytes) from
++    standard input without requiring a terminal.
+ 
+ EXIT STATUS
+     Upon successful execution of a command, the exit status from sudo will
+@@ -54,7 +58,16 @@
+     }
+ 
+     let mut args = env::args().skip(1);
+-    let cmd = args.next().unwrap_or_else(|| {
++    let mut read_stdin = false;
++    let mut next_arg = args.next();
++    if next_arg.as_deref() == Some("-S") {
++        read_stdin = true;
++        next_arg = args.next();
++    }
++    if next_arg.as_deref() == Some("--") {
++        next_arg = args.next();
++    }
++    let cmd = next_arg.unwrap_or_else(|| {
+         eprintln!("sudo: no command provided");
+         exit(1);
+     });
+@@ -78,7 +91,21 @@
+ 
+     // The daemon accepts an empty password only for an account whose password is empty in
+     // the account database, so such an account is never asked for one.
+-    if !authenticate(&file, "", &user.user) {
++    if read_stdin {
++        let password = match read_password_from_stdin() {
++            Ok(password) => password,
++            Err(err) => {
++                eprintln!("sudo: {err}");
++                exit(1);
++            }
++        };
++        if !authenticate(&file, &password.0, &user.user) {
++            drop(password);
++            eprintln!("sudo: incorrect password");
++            exit(1);
++        }
++        drop(password);
++    } else if !authenticate(&file, "", &user.user) {
+         // A password is only ever read from a terminal, never from a pipe or a file.
+         if !io::stdin().is_terminal() {
+             eprintln!(
+@@ -162,6 +190,63 @@
+     io::stdin().read_passwd(&mut terminal)
+ }
+ 
++fn read_password_from_stdin() -> std::result::Result<WipedString, String> {
++    let mut buf = Vec::with_capacity(64);
++    let mut saw_newline = false;
++    for _ in 0..=MAX_STDIN_PASSWORD_BYTES {
++        let mut byte = [0_u8; 1];
++        let mut read_count = None;
++        for _ in 0..MAX_EINTR_RETRIES {
++            match libredox::call::read(0, &mut byte) {
++                Ok(n) => {
++                    read_count = Some(n);
++                    break;
++                }
++                Err(err) if err.errno() == EINTR => continue,
++                Err(err) => {
++                    wipe_bytes(&mut buf);
++                    return Err(format!("cannot read password from standard input: {err}"));
++                }
++            }
++        }
++        let Some(n) = read_count else {
++            wipe_bytes(&mut buf);
++            return Err(format!(
++                "reading password from standard input interrupted more than {MAX_EINTR_RETRIES} times"
++            ));
++        };
++        if n == 0 {
++            break;
++        }
++        if byte[0] == b'\n' {
++            saw_newline = true;
++            break;
++        }
++        if buf.len() == MAX_STDIN_PASSWORD_BYTES {
++            wipe_bytes(&mut buf);
++            return Err(format!(
++                "password on standard input exceeds {MAX_STDIN_PASSWORD_BYTES} bytes"
++            ));
++        }
++        buf.push(byte[0]);
++        assert!(buf.len() <= MAX_STDIN_PASSWORD_BYTES);
++    }
++    if !saw_newline && buf.is_empty() {
++        return Err("no password provided on standard input".to_string());
++    }
++    if buf.last() == Some(&b'\r') {
++        buf.pop();
++    }
++    match String::from_utf8(buf) {
++        Ok(password) => Ok(WipedString(password)),
++        Err(err) => {
++            let mut raw = err.into_bytes();
++            wipe_bytes(&mut raw);
++            Err("password on standard input is not valid UTF-8".to_string())
++        }
++    }
++}
++
+ enum Policy {
+     Deny,
+     Authenticate,

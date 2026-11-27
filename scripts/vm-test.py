@@ -3580,6 +3580,80 @@ def test_sudo_notty(vm, args):
     return True, "sudo true ran without a terminal and exited 0" + (f": {said}" if said else "")
 
 
+def test_sudo_stdin(vm, args):
+    """O2a: sudo -S reads one bounded password line from stdin, preserves remaining stdin for the command, refuses wrong/over-bound passwords, and leaves default non-tty refusal intact."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("root\n")
+    if not vm.wait_serial(r"(?i)password: ", 20):
+        return False, "no password prompt for root"
+    vm.type("password\n")
+    if not vm.wait_serial(r"root:.*# ", 30):
+        return False, "no root shell prompt"
+    since = vm.mark()
+    vm.type("usermod -s /usr/bin/ion user\n")
+    if not vm.wait_serial(r"root:.*# ", 30, since):
+        return False, "usermod -s /usr/bin/ion user did not finish"
+    since = vm.mark()
+    vm.type("passwd user\n")
+    if not vm.wait_serial(r"new password: ", 20, since):
+        return False, "passwd user did not ask for new password"
+    time.sleep(0.5)
+    since = vm.mark()
+    vm.type("ferrion-sudo-pw\n")
+    if not vm.wait_serial(r"confirm password: ", 20, since):
+        return False, "passwd user did not ask to confirm password"
+    time.sleep(0.5)
+    since = vm.mark()
+    vm.type("ferrion-sudo-pw\n")
+    if not vm.wait_serial(r"root:.*# ", 30, since):
+        return False, "passwd user did not finish"
+    since = vm.mark()
+    vm.type("exit\n")
+    if not vm.wait_serial(r"login: ", 30, since):
+        return False, "no serial login prompt after root exit"
+    time.sleep(3)
+    since = vm.mark()
+    vm.type("user\n")
+    if not vm.wait_serial(r"(?i)password: ", 20, since):
+        return False, "no password prompt for user"
+    time.sleep(0.5)
+    since = vm.mark()
+    vm.type("ferrion-sudo-pw\n")
+    if not vm.wait_serial(r"user:\S*\$ ", 30, since):
+        (vm.out / "sudo-stdin-login.txt").write_text(vm.text(since))
+        return False, f"user login with new password did not reach shell; see {vm.out / 'sudo-stdin-login.txt'}"
+    time.sleep(1)
+    script = (
+        "bash -c '"
+        "printf \"ferrion-sudo-pw\\n\" | sudo id -u > /tmp/s_notty 2>&1; echo NOTTY_RC=$?; cat /tmp/s_notty; "
+        "printf \"ferrion-sudo-pw\\naligned-payload\\n\" | sudo -S -- bash -c \"echo UID=\\$(id -u); read -r line; echo REST=\\$line\" > /tmp/s_ok 2>&1; echo OK_RC=$?; cat /tmp/s_ok; "
+        "printf \"wrong-pw\\n\" | sudo -S -- id -u > /tmp/s_bad 2>&1; echo BAD_RC=$?; cat /tmp/s_bad; "
+        "printf \"%1025s\\n\" \"\" | tr \" \" a | sudo -S -- id -u > /tmp/s_big 2>&1; echo BIG_RC=$?; cat /tmp/s_big; "
+        "echo sudo-stdin-end-$((40+2))'\n"
+    )
+    since = vm.mark()
+    vm.type(script)
+    found = vm.wait_serial(r"sudo-stdin-end-42", 90, since)
+    output = vm.text(since)
+    (vm.out / "sudo-stdin.txt").write_text(output)
+    if not found:
+        return False, f"sudo-stdin script did not finish within 90s; see {vm.out / 'sudo-stdin.txt'}"
+    def rc_of(tag):
+        m = re.search(rf"(?m)^{tag}=(\d+)\r?$", output)
+        return int(m.group(1)) if m else None
+    notty_rc, ok_rc, bad_rc, big_rc = rc_of("NOTTY_RC"), rc_of("OK_RC"), rc_of("BAD_RC"), rc_of("BIG_RC")
+    if notty_rc is None or notty_rc == 0 or "not a terminal" not in output:
+        return False, f"default non-tty sudo was not refused (rc={notty_rc}); see {vm.out / 'sudo-stdin.txt'}"
+    if ok_rc != 0 or "UID=0" not in output or "REST=aligned-payload" not in output:
+        return False, f"sudo -S right-password/alignment check failed (rc={ok_rc}); see {vm.out / 'sudo-stdin.txt'}"
+    if bad_rc is None or bad_rc == 0 or "incorrect password" not in output:
+        return False, f"sudo -S wrong password was not refused (rc={bad_rc}); see {vm.out / 'sudo-stdin.txt'}"
+    if big_rc is None or big_rc == 0 or "exceeds 1024 bytes" not in output:
+        return False, f"sudo -S over-bound password was not refused (rc={big_rc}); see {vm.out / 'sudo-stdin.txt'}"
+    return True, f"default notty refused (rc={notty_rc}), -S right password ran as uid 0 with aligned stdin, wrong refused (rc={bad_rc}), 1025 B over-bound refused (rc={big_rc})"
+
+
 # The nonce the tpm test asks attestd about, in hexadecimal, and the PCRs it compares.
 TPM_NONCE = "f3" * 32
 TPM_PCRS = (7, 8, 9)
@@ -12667,6 +12741,7 @@ TESTS["nsmgr-bounds"] = test_nsmgr_bounds
 TESTS["graphics-bounds"] = test_graphics_bounds
 TESTS["gpu-heads"] = test_gpu_heads
 TESTS["sudo-notty"] = test_sudo_notty
+TESTS["sudo-stdin"] = test_sudo_stdin
 TESTS["scheme-short-read"] = test_scheme_short_read
 TESTS["event-poll"] = test_event_poll
 TESTS["desktop-regions"] = test_desktop_regions

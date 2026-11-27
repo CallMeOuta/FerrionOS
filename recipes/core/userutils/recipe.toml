@@ -4,7 +4,7 @@ description = "Command-line UNIX tools for managing users and groups"
 [source]
 git = "https://gitlab.redox-os.org/redox-os/userutils.git"
 rev = "641a5aa81574db79d883151bc3438d3e59f90b88"
-patches = ["ferrion-login-name.patch", "ferrion-login-namespace.patch", "ferrion-sudo-notty.patch", "ferrion-one-password.patch", "ferrion-login-session.patch", "ferrion-su-elevate.patch"]
+patches = ["ferrion-login-name.patch", "ferrion-login-namespace.patch", "ferrion-sudo-notty.patch", "ferrion-one-password.patch", "ferrion-login-session.patch", "ferrion-su-elevate.patch", "ferrion-sudo-stdin.patch"]
 
 [build]
 template = "custom"
