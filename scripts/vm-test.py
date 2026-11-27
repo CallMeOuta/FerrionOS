@@ -13874,7 +13874,7 @@ def test_mpv_sound(args, out):
 
 
 def test_mpv_window(args, out):
-    """M2c-a: checks mpv Wayland wlshm window and ferrion audio under ferrion-wm on 1080p and 4K AV1 clips with burned-in frame counter and 1499 Hz tone (default --config wm-session)."""
+    """M2c-b: checks mpv Wayland wlshm and gpu-next (EGL/llvmpipe) window and ferrion audio under ferrion-wm on 1080p and 4K AV1 clips, tiled or --mpv-fullscreen (default --config wm-session)."""
     import mpv_window
     return mpv_window.run_mpv_window(
         args,
@@ -14226,6 +14226,8 @@ def main():
                         help="rune-headless: RU1 reference directory (default: build/ru1-ref)")
     parser.add_argument("--no-aac-lc", action="store_true",
                         help="media-decode: verify an FFMPEG_AAC_LC=0 image omits fdk-aac-free and libfdk_aac")
+    parser.add_argument("--mpv-fullscreen", action="store_true",
+                        help="mpv-window: run 1080p and 4K wlshm/gpu-next cases with --fs and assert window size equals output mode")
     parser.add_argument("--lab", action="store_true",
                         help="run inside an unprivileged user and network namespace with no route out")
     parser.add_argument("--in-lab", action="store_true", help=argparse.SUPPRESS)

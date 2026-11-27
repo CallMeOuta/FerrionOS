@@ -1,6 +1,5 @@
-"""M2c-a check: mpv Wayland wlshm window + ferrion audio at 1080p and 4K AV1 on wm-session."""
+"""M2c-b check: mpv Wayland wlshm and gpu-next (EGL/llvmpipe) window + ferrion audio on wm-session."""
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -16,10 +15,15 @@ CLIP_SPECS = (
     ("1080p", 1920, 1080, "av1_1080p_tone.mkv"),
     ("4k", 3840, 2160, "av1_4k_tone.mkv"),
 )
+VO_SPECS = (
+    ("wlshm", "--vo=wlshm"),
+    ("gpu-next", "--vo=gpu-next --gpu-api=opengl --gpu-context=wayland --gpu-sw"),
+)
 COUNTER_BITS = 8
 MIN_MARKER_SAMPLES = 8
 WAYLAND_SOCKET_WAIT_ITERS = 30
 WINDOW_POLL_ITERS = 80
+FULLSCREEN_SETTLE_ITERS = 25
 EXIT_POLL_ITERS = 160
 SCREENDUMP_MAX_SHOTS = 4
 SCREENDUMP_INTERVAL_S = 0.65
@@ -28,6 +32,9 @@ BG_TOLERANCE = 10
 MIN_NON_BG_RATIO = 0.25
 MIN_FRAME_DIFF = 1.5
 MAX_LOG_LINES = 20000
+MAX_JSON_SCAN_MATCHES = 128
+WAV_CONTINUITY_EXEMPT_MIN_WIDTH = 3840
+WAV_CONTINUITY_EXEMPT_RENDERER = "llvmpipe"
 
 
 def read_host_loadavg():
@@ -103,14 +110,52 @@ def generate_clip(path, width, height, encoder):
 
 
 def parse_json_array(text):
-    for match in re.finditer(r"\[", text):
+    decoder = json.JSONDecoder()
+    for idx, match in enumerate(re.finditer(r"\[", text)):
+        if idx >= MAX_JSON_SCAN_MATCHES:
+            break
         try:
-            value, _ = json.JSONDecoder().raw_decode(text[match.start():])
+            value, _ = decoder.raw_decode(text[match.start():])
             if isinstance(value, list):
                 return value
         except json.JSONDecodeError:
             continue
     return []
+
+
+def parse_json_object(text):
+    decoder = json.JSONDecoder()
+    for idx, match in enumerate(re.finditer(r"\{", text)):
+        if idx >= MAX_JSON_SCAN_MATCHES:
+            break
+        try:
+            value, _ = decoder.raw_decode(text[match.start():])
+            if isinstance(value, dict):
+                return value
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+def extract_primary_output(outputs_obj):
+    if not isinstance(outputs_obj, dict):
+        return None
+    for name in sorted(outputs_obj.keys()):
+        entry = outputs_obj.get(name)
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("current_mode")
+        modes = entry.get("modes") or []
+        if isinstance(idx, int) and 0 <= idx < len(modes):
+            mode = modes[idx]
+            if isinstance(mode, dict) and "width" in mode and "height" in mode:
+                return {
+                    "name": name,
+                    "mode": [int(mode["width"]), int(mode["height"])],
+                    "refresh_rate": mode.get("refresh_rate"),
+                    "logical": entry.get("logical"),
+                }
+    return None
 
 
 def window_rect(win, frame_w, frame_h):
@@ -129,6 +174,10 @@ def window_rect(win, frame_w, frame_h):
             w = max(1, min(frame_w - x, int(size[0])))
             h = max(1, min(frame_h - y, int(size[1])))
             return x, y, w, h
+        if isinstance(size, list) and len(size) == 2:
+            w = max(1, min(frame_w, int(size[0])))
+            h = max(1, min(frame_h, int(size[1])))
+            return 0, 0, w, h
     return 0, 0, frame_w, frame_h
 
 
@@ -243,35 +292,86 @@ def decode_frame_counter(frame, rect):
 def parse_mpv_window_log(log_text):
     lines = log_text.splitlines()[:MAX_LOG_LINES]
     vo_line = None
+    vo_driver = None
+    vo_drivers = []
+    ao_line = None
+    ao_driver = None
     vo_display_line = None
     vo_scale_line = None
     vo_scaled = None
     vo_src = None
     vo_dst = None
     sws_line = None
+    gpu_context_line = None
+    gpu_context = None
+    egl_version_line = None
+    egl_vendor_line = None
+    gl_renderer = None
+    gl_version = None
+    pl_gl_renderer = None
+    pl_gl_version = None
     avsync_vals = []
     frame_drop_max = None
     dec_drop_max = None
     delayed_max = None
     clamped = None
     dropped_status = None
+    eof = False
+    audio_underrun = False
+    av_desync = False
 
     for line in lines:
-        if vo_line is None and "VO: [wlshm]" in line:
-            vo_line = line.strip()
-        if "[vo/wlshm] Video display:" in line:
-            vo_display_line = line.strip()
+        stripped = line.strip()
+        m_vo = re.match(r"^VO:\s+\[([^\]]+)\]", stripped)
+        if m_vo:
+            drv = m_vo.group(1)
+            vo_drivers.append(drv)
+            if vo_line is None:
+                vo_line = stripped
+                vo_driver = drv
+        m_ao = re.match(r"^AO:\s+\[([^\]]+)\]", stripped)
+        if m_ao and ao_line is None:
+            ao_line = stripped
+            ao_driver = m_ao.group(1)
+        if "Video display:" in line and "[vo/" in line:
+            vo_display_line = stripped
             m_vd = re.search(r"Video display:\s*\([^)]*\)\s*(\d+x\d+)\s*->\s*\([^)]*\)\s*(\d+x\d+)", line)
             if m_vd:
                 vo_src = m_vd.group(1)
                 vo_dst = m_vd.group(2)
-        if "[vo/wlshm] Video scale:" in line:
-            vo_scale_line = line.strip()
+        if "Video scale:" in line and "[vo/" in line:
+            vo_scale_line = stripped
         if sws_line is None and "swscaler:" in line:
-            sws_line = line.strip()
-        m_stat = re.search(
-            r"MPVSTAT\s+av=(\S+)\s+drop=(\S+)\s+decdrop=(\S+)\s+delay=(\S+)\s+pos=(\S+)",
-            line,
+            sws_line = stripped
+        m_ctx = re.search(r"\[vo/[^\]]+\]\s+Initializing GPU context '([^']+)'", line)
+        if m_ctx and gpu_context_line is None:
+            gpu_context_line = stripped
+            gpu_context = m_ctx.group(1)
+        if egl_version_line is None and "[vo/" in line and "EGL_VERSION=" in line:
+            egl_version_line = stripped
+        if egl_vendor_line is None and "[vo/" in line and "EGL_VENDOR=" in line:
+            egl_vendor_line = stripped
+        m_glr_mpv = re.search(r"\[vo/[^\]]+\]\s+GL_RENDERER='([^']+)'", line)
+        if m_glr_mpv and gl_renderer is None:
+            gl_renderer = m_glr_mpv.group(1).strip()
+        m_glv_mpv = re.search(r"\[vo/[^\]]+\]\s+GL_VERSION='([^']+)'", line)
+        if m_glv_mpv and gl_version is None:
+            gl_version = m_glv_mpv.group(1).strip()
+        m_glr_pl = re.search(r"\[vo/[^\]]+\]\s+GL_RENDERER:\s+(.+)$", line)
+        if m_glr_pl and pl_gl_renderer is None:
+            pl_gl_renderer = m_glr_pl.group(1).strip()
+        m_glv_pl = re.search(r"\[vo/[^\]]+\]\s+GL_VERSION:\s+(.+)$", line)
+        if m_glv_pl and pl_gl_version is None:
+            pl_gl_version = m_glv_pl.group(1).strip()
+        if stripped == "Exiting... (End of file)":
+            eof = True
+        if "Audio device underrun detected" in line:
+            audio_underrun = True
+        if "Audio/Video desynchronisation detected" in line:
+            av_desync = True
+        m_stat = re.match(
+            r"^MPVSTAT\s+av=([-+]?\d+(?:\.\d+)?)\s+drop=(\d+)\s+decdrop=(\d+)\s+delay=(\d+)\s+pos=(\S+)",
+            stripped,
         )
         if m_stat:
             try:
@@ -314,8 +414,14 @@ def parse_mpv_window_log(log_text):
             "last_s": round(avsync_vals[-1], 4),
         }
 
+    effective_gl_renderer = gl_renderer or pl_gl_renderer
+    effective_gl_version = gl_version or pl_gl_version
+
     return {
-        "vo_wlshm": "VO: [wlshm]" in log_text,
+        "vo_driver": vo_driver,
+        "vo_drivers": vo_drivers,
+        "vo_wlshm": "wlshm" in vo_drivers,
+        "vo_gpu_next": "gpu-next" in vo_drivers,
         "vo_line": vo_line,
         "vo_display_line": vo_display_line,
         "vo_scale_line": vo_scale_line,
@@ -323,8 +429,20 @@ def parse_mpv_window_log(log_text):
         "vo_dst": vo_dst,
         "vo_scaled": vo_scaled,
         "sws_line": sws_line,
-        "ao_ferrion": "AO: [ferrion]" in log_text,
-        "eof": "Exiting... (End of file)" in log_text,
+        "gpu_context_line": gpu_context_line,
+        "gpu_context": gpu_context,
+        "egl_version_line": egl_version_line,
+        "egl_vendor_line": egl_vendor_line,
+        "gl_renderer": effective_gl_renderer,
+        "gl_version": effective_gl_version,
+        "pl_gl_renderer": pl_gl_renderer,
+        "pl_gl_version": pl_gl_version,
+        "ao_line": ao_line,
+        "ao_driver": ao_driver,
+        "ao_ferrion": ao_driver == "ferrion",
+        "eof": eof,
+        "audio_underrun": audio_underrun,
+        "av_desync": av_desync,
         "frame_drop_count": frame_drop_max if frame_drop_max is not None else (dropped_status or 0),
         "decoder_frame_drop_count": dec_drop_max if dec_drop_max is not None else 0,
         "vo_delayed_frame_count": delayed_max if delayed_max is not None else 0,
@@ -333,7 +451,28 @@ def parse_mpv_window_log(log_text):
     }
 
 
-def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, clips_dir, helpers):
+def help_lists_token(text, token):
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if parts and parts[0] == token:
+            return True
+    return False
+
+
+def run_single_clip(
+    args,
+    clip_out,
+    label,
+    width,
+    height,
+    clip_name,
+    clip_sha,
+    vo_name,
+    vo_flags,
+    fullscreen,
+    clips_dir,
+    helpers,
+):
     audio_vm = helpers["audio_vm"]
     sendkeys = helpers["sendkeys"]
     settle = helpers["settle"]
@@ -356,8 +495,11 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
         "height": height,
         "clip": clip_name,
         "clip_sha256": clip_sha,
+        "vo": vo_name,
+        "vo_flags": vo_flags,
+        "fullscreen": bool(fullscreen),
         "launch_path": "ferrion-wm msg action spawn (unsandboxed mpv in ferrion-wm session)",
-        "red_missing_wlshm": False,
+        "red_missing_vo": False,
         "problems": [],
     }
 
@@ -416,16 +558,29 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
             clip_record["manifest_installed"] = rc_man == 0
 
             rc_help, help_out = run_user(
-                "mkdir -p /tmp/media && mpv --vo=help > /tmp/media/vo-help.txt 2>&1 && "
-                f"{curl_post} @/tmp/media/vo-help.txt {base}/vo-help.txt",
+                "mkdir -p /tmp/media && "
+                "mpv --vo=help > /tmp/media/vo-help.txt 2>&1 && "
+                "mpv --gpu-api=help > /tmp/media/gpu-api-help.txt 2>&1 && "
+                "mpv --gpu-context=help > /tmp/media/gpu-context-help.txt 2>&1 && "
+                f"{curl_post} @/tmp/media/vo-help.txt {base}/vo-help.txt && "
+                f"{curl_post} @/tmp/media/gpu-api-help.txt {base}/gpu-api-help.txt && "
+                f"{curl_post} @/tmp/media/gpu-context-help.txt {base}/gpu-context-help.txt",
                 timeout=45,
             )
             if rc_help != 0:
-                clip_record["problems"].append(f"mpv --vo=help failed (rc={rc_help}): {help_out.strip()[-200:]}")
+                clip_record["problems"].append(f"mpv help probes failed (rc={rc_help}): {help_out.strip()[-200:]}")
                 return clip_record
             vo_help = (guest_dir / "vo-help.txt").read_text(encoding="utf-8", errors="replace")
-            has_wlshm = any(line.strip().startswith("wlshm") for line in vo_help.splitlines())
+            gpu_api_help = (guest_dir / "gpu-api-help.txt").read_text(encoding="utf-8", errors="replace")
+            gpu_ctx_help = (guest_dir / "gpu-context-help.txt").read_text(encoding="utf-8", errors="replace")
+            has_wlshm = help_lists_token(vo_help, "wlshm")
+            has_gpu_next = help_lists_token(vo_help, "gpu-next")
+            has_opengl = help_lists_token(gpu_api_help, "opengl")
+            has_wayland_ctx = help_lists_token(gpu_ctx_help, "wayland")
             clip_record["vo_help_lists_wlshm"] = has_wlshm
+            clip_record["vo_help_lists_gpu_next"] = has_gpu_next
+            clip_record["gpu_api_help_lists_opengl"] = has_opengl
+            clip_record["gpu_context_help_lists_wayland"] = has_wayland_ctx
 
             rc_dl, dl_out = run_user(
                 f"{curl_get} {base}/{clip_name} -o /tmp/media/{clip_name} && "
@@ -437,26 +592,36 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
                 clip_record["problems"].append(f"download or sha256 failed for {clip_name}: {dl_out.strip()[-200:]}")
                 return clip_record
 
-            if not has_wlshm:
-                rc_red, red_out = run_user(
-                    f"rc=0; mpv --no-config --vo=wlshm --ao=ferrion --hwdec=no /tmp/media/{clip_name} "
-                    f"> /tmp/media/red-wlshm.log 2>&1 || rc=$?; "
-                    f"{curl_post} @/tmp/media/red-wlshm.log {base}/red-wlshm.log || true; "
-                    "printf \"RED_RC=%d\\n\" \"$rc\"",
+            missing_requested = (
+                (vo_name == "wlshm" and not has_wlshm)
+                or (vo_name == "gpu-next" and not (has_gpu_next and has_opengl and has_wayland_ctx))
+            )
+            if missing_requested:
+                rc_red, _ = run_user(
+                    f"rc=0; mpv --no-config {vo_flags} --ao=ferrion --hwdec=no /tmp/media/{clip_name} "
+                    "> /tmp/media/red-vo.log 2>&1 || rc=$?; "
+                    "printf \"%d\\n\" \"$rc\" > /tmp/media/red-vo.rc; "
+                    f"{curl_post} @/tmp/media/red-vo.log {base}/red-vo.log || true; "
+                    f"{curl_post} @/tmp/media/red-vo.rc {base}/red-vo.rc || true",
                     timeout=60,
                 )
-                m_red = re.search(r"(?m)^RED_RC=(\d+)\s*$", red_out or "")
-                red_exit = int(m_red.group(1)) if m_red else rc_red
+                red_rc_path = guest_dir / "red-vo.rc"
+                red_exit = (
+                    int(red_rc_path.read_text(encoding="utf-8", errors="replace").strip())
+                    if red_rc_path.is_file() and red_rc_path.read_text(encoding="utf-8", errors="replace").strip().isdigit()
+                    else rc_red
+                )
                 red_log = ""
-                red_path = guest_dir / "red-wlshm.log"
+                red_path = guest_dir / "red-vo.log"
                 if red_path.is_file():
                     red_log = red_path.read_text(encoding="utf-8", errors="replace").strip()
-                red_head = "\n".join(red_log.splitlines()[:10])
-                clip_record["red_missing_wlshm"] = True
-                clip_record["red_wlshm_exit_code"] = red_exit
-                clip_record["red_wlshm_log_head"] = red_head
+                red_head = "\n".join(red_log.splitlines()[:12])
+                clip_record["red_missing_vo"] = True
+                clip_record["red_vo_exit_code"] = red_exit
+                clip_record["red_vo_log_head"] = red_head
                 clip_record["problems"].append(
-                    f"mpv --vo=help omits wlshm; --vo=wlshm rc={red_exit}: {red_head}"
+                    f"mpv lacks requested {vo_name} support (vo={has_gpu_next if vo_name == 'gpu-next' else has_wlshm}, "
+                    f"opengl={has_opengl}, wayland_ctx={has_wayland_ctx}); rc={red_exit}: {red_head}"
                 )
                 return clip_record
 
@@ -503,12 +668,27 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
             clip_record["ferrion_wm_socket"] = wm_sock
             settle(vm, 10, still=1.0).save_png(clip_out / "session.png")
 
+            rc_out, out_json = run_user(
+                f"FERRION_WM_SOCKET={wm_sock} ferrion-wm msg --json outputs",
+                timeout=15,
+            )
+            outputs_obj = parse_json_object(out_json) if rc_out == 0 else {}
+            primary_output = extract_primary_output(outputs_obj)
+            clip_record["output"] = primary_output
+            clip_record["output_mode"] = primary_output["mode"] if primary_output else None
+            if primary_output is None:
+                clip_record["problems"].append(
+                    f"ferrion-wm msg --json outputs returned no output mode (rc={rc_out}): {out_json.strip()[-200:]}"
+                )
+                return clip_record
+
+            fs_flag = "--fs " if fullscreen else ""
             script_cmd = (
                 "cat > /tmp/media/run-mpv.sh <<\\EOF\n"
                 "#!/bin/sh\n"
                 "rc=0\n"
                 "mpv --no-config --terminal=yes --msg-level=statusline=status,all=v "
-                "--vo=wlshm --ao=ferrion --hwdec=no "
+                f"{vo_flags} {fs_flag}--ao=ferrion --hwdec=no "
                 "--term-status-msg=\"MPVSTAT av=\\${avsync} drop=\\${frame-drop-count} "
                 "decdrop=\\${decoder-frame-drop-count} delay=\\${vo-delayed-frame-count} "
                 "pos=\\${time-pos}\" "
@@ -532,8 +712,7 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
                 clip_record["problems"].append(f"ferrion-wm spawn failed (rc={rc_spawn}): {spawn_out.strip()[-200:]}")
                 return clip_record
 
-            mpv_win = None
-            for _ in range(WINDOW_POLL_ITERS):
+            def find_mpv_window():
                 rc_w, w_out = run_user(
                     f"FERRION_WM_SOCKET={wm_sock} ferrion-wm msg --json windows",
                     timeout=15,
@@ -544,14 +723,33 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
                         app_id = str(win.get("app_id") or "").lower()
                         title = str(win.get("title") or "").lower()
                         if "mpv" in app_id or clip_name.lower() in title:
-                            mpv_win = win
-                            break
+                            return win
+                return None
+
+            mpv_win = None
+            for _ in range(WINDOW_POLL_ITERS):
+                mpv_win = find_mpv_window()
                 if mpv_win is not None:
                     break
                 rc_done, _ = run_user("test -f /tmp/media/mpv.rc", timeout=10)
                 if rc_done == 0:
                     break
                 time.sleep(0.1)
+
+            if mpv_win is not None and fullscreen:
+                expected_mode = primary_output["mode"]
+                for _ in range(FULLSCREEN_SETTLE_ITERS):
+                    layout = mpv_win.get("layout") if isinstance(mpv_win, dict) else {}
+                    win_size = layout.get("window_size") if isinstance(layout, dict) else None
+                    if win_size == expected_mode:
+                        break
+                    rc_done, _ = run_user("test -f /tmp/media/mpv.rc", timeout=10)
+                    if rc_done == 0:
+                        break
+                    time.sleep(0.1)
+                    updated = find_mpv_window()
+                    if updated is not None:
+                        mpv_win = updated
 
             shots = []
             rect = None
@@ -583,29 +781,30 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
                             "counter": counter,
                         }
                     )
-                    rc_done, _ = run_user("test -f /tmp/media/mpv.rc", timeout=10)
-                    if rc_done == 0:
-                        break
             else:
                 vm.screenshot().save_png(clip_out / "no-mpv-window.png")
                 clip_record["problems"].append("mpv window never appeared in ferrion-wm msg --json windows")
 
             mpv_rc = None
-            for _ in range(EXIT_POLL_ITERS):
-                rc_check, rc_out = run_user("cat /tmp/media/mpv.rc 2>/dev/null", timeout=15)
-                if rc_check == 0:
-                    m_rc = re.search(r"(?m)^\s*(\d+)\s*$", rc_out)
-                    if m_rc:
-                        mpv_rc = int(m_rc.group(1))
-                        break
-                time.sleep(0.25)
+            run_user(
+                f"i=0; while [ ! -f /tmp/media/mpv.rc ] && [ \"$i\" -lt {EXIT_POLL_ITERS} ]; do "
+                "sleep 0.25; i=$((i + 1)); done; [ -f /tmp/media/mpv.rc ]",
+                timeout=max(60, int(EXIT_POLL_ITERS * 0.25) + 30),
+            )
 
             clip_record["host_loadavg_after"] = read_host_loadavg()
             run_user(
+                f"test -f /tmp/media/mpv.rc && {curl_post} @/tmp/media/mpv.rc {base}/mpv.rc || true; "
                 f"test -f /tmp/media/mpv.log && {curl_post} @/tmp/media/mpv.log {base}/mpv.log || true",
                 timeout=45,
             )
             time.sleep(0.5)
+
+            rc_path = guest_dir / "mpv.rc"
+            if rc_path.is_file():
+                rc_text = rc_path.read_text(encoding="utf-8", errors="replace").strip()
+                if rc_text.isdigit():
+                    mpv_rc = int(rc_text)
 
             log_path = guest_dir / "mpv.log"
             log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
@@ -650,14 +849,45 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
 
             if mpv_rc != 0:
                 clip_record["problems"].append(f"mpv exited {mpv_rc}: {log_text.strip()[-300:]}")
-            if not parsed["vo_wlshm"]:
-                clip_record["problems"].append("mpv log missing VO: [wlshm]")
+            if not log_path.is_file() or not log_text:
+                clip_record["problems"].append("mpv.log was not uploaded from guest")
+            if vo_name == "wlshm":
+                if not parsed["vo_wlshm"]:
+                    clip_record["problems"].append("mpv.log missing VO: [wlshm]")
+                if parsed["vo_gpu_next"]:
+                    clip_record["problems"].append("mpv.log unexpectedly reported VO: [gpu-next] on wlshm run")
+            else:
+                if not parsed["vo_gpu_next"]:
+                    clip_record["problems"].append("mpv.log missing VO: [gpu-next]")
+                if parsed["vo_wlshm"]:
+                    clip_record["problems"].append("mpv.log fell back to VO: [wlshm] on gpu-next run")
+                if parsed["gpu_context"] != "wayland":
+                    clip_record["problems"].append(
+                        f"mpv.log missing Wayland GPU context init (got {parsed['gpu_context']!r})"
+                    )
+                if not parsed["egl_version_line"]:
+                    clip_record["problems"].append("mpv.log missing EGL_VERSION context line")
+                renderer = parsed["gl_renderer"]
+                if not renderer:
+                    clip_record["problems"].append("mpv.log missing GL_RENDERER")
+                elif "zink" in renderer.lower() or "llvmpipe" not in renderer.lower():
+                    clip_record["problems"].append(
+                        f"unexpected GL_RENDERER={renderer!r} (expected llvmpipe, not zink or another driver)"
+                    )
+                if not parsed["gl_version"]:
+                    clip_record["problems"].append("mpv.log missing GL_VERSION")
+            if fullscreen:
+                win_size = (clip_record.get("window") or {}).get("window_size")
+                if win_size != primary_output["mode"]:
+                    clip_record["problems"].append(
+                        f"fullscreen window_size {win_size} != output mode {primary_output['mode']}"
+                    )
             if not parsed["ao_ferrion"]:
-                clip_record["problems"].append("mpv log missing AO: [ferrion]")
+                clip_record["problems"].append("mpv.log missing AO: [ferrion]")
             if not parsed["eof"]:
                 clip_record["problems"].append("mpv did not reach End of file")
             if parsed["avsync"] is None:
-                clip_record["problems"].append("mpv log missing parsed MPVSTAT telemetry lines")
+                clip_record["problems"].append("mpv.log missing parsed MPVSTAT telemetry lines")
             if max_non_bg < MIN_NON_BG_RATIO:
                 clip_record["problems"].append(
                     f"mpv window stayed near background (max_non_bg_ratio={max_non_bg} < {MIN_NON_BG_RATIO})"
@@ -681,8 +911,20 @@ def run_single_clip(args, clip_out, label, width, height, clip_name, clip_sha, c
         if wav_path.is_file()
         else {"ok": False, "reason": "audio.wav missing"}
     )
+    if isinstance(wav_report, dict):
+        wav_report["gap_count"] = len(wav_report.get("gap_blocks") or [])
+        wav_report["phase_jump_count"] = len(wav_report.get("phase_jumps") or [])
     clip_record["wav"] = wav_report
-    if not wav_report.get("ok"):
+    renderer = (clip_record.get("mpv") or {}).get("gl_renderer") or ""
+    exempt_wav_continuity = (
+        width >= WAV_CONTINUITY_EXEMPT_MIN_WIDTH
+        and WAV_CONTINUITY_EXEMPT_RENDERER in renderer.lower()
+    )
+    clip_record["wav_continuity_asserted"] = not exempt_wav_continuity
+    if exempt_wav_continuity:
+        if not wav_report.get("freq_ok"):
+            clip_record["problems"].append(f"WAV frequency/gain check failed: {wav_report}")
+    elif not wav_report.get("ok"):
         clip_record["problems"].append(f"WAV verification failed: {wav_report}")
     return clip_record
 
@@ -695,6 +937,7 @@ def run_mpv_window(args, out, helpers):
     if encoder is None:
         raise Blocked("host ffmpeg lacks libsvtav1 and libaom-av1")
 
+    fullscreen = bool(getattr(args, "mpv_fullscreen", False))
     out.mkdir(parents=True, exist_ok=True)
     clips_dir = out / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -703,6 +946,7 @@ def run_mpv_window(args, out, helpers):
         "encoder": encoder,
         "clip_duration_s": CLIP_DURATION_S,
         "clip_fps": CLIP_FPS,
+        "fullscreen": fullscreen,
         "clips": {},
     }
 
@@ -711,36 +955,51 @@ def run_mpv_window(args, out, helpers):
 
     problems = []
     summaries = []
-    for label, width, height, clip_name in CLIP_SPECS:
+    clip_shas = {}
+    for clip_label, width, height, clip_name in CLIP_SPECS:
         clip_path = clips_dir / clip_name
-        clip_sha = generate_clip(clip_path, width, height, encoder)
-        clip_record = run_single_clip(
-            args,
-            out / label,
-            label,
-            width,
-            height,
-            clip_name,
-            clip_sha,
-            clips_dir,
-            helpers,
-        )
-        record["clips"][label] = clip_record
-        save_record()
-        if clip_record["problems"]:
-            problems.extend(f"{label}: {p}" for p in clip_record["problems"])
-            if clip_record.get("red_missing_wlshm"):
-                break
-        else:
-            mpv_info = clip_record["mpv"]
-            win_size = (clip_record.get("window") or {}).get("window_size")
-            load1 = (clip_record.get("host_loadavg_after") or {}).get("load1")
-            av_max = (mpv_info.get("avsync") or {}).get("max_abs_s")
-            summaries.append(
-                f"{label} win={win_size} counters={clip_record['picture']['decoded_counters']} "
-                f"drop={mpv_info['frame_drop_count']}/{mpv_info['decoder_frame_drop_count']} "
-                f"av_max={av_max}s wav={clip_record['wav']['duration_s']:.3f}s load1={load1}"
+        clip_shas[clip_label] = generate_clip(clip_path, width, height, encoder)
+
+    stop_early = False
+    for clip_label, width, height, clip_name in CLIP_SPECS:
+        if stop_early:
+            break
+        for vo_name, vo_flags in VO_SPECS:
+            case_label = f"{clip_label}-{vo_name}-fs" if fullscreen else f"{clip_label}-{vo_name}"
+            clip_record = run_single_clip(
+                args,
+                out / case_label,
+                case_label,
+                width,
+                height,
+                clip_name,
+                clip_shas[clip_label],
+                vo_name,
+                vo_flags,
+                fullscreen,
+                clips_dir,
+                helpers,
             )
+            record["clips"][case_label] = clip_record
+            save_record()
+            if clip_record["problems"]:
+                problems.extend(f"{case_label}: {p}" for p in clip_record["problems"])
+                if clip_record.get("red_missing_vo"):
+                    stop_early = True
+                    break
+            else:
+                mpv_info = clip_record["mpv"]
+                win_size = (clip_record.get("window") or {}).get("window_size")
+                load1 = (clip_record.get("host_loadavg_after") or {}).get("load1")
+                av_max = (mpv_info.get("avsync") or {}).get("max_abs_s")
+                renderer_note = f" gl={mpv_info['gl_renderer']!r}" if vo_name == "gpu-next" else ""
+                summaries.append(
+                    f"{case_label} win={win_size} mode={clip_record.get('output_mode')} "
+                    f"counters={clip_record['picture']['decoded_counters']} "
+                    f"drop={mpv_info['frame_drop_count']}/{mpv_info['decoder_frame_drop_count']}/"
+                    f"{mpv_info['vo_delayed_frame_count']} "
+                    f"av_max={av_max}s{renderer_note} wav={clip_record['wav']['duration_s']:.3f}s load1={load1}"
+                )
 
     record["problems"] = problems
     save_record()
