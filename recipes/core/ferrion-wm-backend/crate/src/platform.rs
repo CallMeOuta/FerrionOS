@@ -801,7 +801,7 @@ impl Display {
             ));
         }
         Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Other,
             "display changed repeatedly during startup probe",
         ))
     }
