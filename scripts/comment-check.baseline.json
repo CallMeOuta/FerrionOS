@@ -2368,7 +2368,7 @@
   "components/kernel/src/context/arch/x86_64.rs": 52,
   "components/kernel/src/context/context.rs": 128,
   "components/kernel/src/context/file.rs": 23,
-  "components/kernel/src/context/memory.rs": 249,
+  "components/kernel/src/context/memory.rs": 247,
   "components/kernel/src/context/mod.rs": 48,
   "components/kernel/src/context/signal.rs": 22,
   "components/kernel/src/context/switch.rs": 214,

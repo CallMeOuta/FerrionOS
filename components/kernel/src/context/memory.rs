@@ -1596,8 +1596,8 @@ impl Grant {
                             .translate(src_page.start_address())
                         {
                             Some((phys, page_flags)) => (Frame::containing(phys), page_flags),
-                            // TODO: ensure the correct context is hardblocked, if necessary
                             None => {
+                                reject_unmapped_borrow_source(&guard, src_page)?;
                                 let (frame, _, new_guard) = correct_inner(
                                     src.addr_space_lock,
                                     guard,
@@ -1626,8 +1626,8 @@ impl Grant {
                             .remap_with(src_page.start_address(), |flags| flags.write(false))
                         {
                             Some((page_flags, phys, _)) => (Frame::containing(phys), page_flags),
-                            // TODO: ensure the correct context is hardblocked, if necessary
                             None => {
+                                reject_unmapped_borrow_source(&guard, src_page)?;
                                 let (frame, _, new_guard) = correct_inner(
                                     src.addr_space_lock,
                                     guard,
@@ -2806,6 +2806,20 @@ pub unsafe fn copy_frame_to_frame_directly(dst: Frame, src: Frame) {
     unsafe {
         dst.copy_from_nonoverlapping(src, PAGE_SIZE);
     }
+}
+
+fn reject_unmapped_borrow_source(addr_space: &AddrSpace, src_page: Page) -> Result<()> {
+    if matches!(
+        addr_space.grants.contains(src_page),
+        Some((_, info))
+            if matches!(
+                info.provider,
+                Provider::External { .. } | Provider::FmapBorrowed { .. }
+            )
+    ) {
+        return Err(Error::new(EIO));
+    }
+    Ok(())
 }
 
 pub fn try_correcting_page_tables(
