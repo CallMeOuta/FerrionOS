@@ -6568,7 +6568,10 @@ def test_app_undeclared(vm, args):
             problems.append(f"--pass-fd under manifest was not refused with 125 (exit {st})")
 
         copy_args = f"{address} /homecopy-net /home/user/Documents/secret.txt /home/user/Pictures/secret.txt /home/user/Downloads/secret.txt"
-        st, out = pfr1_run_as_user(vm, transcript, "homecopy", f"ferrion-run --read-only /home/user/bin /home/user/bin/pfr1-declared cap-check {copy_args}")
+        st, out = pfr1_run_as_user(vm, transcript, "homecopy-ro", f"ferrion-run --read-only /home/user/bin /home/user/bin/pfr1-declared cap-check {copy_args}")
+        if st != 125 or "Permission denied" not in out:
+            problems.append(f"home-copy under --read-only was not refused with 125 Permission denied (exit {st})")
+        st, out = pfr1_run_as_user(vm, transcript, "homecopy", f"ferrion-run --exec-written /home/user/bin /home/user/bin/pfr1-declared cap-check {copy_args}")
         caps = pfr1_parse_caps(out)
         if st != 0:
             problems.append(f"home-copy launch exited {st}")
