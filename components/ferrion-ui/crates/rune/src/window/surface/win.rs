@@ -291,7 +291,7 @@ impl Win {
     }
 
     pub(in crate::window) fn hide(&self) {
-        #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+        #[cfg(all(feature = "native-file-dialog", feature = "dbus", target_os = "linux"))]
         crate::file_dialog::window_focus(&self.window, false);
         #[cfg(target_os = "macos")]
         if let Some(shadow) = &self.native.shadow { shadow.hidden(); }

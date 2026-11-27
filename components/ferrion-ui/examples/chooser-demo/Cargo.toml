@@ -1,0 +1,16 @@
+[package]
+name = "chooser-demo"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["native-file-dialog"]
+native-file-dialog = ["rune/native-file-dialog"]
+fault-hooks = ["rune/fault-hooks"]
+
+[dependencies]
+rune = { workspace = true, features = ["svg", "embedded-fonts", "tooling"] }
+
+[lints]
+workspace = true

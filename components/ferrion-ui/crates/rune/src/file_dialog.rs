@@ -18,14 +18,14 @@ use std::task::{Context, Poll};
 use crate::Tx;
 use crate::runtime::Waker;
 
-#[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+#[cfg(not(target_arch = "wasm32"))]
+pub mod chooser;
+#[cfg(all(feature = "native-file-dialog", feature = "dbus", target_os = "linux"))]
 mod portal;
-#[cfg(any(all(feature = "native-file-dialog", target_os = "linux"), all(test, unix)))]
+#[cfg(any(all(feature = "native-file-dialog", feature = "dbus", target_os = "linux"), all(test, unix)))]
 mod portal_format;
-#[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+#[cfg(all(feature = "native-file-dialog", feature = "dbus", target_os = "linux"))]
 pub(crate) use portal::window_focus;
-#[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
-use portal::show as native;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileDialogOptions {
@@ -130,9 +130,33 @@ fn rfd_show(dialog: rfd::AsyncFileDialog, kind: FileDialogKind) -> impl Future<O
     };
     async move { Ok(file.await.map(|file| file.path().to_path_buf())) }
 }
-#[cfg(all(feature = "native-file-dialog", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+#[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+async fn native(kind: FileDialogKind, options: FileDialogOptions) -> Result<Option<PathBuf>, FileDialogError> {
+    if let Some(path) = chooser::tooling_override_path()? {
+        return chooser::show_with_path(path, kind, options).await;
+    }
+    #[cfg(feature = "dbus")]
+    {
+        portal::show(kind, options).await
+    }
+    #[cfg(not(feature = "dbus"))]
+    {
+        let _ = (kind, options);
+        Err(FileDialogError("no XDG desktop portal FileChooser is available".into()))
+    }
+}
+#[cfg(all(feature = "native-file-dialog", target_os = "redox"))]
+async fn native(kind: FileDialogKind, options: FileDialogOptions) -> Result<Option<PathBuf>, FileDialogError> {
+    chooser::show(kind, options).await
+}
+#[cfg(all(feature = "native-file-dialog", not(any(target_os = "linux", target_os = "redox", target_os = "macos", target_os = "windows"))))]
 async fn native(_: FileDialogKind, _: FileDialogOptions) -> Result<Option<PathBuf>, FileDialogError> {
     Err(FileDialogError("native file dialogs aren't supported on this platform".into()))
+}
+
+pub(crate) fn shutdown() {
+    #[cfg(not(target_arch = "wasm32"))]
+    chooser::shutdown();
 }
 
 /// What a [`Tx::open_file`], [`Tx::save_file`] or [`Tx::open_folder`] callback gets: the chosen path, `Ok(None)`

@@ -159,6 +159,8 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
         not(feature = "x11")
     ))]
     crate::drag_out::wayland::set_ignore_shutdown_for_test(args.stall_dnd_shutdown);
+    #[cfg(all(feature = "fault-hooks", not(target_arch = "wasm32")))]
+    crate::file_dialog::chooser::set_fault_for_test(args.chooser_fault.clone());
     let mut windows = Windows {
         factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default(),
         any_shown: false, startup_error: None,
@@ -173,6 +175,7 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     crate::tooling::interaction::flush();
     crate::render::discard_prewarm();
     crate::clipboard::shutdown(); // Also cover an event-loop error before `exiting`.
+    crate::file_dialog::shutdown();
     #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
     {
         crate::drag_out::wayland::detach_display().ok();

@@ -38,7 +38,7 @@ frame-profile = ["tooling", "dep:procwatch"]
 # A measuring build's heap dumps (procwatch's `alloc-sites`) also list the GPU device's allocations.
 alloc-sites = ["dep:procwatch", "procwatch/alloc-sites", "wgpu/counters"]
 # Native Open, Save and folder dialogs: rfd on macOS and Windows, the XDG desktop portal over zbus on Linux.
-native-file-dialog = ["dep:rfd", "dbus"]
+native-file-dialog = ["dep:rfd"]
 hot = ["dep:subsecond", "dep:dioxus-devtools"]
 # macOS: let an overlay set its element's cursor while its app isn't frontmost. macOS ignores
 # `[NSCursor set]` from a background app; this sets WindowServer's private per-connection

@@ -212,7 +212,7 @@ impl Host {
         if self.launcher() && self.win.as_ref().is_some_and(|w| !w.first_frame.notified()) {
             return;
         }
-        #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+        #[cfg(all(feature = "native-file-dialog", feature = "dbus", target_os = "linux"))]
         if let Some(w) = &self.win {
             crate::file_dialog::window_focus(&w.window, false);
         }
@@ -299,7 +299,7 @@ impl Host {
                 if !stale { self.secure_input.window_focus(focused); }
                 if self.launcher() && self.win.as_ref().is_some_and(|w| !w.first_frame.notified()) { return; }
                 if stale { return; }
-                #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+                #[cfg(all(feature = "native-file-dialog", feature = "dbus", target_os = "linux"))]
                 if let Some(w) = &self.win { crate::file_dialog::window_focus(&w.window, focused && self.life.shown()); }
                 // Deliver independently of drawable availability, including hide/occlusion.
                 self.app.window_focus(focused);

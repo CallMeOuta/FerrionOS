@@ -67,6 +67,7 @@ url = "https://github.com/anomalyco/rune"
 rev = "f9a63aa3799b65f160921b4c659bd2fb0103f9da"
 added = [
     "crates/rune-term",
+    "crates/ferrion-file-chooser",
     "examples/cpu-refusal",
     "examples/layer-shell-demo",
     "examples/clipboard-demo",
@@ -74,6 +75,7 @@ added = [
     "examples/dnd-demo",
     "examples/scripts-demo",
     "examples/term-demo",
+    "examples/chooser-demo",
 ]
 
 [ferrion-ui.include]

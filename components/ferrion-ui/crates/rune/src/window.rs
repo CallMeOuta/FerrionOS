@@ -484,6 +484,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
         self.hosts.clear();
         crate::marks::mark("windows.dropped");
         crate::clipboard::shutdown();
+        crate::file_dialog::shutdown();
         #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")), not(feature = "x11")))]
         {
             if let Err(crate::drag_out::wayland::DndWaylandError::ShutdownTimeout) =

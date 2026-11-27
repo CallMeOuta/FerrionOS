@@ -87,6 +87,8 @@ pub struct Args {
     pub(crate) snap_popup: Option<PathBuf>,
     #[cfg(feature = "fault-hooks")]
     pub(crate) stall_dnd_shutdown: bool,
+    #[cfg(feature = "fault-hooks")]
+    pub(crate) chooser_fault: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -257,6 +259,8 @@ impl Args {
                 "--snap-popup" => a.snap_popup = Some(val(&mut i).into()),
                 #[cfg(feature = "fault-hooks")]
                 "--stall-dnd-shutdown" => a.stall_dnd_shutdown = true,
+                #[cfg(feature = "fault-hooks")]
+                "--chooser-fault" => a.chooser_fault = Some(val(&mut i)),
                 "-h" | "--help" => {
                     eprintln!("{HELP}");
                     std::process::exit(0);

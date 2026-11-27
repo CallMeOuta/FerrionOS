@@ -17,6 +17,7 @@ members = [
     "crates/procwatch",
     "crates/rune-taffy",
     "crates/rune-term",
+    "crates/ferrion-file-chooser",
     "themes/opencode",
     "examples/hello",
     "examples/settings",
@@ -28,6 +29,7 @@ members = [
     "examples/dnd-demo",
     "examples/scripts-demo",
     "examples/term-demo",
+    "examples/chooser-demo",
 ]
 # Default cargo check/test targets: the core framework, libraries and theme.
 # Excludes examples/*, www/app, rune-luau (C++ Luau build via cc/mlua), rune-notify/rune-mac
@@ -50,6 +52,7 @@ default-members = [
     "crates/procwatch",
     "crates/rune-taffy",
     "crates/rune-term",
+    "crates/ferrion-file-chooser",
     "themes/opencode",
 ]
 exclude = ["tools/rune-dev-guard", "tools/ratex-math-wasm", "tools/ratex-math-wasm/pack", "vendor/accesskit_macos", "vendor/accesskit_windows", "vendor/parley_engine", "vendor/sctk-adwaita", "vendor/tiny-skia-path", "vendor/wgpu-hal", "vendor/winit"]
