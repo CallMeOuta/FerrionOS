@@ -1,0 +1,25 @@
+Subject: [PATCH] niri: Restrict ext_idle_notifier_v1 to unrestricted clients
+
+FerrionOS change to niri (GPL-3.0-or-later, kept), made against pinned
+commit ef54ab5421d13ffed2b5fc1f0308998cac4808d0 after the existing
+recipe patches.
+
+Gate IdleNotifierState (ext_idle_notifier_v1) behind
+client_is_unrestricted while leaving IdleInhibitManagerState
+(zwp_idle_inhibit_manager_v1) available to ordinary clients.
+---
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -2656,7 +2656,11 @@
+         let pointer_gestures_state = PointerGesturesState::new::<State>(&display_handle);
+         let relative_pointer_state = RelativePointerManagerState::new::<State>(&display_handle);
+         let pointer_constraints_state = PointerConstraintsState::new::<State>(&display_handle);
+-        let idle_notifier_state = IdleNotifierState::new(&display_handle, event_loop.clone());
++        let idle_notifier_state = IdleNotifierState::new_with_filter(
++            &display_handle,
++            event_loop.clone(),
++            client_is_unrestricted,
++        );
+         let idle_inhibit_manager_state = IdleInhibitManagerState::new::<State>(&display_handle);
+         let data_device_state = DataDeviceState::new::<State>(&display_handle);
+         let primary_selection_state =
