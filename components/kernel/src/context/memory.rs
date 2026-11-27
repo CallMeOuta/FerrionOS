@@ -666,7 +666,7 @@ impl AddrSpace {
         let utable = unsafe {
             PageMapper::create(
                 TableKind::User,
-                crate::memory::TheFrameAllocator(NumaMemoryPolicy::NodeLocalLeniant),
+                crate::memory::TheFrameAllocator::fallible(NumaMemoryPolicy::NodeLocalLeniant),
             )
             .ok_or(Error::new(ENOMEM))?
         };
@@ -1446,7 +1446,7 @@ impl Grant {
         flusher: &mut Flusher,
         mem_policy: NumaMemoryPolicy,
     ) -> Result<Grant, Enomem> {
-        let mut frame_allocator = TheFrameAllocator(mem_policy);
+        let mut frame_allocator = TheFrameAllocator::fallible(mem_policy);
         let base = Frame::containing(
             frame_allocator
                 .allocate(FrameCount::new(span.count))

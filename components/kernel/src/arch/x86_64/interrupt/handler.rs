@@ -379,6 +379,7 @@ macro_rules! interrupt_stack {
         #[unsafe(naked)]
         pub unsafe extern "C" fn $name() {
             unsafe extern "C" fn inner($stack: &mut $crate::arch::x86_64::interrupt::InterruptStack) {
+                let _irq_alloc_charge_guard = $crate::percpu::IrqAllocChargeGuard::enter();
                 $code
             }
             core::arch::naked_asm!(
@@ -425,6 +426,7 @@ macro_rules! interrupt {
         #[unsafe(naked)]
         pub unsafe extern "C" fn $name() {
             unsafe extern "C" fn inner() {
+                let _irq_alloc_charge_guard = $crate::percpu::IrqAllocChargeGuard::enter();
                 $code
             }
 
@@ -458,6 +460,7 @@ macro_rules! interrupt_error {
         #[unsafe(naked)]
         pub unsafe extern "C" fn $name() {
             unsafe extern "C" fn inner($stack: &mut $crate::arch::x86_64::interrupt::handler::InterruptStack, $error_code: usize) {
+                let _irq_alloc_charge_guard = $crate::percpu::IrqAllocChargeGuard::enter();
                 $code
             }
 

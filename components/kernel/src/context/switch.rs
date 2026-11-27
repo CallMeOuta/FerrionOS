@@ -182,6 +182,10 @@ pub enum SwitchResult {
 ///   to an idle context.
 pub fn switch(token: &mut CleanLockToken) -> SwitchResult {
     let percpu = PercpuBlock::current();
+    assert!(
+        !percpu.user_charged_alloc.get(),
+        "context::switch called inside user_charged_alloc scope"
+    );
     let schedule_time = crate::time::monotonic(token);
 
     switch_inner(percpu, schedule_time, token)

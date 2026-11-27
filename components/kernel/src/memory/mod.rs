@@ -57,6 +57,36 @@ pub(crate) fn areas() -> &'static [rmm::MemoryArea] {
     unsafe { &(&*AREAS.get())[..AREA_COUNT.get().read().into()] }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllocClass {
+    Fallible,
+    Infallible,
+}
+
+pub const KERNEL_HEAP_RESERVE_MIN_FRAMES: usize = 1024;
+pub const KERNEL_HEAP_RESERVE_MAX_FRAMES: usize = 2048;
+const KERNEL_HEAP_RESERVE_SHIFT: usize = 7;
+
+static GLOBAL_FREE_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static KERNEL_HEAP_RESERVE_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+fn compute_kernel_heap_reserve(total: usize) -> usize {
+    let scaled = total >> KERNEL_HEAP_RESERVE_SHIFT;
+    let clamped = scaled.clamp(
+        KERNEL_HEAP_RESERVE_MIN_FRAMES,
+        KERNEL_HEAP_RESERVE_MAX_FRAMES,
+    );
+    clamped.min(total / 4)
+}
+
+pub fn kernel_heap_reserve_frames() -> usize {
+    KERNEL_HEAP_RESERVE_FRAMES.load(Ordering::Relaxed)
+}
+
+pub fn global_free_frames() -> usize {
+    GLOBAL_FREE_FRAMES.load(Ordering::Acquire)
+}
+
 /// Get the number of frames available
 pub fn free_frames() -> usize {
     total_frames() - used_frames()
@@ -77,44 +107,44 @@ pub fn total_frames() -> usize {
     sections().iter().map(|section| section.frames.len()).sum()
 }
 
-pub fn allocate_p2frame_with_mask(
+pub fn allocate_p2frame_with_mask_class(
     mask: FreeListMask,
     order: u32,
     fallback: bool,
     must_be_zero: bool,
+    class: AllocClass,
 ) -> Option<Frame> {
     let lists = FREE_LISTS.get().unwrap();
     if lists.len() == 1 {
-        return allocate_p2frame_complex(order, (), None, order, 0, must_be_zero).map(|e| e.0);
+        return allocate_p2frame_complex(order, (), None, order, 0, must_be_zero, class)
+            .map(|e| e.0);
     }
 
     for i in 0..lists.len() {
         if mask.is_enabled(i)
             && let Some(_) = lists.get(i)
             && let Some((frame, _)) =
-                allocate_p2frame_complex(order, (), None, order, i, must_be_zero)
+                allocate_p2frame_complex(order, (), None, order, i, must_be_zero, class)
         {
             return Some(frame);
         }
     }
 
     if fallback {
-        // if distance info is available, use it to try allocating
-        // from nodes in the increasing order of distance from current node
         if let Some(masks) = numa::free_lists_masks() {
             for mask in masks {
-                if let Some(frame) = allocate_p2frame_with_mask(mask, order, false, must_be_zero) {
+                if let Some(frame) =
+                    allocate_p2frame_with_mask_class(mask, order, false, must_be_zero, class)
+                {
                     return Some(frame);
                 }
             }
         } else {
-            // if distance info is not available, just try allocating from the remaining memory regions
-            // not present in the mask
             for i in 0..lists.len() {
                 if !mask.is_enabled(i)
                     && let Some(_) = lists.get(i)
                     && let Some((frame, _)) =
-                        allocate_p2frame_complex(order, (), None, order, i, must_be_zero)
+                        allocate_p2frame_complex(order, (), None, order, i, must_be_zero, class)
                 {
                     return Some(frame);
                 }
@@ -125,27 +155,51 @@ pub fn allocate_p2frame_with_mask(
     None
 }
 
-/// Allocate a range of frames
-pub fn allocate_p2frame(order: u32, must_be_zero: bool) -> Option<Frame> {
+pub fn allocate_p2frame_with_mask(
+    mask: FreeListMask,
+    order: u32,
+    fallback: bool,
+    must_be_zero: bool,
+) -> Option<Frame> {
+    allocate_p2frame_with_mask_class(mask, order, fallback, must_be_zero, AllocClass::Fallible)
+}
+
+pub fn allocate_p2frame_class(
+    order: u32,
+    must_be_zero: bool,
+    class: AllocClass,
+) -> Option<Frame> {
     static RR_INDEX: AtomicU8 = AtomicU8::new(0);
     let len = FREE_LISTS.get().unwrap().len();
 
     if !numa::is_supported() || len == 1 {
-        return allocate_p2frame_complex(order, (), None, order, 0, must_be_zero).map(|e| e.0);
+        return allocate_p2frame_complex(order, (), None, order, 0, must_be_zero, class)
+            .map(|e| e.0);
     }
 
-    // relaxed ordering since we only want atomicity
     let index = usize::from(RR_INDEX.fetch_add(1, Ordering::Relaxed)) % len;
     for i in (index..len).chain(0..index) {
-        if let Some(frame) = allocate_p2frame_complex(order, (), None, order, i, must_be_zero) {
+        if let Some(frame) =
+            allocate_p2frame_complex(order, (), None, order, i, must_be_zero, class)
+        {
             return Some(frame.0);
         }
     }
 
     None
 }
+
+/// Allocate a range of frames
+pub fn allocate_p2frame(order: u32, must_be_zero: bool) -> Option<Frame> {
+    allocate_p2frame_class(order, must_be_zero, AllocClass::Fallible)
+}
+
+pub fn allocate_frame_class(must_be_zero: bool, class: AllocClass) -> Option<Frame> {
+    allocate_p2frame_class(0, must_be_zero, class)
+}
+
 pub fn allocate_frame(must_be_zero: bool) -> Option<Frame> {
-    allocate_p2frame(0, must_be_zero)
+    allocate_frame_class(must_be_zero, AllocClass::Fallible)
 }
 
 // TODO: Flags, strategy
@@ -156,6 +210,7 @@ pub fn allocate_p2frame_complex(
     min_order: u32,
     index: usize,
     must_be_zero: bool,
+    class: AllocClass,
 ) -> Option<(Frame, usize)> {
     let mut freelist = FREE_LISTS.get().unwrap()[index].free_list_inner.lock();
 
@@ -165,6 +220,20 @@ pub fn allocate_p2frame_complex(
         .enumerate()
         .skip(min_order as usize)
         .find_map(|(i, f)| f.map(|f| (i as u32, f)))?;
+
+    let needed = 1usize << min_order;
+    let floor = match class {
+        AllocClass::Fallible => kernel_heap_reserve_frames(),
+        AllocClass::Infallible => 0,
+    };
+    if GLOBAL_FREE_FRAMES
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            cur.checked_sub(needed).filter(|&after| after >= floor)
+        })
+        .is_err()
+    {
+        return None;
+    }
 
     let info = get_page_info(frame)
         .unwrap_or_else(|| panic!("no page info for allocated frame {frame:?}"))
@@ -332,8 +401,8 @@ pub unsafe fn deallocate_p2frame(orig_frame: Frame, order: u32) {
         old_head_info.set_prev(P2Frame::new(Some(new_head), largest_order));
     }
 
-    // info!("FREED {current:?} ORDER {order} FRAME_ORDER {largest_order}");
     freelist.used_frames -= 1 << order;
+    GLOBAL_FREE_FRAMES.fetch_add(1 << order, Ordering::Release);
 }
 
 pub unsafe fn deallocate_frame(frame: Frame) {
@@ -1133,6 +1202,19 @@ fn init_sections(allocator: &mut BumpAllocator<RmmA>) -> Option<numa::RegionMask
     }
 
     FREE_LISTS.call_once(|| free_lists);
+    let mut initial_free = 0usize;
+    for list in free_lists.iter() {
+        let fl = list.free_list_inner.lock();
+        for (order, head) in fl.for_orders.iter().enumerate() {
+            let mut cur = *head;
+            while let Some(frame) = cur {
+                initial_free += 1usize << order;
+                cur = get_free_alloc_page_info(frame).next().frame();
+            }
+        }
+    }
+    GLOBAL_FREE_FRAMES.store(initial_free, Ordering::Release);
+    KERNEL_HEAP_RESERVE_FRAMES.store(compute_kernel_heap_reserve(initial_free), Ordering::Release);
 
     //debug_freelist();
     debug!("Initial freelist consistent");
@@ -1148,8 +1230,8 @@ pub fn init_mm(allocator: &mut BumpAllocator<RmmA>) -> Option<numa::RegionMask> 
         // would have been interesting otherwise
         let must_be_zero = true;
 
-        let the_frame =
-            allocate_frame(must_be_zero).expect("failed to allocate static zeroed frame");
+        let the_frame = allocate_frame_class(must_be_zero, AllocClass::Infallible)
+            .expect("failed to allocate static zeroed frame");
         let the_info = get_page_info(the_frame).expect("static zeroed frame had no PageInfo");
         the_info
             .refcount
@@ -1778,17 +1860,32 @@ pub unsafe fn free_user_table_now(frame: Frame) {
 }
 
 #[derive(Debug)]
-pub struct TheFrameAllocator(pub NumaMemoryPolicy);
+pub struct TheFrameAllocator(pub NumaMemoryPolicy, AllocClass);
+
+impl TheFrameAllocator {
+    pub const fn fallible(policy: NumaMemoryPolicy) -> Self {
+        Self(policy, AllocClass::Fallible)
+    }
+
+    pub const fn infallible(policy: NumaMemoryPolicy) -> Self {
+        Self(policy, AllocClass::Infallible)
+    }
+
+    pub const fn with_class(policy: NumaMemoryPolicy, class: AllocClass) -> Self {
+        Self(policy, class)
+    }
+}
 
 unsafe impl FrameAllocator for TheFrameAllocator {
     fn allocate(&mut self, count: FrameCount) -> Option<PhysicalAddress> {
         let count = count.data();
+        let class = self.1;
         let frame = if let Some((mask, fallback)) = numa::free_list_mask(self.0) {
             allocate_frames(count, |order| {
-                allocate_p2frame_with_mask(mask, order, fallback, true)
+                allocate_p2frame_with_mask_class(mask, order, fallback, true, class)
             })
         } else {
-            allocate_frames(count, |order| allocate_p2frame(order, true))
+            allocate_frames(count, |order| allocate_p2frame_class(order, true, class))
         }?;
         Some(frame.base())
     }

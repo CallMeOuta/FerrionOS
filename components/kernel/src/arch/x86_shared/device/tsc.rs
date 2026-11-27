@@ -9,7 +9,7 @@ use core::arch::x86::__cpuid;
 use rmm::Arch;
 use spin::Once;
 
-use crate::{memory::allocate_frame, percpu::PercpuBlock};
+use crate::percpu::PercpuBlock;
 
 pub struct KvmSupport {
     max_leaf: u32,
@@ -177,7 +177,11 @@ pub unsafe fn init() -> bool {
                 .contains(KvmFeatureBits::CLOCKSOURCE2 | KvmFeatureBits::CLOCKSOURCE_STABLE)
         {
             let must_be_zero = true;
-            let frame = allocate_frame(must_be_zero).expect("failed to allocate timer page");
+            let frame = crate::memory::allocate_frame_class(
+                must_be_zero,
+                crate::memory::AllocClass::Infallible,
+            )
+            .expect("failed to allocate timer page");
             x86::msr::wrmsr(MSR_KVM_SYSTEM_TIME_NEW, (frame.base().data() as u64) | 1);
             let ptr = crate::memory::RmmA::phys_to_virt(frame.base()).data()
                 as *const PvclockVcpuTimeInfo;

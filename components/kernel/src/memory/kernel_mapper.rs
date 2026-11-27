@@ -23,22 +23,29 @@ pub struct KernelMapper<const RW: bool> {
 
 impl KernelMapper<false> {
     pub fn lock_ro() -> Self {
-        KernelMapper::lock()
+        KernelMapper::lock(crate::memory::AllocClass::Infallible)
     }
 }
 
 impl KernelMapper<true> {
     pub fn lock_rw() -> Self {
-        KernelMapper::lock()
+        KernelMapper::lock(crate::memory::AllocClass::Infallible)
+    }
+
+    pub fn lock_rw_with_class(class: crate::memory::AllocClass) -> Self {
+        KernelMapper::lock(class)
     }
 }
 
 impl<const RW: bool> KernelMapper<RW> {
-    fn lock() -> Self {
+    fn lock(class: crate::memory::AllocClass) -> Self {
         let mapper = unsafe {
             PageMapper::current(
                 TableKind::Kernel,
-                crate::memory::TheFrameAllocator(syscall::NumaMemoryPolicy::NodeLocalLeniant),
+                crate::memory::TheFrameAllocator::with_class(
+                    syscall::NumaMemoryPolicy::NodeLocalLeniant,
+                    class,
+                ),
             )
         };
 

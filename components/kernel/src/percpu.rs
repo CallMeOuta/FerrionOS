@@ -58,6 +58,66 @@ pub struct PercpuBlock {
     pub numa_node: Cell<Option<(NumaNodeID, &'static NumaNode)>>,
 
     pub live_flushers: AtomicU32,
+
+    pub user_charged_alloc: Cell<bool>,
+}
+
+static PERCPU_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_user_charged() -> bool {
+    PERCPU_INITIALIZED.load(Ordering::Acquire) && PercpuBlock::current().user_charged_alloc.get()
+}
+
+pub fn user_charged<R>(f: impl FnOnce() -> R) -> R {
+    struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if PERCPU_INITIALIZED.load(Ordering::Acquire) {
+                PercpuBlock::current().user_charged_alloc.set(self.0);
+            }
+        }
+    }
+    let prev = if PERCPU_INITIALIZED.load(Ordering::Acquire) {
+        let cell = &PercpuBlock::current().user_charged_alloc;
+        let old = cell.get();
+        cell.set(true);
+        old
+    } else {
+        false
+    };
+    let _guard = Guard(prev);
+    f()
+}
+
+pub struct IrqAllocChargeGuard {
+    prev: bool,
+    active: bool,
+}
+
+impl IrqAllocChargeGuard {
+    #[inline]
+    pub fn enter() -> Self {
+        if PERCPU_INITIALIZED.load(Ordering::Acquire) {
+            let cell = &PercpuBlock::current().user_charged_alloc;
+            let prev = cell.get();
+            cell.set(false);
+            Self { prev, active: true }
+        } else {
+            Self {
+                prev: false,
+                active: false,
+            }
+        }
+    }
+}
+
+impl Drop for IrqAllocChargeGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if self.active {
+            PercpuBlock::current().user_charged_alloc.set(self.prev);
+        }
+    }
 }
 
 pub static ALL_PERCPU_BLOCKS: [AtomicPtr<PercpuBlock>; MAX_CPU_COUNT as usize] =
@@ -76,7 +136,8 @@ pub fn all_percpu_blocks() -> impl Iterator<Item = &'static PercpuBlock> {
 
 #[allow(unused)]
 pub unsafe fn init_tlb_shootdown(id: LogicalCpuId, block: *mut PercpuBlock) {
-    ALL_PERCPU_BLOCKS[id.get() as usize].store(block, Ordering::Release)
+    ALL_PERCPU_BLOCKS[id.get() as usize].store(block, Ordering::Release);
+    PERCPU_INITIALIZED.store(true, Ordering::Release);
 }
 
 pub fn get_all_stats() -> Vec<(LogicalCpuId, CpuStatsData)> {
@@ -242,6 +303,7 @@ impl PercpuBlock {
             stats: CpuStats::default(),
             numa_node: Cell::new(None),
             live_flushers: AtomicU32::new(0),
+            user_charged_alloc: Cell::new(false),
         }
     }
 }

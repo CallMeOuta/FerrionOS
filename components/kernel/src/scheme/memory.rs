@@ -390,12 +390,14 @@ impl KernelScheme for MemoryScheme {
     fn kfstatvfs(&self, _file: usize, dst: UserSliceWo, _token: &mut CleanLockToken) -> Result<()> {
         let used = used_frames() as u64;
         let free = free_frames() as u64;
+        let allocatable = crate::memory::global_free_frames() as u64;
+        let reserve = crate::memory::kernel_heap_reserve_frames() as u64;
 
         let stat = StatVfs {
             f_bsize: PAGE_SIZE.try_into().map_err(|_| Error::new(EOVERFLOW))?,
             f_blocks: used + free,
             f_bfree: free,
-            f_bavail: free,
+            f_bavail: allocatable.saturating_sub(reserve),
         };
         dst.copy_exactly(&stat)?;
 

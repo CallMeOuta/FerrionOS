@@ -2395,7 +2395,7 @@
   "components/kernel/src/macros.rs": 2,
   "components/kernel/src/main.rs": 33,
   "components/kernel/src/memory/kernel_mapper.rs": 11,
-  "components/kernel/src/memory/mod.rs": 152,
+  "components/kernel/src/memory/mod.rs": 146,
   "components/kernel/src/memory/page.rs": 6,
   "components/kernel/src/numa.rs": 11,
   "components/kernel/src/panic.rs": 8,

@@ -86,6 +86,7 @@ pub unsafe extern "C" fn exception_handler() {
 }
 
 unsafe fn exception_handler_inner(regs: &mut InterruptStack) {
+    let _irq_alloc_charge_guard = crate::percpu::IrqAllocChargeGuard::enter();
     unsafe {
         let scause: usize;
         let sstatus: usize;

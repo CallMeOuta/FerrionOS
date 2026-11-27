@@ -31,8 +31,11 @@ impl PercpuBlock {
 pub unsafe fn init(cpu_id: LogicalCpuId) {
     unsafe {
         let must_be_zero = true;
-        let frame =
-            crate::memory::allocate_frame(must_be_zero).expect("failed to allocate percpu memory");
+        let frame = crate::memory::allocate_frame_class(
+            must_be_zero,
+            crate::memory::AllocClass::Infallible,
+        )
+        .expect("failed to allocate percpu memory");
         let virt = RmmA::phys_to_virt(frame.base()).data() as *mut ArchPercpu;
 
         virt.write(ArchPercpu {

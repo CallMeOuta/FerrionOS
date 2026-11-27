@@ -24,6 +24,11 @@ unsafe impl GlobalAlloc for Allocator {
         let max_attempts = (layout.size() / super::KERNEL_HEAP_SIZE)
             .saturating_add(2)
             .min(MAX_HEAP_GROW_ATTEMPTS);
+        let class = if crate::percpu::is_user_charged() {
+            crate::memory::AllocClass::Fallible
+        } else {
+            crate::memory::AllocClass::Infallible
+        };
         unsafe {
             let mut heap_guard = HEAP.lock();
             let Some(ref mut heap) = *heap_guard else {
@@ -35,7 +40,7 @@ unsafe impl GlobalAlloc for Allocator {
                 }
                 let size = heap.size();
                 if super::map_heap(
-                    &mut KernelMapper::lock_rw(),
+                    &mut KernelMapper::lock_rw_with_class(class),
                     crate::kernel_heap_offset() + size,
                     super::KERNEL_HEAP_SIZE,
                 )

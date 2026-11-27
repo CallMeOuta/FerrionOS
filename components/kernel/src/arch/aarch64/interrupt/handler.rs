@@ -382,6 +382,7 @@ macro_rules! exception_stack {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(stack: &mut $crate::arch::aarch64::interrupt::InterruptStack) {
             unsafe extern "C" fn inner($stack: &mut $crate::arch::aarch64::interrupt::InterruptStack) {
+                let _irq_alloc_charge_guard = $crate::percpu::IrqAllocChargeGuard::enter();
                 $code
             }
             core::arch::naked_asm!(
