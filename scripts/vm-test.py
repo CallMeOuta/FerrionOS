@@ -10727,6 +10727,216 @@ def test_rune_headless(vm, args):
     return True, f"{' '.join(parts)}; see {report_path}"
 
 
+RUNE_TERM_REQUIRED_STEPS = (
+    "spawn",
+    "echo",
+    "winsize_initial",
+    "winsize_resized",
+    "reap",
+    "shutdown",
+)
+
+RUNE_TERM_SIGNAL_STEPS = (
+    "spawn",
+    "job_control",
+    "sigwinch",
+    "sigint",
+    "reap",
+    "shutdown",
+)
+
+
+def test_rune_term(vm, args):
+    """Runs rune-term-demo --pty-check and --feed headlessly on FerrionOS, proving standard PTY spawn, echo, TIOCGWINSZ/TIOCSWINSZ resize (24x80->18x60), reap, bounded shutdown, and screen dump (use --config rune-headless on x86_64)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+
+    def fetch_bytes(remote_path, tag):
+        since = vm.mark()
+        vm.type(
+            f"bash -c 'echo RUNEDATA-\"\"{tag}-BEGIN; base64 -w 0 {remote_path} 2>/dev/null; "
+            f"echo; echo RUNEDATA-\"\"{tag}-END'\n"
+        )
+        found = vm.wait_serial(
+            rf"RUNEDATA-{tag}-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)RUNEDATA-{tag}-END",
+            RUNE_HEADLESS_FETCH_TIMEOUT,
+            since,
+        )
+        if not found:
+            return None
+        raw = "".join(found.group(1).split())
+        if not raw:
+            return None
+        try:
+            return base64.b64decode(raw, validate=True)
+        except ValueError:
+            return None
+
+    reasons = []
+    log_sections = []
+
+    pty_path = "/tmp/rune-term-pty.json"
+    pty_status, pty_out = guest_run(
+        vm,
+        "runetermpty",
+        f"rm -f {pty_path}; rune-term-demo --pty-check {pty_path} 2>&1",
+        RUNE_HEADLESS_RUN_TIMEOUT,
+    )
+    log_sections.append(f"=== pty-check (exit {pty_status}) ===\n{pty_out}\n")
+    pty_bytes = fetch_bytes(pty_path, "TERMPTY")
+    pty_report = None
+    if pty_bytes:
+        (vm.out / "rune-term-pty.json").write_bytes(pty_bytes)
+        try:
+            pty_report = json.loads(pty_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as err:
+            reasons.append(f"pty-check JSON invalid: {err}")
+    else:
+        reasons.append(f"pty-check missing report (exit {pty_status})")
+
+    if pty_status != 0:
+        reasons.append(f"pty-check exited {pty_status}")
+    if isinstance(pty_report, dict):
+        if not pty_report.get("ok"):
+            err_msg = pty_report.get("error") or "steps failed"
+            reasons.append(f"pty-check ok=false ({err_msg})")
+        step_map = {
+            s.get("step"): s
+            for s in pty_report.get("steps", [])
+            if isinstance(s, dict)
+        }
+        for step in RUNE_TERM_REQUIRED_STEPS:
+            entry = step_map.get(step)
+            if not entry or not entry.get("ok"):
+                detail = entry.get("detail") if isinstance(entry, dict) else "missing"
+                reasons.append(f"step {step} failed ({detail})")
+        screen = pty_report.get("screen")
+        if not isinstance(screen, dict) or screen.get("cols") != 60 or screen.get("rows") != 18:
+            reasons.append("pty-check screen missing or wrong resized dimensions")
+
+    feed_in = "/tmp/rune-term-feed.bin"
+    feed_out = "/tmp/rune-term-feed.json"
+    feed_status, feed_out_txt = guest_run(
+        vm,
+        "runetermfeed",
+        f"rm -f {feed_in} {feed_out}; "
+        f'printf "\\033[1;32mFerrionOS\\033[0m Term" > {feed_in} && '
+        f"rune-term-demo --feed={feed_in} --cols=40 --rows=4 --dump-screen={feed_out} 2>&1",
+        RUNE_HEADLESS_RUN_TIMEOUT,
+    )
+    log_sections.append(f"=== feed-check (exit {feed_status}) ===\n{feed_out_txt}\n")
+    feed_bytes = fetch_bytes(feed_out, "TERMFEED") if feed_status == 0 else None
+    feed_report = None
+    if feed_bytes:
+        (vm.out / "rune-term-feed.json").write_bytes(feed_bytes)
+        try:
+            feed_report = json.loads(feed_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as err:
+            reasons.append(f"feed-check JSON invalid: {err}")
+    else:
+        reasons.append(f"feed-check missing screen dump (exit {feed_status})")
+
+    if feed_status != 0:
+        reasons.append(f"feed-check exited {feed_status}")
+    if isinstance(feed_report, dict):
+        lines = feed_report.get("text_lines") or []
+        if not lines or lines[0] != "FerrionOS Term":
+            reasons.append(f"feed-check row0 mismatch: {lines[:1]!r}")
+        if feed_report.get("cursor") != [14, 0]:
+            reasons.append(f"feed-check cursor mismatch: {feed_report.get('cursor')!r}")
+
+    log = vm.out / "rune-term.txt"
+    log.write_text("".join(log_sections))
+    report = {
+        "pty_exit": pty_status,
+        "feed_exit": feed_status,
+        "pty": pty_report,
+        "feed": feed_report,
+        "reasons": reasons,
+    }
+    report_path = vm.out / "rune-term.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, f"pty=6/6(24x80->18x60,reap=0) feed=ok; see {report_path}"
+
+
+def test_rune_term_signals(vm, args):
+    """RU13b check: runs rune-term-demo --pty-signals-check on FerrionOS, verifying shell job control, SIGWINCH on resize, and Ctrl-C SIGINT to foreground process group (use --config rune-headless on x86_64)."""
+    if not root_shell(vm, args.timeout):
+        return False, "no root serial login"
+
+    def fetch_bytes(remote_path, tag):
+        since = vm.mark()
+        vm.type(
+            f"bash -c 'echo RUNEDATA-\"\"{tag}-BEGIN; base64 -w 0 {remote_path} 2>/dev/null; "
+            f"echo; echo RUNEDATA-\"\"{tag}-END'\n"
+        )
+        found = vm.wait_serial(
+            rf"RUNEDATA-{tag}-BEGIN\s*\n([A-Za-z0-9+/=\s]*?)RUNEDATA-{tag}-END",
+            RUNE_HEADLESS_FETCH_TIMEOUT,
+            since,
+        )
+        if not found:
+            return None
+        raw = "".join(found.group(1).split())
+        if not raw:
+            return None
+        try:
+            return base64.b64decode(raw, validate=True)
+        except ValueError:
+            return None
+
+    reasons = []
+    sig_path = "/tmp/rune-term-signals.json"
+    sig_status, sig_out = guest_run(
+        vm,
+        "runetermsig",
+        f"rm -f {sig_path}; rune-term-demo --pty-signals-check {sig_path} 2>&1",
+        RUNE_HEADLESS_RUN_TIMEOUT,
+    )
+    sig_bytes = fetch_bytes(sig_path, "TERMSIG")
+    sig_report = None
+    if sig_bytes:
+        (vm.out / "rune-term-signals-raw.json").write_bytes(sig_bytes)
+        try:
+            sig_report = json.loads(sig_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as err:
+            reasons.append(f"pty-signals-check JSON invalid: {err}")
+    else:
+        reasons.append(f"pty-signals-check missing report (exit {sig_status})")
+
+    if sig_status != 0:
+        reasons.append(f"pty-signals-check exited {sig_status}")
+    if isinstance(sig_report, dict):
+        if not sig_report.get("ok"):
+            err_msg = sig_report.get("error") or "steps failed"
+            reasons.append(f"pty-signals-check ok=false ({err_msg})")
+        step_map = {
+            s.get("step"): s
+            for s in sig_report.get("steps", [])
+            if isinstance(s, dict)
+        }
+        for step in RUNE_TERM_SIGNAL_STEPS:
+            entry = step_map.get(step)
+            if not entry or not entry.get("ok"):
+                detail = entry.get("detail") if isinstance(entry, dict) else "missing"
+                reasons.append(f"step {step} failed ({detail})")
+
+    log = vm.out / "rune-term-signals.txt"
+    log.write_text(f"=== pty-signals-check (exit {sig_status}) ===\n{sig_out}\n")
+    report = {
+        "signals_exit": sig_status,
+        "signals": sig_report,
+        "reasons": reasons,
+    }
+    report_path = vm.out / "rune-term-signals.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    if reasons:
+        return False, "; ".join(reasons) + f"; see {log}"
+    return True, f"signals=6/6(job_control,sigwinch,sigint,reap=0); see {report_path}"
+
+
 LOCK_PROBE_CHECKS = (
     "fcntl-conflict", "getlk-holder", "fcntl-shared", "fcntl-split-merge", "seek-cur-and-end",
     "release-on-close", "release-on-close-other-fd", "path-lookups-keep-locks", "release-on-exit", "release-on-kill",
@@ -13236,6 +13446,8 @@ TESTS["gpu-gbm"] = test_gpu_gbm
 TESTS["vk-exact"] = test_vk_exact
 TESTS["wgpu-headless"] = test_wgpu_headless
 TESTS["rune-headless"] = test_rune_headless
+TESTS["rune-term"] = test_rune_term
+TESTS["rune-term-signals"] = test_rune_term_signals
 TESTS["agent-scope"] = test_agent_scope
 TESTS["agent-clone"] = test_agent_clone
 TESTS["agent-scope-overhead"] = test_agent_scope_overhead
@@ -13924,7 +14136,7 @@ def main():
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=venus",)
                 run_args = argparse.Namespace(**{**vars(args), "trace": [*args.trace, *VK_EXACT_TRACE]})
-            elif name == "rune-headless":
+            elif name in ("rune-headless", "rune-term", "rune-term-signals"):
                 if not any(assignment.startswith("gpu=") for assignment in args.make):
                     make = ("gpu=no",)
             elif name in ("iommu", "dma-outside-grant"):

@@ -1,5 +1,5 @@
 [package]
-description = "Rune headless rendering examples (hello, settings, launcher) for FerrionOS"
+description = "Rune headless rendering examples (hello, settings, launcher, clipboard-demo, term-demo) for FerrionOS"
 dependencies = [
     "libwayland",
     "libxkbcommon",
@@ -22,7 +22,7 @@ script = """
 DYNAMIC_INIT
 COOKBOOK_SOURCE="$(realpath "${COOKBOOK_SOURCE}")"
 COOKBOOK_CARGO_FLAGS+=(--features rune/tooling)
-for app in hello settings launcher clipboard-demo; do
+for app in hello settings launcher clipboard-demo term-demo; do
     bin_name="${app}" bin_flags="--package ${app}" bin_final_name="rune-${app}" cookbook_cargo_build
 done
 """
