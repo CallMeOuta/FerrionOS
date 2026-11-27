@@ -145,7 +145,7 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
 
     /// EROFS when the file system is served read-only (`redoxfs --read-only`).
     fn writable(&self) -> Result<()> {
-        if self.fs.read_only {
+        if self.fs.access.is_read_only() {
             Err(Error::new(EROFS))
         } else {
             Ok(())
@@ -1307,6 +1307,7 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
             [KEY_CALL, KEY_SET, index]
                 if *index < 64 && (97..=96 + MAX_PASSPHRASE).contains(&payload.len()) =>
             {
+                self.writable()?;
                 let index = *index as usize;
                 let old_bytes: [u8; 48] = payload[..48].try_into().unwrap();
                 let new_bytes: [u8; 48] = payload[48..96].try_into().unwrap();

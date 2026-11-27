@@ -18,6 +18,31 @@ fn compress_cache() -> Vec<u8> {
     vec![0; lz4_flex::block::get_maximum_output_size(RECORD_SIZE as usize)]
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Barriers {
+    EveryCommit,
+    OnUnmount,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    ReadWrite { barriers: Barriers },
+    ReadOnly,
+}
+
+impl Access {
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
+
+    pub fn barriers(self) -> Option<Barriers> {
+        match self {
+            Self::ReadWrite { barriers } => Some(barriers),
+            Self::ReadOnly => None,
+        }
+    }
+}
+
 /// A file system
 pub struct FileSystem<D: Disk> {
     //TODO: make private
@@ -30,10 +55,7 @@ pub struct FileSystem<D: Disk> {
     pub(crate) cipher_opt: Option<Xts128<Aes128>>,
     pub(crate) compress_cache: Vec<u8>,
     pub node_usages: BTreeMap<u32, u64>,
-    /// A file system that is only read: transactions are dropped instead of committed, so that
-    /// nothing (an access time included) is written to the disk. Set after `open`.
-    pub read_only: bool,
-    pub barriers: bool,
+    pub access: Access,
 }
 
 impl<D: Disk> FileSystem<D> {
@@ -57,7 +79,12 @@ impl<D: Disk> FileSystem<D> {
                 Ok(())
             })?;
         }
-        if !self.barriers {
+        if matches!(
+            self.access,
+            Access::ReadWrite {
+                barriers: Barriers::OnUnmount
+            }
+        ) {
             self.disk.flush()?;
         }
         Ok(())
@@ -126,8 +153,9 @@ impl<D: Disk> FileSystem<D> {
                 cipher_opt,
                 compress_cache: compress_cache(),
                 node_usages: BTreeMap::new(),
-                read_only: false,
-                barriers: true,
+                access: Access::ReadWrite {
+                    barriers: Barriers::EveryCommit,
+                },
             };
 
             unsafe { fs.reset_allocator()? };
@@ -236,8 +264,9 @@ impl<D: Disk> FileSystem<D> {
             cipher_opt,
             compress_cache: compress_cache(),
             node_usages: BTreeMap::new(),
-            read_only: false,
-            barriers: true,
+            access: Access::ReadWrite {
+                barriers: Barriers::EveryCommit,
+            },
         };
 
         // Set tree and alloc pointers and write header generation one
@@ -284,6 +313,9 @@ impl<D: Disk> FileSystem<D> {
 
     /// Release unused nodes and squash allocation log, happens on mount (with cleanup) and unmount
     pub fn cleanup(&mut self) -> Result<()> {
+        if self.access.is_read_only() {
+            return Ok(());
+        }
         let mut tx = Transaction::new(self);
         tx.release_unused_nodes()?;
         tx.commit(true)
@@ -291,12 +323,9 @@ impl<D: Disk> FileSystem<D> {
 
     /// start a filesystem transaction, required for making any changes
     pub fn tx<F: FnOnce(&mut Transaction<D>) -> Result<T>, T>(&mut self, f: F) -> Result<T> {
-        let read_only = self.read_only;
         let mut tx = Transaction::new(self);
         let t = f(&mut tx)?;
-        if !read_only {
-            tx.commit(false)?;
-        }
+        tx.commit(false)?;
         Ok(t)
     }
 

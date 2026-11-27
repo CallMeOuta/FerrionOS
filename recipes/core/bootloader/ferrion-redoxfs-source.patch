@@ -1,6 +1,6 @@
 FerrionOS change to the upstream bootloader (MIT license, kept), made against upstream commit f3d9261b5fc81418c259c5059f46ee7087e86ed8 after the existing recipe patches.
 
-Embed the recipe-patched RedoxFS, not the registry copy, mark the unlocked boot filesystem read_only before any transaction, assert read_only on load_to_memory and verify::Manifest::load, and match its syscall error type.
+Embed the recipe-patched RedoxFS, not the registry copy, mark the unlocked boot filesystem Access::ReadOnly before any transaction, assert is_read_only() on load_to_memory and verify::Manifest::load, and match its syscall error type.
 
 diff -ruN '--exclude=.git' a/Cargo.lock b/Cargo.lock
 --- a/Cargo.lock
@@ -349,7 +349,7 @@ diff -ruN '--exclude=.git' a/src/main.rs b/src/main.rs
      path: &str,
      filetype: Filetype,
  ) -> &'static mut [u8] {
-+    assert!(fs.read_only);
++    assert!(fs.access.is_read_only());
      fs.tx(|tx| {
          let mut node = None;
          for component in path.split('/') {
@@ -362,7 +362,7 @@ diff -ruN '--exclude=.git' a/src/os/bios/mod.rs b/src/os/bios/mod.rs
          let block = 2 * crate::MIBI as u64 / redoxfs::BLOCK_SIZE;
 -        redoxfs::FileSystem::open(disk, password_opt, Some(block), false)
 +        let mut fs = redoxfs::FileSystem::open(disk, password_opt, Some(block), false)?;
-+        fs.read_only = true;
++        fs.access = redoxfs::Access::ReadOnly;
 +        Ok(fs)
      }
  
@@ -376,7 +376,7 @@ diff -ruN '--exclude=.git' a/src/os/uefi/mod.rs b/src/os/uefi/mod.rs
              match redoxfs::FileSystem::open(device.disk, password_opt, Some(block), false) {
 -                Ok(ok) => return Ok(ok),
 +                Ok(mut ok) => {
-+                    ok.read_only = true;
++                    ok.access = redoxfs::Access::ReadOnly;
 +                    return Ok(ok);
 +                }
                  Err(err) => match err.errno {
@@ -389,7 +389,7 @@ diff -ruN '--exclude=.git' a/src/verify.rs b/src/verify.rs
      /// With verification on, loads the manifest and its signature and checks the signature
      /// before reading anything else in the manifest; refuses to go on when either fails.
      pub fn load<O: Os>(os: &O, fs: &mut redoxfs::FileSystem<O::D>) -> Option<Manifest> {
-+        assert!(fs.read_only);
++        assert!(fs.access.is_read_only());
          let key = key();
          // Measured with or without a key: all zero records that this boot verifies nothing.
          crate::measure::boot_key(&key);

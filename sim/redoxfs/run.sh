@@ -17,6 +17,10 @@ if [ "${1:-}" = ringdrain ]; then
     shift
     exec target/release/redoxfs-sim ringdrain "$@"
 fi
+if [ "${1:-}" = readonly ]; then
+    shift
+    exec target/release/redoxfs-sim readonly "$@"
+fi
 seeds=${1:?usage: run.sh SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount], or run.sh replay FILE}
 ops=${2:?usage: run.sh SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount], or run.sh replay FILE}
 shift 2

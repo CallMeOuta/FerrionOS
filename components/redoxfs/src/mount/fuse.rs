@@ -72,7 +72,9 @@ where
 
     // Cleanup on unmount
     filesystem.cleanup()?;
-    filesystem.disk.flush()?;
+    if !filesystem.access.is_read_only() {
+        filesystem.disk.flush()?;
+    }
 
     Ok(res)
 }

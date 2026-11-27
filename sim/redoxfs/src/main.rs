@@ -6,6 +6,7 @@ mod keyroll;
 mod maps;
 mod model;
 mod op;
+mod readonly;
 mod ring;
 mod rng;
 
@@ -311,7 +312,7 @@ fn summary(label: &str, seeds: usize, stats: &Stats, elapsed: Duration, failures
 
 fn usage() -> ! {
     eprintln!(
-        "usage: redoxfs-sim run SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount]\n       redoxfs-sim seed SEED OPS [--flush-on-unmount]\n       redoxfs-sim replay FILE\n       redoxfs-sim maps SEEDS OPS [--first SEED] [--threads N]\n       redoxfs-sim keyroll SEEDS OPS [--first SEED] [--threads N]"
+        "usage: redoxfs-sim run SEEDS OPS [--first SEED] [--threads N] [--shrink N] [--flush-on-unmount]\n       redoxfs-sim seed SEED OPS [--flush-on-unmount]\n       redoxfs-sim replay FILE\n       redoxfs-sim maps SEEDS OPS [--first SEED] [--threads N]\n       redoxfs-sim keyroll SEEDS OPS [--first SEED] [--threads N]\n       redoxfs-sim ringdrain [SEEDS]\n       redoxfs-sim readonly"
     );
     std::process::exit(2)
 }
@@ -562,6 +563,10 @@ fn main() {
         "ringdrain" => {
             let seeds: u64 = args.get(1).and_then(|arg| arg.parse().ok()).unwrap_or(200);
             let failed = ring::run_ringdrain(seeds);
+            std::process::exit(if failed == 0 { 0 } else { 1 });
+        }
+        "readonly" => {
+            let failed = readonly::run_readonly();
             std::process::exit(if failed == 0 { 0 } else { 1 });
         }
         _ => usage(),

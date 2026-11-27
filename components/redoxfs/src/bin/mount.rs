@@ -18,7 +18,7 @@ use std::{mem::MaybeUninit, ptr::addr_of_mut, sync::atomic::Ordering};
 
 #[cfg(target_os = "redox")]
 use redoxfs::ring::DiskRing;
-use redoxfs::{Disk, DiskCache, DiskFile, FileSystem, mount};
+use redoxfs::{Access, Barriers, Disk, DiskCache, DiskFile, FileSystem, mount};
 use termion::input::TermRead;
 use uuid::Uuid;
 
@@ -188,7 +188,7 @@ fn filesystem_read_only(path: &str) -> Option<(String, FileSystem<DiskCache<Box<
     };
     match redoxfs::FileSystem::open(DiskCache::new(disk), None, None, false) {
         Ok(mut filesystem) => {
-            filesystem.read_only = true;
+            filesystem.access = Access::ReadOnly;
             Some((path.to_string(), filesystem))
         }
         Err(err) => {
@@ -431,7 +431,15 @@ fn daemon(
     drop(boot_password);
 
     if let Some((path, mut filesystem)) = filesystem_opt {
-        filesystem.barriers = !flush_on_unmount;
+        if !filesystem.access.is_read_only() {
+            filesystem.access = Access::ReadWrite {
+                barriers: if flush_on_unmount {
+                    Barriers::OnUnmount
+                } else {
+                    Barriers::EveryCommit
+                },
+            };
+        }
         match mount(filesystem, mountpoint, |mounted_path| {
             capability_mode();
 
@@ -539,6 +547,10 @@ fn main() {
 
             _ => print_usage_exit(),
         }
+    }
+
+    if read_only && flush_on_unmount {
+        print_err_exit("--read-only and --flush-on-unmount cannot be used together");
     }
 
     let disk_id = match disk_id {

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use redoxfs::{
-    ALLOC_GC_THRESHOLD, ALLOC_LIST_ENTRIES, Disk, FileSystem, HEADER_RING, Header, KeySlot, Node,
-    Salt, Transaction, TreeData, TreePtr,
+    ALLOC_GC_THRESHOLD, ALLOC_LIST_ENTRIES, Access, Barriers, Disk, FileSystem, HEADER_RING,
+    Header, KeySlot, Node, Salt, Transaction, TreeData, TreePtr,
 };
 use syscall::error::{
     EACCES, EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, Error, Result,
@@ -300,7 +300,13 @@ impl Engine {
     fn adopt(&mut self, mut fs: FileSystem<SimDisk>, why: Mounted) {
         assert!(!fs.disk.is_crashed(), "adopting a crashed disk");
         fs.disk.guard = Some(Guard::new(fs.allocator().clone(), &fs.header));
-        fs.barriers = self.profile.barriers;
+        fs.access = Access::ReadWrite {
+            barriers: if self.profile.barriers {
+                Barriers::EveryCommit
+            } else {
+                Barriers::OnUnmount
+            },
+        };
         self.handles = [Slot::Free; MAX_HANDLES as usize];
         self.verified_slots = None;
         if let DurableCheck::AfterFlush { media_current } = &mut self.durable_check {
@@ -949,9 +955,16 @@ impl Engine {
     }
 
     pub fn step(&mut self, step: &Step) -> std::result::Result<(), String> {
+        let expected_barriers = if self.profile.barriers {
+            Barriers::EveryCommit
+        } else {
+            Barriers::OnUnmount
+        };
         assert_eq!(
-            self.fs.as_ref().expect("mounted file system").barriers,
-            self.profile.barriers
+            self.fs.as_ref().expect("mounted file system").access,
+            Access::ReadWrite {
+                barriers: expected_barriers,
+            }
         );
         match &step.op {
             Op::Crash { after, kind, salt } => {
@@ -1334,7 +1347,7 @@ impl Engine {
                     ));
                 }
             };
-            mounted.read_only = true;
+            mounted.access = Access::ReadOnly;
             let snapshot = check::snapshot(&mut mounted)
                 .map_err(|err| format!("{}: walk failed: {err}", boundary.label))?;
             if !snapshot.problems.is_empty() {
@@ -1441,7 +1454,7 @@ impl Engine {
         let view = View::new(fs.disk.media(), None, BTreeMap::new());
         let mut mounted = mount(view, password.as_deref())
             .map_err(|err| format!("the durable state does not mount: {err}"))?;
-        mounted.read_only = true;
+        mounted.access = Access::ReadOnly;
         let snapshot =
             check::snapshot(&mut mounted).map_err(|err| format!("durable walk failed: {err}"))?;
         if snapshot.generation != live_generation {

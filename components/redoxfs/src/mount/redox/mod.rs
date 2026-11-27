@@ -100,7 +100,9 @@ where
 
     // Cleanup on unmount
     scheme.fs.cleanup()?;
-    scheme.fs.disk.flush()?;
+    if !scheme.fs.access.is_read_only() {
+        scheme.fs.disk.flush()?;
+    }
 
     Ok(res)
 }

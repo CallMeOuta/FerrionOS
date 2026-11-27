@@ -8,14 +8,14 @@ use core::{
     ops::{Deref, DerefMut},
 };
 use syscall::error::{
-    EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, ERANGE, Error, Result,
+    EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, ERANGE, EROFS, Error, Result,
 };
 
 use crate::{
-    ALLOC_GC_THRESHOLD, ALLOC_LIST_ENTRIES, AllocEntry, AllocList, Allocator, BlockAddr, BlockData,
-    BlockLevel, BlockMeta, BlockPtr, BlockTrait, DIR_ENTRY_MAX_LENGTH, DirEntry, DirList, Disk,
-    FileSystem, HEADER_RING, Header, Node, NodeFlags, NodeLevel, NodeLevelData, RecordRaw,
-    ReleaseList, TreeData, TreePtr,
+    ALLOC_GC_THRESHOLD, ALLOC_LIST_ENTRIES, Access, AllocEntry, AllocList, Allocator, Barriers,
+    BlockAddr, BlockData, BlockLevel, BlockMeta, BlockPtr, BlockTrait, DIR_ENTRY_MAX_LENGTH,
+    DirEntry, DirList, Disk, FileSystem, HEADER_RING, Header, Node, NodeFlags, NodeLevel,
+    NodeLevelData, RecordRaw, ReleaseList, TreeData, TreePtr,
     htree::{self, HTreeHash, HTreeNode, HTreePtr},
 };
 
@@ -90,11 +90,29 @@ impl<'a, D: Disk> Transaction<'a, D> {
         }
     }
 
+    fn has_changes(&self) -> bool {
+        self.header_changed
+            || !self.write_cache.is_empty()
+            || !self.allocator_log.is_empty()
+            || !self.deallocate.is_empty()
+    }
+
     pub fn commit(mut self, squash: bool) -> Result<()> {
-        self.sync(squash)?;
-        self.fs.header = self.header;
-        self.fs.allocator = self.allocator;
-        Ok(())
+        match self.fs.access {
+            Access::ReadOnly => {
+                if self.has_changes() {
+                    Err(Error::new(EROFS))
+                } else {
+                    Ok(())
+                }
+            }
+            Access::ReadWrite { .. } => {
+                self.sync(squash)?;
+                self.fs.header = self.header;
+                self.fs.allocator = self.allocator;
+                Ok(())
+            }
+        }
     }
 
     //
@@ -266,12 +284,16 @@ impl<'a, D: Disk> Transaction<'a, D> {
 
     /// Write all changes cached in this [`Transaction`] to disk.
     pub fn sync(&mut self, force_squash: bool) -> Result<bool> {
-        if !force_squash
-            && !self.header_changed
-            && self.write_cache.is_empty()
-            && self.allocator_log.is_empty()
-            && self.deallocate.is_empty()
-        {
+        let barriers = match self.fs.access {
+            Access::ReadOnly => {
+                if self.has_changes() {
+                    return Err(Error::new(EROFS));
+                }
+                return Ok(false);
+            }
+            Access::ReadWrite { barriers } => barriers,
+        };
+        if !force_squash && !self.has_changes() {
             return Ok(false);
         }
 
@@ -291,6 +313,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
             // sync_alloc must have changed alloc block pointer
             // if we have any blocks to write
             assert!(self.header_changed);
+            assert!(!self.fs.access.is_read_only(), "write_at under ReadOnly");
 
             let written = unsafe { self.fs.disk.write_at_batched(&batch)? };
             if written != expected_written {
@@ -299,7 +322,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
                 log::error!("SYNC WRITE_CACHE: WRONG NUMBER OF BYTES");
                 return Err(Error::new(EIO));
             }
-            if self.fs.barriers {
+            if barriers == Barriers::EveryCommit {
                 self.fs.disk.flush()?;
             }
         }
@@ -317,6 +340,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
         let generation = self.header.update(self.fs.cipher_opt.as_ref());
         let gen_block = generation % HEADER_RING;
 
+        assert!(!self.fs.access.is_read_only(), "write_at under ReadOnly");
         // Write header
         let count = unsafe {
             self.fs
@@ -329,7 +353,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
             log::error!("SYNC: WRONG NUMBER OF BYTES");
             return Err(Error::new(EIO));
         }
-        if self.fs.barriers {
+        if barriers == Barriers::EveryCommit {
             self.fs.disk.flush()?;
         }
 
@@ -1856,7 +1880,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
         let mut node_changed = false;
 
         let i = self.read_node_inner(&node, offset, buf)?;
-        if i > 0 {
+        if i > 0 && !self.fs.access.is_read_only() {
             let node_atime = node.data().atime();
             if atime > node_atime.0 || (atime == node_atime.0 && atime_nsec > node_atime.1) {
                 let is_old = atime - node_atime.0 > 3600; // Last read was more than a day ago
