@@ -10,7 +10,7 @@ use core::{
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, Deref},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use rmm::{Arch as _, FrameAllocator, FrameCount, PageFlush};
 use smallvec::SmallVec;
@@ -146,15 +146,24 @@ impl UnmapResult {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AddrSpaceId(u64);
+
+static NEXT_ADDR_SPACE_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug)]
 pub struct AddrSpaceWrapper {
+    pub id: AddrSpaceId,
     pub inner: RwLock<L5, AddrSpace>,
     pub tlb_ack: AtomicU32,
     pub used_by: LogicalCpuSet,
 }
 impl AddrSpaceWrapper {
     pub fn new() -> Result<Arc<Self>> {
+        let raw_id = NEXT_ADDR_SPACE_ID.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(raw_id, u64::MAX, "AddrSpaceId overflow");
         Ok(Arc::new(Self {
+            id: AddrSpaceId(raw_id),
             inner: RwLock::new(AddrSpace::new()?),
             tlb_ack: AtomicU32::new(0),
             used_by: LogicalCpuSet::empty(),
@@ -189,6 +198,7 @@ impl AddrSpaceWrapper {
         unsafe { self.inner.rewrite(lock_token) }
     }
     pub fn into_drop(self, token: &mut CleanLockToken) {
+        crate::syscall::futex::cleanup_addr_space(self.id, token);
         self.inner.into_inner().into_drop(token);
     }
 }

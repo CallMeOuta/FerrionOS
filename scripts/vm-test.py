@@ -1129,9 +1129,22 @@ def user_probe(vm, args, probe, passes, timeout=60):
 
 
 def test_fork_wake(vm, args):
-    """Threads blocked on a mutex and on a condition variable before fork() are woken by the parent afterwards (use --config firefox)."""
-    ok, note = user_probe(vm, args, "fork-wake-probe", ("mutex", "cond"))
-    return ok, note or "mutex and condition waiters blocked before fork() were woken"
+    """Threads blocked before fork(), killed shared/private waiters, timeout/signal wake races, condvar timedwait, and /scheme/sys/stat futex entry cleanup (use --config firefox)."""
+    ok, note = user_probe(
+        vm,
+        args,
+        "fork-wake-probe",
+        (
+            "mutex",
+            "cond",
+            "wake-signal-race",
+            "killed-shared-wake",
+            "timeout-exit-wake",
+            "cond-timedwait-signal",
+            "killed-private-reuse",
+        ),
+    )
+    return ok, note or "fork-wake, wake-signal race, killed shared/private waiters, timeout-exit, cond timedwait, and sys:stat cleanup passed"
 
 
 def test_ipc_fd(vm, args):

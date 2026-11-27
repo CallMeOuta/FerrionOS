@@ -17,7 +17,7 @@ use syscall::EINTR;
 use crate::{
     context::{
         self,
-        memory::{AccessMode, AddrSpace, Provider},
+        memory::{AccessMode, AddrSpace, AddrSpaceId, Provider},
         unblock_context, ContextLock,
     },
     memory::{Page, PhysicalAddress, VirtualAddress},
@@ -32,6 +32,8 @@ use crate::syscall::{
 
 use super::usercopy::UserSlice;
 
+const MAX_WAITERS_PER_KEY: usize = 1024;
+
 /// Where a futex word lives, as waiters and wakers must agree on it.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum FutexKey {
@@ -40,7 +42,7 @@ enum FutexKey {
     /// breaks copy-on-write and gives the writer a new frame, which would strand a thread that
     /// was already waiting on the old one.
     Private {
-        addr_space: usize,
+        space: AddrSpaceId,
         addr: VirtualAddress,
     },
     /// Memory that stays shared between address spaces: keyed by physical address, so that
@@ -71,6 +73,11 @@ pub fn get_futex_stat(token: &mut CleanLockToken) -> (usize, usize) {
         regc += 1;
     }
     (regc, regl)
+}
+
+pub fn cleanup_addr_space(space: AddrSpaceId, token: &mut CleanLockToken) {
+    let mut registry = FUTEXES.lock(token.token());
+    registry.retain(|key, _| !matches!(key, FutexKey::Private { space: s, .. } if *s == space));
 }
 
 fn validate_and_translate_virt(space: &AddrSpace, addr: VirtualAddress) -> Option<PhysicalAddress> {
@@ -121,7 +128,7 @@ pub fn futex(
                         && info.flags().has_user() =>
                 {
                     Some(FutexKey::Private {
-                        addr_space: Arc::as_ptr(&current_addrsp) as usize,
+                        space: current_addrsp.id,
                         addr: target_virtaddr,
                     })
                 }
@@ -159,7 +166,7 @@ pub fn futex(
     // `needs_correction` holds exactly for private (`Provider::Allocated`) memory.
     let key = if needs_correction {
         FutexKey::Private {
-            addr_space: Arc::as_ptr(&current_addrsp) as usize,
+            space: current_addrsp.id,
             addr: target_virtaddr,
         }
     } else {
@@ -200,12 +207,23 @@ pub fn futex(
 
                 let futexes = FUTEXES.lock(token.token());
                 let (mut futexes, mut lock_token) = futexes.into_split();
-                futexes
-                    .entry(key)
-                    .or_insert_with(Vec::new)
-                    .push(FutexEntry {
-                        context_lock: Arc::downgrade(&context_lock),
-                    });
+                let list = futexes.entry(key).or_insert_with(Vec::new);
+                if list.len() >= MAX_WAITERS_PER_KEY {
+                    list.retain(|entry| entry.context_lock.strong_count() > 0);
+                }
+                if list.len() >= MAX_WAITERS_PER_KEY {
+                    drop(futexes);
+                    unblock_context(&context_lock, &mut token.token().downgrade());
+                    context_lock.write(token.token()).wake = None;
+                    return Err(Error::new(ENOMEM));
+                }
+                list.push(FutexEntry {
+                    context_lock: Arc::downgrade(&context_lock),
+                });
+                assert!(
+                    list.len() <= MAX_WAITERS_PER_KEY,
+                    "futex waiter list over its bound"
+                );
 
                 // Now rearcquire again to read
                 let addr_space_guard = current_addrsp.acquire_read(lock_token.downgrade());
