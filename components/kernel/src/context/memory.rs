@@ -3063,23 +3063,26 @@ fn correct_inner<'l>(
                                     new_frame,
                                     old_frame,
                                 } = cow(src_frame, info, RefKind::Shared)?;
-
-                                if let Some(old_frame) = old_frame {
-                                    flusher.queue(old_frame, None, TlbShootdownActions::FREE);
-                                    flusher.flush();
-                                }
-
                                 let mut guard = RwLockUpgradableGuard::upgrade(guard);
-
-                                // TODO: flusher
+                                let mut src_flusher = Flusher::with_cpu_set(
+                                    &foreign_address_space.used_by,
+                                    &foreign_address_space.tlb_ack,
+                                );
                                 unsafe {
-                                    guard
+                                    if let Some((_, _, flush)) = guard
                                         .table
                                         .utable
                                         .remap_with_full(src_page.start_address(), |_, f| {
                                             Some((new_frame.base(), f))
-                                        });
+                                        })
+                                    {
+                                        flush.flush();
+                                    }
                                 }
+                                if let Some(old_frame) = old_frame {
+                                    src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
+                                }
+                                drop(src_flusher);
 
                                 new_frame
                             }
