@@ -28,7 +28,33 @@ mod vt;
 
 pub const SWAP_BUFFERS: usize = 2;
 pub const MAX_IN_FLIGHT_FLIPS: usize = 1;
+pub const MAX_DMABUF_FBS_PER_HEAD: usize = 3;
 pub const MAX_OUTPUTS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DmabufFb(u32);
+
+impl DmabufFb {
+    #[cfg(target_os = "redox")]
+    pub(crate) fn new(id: u32) -> Self {
+        assert!(id != 0);
+        Self(id)
+    }
+
+    pub fn id(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmabufFbDesc {
+    pub width: u32,
+    pub height: u32,
+    pub fourcc: u32,
+    pub stride: u32,
+    pub offset: u32,
+    pub modifier: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputInfo {
@@ -193,6 +219,27 @@ impl Backend {
         match *self {}
     }
     pub fn present_for(&mut self, _output_id: u32) -> std::io::Result<Presentation> {
+        match *self {}
+    }
+    pub fn import_dmabuf_fb_for(
+        &mut self,
+        _output_id: u32,
+        _dmabuf_fd: std::os::fd::BorrowedFd<'_>,
+        _desc: DmabufFbDesc,
+    ) -> std::io::Result<DmabufFb> {
+        match *self {}
+    }
+    pub fn destroy_dmabuf_fb_for(&mut self, _output_id: u32, _fb: DmabufFb) -> std::io::Result<()> {
+        match *self {}
+    }
+    pub fn destroy_all_dmabuf_fbs(&mut self) {
+        match *self {}
+    }
+    pub fn present_dmabuf_for(
+        &mut self,
+        _output_id: u32,
+        _fb: DmabufFb,
+    ) -> std::io::Result<Presentation> {
         match *self {}
     }
     pub fn try_event(&mut self) -> std::io::Result<Option<BackendEvent>> {

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -20,8 +20,8 @@ use crate::input::{InputState, OutputRect};
 use crate::presenter::{self, Presenter};
 use crate::vt::{Consumer, ConsumerEvent};
 use crate::{
-    BackendEvent, CursorTiming, FlipCompletion, Input, MAX_OUTPUTS, OutputInfo, PresentMode,
-    PresentPreference, Presentation,
+    BackendEvent, CursorTiming, DmabufFb, DmabufFbDesc, FlipCompletion, Input, MAX_OUTPUTS,
+    OutputInfo, PresentMode, PresentPreference, Presentation,
 };
 
 pub struct Backend {
@@ -317,6 +317,83 @@ impl Backend {
             .find(|head| head.info.id == output_id)
             .ok_or_else(unknown_output_err)?;
         let result = head.presenter.present(started_us, || elapsed_us(epoch));
+        match result {
+            Ok(presentation) => Ok(presentation),
+            Err(error) => {
+                let phase = self.shared.phase.lock().unwrap();
+                if matches!(*phase, DisplayPhase::Active(_)) {
+                    Err(error)
+                } else {
+                    Err(display_change_pending_err())
+                }
+            }
+        }
+    }
+
+    pub fn import_dmabuf_fb_for(
+        &mut self,
+        output_id: u32,
+        dmabuf_fd: BorrowedFd<'_>,
+        desc: DmabufFbDesc,
+    ) -> io::Result<DmabufFb> {
+        self.check_failure()?;
+        {
+            let phase = self.shared.phase.lock().unwrap();
+            match *phase {
+                DisplayPhase::Active(_) => {}
+                DisplayPhase::ChangeQueued(_, _)
+                | DisplayPhase::ChangePending(_, _)
+                | DisplayPhase::Stopped => {
+                    return Err(display_change_pending_err());
+                }
+            }
+        }
+        let head = self
+            .display
+            .heads
+            .iter_mut()
+            .find(|head| head.info.id == output_id)
+            .ok_or_else(unknown_output_err)?;
+        head.presenter.import_dmabuf_fb(dmabuf_fd, desc)
+    }
+
+    pub fn destroy_dmabuf_fb_for(&mut self, output_id: u32, fb: DmabufFb) -> io::Result<()> {
+        let head = self
+            .display
+            .heads
+            .iter_mut()
+            .find(|head| head.info.id == output_id)
+            .ok_or_else(unknown_output_err)?;
+        head.presenter.destroy_dmabuf_fb(fb)
+    }
+
+    pub fn destroy_all_dmabuf_fbs(&mut self) {
+        for head in &mut self.display.heads {
+            head.presenter.destroy_all_dmabuf_fbs();
+        }
+    }
+
+    pub fn present_dmabuf_for(&mut self, output_id: u32, fb: DmabufFb) -> io::Result<Presentation> {
+        self.check_failure()?;
+        {
+            let phase = self.shared.phase.lock().unwrap();
+            match *phase {
+                DisplayPhase::Active(_) => {}
+                DisplayPhase::ChangeQueued(_, _)
+                | DisplayPhase::ChangePending(_, _)
+                | DisplayPhase::Stopped => {
+                    return Err(display_change_pending_err());
+                }
+            }
+        }
+        let started_us = self.now_us();
+        let head = self
+            .display
+            .heads
+            .iter_mut()
+            .find(|head| head.info.id == output_id)
+            .ok_or_else(unknown_output_err)?;
+        let result = head.presenter.present_dmabuf(fb, started_us);
         match result {
             Ok(presentation) => Ok(presentation),
             Err(error) => {

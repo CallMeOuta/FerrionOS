@@ -1,5 +1,6 @@
 use std::io;
-use std::os::fd::{AsFd, AsRawFd};
+use std::num::NonZeroU32;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,8 +9,11 @@ use drm::control::{ClipRect, Device as _, Mode, PageFlipFlags, connector, crtc, 
 use graphics_ipc::{CpuBackedBuffer, DrmHandle, RedoxDrmEvent};
 
 use crate::{
-    FlipCompletion, MAX_IN_FLIGHT_FLIPS, PresentMode, PresentPreference, Presentation, SWAP_BUFFERS,
+    DmabufFb, DmabufFbDesc, FlipCompletion, MAX_DMABUF_FBS_PER_HEAD, MAX_IN_FLIGHT_FLIPS,
+    PresentMode, PresentPreference, Presentation, SWAP_BUFFERS,
 };
+
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 
 const FLIP_PROBE_TIMEOUT_MS: i32 = 2_000;
 const MAX_PROBE_POLL_ROUNDS: usize = 16;
@@ -77,11 +81,23 @@ enum PresenterKind {
     },
 }
 
+#[derive(Clone, Copy)]
+struct DmabufEntry {
+    id: DmabufFb,
+    framebuffer: framebuffer::Handle,
+    gem_handle: u32,
+}
+
 pub(crate) struct Presenter {
     drm: Arc<DrmHandle>,
     crtc: crtc::Handle,
+    connector: connector::Handle,
+    mode: Mode,
     dimensions: (u32, u32),
     kind: PresenterKind,
+    dmabuf_fbs: [Option<DmabufEntry>; MAX_DMABUF_FBS_PER_HEAD],
+    active_dmabuf_fb: Option<DmabufFb>,
+    crtc_fb_active: bool,
 }
 
 impl Presenter {
@@ -129,8 +145,13 @@ impl Presenter {
     ) -> io::Result<Presentation> {
         let (width, height) = self.dimensions;
         let crtc = self.crtc;
+        let connector = self.connector;
+        let mode = self.mode;
+        let crtc_fb_active = &mut self.crtc_fb_active;
+        let active_dmabuf_fb = &mut self.active_dmabuf_fb;
         match &mut self.kind {
             PresenterKind::Cpu { slot } => {
+                assert!(*crtc_fb_active);
                 slot.sync_full((width, height));
                 self.drm.dirty_framebuffer(
                     slot.framebuffer,
@@ -159,12 +180,19 @@ impl Presenter {
                 let slot = &mut slots[*back];
                 slot.sync_full((width, height));
                 let fb = slot.framebuffer;
+                if !*crtc_fb_active {
+                    self.drm
+                        .set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode))?;
+                    *crtc_fb_active = true;
+                    *active_dmabuf_fb = None;
+                }
                 if let Err(error) = self.drm.page_flip(crtc, fb, PageFlipFlags::EVENT, None) {
                     if error.raw_os_error() == Some(libc::EBUSY) {
                         return Err(io::Error::new(io::ErrorKind::WouldBlock, "page flip busy"));
                     }
                     return Err(error);
                 }
+                *active_dmabuf_fb = None;
                 *back = (*back + 1) % SWAP_BUFFERS;
                 *in_flight += 1;
                 assert!(*in_flight <= MAX_IN_FLIGHT_FLIPS);
@@ -304,6 +332,183 @@ impl Presenter {
         DrainOutcome { hotplug_seen }
     }
 
+    pub(crate) fn import_dmabuf_fb(
+        &mut self,
+        dmabuf_fd: BorrowedFd<'_>,
+        desc: DmabufFbDesc,
+    ) -> io::Result<DmabufFb> {
+        if !matches!(self.kind, PresenterKind::Flip { .. }) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "dma-buf scanout requires page-flip presenter",
+            ));
+        }
+        let min_stride = desc.width.checked_mul(4).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "dma-buf width overflows stride",
+            )
+        })?;
+        if desc.width != self.dimensions.0
+            || desc.height != self.dimensions.1
+            || desc.stride < min_stride
+            || desc.modifier != DRM_FORMAT_MOD_LINEAR
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "dma-buf geometry or modifier does not match output",
+            ));
+        }
+        let Some(slot_index) = self.dmabuf_fbs.iter().position(Option::is_none) else {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "per-head dma-buf framebuffer limit reached",
+            ));
+        };
+        let prime = drm_ffi::gem::fd_to_handle(self.drm.as_fd(), dmabuf_fd)?;
+        let gem_handle = prime.handle;
+        if gem_handle == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PRIME import returned zero GEM handle",
+            ));
+        }
+        let fb_cmd = match drm_ffi::mode::add_fb2(
+            self.drm.as_fd(),
+            desc.width,
+            desc.height,
+            desc.fourcc,
+            &[gem_handle, 0, 0, 0],
+            &[desc.stride, 0, 0, 0],
+            &[desc.offset, 0, 0, 0],
+            &[desc.modifier, 0, 0, 0],
+            drm_ffi::DRM_MODE_FB_MODIFIERS,
+        ) {
+            Ok(cmd) => cmd,
+            Err(error) => {
+                let _ = drm_ffi::gem::close(self.drm.as_fd(), gem_handle);
+                return Err(error);
+            }
+        };
+        let Some(fb_nz) = NonZeroU32::new(fb_cmd.fb_id) else {
+            let _ = drm_ffi::gem::close(self.drm.as_fd(), gem_handle);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ADDFB2 returned zero framebuffer id",
+            ));
+        };
+        let id = DmabufFb::new(fb_cmd.fb_id);
+        self.dmabuf_fbs[slot_index] = Some(DmabufEntry {
+            id,
+            framebuffer: framebuffer::Handle::from(fb_nz),
+            gem_handle,
+        });
+        assert!(self.dmabuf_fbs.iter().flatten().count() <= MAX_DMABUF_FBS_PER_HEAD);
+        Ok(id)
+    }
+
+    pub(crate) fn present_dmabuf(
+        &mut self,
+        fb: DmabufFb,
+        started_us: u64,
+    ) -> io::Result<Presentation> {
+        let Some(entry) = self
+            .dmabuf_fbs
+            .iter()
+            .flatten()
+            .find(|entry| entry.id == fb)
+            .copied()
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "unknown dma-buf framebuffer",
+            ));
+        };
+        let crtc = self.crtc;
+        let connector = self.connector;
+        let mode = self.mode;
+        let crtc_fb_active = &mut self.crtc_fb_active;
+        let active_dmabuf_fb = &mut self.active_dmabuf_fb;
+        match &mut self.kind {
+            PresenterKind::Cpu { .. } => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "dma-buf scanout requires page-flip presenter",
+            )),
+            PresenterKind::Flip { in_flight, .. } => {
+                assert!(*in_flight <= MAX_IN_FLIGHT_FLIPS);
+                if *in_flight >= MAX_IN_FLIGHT_FLIPS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "page flip already in flight",
+                    ));
+                }
+                if !*crtc_fb_active {
+                    self.drm.set_crtc(
+                        crtc,
+                        Some(entry.framebuffer),
+                        (0, 0),
+                        &[connector],
+                        Some(mode),
+                    )?;
+                    *crtc_fb_active = true;
+                    *active_dmabuf_fb = Some(entry.id);
+                }
+                if let Err(error) =
+                    self.drm
+                        .page_flip(crtc, entry.framebuffer, PageFlipFlags::EVENT, None)
+                {
+                    if error.raw_os_error() == Some(libc::EBUSY) {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "page flip busy"));
+                    }
+                    return Err(error);
+                }
+                *active_dmabuf_fb = Some(entry.id);
+                *in_flight += 1;
+                assert!(*in_flight <= MAX_IN_FLIGHT_FLIPS);
+                Ok(Presentation {
+                    started_us,
+                    completed_us: started_us,
+                    mode: PresentMode::PageFlip,
+                    pending: true,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn destroy_dmabuf_fb(&mut self, fb: DmabufFb) -> io::Result<()> {
+        let Some(slot) = self
+            .dmabuf_fbs
+            .iter_mut()
+            .find(|slot| slot.is_some_and(|entry| entry.id == fb))
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "unknown dma-buf framebuffer",
+            ));
+        };
+        let entry = slot.take().unwrap();
+        if self.active_dmabuf_fb == Some(entry.id) {
+            self.active_dmabuf_fb = None;
+            self.crtc_fb_active = false;
+        }
+        let _ = self.drm.destroy_framebuffer(entry.framebuffer);
+        let _ = drm_ffi::gem::close(self.drm.as_fd(), entry.gem_handle);
+        Ok(())
+    }
+
+    pub(crate) fn destroy_all_dmabuf_fbs(&mut self) {
+        for slot in &mut self.dmabuf_fbs {
+            if let Some(entry) = slot.take() {
+                if self.active_dmabuf_fb == Some(entry.id) {
+                    self.active_dmabuf_fb = None;
+                    self.crtc_fb_active = false;
+                }
+                let _ = self.drm.destroy_framebuffer(entry.framebuffer);
+                let _ = drm_ffi::gem::close(self.drm.as_fd(), entry.gem_handle);
+            }
+        }
+    }
+
     pub(crate) fn disable_crtc(&self) {
         let _ = self.drm.set_crtc(self.crtc, None, (0, 0), &[], None);
     }
@@ -311,6 +516,7 @@ impl Presenter {
 
 impl Drop for Presenter {
     fn drop(&mut self) {
+        self.destroy_all_dmabuf_fbs();
         match &mut self.kind {
             PresenterKind::Cpu { slot } => slot.destroy(&self.drm),
             PresenterKind::Flip { slots, .. } => {
@@ -347,8 +553,13 @@ pub(crate) fn open_presenter_probing(
             Presenter {
                 drm,
                 crtc,
+                connector,
+                mode,
                 dimensions,
                 kind: PresenterKind::Cpu { slot: slot0 },
+                dmabuf_fbs: [None; MAX_DMABUF_FBS_PER_HEAD],
+                active_dmabuf_fb: None,
+                crtc_fb_active: true,
             },
             PresentMode::DirtyFb,
             false,
@@ -377,12 +588,17 @@ pub(crate) fn open_presenter_probing(
                 Presenter {
                     drm,
                     crtc,
+                    connector,
+                    mode,
                     dimensions,
                     kind: PresenterKind::Flip {
                         slots: [slot0, slot1],
                         back: 0,
                         in_flight: 0,
                     },
+                    dmabuf_fbs: [None; MAX_DMABUF_FBS_PER_HEAD],
+                    active_dmabuf_fb: None,
+                    crtc_fb_active: true,
                 },
                 PresentMode::PageFlip,
                 hotplug_seen,
@@ -399,8 +615,13 @@ pub(crate) fn open_presenter_probing(
                 Presenter {
                     drm,
                     crtc,
+                    connector,
+                    mode,
                     dimensions,
                     kind: PresenterKind::Cpu { slot: slot0 },
+                    dmabuf_fbs: [None; MAX_DMABUF_FBS_PER_HEAD],
+                    active_dmabuf_fb: None,
+                    crtc_fb_active: true,
                 },
                 PresentMode::DirtyFb,
                 false,
@@ -439,8 +660,13 @@ pub(crate) fn open_presenter_with_mode(
         PresentMode::DirtyFb => Ok(Presenter {
             drm,
             crtc,
+            connector,
+            mode,
             dimensions,
             kind: PresenterKind::Cpu { slot: slot0 },
+            dmabuf_fbs: [None; MAX_DMABUF_FBS_PER_HEAD],
+            active_dmabuf_fb: None,
+            crtc_fb_active: true,
         }),
         PresentMode::PageFlip => {
             let slot1 = match SwapSlot::create(&drm, dimensions) {
@@ -454,12 +680,17 @@ pub(crate) fn open_presenter_with_mode(
             Ok(Presenter {
                 drm,
                 crtc,
+                connector,
+                mode,
                 dimensions,
                 kind: PresenterKind::Flip {
                     slots: [slot0, slot1],
                     back: 1,
                     in_flight: 0,
                 },
+                dmabuf_fbs: [None; MAX_DMABUF_FBS_PER_HEAD],
+                active_dmabuf_fb: None,
+                crtc_fb_active: true,
             })
         }
     }
