@@ -42,6 +42,7 @@ static const struct iface_rule CORE_IFACES[] = {
     {"wl_compositor", "core"},
     {"wl_shm", "core"},
     {"xdg_wm_base", "core"},
+    {"zwp_idle_inhibit_manager_v1", "core"},
 };
 
 static const struct iface_rule RESTRICTED_IFACES[] = {
@@ -54,6 +55,7 @@ static const struct iface_rule RESTRICTED_IFACES[] = {
     {"ext_data_control_manager_v1", "data_control"},
     {"zwlr_layer_shell_v1", "layer_shell"},
     {"ext_session_lock_manager_v1", "session_lock"},
+    {"ext_idle_notifier_v1", "idle_notify"},
     {"wp_security_context_manager_v1", "other_privileged"},
     {"zwp_input_method_manager_v2", "other_privileged"},
     {"zwlr_foreign_toplevel_manager_v1", "other_privileged"},

@@ -11,8 +11,10 @@ REQUIRED_CATEGORIES = (
     "data_control",
     "layer_shell",
     "session_lock",
+    "idle_notify",
 )
-CORE_INTERFACES = ("wl_compositor", "wl_shm", "xdg_wm_base")
+CORE_INTERFACES = ("wl_compositor", "wl_shm", "xdg_wm_base", "zwp_idle_inhibit_manager_v1")
+SANITY_BIND_INTERFACES = ("wl_compositor", "zwp_idle_inhibit_manager_v1")
 MAX_RECORDED_GLOBALS = 32
 DEFAULT_GLOBALS_CACHE = Path("build/o3-red-globals.json")
 
@@ -137,11 +139,13 @@ def run_desktop_deny(vm, args, helpers):
     if not recorded_restricted or len(recorded_restricted) > MAX_RECORDED_GLOBALS:
         problems.append(f"invalid recorded restricted count: {len(recorded_restricted)}")
     else:
-        comp = core["wl_compositor"]
-        cst, cout = run_in_session(f"wayland-deny-probe --bind {comp['name']} wl_compositor {comp['version']} --expect-allow")
-        record["core_sanity_bind"] = {"exit": cst, "output": cout.strip()}
-        if cst != 0 or "BIND_OK " not in cout:
-            problems.append(f"sanity bind of wl_compositor failed: exit={cst} out={cout.strip()!r}")
+        record["core_sanity_binds"] = []
+        for iface in SANITY_BIND_INTERFACES:
+            entry = core[iface]
+            cst, cout = run_in_session(f"wayland-deny-probe --bind {entry['name']} {iface} {entry['version']} --expect-allow")
+            record["core_sanity_binds"].append({"interface": iface, "name": entry["name"], "exit": cst, "output": cout.strip()})
+            if cst != 0 or "BIND_OK " not in cout:
+                problems.append(f"sanity bind of {iface} failed: exit={cst} out={cout.strip()!r}")
 
         for item in recorded_restricted:
             cmd = f"wayland-deny-probe --bind {item['name']} {item['interface']} {item['version']} --expect-deny"
