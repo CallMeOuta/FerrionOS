@@ -832,6 +832,10 @@ impl<'a> ProcScheme<'a> {
             let proc_guard = self.processes.get(&parent_pid).ok_or(Error::new(EBADFD))?;
             let proc = proc_guard.borrow();
             proc.terminating_siblings.is_some()
+                || matches!(
+                    proc.status,
+                    ProcessStatus::Exiting { .. } | ProcessStatus::Exited { .. }
+                )
         };
         if blocked {
             return Err(Error::new(EAGAIN));
@@ -2437,7 +2441,35 @@ impl<'a> ProcScheme<'a> {
                             };
                         }
                     };
-
+                    if !proc.aborted_before_start && !proc.unstarted_children.is_empty() {
+                        drop(proc_guard);
+                        match self.discard_unstarted_children(current_pid) {
+                            Ok(0) => {}
+                            Ok(_) => {
+                                if let Some(proc_rc) = self.processes.get(&current_pid) {
+                                    proc_rc.borrow_mut().awaiting_threads_term.push(req_id);
+                                }
+                                *state_entry.get_mut() =
+                                    PendingState::AwaitingThreadsTermination(current_pid, tag);
+                                return Pending;
+                            }
+                            Err(err) => {
+                                log::error!(
+                                    "Failed to discard unstarted children for exiting PID {current_pid:?}: {err}"
+                                );
+                            }
+                        }
+                        let Some(proc_rc) = self.processes.get(&current_pid) else {
+                            state_entry.remove();
+                            return if let Some(tag) = tag {
+                                Response::ready_err(ESRCH, tag)
+                            } else {
+                                Pending
+                            };
+                        };
+                        proc_guard = proc_rc.borrow_mut();
+                    }
+                    let proc = &mut *proc_guard;
                     // TODO: Properly remove state
                     state_entry.remove();
 
