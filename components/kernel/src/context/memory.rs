@@ -10,7 +10,7 @@ use core::{
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, Deref},
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use rmm::{Arch as _, FrameAllocator, FrameCount, PageFlush};
 use smallvec::SmallVec;
@@ -157,6 +157,9 @@ pub struct AddrSpaceWrapper {
     pub inner: RwLock<L5, AddrSpace>,
     pub tlb_ack: AtomicU32,
     pub used_by: LogicalCpuSet,
+    pub pipe_count: Arc<AtomicUsize>,
+    pub event_queue_count: Arc<AtomicUsize>,
+    pub futex_waiters: AtomicUsize,
 }
 impl AddrSpaceWrapper {
     pub fn new() -> Result<Arc<Self>> {
@@ -167,6 +170,9 @@ impl AddrSpaceWrapper {
             inner: RwLock::new(AddrSpace::new()?),
             tlb_ack: AtomicU32::new(0),
             used_by: LogicalCpuSet::empty(),
+            pipe_count: Arc::new(AtomicUsize::new(0)),
+            event_queue_count: Arc::new(AtomicUsize::new(0)),
+            futex_waiters: AtomicUsize::new(0),
         }))
     }
     pub fn acquire_read<'a>(

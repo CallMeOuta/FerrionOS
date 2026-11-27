@@ -6,7 +6,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use hashbrown::{
     hash_map::{DefaultHashBuilder, Entry, OccupiedEntry},
     HashMap,
@@ -51,6 +51,28 @@ enum FutexKey {
 }
 
 type FutexList = HashMap<FutexKey, Vec<FutexEntry>>;
+
+const MAX_FUTEX_WAITERS_PER_PROCESS: usize = 4096;
+const MAX_FUTEX_KEYS: usize = 32_768;
+
+struct FutexWaiterGuard<'a>(&'a AtomicUsize);
+
+impl<'a> FutexWaiterGuard<'a> {
+    fn acquire(counter: &'a AtomicUsize) -> Result<Self> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_FUTEX_WAITERS_PER_PROCESS).then_some(n + 1)
+            })
+            .map_err(|_| Error::new(ENOMEM))?;
+        Ok(Self(counter))
+    }
+}
+
+impl Drop for FutexWaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
 
 pub struct FutexEntry {
     // Context to wake up, and compare address spaces.
@@ -184,6 +206,8 @@ pub fn futex(
                 return Err(Error::new(EINVAL));
             }
 
+            let _waiter_guard = FutexWaiterGuard::acquire(&current_addrsp.futex_waiters)?;
+
             {
                 let context_lock = context::current();
 
@@ -207,23 +231,55 @@ pub fn futex(
 
                 let futexes = FUTEXES.lock(token.token());
                 let (mut futexes, mut lock_token) = futexes.into_split();
-                let list = futexes.entry(key).or_insert_with(Vec::new);
-                if list.len() >= MAX_WAITERS_PER_KEY {
-                    list.retain(|entry| entry.context_lock.strong_count() > 0);
-                }
-                if list.len() >= MAX_WAITERS_PER_KEY {
+                let enqueue_res = (|| -> Result<()> {
+                    if !futexes.contains_key(&key) {
+                        if futexes.len() >= MAX_FUTEX_KEYS {
+                            return Err(Error::new(ENOMEM));
+                        }
+                        crate::percpu::user_charged(|| futexes.try_reserve(1))
+                            .map_err(|_| Error::new(ENOMEM))?;
+                    }
+                    match futexes.entry(key) {
+                        Entry::Occupied(mut occ) => {
+                            let waiters = occ.get_mut();
+                            if waiters.len() >= MAX_WAITERS_PER_KEY {
+                                waiters.retain(|entry| entry.context_lock.strong_count() > 0);
+                            }
+                            if waiters.len() >= MAX_WAITERS_PER_KEY {
+                                return Err(Error::new(ENOMEM));
+                            }
+                            crate::percpu::user_charged(|| waiters.try_reserve(1))
+                                .map_err(|_| Error::new(ENOMEM))?;
+                            waiters.push(FutexEntry {
+                                context_lock: Arc::downgrade(&context_lock),
+                            });
+                            assert!(
+                                waiters.len() <= MAX_WAITERS_PER_KEY,
+                                "futex waiter list over its bound"
+                            );
+                        }
+                        Entry::Vacant(vac) => {
+                            let mut waiters = Vec::new();
+                            crate::percpu::user_charged(|| waiters.try_reserve(1))
+                                .map_err(|_| Error::new(ENOMEM))?;
+                            waiters.push(FutexEntry {
+                                context_lock: Arc::downgrade(&context_lock),
+                            });
+                            assert!(
+                                waiters.len() <= MAX_WAITERS_PER_KEY,
+                                "futex waiter list over its bound"
+                            );
+                            vac.insert(waiters);
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = enqueue_res {
                     drop(futexes);
                     unblock_context(&context_lock, &mut token.token().downgrade());
                     context_lock.write(token.token()).wake = None;
-                    return Err(Error::new(ENOMEM));
+                    return Err(err);
                 }
-                list.push(FutexEntry {
-                    context_lock: Arc::downgrade(&context_lock),
-                });
-                assert!(
-                    list.len() <= MAX_WAITERS_PER_KEY,
-                    "futex waiter list over its bound"
-                );
 
                 // Now rearcquire again to read
                 let addr_space_guard = current_addrsp.acquire_read(lock_token.downgrade());

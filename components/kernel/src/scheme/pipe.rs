@@ -9,12 +9,15 @@ use crate::{
     context::{
         context::bulk_insert_fds,
         file::{InternalFlags, LockedFileDescription},
+        memory::AddrSpace,
     },
     event,
     sync::{CleanLockToken, Mutex, RwLock, WaitCondition, L1},
     syscall::{
         data::Stat,
-        error::{Error, Result, EAGAIN, EBADF, EINTR, EINVAL, ENOENT, EPIPE},
+        error::{
+            Error, Result, EAGAIN, EBADF, EINTR, EINVAL, EMFILE, ENFILE, ENOENT, ENOMEM, EPIPE,
+        },
         flag::{EventFlags, EVENT_ERR, EVENT_HUP, EVENT_READ, EVENT_WRITE, MODE_FIFO, O_NONBLOCK},
         usercopy::{UserSliceRo, UserSliceRw, UserSliceWo},
     },
@@ -36,6 +39,8 @@ static PIPES: RwLock<L1, HashMap<usize, Handle>> =
     RwLock::new(HashMap::with_hasher(DefaultHashBuilder::new()));
 
 const MAX_QUEUE_SIZE: usize = 65536;
+const MAX_PIPES_PER_PROCESS: usize = 1024;
+const MAX_PIPES_TOTAL: usize = 16_384;
 
 // In almost all places where Rust (and LLVM) uses pointers, they are limited to nonnegative isize,
 // so this is fine.
@@ -45,22 +50,54 @@ fn from_raw_id(id: usize) -> (bool, usize) {
     (id & WRITE_NOT_READ_BIT != 0, id & !WRITE_NOT_READ_BIT)
 }
 
+struct PipeSlotGuard(Option<Arc<AtomicUsize>>);
+
+impl PipeSlotGuard {
+    fn acquire() -> Result<Self> {
+        let Ok(addrsp) = AddrSpace::current() else {
+            return Ok(Self(None));
+        };
+        let counter = Arc::clone(&addrsp.pipe_count);
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_PIPES_PER_PROCESS).then_some(n + 1)
+            })
+            .map_err(|_| Error::new(EMFILE))?;
+        Ok(Self(Some(counter)))
+    }
+}
+
+impl Drop for PipeSlotGuard {
+    fn drop(&mut self) {
+        if let Some(ref counter) = self.0 {
+            counter.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
 pub fn pipe(token: &mut CleanLockToken) -> Result<(usize, usize)> {
+    let slot = PipeSlotGuard::acquire()?;
+
+    let mut pipes = PIPES.write(token.token());
+    if pipes.len() >= MAX_PIPES_TOTAL {
+        return Err(Error::new(ENFILE));
+    }
+    crate::percpu::user_charged(|| pipes.try_reserve(1)).map_err(|_| Error::new(ENOMEM))?;
+
+    let pipe_obj = Arc::new(Pipe {
+        queue: Mutex::new(VecDeque::new()),
+        read_condition: WaitCondition::new(),
+        write_condition: WaitCondition::new(),
+        writer_is_alive: AtomicBool::new(true),
+        reader_is_alive: AtomicBool::new(true),
+        has_run_dup: AtomicBool::new(false),
+        fd_queue: Mutex::new(VecDeque::new()),
+        _owner_slot: slot,
+    });
+
     // Bit 0 is used for WRITE_NOT_READ_BIT
     let id = PIPE_NEXT_ID.fetch_add(2, Ordering::Relaxed);
-
-    PIPES.write(token.token()).insert(
-        id,
-        Handle::Pipe(Arc::new(Pipe {
-            queue: Mutex::new(VecDeque::new()),
-            read_condition: WaitCondition::new(),
-            write_condition: WaitCondition::new(),
-            writer_is_alive: AtomicBool::new(true),
-            reader_is_alive: AtomicBool::new(true),
-            has_run_dup: AtomicBool::new(false),
-            fd_queue: Mutex::new(VecDeque::new()),
-        })),
-    );
+    pipes.insert(id, Handle::Pipe(pipe_obj));
 
     Ok((id, id | WRITE_NOT_READ_BIT))
 }
@@ -246,8 +283,14 @@ impl KernelScheme for PipeScheme {
         match path.trim_start_matches('/') {
             "" => (),
             "scheme-root" => {
+                let mut pipes = PIPES.write(token.token());
+                if pipes.len() >= MAX_PIPES_TOTAL {
+                    return Err(Error::new(ENFILE));
+                }
+                crate::percpu::user_charged(|| pipes.try_reserve(1))
+                    .map_err(|_| Error::new(ENOMEM))?;
                 let id = PIPE_NEXT_ID.fetch_add(2, Ordering::Relaxed);
-                PIPES.write(token.token()).insert(id, Handle::SchemeRoot);
+                pipes.insert(id, Handle::SchemeRoot);
                 return Ok(OpenResult::SchemeLocal(id, InternalFlags::empty()));
             }
             _ => return Err(Error::new(ENOENT)),
@@ -358,6 +401,12 @@ impl KernelScheme for PipeScheme {
                     Err(_) if idx > 0 => break,
                     Err(error) => return Err(error),
                 };
+                if crate::percpu::user_charged(|| vec.try_reserve(chunk_byte_count)).is_err() {
+                    if bytes_written > 0 {
+                        break;
+                    }
+                    return Err(Error::new(ENOMEM));
+                }
                 vec.extend(&tmp_buf[..chunk_byte_count]);
                 bytes_written += chunk_byte_count;
             }
@@ -430,13 +479,13 @@ impl KernelScheme for PipeScheme {
             }
 
             let before_len = vec.len();
+            let space = crate::context::CONTEXT_MAX_FILES.saturating_sub(before_len);
+            let to_push = descs.len().min(space);
+            crate::percpu::user_charged(|| vec.try_reserve(to_push))
+                .map_err(|_| Error::new(ENOMEM))?;
 
-            for desc in descs.drain(..) {
-                if vec.len() < crate::context::CONTEXT_MAX_FILES {
-                    vec.push_back(desc);
-                } else {
-                    break;
-                }
+            for desc in descs.drain(..to_push) {
+                vec.push_back(desc);
             }
 
             let fds_written = vec.len() - before_len;
@@ -493,7 +542,10 @@ impl KernelScheme for PipeScheme {
             let max_fds_read = payload.len() / size_of::<usize>();
             let fds_to_read = core::cmp::min(fds_available, max_fds_read);
             if fds_to_read > 0 {
-                let fds_to_transfer: Vec<_> = vec.drain(..fds_to_read).collect();
+                let mut fds_to_transfer = Vec::new();
+                crate::percpu::user_charged(|| fds_to_transfer.try_reserve_exact(fds_to_read))
+                    .map_err(|_| Error::new(ENOMEM))?;
+                fds_to_transfer.extend(vec.drain(..fds_to_read));
                 drop(vec);
 
                 event::trigger_locked(
@@ -528,4 +580,5 @@ pub struct Pipe {
     writer_is_alive: AtomicBool, // starts set, unset when writer closes
     has_run_dup: AtomicBool,
     fd_queue: Mutex<L1, VecDeque<Arc<LockedFileDescription>>>,
+    _owner_slot: PipeSlotGuard,
 }

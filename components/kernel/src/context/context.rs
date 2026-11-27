@@ -880,10 +880,12 @@ impl FdTbl {
         // Validate that all handles are valid before proceeding to avoid partial results.
         self.validate_handles(handles)?;
 
-        let files = handles
-            .iter()
-            .map(|&i| self.remove_file(i).expect("File should exist"))
-            .collect();
+        let mut files = Vec::new();
+        crate::percpu::user_charged(|| files.try_reserve_exact(handles.len()))
+            .map_err(|_| Error::new(ENOMEM))?;
+        for &i in handles {
+            files.push(self.remove_file(i).expect("File should exist"));
+        }
 
         Ok(files)
     }

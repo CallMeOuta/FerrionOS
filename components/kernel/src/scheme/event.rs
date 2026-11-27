@@ -1,9 +1,13 @@
 use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
 use syscall::{EventFlags, O_NONBLOCK};
 
 use crate::{
-    context::file::InternalFlags,
-    event::{next_queue_id, queues, queues_mut, unregister_queue, EventQueue, EventQueueId},
+    context::{file::InternalFlags, memory::AddrSpace},
+    event::{
+        next_queue_id, queues, queues_mut, unregister_queue, EventQueue, EventQueueId,
+        EventQueueSlot,
+    },
     sync::CleanLockToken,
     syscall::{
         data::Event,
@@ -15,6 +19,21 @@ use crate::{
 use super::{CallerCtx, KernelScheme, OpenResult, StrOrBytes};
 
 const SCHEME_ROOT_ID: usize = usize::MAX;
+const MAX_EVENT_QUEUES_PER_PROCESS: usize = 256;
+const MAX_EVENT_QUEUES_TOTAL: usize = 8192;
+
+fn acquire_event_queue_slot() -> Result<EventQueueSlot> {
+    let Ok(addrsp) = AddrSpace::current() else {
+        return Ok(EventQueueSlot::new(None));
+    };
+    let counter = Arc::clone(&addrsp.event_queue_count);
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < MAX_EVENT_QUEUES_PER_PROCESS).then_some(n + 1)
+        })
+        .map_err(|_| Error::new(EMFILE))?;
+    Ok(EventQueueSlot::new(Some(counter)))
+}
 
 pub struct EventScheme;
 
@@ -34,8 +53,15 @@ impl KernelScheme for EventScheme {
         if id != SCHEME_ROOT_ID {
             return Err(Error::new(EACCES));
         }
+        let slot = acquire_event_queue_slot()?;
+        let mut qs = queues_mut(token.token());
+        if qs.len() >= MAX_EVENT_QUEUES_TOTAL {
+            return Err(Error::new(ENFILE));
+        }
+        crate::percpu::user_charged(|| qs.try_reserve(1)).map_err(|_| Error::new(ENOMEM))?;
         let id = next_queue_id();
-        queues_mut(token.token()).insert(id, Arc::new(EventQueue::new(id)));
+        let queue = Arc::new(EventQueue::new(id, slot));
+        qs.insert(id, queue);
 
         Ok(OpenResult::SchemeLocal(id.get(), InternalFlags::empty()))
     }

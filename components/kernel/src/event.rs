@@ -3,7 +3,10 @@ use core::{
     hash::{Hash, Hasher},
     sync::atomic::{AtomicUsize, Ordering},
 };
-use hashbrown::{hash_map::DefaultHashBuilder, HashMap};
+use hashbrown::{
+    hash_map::{DefaultHashBuilder, Entry},
+    HashMap,
+};
 use smallvec::SmallVec;
 use syscall::{data::GlobalSchemes, EAGAIN, EINTR};
 
@@ -16,7 +19,7 @@ use crate::{
     },
     syscall::{
         data::Event,
-        error::{Error, Result, EBADF},
+        error::{Error, Result, EBADF, ENOMEM},
         flag::EventFlags,
         usercopy::UserSliceWo,
     },
@@ -24,18 +27,38 @@ use crate::{
 
 int_like!(EventQueueId, AtomicEventQueueId, usize, AtomicUsize);
 
+const MAX_EVENT_REGISTRATIONS: usize = 65_536;
+
+pub struct EventQueueSlot(Option<Arc<AtomicUsize>>);
+
+impl EventQueueSlot {
+    pub fn new(counter: Option<Arc<AtomicUsize>>) -> Self {
+        Self(counter)
+    }
+}
+
+impl Drop for EventQueueSlot {
+    fn drop(&mut self) {
+        if let Some(ref counter) = self.0 {
+            counter.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
 pub struct EventQueue {
     id: EventQueueId,
     queue: WaitQueue<Event>,
     timeout_opt: Mutex<L1, Option<usize>>,
+    _owner_slot: EventQueueSlot,
 }
 
 impl EventQueue {
-    pub fn new(id: EventQueueId) -> EventQueue {
+    pub fn new(id: EventQueueId, owner_slot: EventQueueSlot) -> EventQueue {
         EventQueue {
             id,
             queue: WaitQueue::new(),
             timeout_opt: Mutex::new(None),
+            _owner_slot: owner_slot,
         }
     }
 
@@ -154,7 +177,7 @@ impl EventQueue {
                 },
                 event.flags,
                 token,
-            );
+            )?;
 
             let flags = sync(RegKey { scheme, number }, token)?;
             if !flags.is_empty() {
@@ -232,16 +255,45 @@ pub fn register(
     queue_key: QueueKey,
     flags: EventFlags,
     token: &mut CleanLockToken,
-) {
+) -> Result<()> {
     let mut registry = REGISTRY.write(token.token());
 
-    let entry = registry.entry(reg_key).or_default();
-
     if flags.is_empty() {
-        entry.remove(&queue_key);
-    } else {
-        entry.insert(queue_key, flags);
+        if let Some(entry) = registry.get_mut(&reg_key) {
+            entry.remove(&queue_key);
+            if entry.is_empty() {
+                registry.remove(&reg_key);
+            }
+        }
+        return Ok(());
     }
+
+    if !registry.contains_key(&reg_key) {
+        if registry.len() >= MAX_EVENT_REGISTRATIONS {
+            return Err(Error::new(ENOMEM));
+        }
+        crate::percpu::user_charged(|| registry.try_reserve(1)).map_err(|_| Error::new(ENOMEM))?;
+    }
+    match registry.entry(reg_key) {
+        Entry::Occupied(mut occ) => {
+            let entry = occ.get_mut();
+            if !entry.contains_key(&queue_key) {
+                if entry.len() >= MAX_EVENT_REGISTRATIONS {
+                    return Err(Error::new(ENOMEM));
+                }
+                crate::percpu::user_charged(|| entry.try_reserve(1))
+                    .map_err(|_| Error::new(ENOMEM))?;
+            }
+            entry.insert(queue_key, flags);
+        }
+        Entry::Vacant(vac) => {
+            let mut inner = HashMap::default();
+            crate::percpu::user_charged(|| inner.try_reserve(1)).map_err(|_| Error::new(ENOMEM))?;
+            inner.insert(queue_key, flags);
+            vac.insert(inner);
+        }
+    }
+    Ok(())
 }
 
 pub fn sync(reg_key: RegKey, token: &mut CleanLockToken) -> Result<EventFlags> {
