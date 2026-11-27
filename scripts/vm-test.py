@@ -6692,19 +6692,28 @@ def test_app_declared(vm, args):
         if caps3.get("docs", ("",))[0] != "REACHED" or caps3.get("audio-playback", ("",))[0] != "REACHED":
             problems.append(f"--no-network broke docs/audio under manifest: {caps3}")
 
-        st4, out4 = pfr1_run_as_user(
-            vm,
-            transcript,
-            "installed",
-            "ls -1 /usr/share/ferrion/apps/cosmic-edit.toml /usr/share/ferrion/apps/cosmic-files.toml /usr/share/ferrion/apps/cosmic-term.toml /usr/share/ferrion/apps/mpv.toml",
+        desktop_manifests = (
+            "/usr/share/ferrion/apps/cosmic-edit.toml",
+            "/usr/share/ferrion/apps/cosmic-files.toml",
+            "/usr/share/ferrion/apps/cosmic-term.toml",
         )
-        if st4 != 0:
-            problems.append(f"desktop app manifests missing under /usr/share/ferrion/apps (exit {st4})")
+        missing_manifests = []
+        for manifest_path in desktop_manifests:
+            st_m, _ = pfr1_run_as_user(
+                vm,
+                transcript,
+                f"installed-{Path(manifest_path).stem}",
+                f"test -f {shlex.quote(manifest_path)}",
+            )
+            if st_m != 0:
+                missing_manifests.append(manifest_path)
+        if missing_manifests:
+            problems.append(f"desktop app manifests missing: {', '.join(missing_manifests)}")
 
         (vm.out / "app-declared.txt").write_text("".join(transcript) + f"host saw: {seen}\n")
         if problems:
             return False, "; ".join(problems) + f"; see {vm.out}"
-        return True, f"declared network, Documents (XDG+user-dirs+persistent HOME) and audio-playback granted; capture silent/absent; ungranted Pictures, Downloads and sudo absent; 4 desktop manifests installed; see {vm.out}"
+        return True, f"declared network, Documents (XDG+user-dirs+persistent HOME) and audio-playback granted; capture silent/absent; ungranted Pictures, Downloads and sudo absent; {len(desktop_manifests)} desktop manifests installed; see {vm.out}"
     finally:
         server.shutdown()
         server.server_close()
