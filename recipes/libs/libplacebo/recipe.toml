@@ -15,6 +15,8 @@ DYNAMIC_INIT
 
 cookbook_meson \
     -Dauto_features=disabled \
+    -Dopengl=enabled \
+    -Dvulkan=disabled \
     -Ddemos=false \
     -Dtests=false \
     -Dbench=false \
