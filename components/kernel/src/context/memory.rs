@@ -1459,18 +1459,39 @@ impl Grant {
                 .ok_or(Enomem)?,
         );
 
-        for (i, page) in span.pages().enumerate() {
-            let frame = base.next_by(i);
-
-            get_page_info(frame)
+        for i in 0..span.count {
+            get_page_info(base.next_by(i))
                 .expect("PageInfo must exist for allocated frame")
                 .refcount
                 .store(RefCount::One.to_raw(), Ordering::Relaxed);
+        }
 
+        for (i, page) in span.pages().enumerate() {
+            let frame = base.next_by(i);
+
+            let Some(result) =
+                (unsafe { mapper.map_phys(page.start_address(), frame.base(), flags, 0) })
+            else {
+                if i > 0 {
+                    unsafe {
+                        mapper.unmap_range(
+                            span.base.start_address(),
+                            span.base.next_by(i).start_address(),
+                            |_, _, lvl, _| {
+                                assert_eq!(lvl, 0);
+                            },
+                            None::<fn(rmm::PhysicalAddress)>,
+                        );
+                    }
+                }
+                flusher.queue(
+                    base,
+                    NonZeroUsize::new(span.count),
+                    TlbShootdownActions::FREE,
+                );
+                return Err(Enomem);
+            };
             unsafe {
-                let result = mapper
-                    .map_phys(page.start_address(), frame.base(), flags, 0)
-                    .expect("TODO: page table OOM");
                 result.ignore();
 
                 flusher.queue(frame, None, TlbShootdownActions::NEW_MAPPING);
@@ -2014,6 +2035,32 @@ impl Grant {
                 }
             }
             CopyMappingsMode::Borrowed => {
+                fn rollback_dst(
+                    dst_base: Page,
+                    mapped_count: usize,
+                    dst_mapper: &mut PageMapper,
+                    dst_flusher: &mut impl GenericFlusher,
+                ) {
+                    if mapped_count == 0 {
+                        return;
+                    }
+                    unsafe {
+                        dst_mapper.unmap_range(
+                            dst_base.start_address(),
+                            dst_base.next_by(mapped_count).start_address(),
+                            |_, phys, lvl, _| {
+                                assert_eq!(lvl, 0);
+                                dst_flusher.queue(
+                                    Frame::containing(phys),
+                                    None,
+                                    TlbShootdownActions::FREE,
+                                );
+                            },
+                            None::<fn(rmm::PhysicalAddress)>,
+                        );
+                    }
+                }
+
                 for page_idx in 0..page_count {
                     let src_page = src_base.next_by(page_idx);
                     let dst_page = dst_base.next_by(page_idx).start_address();
@@ -2024,12 +2071,21 @@ impl Grant {
                         Frame::containing(phys)
                     } else {
                         let must_be_zero = true;
-                        let new_frame =
-                            init_frame(RefCount::One, must_be_zero).expect("TODO: handle OOM");
-                        let src_flush = unsafe {
-                            src_mapper
-                                .map_phys(src_page.start_address(), new_frame.base(), flags, 0)
-                                .expect("TODO: handle OOM")
+                        let Ok(new_frame) = init_frame(RefCount::One, must_be_zero) else {
+                            rollback_dst(dst_base, page_idx, dst_mapper, dst_flusher);
+                            return Err(Enomem);
+                        };
+                        let Some(src_flush) = (unsafe {
+                            src_mapper.map_phys(
+                                src_page.start_address(),
+                                new_frame.base(),
+                                flags,
+                                0,
+                            )
+                        }) else {
+                            src_flusher.queue(new_frame, None, TlbShootdownActions::FREE);
+                            rollback_dst(dst_base, page_idx, dst_mapper, dst_flusher);
+                            return Err(Enomem);
                         };
                         unsafe {
                             src_flush.ignore();
@@ -2045,11 +2101,14 @@ impl Grant {
                         match src_page_info.add_ref(RefKind::Shared) {
                             Ok(()) => src_frame,
                             Err(AddRefError::CowToShared) => {
-                                let CowResult {
+                                let Ok(CowResult {
                                     new_frame,
                                     old_frame,
-                                } = cow(src_frame, src_page_info, RefKind::Shared)
-                                    .map_err(|_| Enomem)?;
+                                }) = cow(src_frame, src_page_info, RefKind::Shared)
+                                else {
+                                    rollback_dst(dst_base, page_idx, dst_mapper, dst_flusher);
+                                    return Err(Enomem);
+                                };
                                 if let Some(old_frame) = old_frame {
                                     src_flusher.queue(old_frame, None, TlbShootdownActions::FREE);
                                 }
@@ -2072,7 +2131,10 @@ impl Grant {
                             Err(AddRefError::SharedToCow) => {
                                 unreachable!("SharedToCow cannot occur in Borrowed copy_mappings")
                             }
-                            Err(AddRefError::RcOverflow) => return Err(Enomem),
+                            Err(AddRefError::RcOverflow) => {
+                                rollback_dst(dst_base, page_idx, dst_mapper, dst_flusher);
+                                return Err(Enomem);
+                            }
                         }
                     };
 
@@ -2084,7 +2146,9 @@ impl Grant {
                             0,
                         )
                     }) else {
-                        break;
+                        dst_flusher.queue(src_frame, None, TlbShootdownActions::FREE);
+                        rollback_dst(dst_base, page_idx, dst_mapper, dst_flusher);
+                        return Err(Enomem);
                     };
                     unsafe {
                         map_result.ignore();
