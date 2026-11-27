@@ -7,6 +7,7 @@ use linked_list_allocator::Heap;
 use spin::Mutex;
 
 static HEAP: Mutex<Option<Heap>> = Mutex::new(None);
+const MAX_HEAP_GROW_ATTEMPTS: usize = 64;
 
 pub struct Allocator;
 
@@ -20,22 +21,32 @@ impl Allocator {
 
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let max_attempts = (layout.size() / super::KERNEL_HEAP_SIZE)
+            .saturating_add(2)
+            .min(MAX_HEAP_GROW_ATTEMPTS);
         unsafe {
-            while let Some(ref mut heap) = *HEAP.lock() {
-                match heap.allocate_first_fit(layout) {
-                    Ok(ptr) => return ptr.as_ptr(),
-                    Err(()) => {
-                        let size = heap.size();
-                        super::map_heap(
-                            &mut KernelMapper::lock_rw(),
-                            crate::kernel_heap_offset() + size,
-                            super::KERNEL_HEAP_SIZE,
-                        );
-                        heap.extend(super::KERNEL_HEAP_SIZE);
-                    }
+            let mut heap_guard = HEAP.lock();
+            let Some(ref mut heap) = *heap_guard else {
+                panic!("__rust_allocate: heap not initialized");
+            };
+            for _ in 0..max_attempts {
+                if let Ok(ptr) = heap.allocate_first_fit(layout) {
+                    return ptr.as_ptr();
                 }
+                let size = heap.size();
+                if super::map_heap(
+                    &mut KernelMapper::lock_rw(),
+                    crate::kernel_heap_offset() + size,
+                    super::KERNEL_HEAP_SIZE,
+                )
+                .is_err()
+                {
+                    return core::ptr::null_mut();
+                }
+                heap.extend(super::KERNEL_HEAP_SIZE);
             }
-            panic!("__rust_allocate: heap not initialized");
+            heap.allocate_first_fit(layout)
+                .map_or(core::ptr::null_mut(), |ptr| ptr.as_ptr())
         }
     }
 

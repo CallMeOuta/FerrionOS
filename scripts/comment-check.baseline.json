@@ -2263,7 +2263,7 @@
   "components/kernel/src/acpi/srat/x86.rs": 4,
   "components/kernel/src/acpi/xsdt.rs": 0,
   "components/kernel/src/allocator/linked_list.rs": 0,
-  "components/kernel/src/allocator/mod.rs": 4,
+  "components/kernel/src/allocator/mod.rs": 3,
   "components/kernel/src/arch/aarch64/consts.rs": 7,
   "components/kernel/src/arch/aarch64/debug.rs": 0,
   "components/kernel/src/arch/aarch64/device/cpu/boot.rs": 15,

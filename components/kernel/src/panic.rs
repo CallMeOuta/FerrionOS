@@ -32,8 +32,38 @@ fn panic_handler(info: &PanicInfo) -> ! {
     panic_handler_inner(info)
 }
 
+struct PanicPrefixProbe {
+    buf: [u8; 64],
+    len: usize,
+}
+
+impl core::fmt::Write for PanicPrefixProbe {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let avail = self.buf.len().saturating_sub(self.len);
+        let n = bytes.len().min(avail);
+        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+        self.len += n;
+        Ok(())
+    }
+}
+
+fn is_heap_oom_panic(info: &PanicInfo) -> bool {
+    use core::fmt::Write;
+    let mut probe = PanicPrefixProbe {
+        buf: [0; 64],
+        len: 0,
+    };
+    let _ = write!(&mut probe, "{}", info.message());
+    core::str::from_utf8(&probe.buf[..probe.len])
+        .is_ok_and(|s| s.starts_with("memory allocation of "))
+}
+
 #[cfg_attr(test, expect(dead_code))]
 fn panic_handler_inner(info: &PanicInfo) -> ! {
+    if is_heap_oom_panic(info) {
+        println!("OUT OF MEMORY: kernel heap exhausted");
+    }
     println!("KERNEL PANIC: {}", info);
 
     unsafe {
