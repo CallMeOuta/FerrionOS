@@ -1,0 +1,44 @@
+FerrionOS change to pop-os softbuffer 0.4.1 (MIT OR Apache-2.0 license, kept), made against pinned commit c2b2c19ddb38ff17495643699f97cb1f2064a1be.
+
+Enable wayland_platform on FerrionOS when the wayland feature is selected while keeping x11_platform and kms_platform excluded on redox, and split Cargo.toml's Unix target table so only the Wayland SHM crates are reachable on redox while X11 and KMS dependencies stay excluded.
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -28,17 +28,19 @@
+ log = "0.4.17"
+ raw_window_handle = { package = "raw-window-handle", version = "0.6", features = ["std"] }
+ 
+-[target.'cfg(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "redox"))))'.dependencies]
+-as-raw-xcb-connection = { version = "1.0.0", optional = true }
+-bytemuck = { version = "1.12.3", optional = true }
+-drm = { version = "0.11.0", default-features = false, optional = true }
++[target.'cfg(all(unix, not(any(target_vendor = "apple", target_os = "android"))))'.dependencies]
+ fastrand = { version = "2.0.0", optional = true }
+ memmap2 = { version = "0.9.0", optional = true }
+ rustix = { version = "0.38.19", features = ["fs", "mm", "shm", "std"], default-features = false, optional = true }
+-tiny-xlib = { version = "0.2.1", optional = true }
+ wayland-backend = { version = "0.3.0", features = ["client_system"], optional = true }
+ wayland-client = { version = "0.31.0", optional = true }
+ wayland-sys = "0.31.0"
++
++[target.'cfg(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "redox"))))'.dependencies]
++as-raw-xcb-connection = { version = "1.0.0", optional = true }
++bytemuck = { version = "1.12.3", optional = true }
++drm = { version = "0.11.0", default-features = false, optional = true }
++tiny-xlib = { version = "0.2.1", optional = true }
+ x11rb = { version = "0.13.0", features = ["allow-unsafe-code", "shm"], optional = true }
+ 
+ [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+--- a/build.rs
++++ b/build.rs
+@@ -1,8 +1,9 @@
+ fn main() {
+     cfg_aliases::cfg_aliases! {
+         free_unix: { all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "redox"))) },
++        wayland_unix: { all(unix, not(any(target_vendor = "apple", target_os = "android"))) },
+         kms_platform: { all(feature = "kms", free_unix, not(target_arch = "wasm32")) },
+         x11_platform: { all(feature = "x11", free_unix, not(target_arch = "wasm32")) },
+-        wayland_platform: { all(feature = "wayland", free_unix, not(target_arch = "wasm32")) },
++        wayland_platform: { all(feature = "wayland", wayland_unix, not(target_arch = "wasm32")) },
+     }
+ }
