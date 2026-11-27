@@ -39,6 +39,8 @@ use syscall::{
 const THREAD_CALL_TERMINATE_SIBLINGS: u64 = 0x4645_0001;
 const ATTR_CALL_SET_RUID: u64 = 0x4645_0002;
 const MAX_EXEC_SIBLINGS: usize = 1024;
+const MAX_EXEC_UNSTARTED_CHILDREN: usize = 1024;
+const MAX_FORK_PRUNE_STEPS: usize = 2;
 const MAX_NEXT_EVENT_EINTR_RETRIES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -404,6 +406,8 @@ struct Process {
     status: ProcessStatus,
     disabled_setpgid: bool,
     terminating_siblings: Option<Weak<RefCell<Thread>>>,
+    unstarted_children: VecDeque<ProcessId>,
+    aborted_before_start: bool,
 
     awaiting_threads_term: Vec<VirtualId>,
 
@@ -715,6 +719,8 @@ impl<'a> ProcScheme<'a> {
                     status: ProcessStatus::PossiblyRunnable,
                     disabled_setpgid: false,
                     terminating_siblings: None,
+                    unstarted_children: VecDeque::new(),
+                    aborted_before_start: false,
                     awaiting_threads_term: Vec::new(),
                     waitpid: BTreeMap::new(),
                     waitpid_waiting: VecDeque::new(),
@@ -822,12 +828,30 @@ impl<'a> ProcScheme<'a> {
         }
     }
     fn fork(&mut self, parent_pid: ProcessId) -> Result<ProcessId> {
+        let blocked = {
+            let proc_guard = self.processes.get(&parent_pid).ok_or(Error::new(EBADFD))?;
+            let proc = proc_guard.borrow();
+            proc.terminating_siblings.is_some()
+        };
+        if blocked {
+            return Err(Error::new(EAGAIN));
+        }
+        self.prune_unstarted_children_bounded(parent_pid, MAX_FORK_PRUNE_STEPS);
+        let at_cap = {
+            let proc_guard = self.processes.get(&parent_pid).ok_or(Error::new(EBADFD))?;
+            proc_guard.borrow().unstarted_children.len() >= MAX_EXEC_UNSTARTED_CHILDREN
+        };
+        if at_cap {
+            self.prune_unstarted_children_bounded(parent_pid, MAX_EXEC_UNSTARTED_CHILDREN);
+            let proc_guard = self.processes.get(&parent_pid).ok_or(Error::new(EBADFD))?;
+            if proc_guard.borrow().unstarted_children.len() >= MAX_EXEC_UNSTARTED_CHILDREN {
+                return Err(Error::new(EAGAIN));
+            }
+        }
+
         let child_pid = self.new_id();
 
         let proc_guard = self.processes.get(&parent_pid).ok_or(Error::new(EBADFD))?;
-        if proc_guard.borrow().terminating_siblings.is_some() {
-            return Err(Error::new(EAGAIN));
-        }
 
         let Process {
             pgid,
@@ -880,6 +904,8 @@ impl<'a> ProcScheme<'a> {
             status: ProcessStatus::PossiblyRunnable,
             disabled_setpgid: false,
             terminating_siblings: None,
+            unstarted_children: VecDeque::new(),
+            aborted_before_start: false,
             awaiting_threads_term: Vec::new(),
 
             waitpid: BTreeMap::new(),
@@ -901,6 +927,13 @@ impl<'a> ProcScheme<'a> {
 
         self.processes.insert(child_pid, new_process);
         self.thread_lookup.insert(thread_ident, thread_weak);
+        if let Some(parent_rc) = self.processes.get(&parent_pid) {
+            let mut parent = parent_rc.borrow_mut();
+            assert!(!parent.unstarted_children.contains(&child_pid));
+            assert!(parent.unstarted_children.len() < MAX_EXEC_UNSTARTED_CHILDREN);
+            parent.unstarted_children.push_back(child_pid);
+            assert!(parent.unstarted_children.len() <= MAX_EXEC_UNSTARTED_CHILDREN);
+        }
         if let Some(session) = self.sessions.get_mut(&sid) {
             session.process_count += 1;
         }
@@ -1748,6 +1781,159 @@ impl<'a> ProcScheme<'a> {
         proc.pgid = new_pgid;
         Ok(())
     }
+    fn is_child_not_yet_started(proc_rc: &Rc<RefCell<Process>>) -> bool {
+        let proc = proc_rc.borrow();
+        if !matches!(proc.status, ProcessStatus::PossiblyRunnable) || proc.threads.len() != 1 {
+            return false;
+        }
+        let mut sts_buf = CtxtStsBuf::default();
+        let thread = proc.threads[0].borrow();
+        thread.status_hndl.read(&mut sts_buf).is_ok()
+            && sts_buf.status == ContextStatus::NotYetStarted as usize
+    }
+    fn should_keep_in_unstarted(proc_rc: &Rc<RefCell<Process>>, parent_pid: ProcessId) -> bool {
+        let proc = proc_rc.borrow();
+        if proc.ppid != parent_pid {
+            return false;
+        }
+        if proc.aborted_before_start {
+            return true;
+        }
+        match proc.status {
+            ProcessStatus::Exiting { .. } | ProcessStatus::Exited { .. } => return false,
+            ProcessStatus::Stopped(_) => return true,
+            ProcessStatus::PossiblyRunnable => (),
+        }
+        if proc.threads.len() != 1 {
+            return false;
+        }
+        let mut sts_buf = CtxtStsBuf::default();
+        let thread = proc.threads[0].borrow();
+        let Ok(_) = thread.status_hndl.read(&mut sts_buf) else {
+            return true;
+        };
+        let positively_started_or_dead = sts_buf.status == ContextStatus::Runnable as usize
+            || sts_buf.status == ContextStatus::Blocked as usize
+            || sts_buf.status == ContextStatus::Dead as usize
+            || sts_buf.status == ContextStatus::ForceKilled as usize
+            || sts_buf.status == ContextStatus::UnhandledExcp as usize;
+        !positively_started_or_dead
+    }
+    fn prune_unstarted_children_bounded(&mut self, parent_pid: ProcessId, max_steps: usize) {
+        let steps = {
+            let Some(parent_rc) = self.processes.get(&parent_pid) else {
+                return;
+            };
+            let len = parent_rc.borrow().unstarted_children.len();
+            assert!(len <= MAX_EXEC_UNSTARTED_CHILDREN);
+            len.min(max_steps)
+        };
+        for _ in 0..steps {
+            let cpid = {
+                let Some(parent_rc) = self.processes.get(&parent_pid) else {
+                    return;
+                };
+                let Some(cpid) = parent_rc.borrow_mut().unstarted_children.pop_front() else {
+                    break;
+                };
+                cpid
+            };
+            let keep = cpid != parent_pid
+                && self
+                    .processes
+                    .get(&cpid)
+                    .is_some_and(|child_rc| Self::should_keep_in_unstarted(child_rc, parent_pid));
+            if keep && let Some(parent_rc) = self.processes.get(&parent_pid) {
+                let mut parent = parent_rc.borrow_mut();
+                assert!(!parent.unstarted_children.contains(&cpid));
+                assert!(parent.unstarted_children.len() < MAX_EXEC_UNSTARTED_CHILDREN);
+                parent.unstarted_children.push_back(cpid);
+                assert!(parent.unstarted_children.len() <= MAX_EXEC_UNSTARTED_CHILDREN);
+            }
+        }
+    }
+    fn discard_unstarted_children(&mut self, parent_pid: ProcessId) -> Result<usize> {
+        let steps = {
+            let Some(parent_rc) = self.processes.get(&parent_pid) else {
+                return Ok(0);
+            };
+            let len = parent_rc.borrow().unstarted_children.len();
+            assert!(len <= MAX_EXEC_UNSTARTED_CHILDREN);
+            len
+        };
+        let mut to_kill = Vec::new();
+        let mut still_aborting = 0usize;
+        for _ in 0..steps {
+            let cpid = {
+                let Some(parent_rc) = self.processes.get(&parent_pid) else {
+                    return Ok(0);
+                };
+                let Some(cpid) = parent_rc.borrow_mut().unstarted_children.pop_front() else {
+                    break;
+                };
+                cpid
+            };
+            if cpid == parent_pid {
+                continue;
+            }
+            let Some(child_rc) = self.processes.get(&cpid) else {
+                continue;
+            };
+            let (ppid, aborting) = {
+                let child = child_rc.borrow();
+                (child.ppid, child.aborted_before_start)
+            };
+            if ppid != parent_pid {
+                continue;
+            }
+            let keep = if aborting {
+                still_aborting += 1;
+                true
+            } else if Self::is_child_not_yet_started(child_rc) {
+                to_kill.push(cpid);
+                true
+            } else {
+                false
+            };
+            if keep && let Some(parent_rc) = self.processes.get(&parent_pid) {
+                let mut parent = parent_rc.borrow_mut();
+                assert!(!parent.unstarted_children.contains(&cpid));
+                assert!(parent.unstarted_children.len() < MAX_EXEC_UNSTARTED_CHILDREN);
+                parent.unstarted_children.push_back(cpid);
+                assert!(parent.unstarted_children.len() <= MAX_EXEC_UNSTARTED_CHILDREN);
+            }
+        }
+        for cpid in to_kill {
+            let Some(child_rc) = self.processes.get(&cpid) else {
+                continue;
+            };
+            let mut child = child_rc.borrow_mut();
+            if child.aborted_before_start {
+                still_aborting += 1;
+                continue;
+            }
+            if !matches!(child.status, ProcessStatus::PossiblyRunnable) || child.threads.len() != 1
+            {
+                continue;
+            }
+            child.aborted_before_start = true;
+            let thread = child.threads[0].borrow();
+            match thread
+                .status_hndl
+                .write(&(ContextVerb::ForceKill as usize).to_ne_bytes())
+            {
+                Ok(_) | Err(Error { errno: EOWNERDEAD }) => {
+                    still_aborting += 1;
+                }
+                Err(err) => {
+                    drop(thread);
+                    child.aborted_before_start = false;
+                    return Err(err);
+                }
+            }
+        }
+        Ok(still_aborting)
+    }
     fn on_terminate_siblings(
         &mut self,
         thr: &Rc<RefCell<Thread>>,
@@ -1781,7 +1967,31 @@ impl<'a> ProcScheme<'a> {
             return Response::ready_err(ESRCH, tag);
         }
         if process.threads.len() == 1 {
-            return Ready(Response::new(Ok(0), tag));
+            if process.unstarted_children.is_empty() {
+                return Ready(Response::new(Ok(0), tag));
+            }
+            drop(process_guard);
+            return match self.discard_unstarted_children(pid) {
+                Ok(0) => Ready(Response::new(Ok(0), tag)),
+                Ok(_) => {
+                    let Some(proc_rc) = self.processes.get(&pid) else {
+                        return Response::ready_err(ESRCH, tag);
+                    };
+                    let req_id = *state.key();
+                    {
+                        let mut proc = proc_rc.borrow_mut();
+                        proc.terminating_siblings = Some(Rc::downgrade(thr));
+                        proc.awaiting_threads_term.push(req_id);
+                    }
+                    state.insert_entry(PendingState::AwaitingSiblingsTermination {
+                        pid,
+                        survivor: Rc::downgrade(thr),
+                        tag,
+                    });
+                    Pending
+                }
+                Err(err) => Response::ready_err(err.errno, tag),
+            };
         }
 
         process.terminating_siblings = Some(Rc::downgrade(thr));
@@ -2055,7 +2265,7 @@ impl<'a> ProcScheme<'a> {
         let Entry::Occupied(entry) = self.processes.entry(pid) else {
             return;
         };
-        let pgid = {
+        let (ppid, pgid) = {
             let proc = entry.get().borrow();
             if !proc.threads.is_empty() {
                 log::error!(
@@ -2064,10 +2274,22 @@ impl<'a> ProcScheme<'a> {
                 );
                 return;
             }
-            proc.pgid
+            (proc.ppid, proc.pgid)
         };
         let proc_rc = entry.remove();
         let proc_weak = Rc::downgrade(&proc_rc);
+
+        if let Some(parent_rc) = self.processes.get(&ppid) {
+            let mut parent = parent_rc.borrow_mut();
+            assert!(parent.unstarted_children.len() <= MAX_EXEC_UNSTARTED_CHILDREN);
+            if let Some(pos) = parent
+                .unstarted_children
+                .iter()
+                .position(|&cpid| cpid == pid)
+            {
+                parent.unstarted_children.remove(pos);
+            }
+        }
 
         let Entry::Occupied(group) = self.groups.entry(pgid) else {
             log::error!("Process missing from its group");
@@ -2215,6 +2437,7 @@ impl<'a> ProcScheme<'a> {
                             };
                         }
                     };
+
                     // TODO: Properly remove state
                     state_entry.remove();
 
@@ -2237,10 +2460,18 @@ impl<'a> ProcScheme<'a> {
                         self.sessions.remove(&proc.sid);
                     }
 
-                    let (ppid, pgid) = (proc.ppid, proc.pgid);
+                    let (ppid, pgid, aborted_before_start) =
+                        (proc.ppid, proc.pgid, proc.aborted_before_start);
                     drop(proc_guard);
 
-                    if let Some(parent_rc) = self.processes.get(&ppid) {
+                    if aborted_before_start {
+                        self.reap(current_pid);
+                        if let Some(parent_rc) = self.processes.get(&ppid) {
+                            let mut parent = parent_rc.borrow_mut();
+                            awoken.extend(parent.awaiting_threads_term.drain(..));
+                            awoken.extend(parent.waitpid_waiting.drain(..));
+                        }
+                    } else if let Some(parent_rc) = self.processes.get(&ppid) {
                         // When a process exits, the parent is sent SIGCHLD. The process has no threads
                         // at this point. The system generates this signal, so the permission check
                         // of kill() does not apply: the parent may run under another user ID.
@@ -2393,9 +2624,31 @@ impl<'a> ProcScheme<'a> {
                     return Response::ready_err(ESRCH, tag);
                 };
                 if proc.threads.len() == 1 && Rc::ptr_eq(&proc.threads[0], &survivor_rc) {
-                    proc.terminating_siblings = None;
-                    state_entry.remove();
-                    return Ready(Response::new(Ok(0), tag));
+                    drop(proc_guard);
+                    match self.discard_unstarted_children(pid) {
+                        Ok(0) => {
+                            if let Some(proc_rc) = self.processes.get(&pid) {
+                                proc_rc.borrow_mut().terminating_siblings = None;
+                            }
+                            state_entry.remove();
+                            return Ready(Response::new(Ok(0), tag));
+                        }
+                        Ok(_) => {
+                            if let Some(proc_rc) = self.processes.get(&pid) {
+                                proc_rc.borrow_mut().awaiting_threads_term.push(req_id);
+                            }
+                            *state_entry.get_mut() =
+                                PendingState::AwaitingSiblingsTermination { pid, survivor, tag };
+                            return Pending;
+                        }
+                        Err(err) => {
+                            if let Some(proc_rc) = self.processes.get(&pid) {
+                                proc_rc.borrow_mut().terminating_siblings = None;
+                            }
+                            state_entry.remove();
+                            return Response::ready_err(err.errno, tag);
+                        }
+                    }
                 }
                 if !proc.threads.iter().any(|t| Rc::ptr_eq(t, &survivor_rc)) {
                     proc.terminating_siblings = None;
