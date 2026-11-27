@@ -58,7 +58,8 @@ where
                 Some(Response::new(result, sendfd_request))
             }
             RequestKind::Cancellation(cancellation) => {
-                locks.cancel(cancellation.id, &mut replies);
+                let alive = |pid| scheme.process_alive(pid);
+                locks.cancel(cancellation.id, &alive, &mut replies);
                 None
             }
             RequestKind::OnClose { id } => {

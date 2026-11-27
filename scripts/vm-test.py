@@ -10732,6 +10732,7 @@ LOCK_PROBE_CHECKS = (
     "release-on-close", "release-on-close-other-fd", "path-lookups-keep-locks", "release-on-exit", "release-on-kill",
     "ofd-shared-by-fork", "ofd-survives-child-exit", "ofd-conflicts-with-process-lock",
     "ofd-released-on-close", "process-lock-not-inherited", "setlkw-wakes", "ofd-setlkw-wakes",
+    "setlkw-wakes-on-downgrade", "ofd-setlkw-wakes-on-downgrade", "setlkw-wakes-after-cascaded-downgrade",
     "setlkw-eintr", "setlkw-edeadlk", "flock-exclusive-nb", "flock-shared", "flock-wakes",
     "flock-owned-by-description", "flock-independent-of-fcntl", "flock-release-on-close",
 )

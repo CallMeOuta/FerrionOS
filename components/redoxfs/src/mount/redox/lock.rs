@@ -19,6 +19,7 @@ const MAX_RANGES_PER_PROCESS: usize = 1024;
 const MAX_WAITERS: usize = 1024;
 const MAX_WAITERS_PER_FILE: usize = 128;
 const MAX_WAITERS_PER_PROCESS: usize = 64;
+const MAX_SETTLE_PASSES: usize = MAX_WAITERS_PER_FILE + 1;
 const MAX_DEADLOCK_STEPS: usize = 64;
 const RANGE_GROWTH_PER_SET: usize = 2;
 
@@ -227,6 +228,33 @@ pub struct Call {
     pub flags: usize,
     pub handle: usize,
     pub pid: usize,
+}
+
+enum Event<'a> {
+    Lock {
+        call: &'a Call,
+        tag: Tag,
+        arg1: u64,
+        arg2: u64,
+        flags: u64,
+    },
+    Unlock {
+        call: &'a Call,
+        arg1: u64,
+        arg2: u64,
+        flags: u64,
+    },
+    Close {
+        node: u32,
+        handle: usize,
+    },
+    Detach {
+        node: u32,
+        pid: usize,
+    },
+    Cancel {
+        id: Id,
+    },
 }
 
 #[derive(Default)]
@@ -505,6 +533,156 @@ impl LockTable {
         alive: &dyn Fn(usize) -> bool,
         replies: &mut Vec<Reply>,
     ) {
+        let _ = self.step(
+            Event::Lock {
+                call,
+                tag,
+                arg1,
+                arg2,
+                flags,
+            },
+            alive,
+            replies,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn unlock(
+        &mut self,
+        call: &Call,
+        arg1: u64,
+        arg2: u64,
+        flags: u64,
+        alive: &dyn Fn(usize) -> bool,
+        replies: &mut Vec<Reply>,
+    ) -> Result<usize> {
+        self.step(
+            Event::Unlock {
+                call,
+                arg1,
+                arg2,
+                flags,
+            },
+            alive,
+            replies,
+        )
+    }
+
+    pub fn get_lock(&self, call: &Call, payload: &mut [u8]) -> Result<usize> {
+        let words: &mut [u8; 16] = payload
+            .get_mut(..16)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::new(EINVAL))?;
+        let arg1 = u64::from_ne_bytes(words[..8].try_into().unwrap());
+        let arg2 = u64::from_ne_bytes(words[8..].try_into().unwrap());
+        let (start, end) = span(arg1 & !OFD_BIT, arg2 & !EXCLUSIVE_BIT)?;
+        let exclusive = arg2 & EXCLUSIVE_BIT == EXCLUSIVE_BIT;
+        let holder = self
+            .files
+            .get(&call.node)
+            .and_then(|file| file.range_conflict(owner_of(call, arg1), exclusive, start, end))
+            .ok_or(Error::new(ESRCH))?;
+        let len = holder.length() | if holder.exclusive { EXCLUSIVE_BIT } else { 0 };
+        words[..8].copy_from_slice(&holder.start.to_ne_bytes());
+        words[8..].copy_from_slice(&len.to_ne_bytes());
+        Ok(match holder.owner {
+            Owner::Process(pid) => pid,
+            Owner::Handle(_) => 0,
+        })
+    }
+
+    pub fn cancel(&mut self, id: Id, alive: &dyn Fn(usize) -> bool, replies: &mut Vec<Reply>) {
+        let _ = self.step(Event::Cancel { id }, alive, replies);
+    }
+
+    pub fn on_detach(
+        &mut self,
+        node: u32,
+        pid: usize,
+        alive: &dyn Fn(usize) -> bool,
+        replies: &mut Vec<Reply>,
+    ) {
+        let _ = self.step(Event::Detach { node, pid }, alive, replies);
+    }
+
+    pub fn on_close(
+        &mut self,
+        node: u32,
+        handle: usize,
+        alive: &dyn Fn(usize) -> bool,
+        replies: &mut Vec<Reply>,
+    ) {
+        let _ = self.step(Event::Close { node, handle }, alive, replies);
+    }
+
+    fn step(
+        &mut self,
+        event: Event<'_>,
+        alive: &dyn Fn(usize) -> bool,
+        replies: &mut Vec<Reply>,
+    ) -> Result<usize> {
+        let (node, outcome) = match event {
+            Event::Lock {
+                call,
+                tag,
+                arg1,
+                arg2,
+                flags,
+            } => {
+                self.apply_lock(call, tag, arg1, arg2, flags, replies);
+                (Some(call.node), Ok(0))
+            }
+            Event::Unlock {
+                call,
+                arg1,
+                arg2,
+                flags,
+            } => (Some(call.node), self.apply_unlock(call, arg1, arg2, flags)),
+            Event::Close { node, handle } => {
+                self.release(node, Owner::Handle(handle));
+                let mut index = 0;
+                while index < self.waiters.len() {
+                    if self.waiters[index].handle == handle && self.waiters[index].node == node {
+                        let waiter = self.waiters.remove(index);
+                        replies.push(self.reply(waiter.tag, waiter.node, Err(Error::new(EINTR))));
+                    } else {
+                        index += 1;
+                    }
+                }
+                (Some(node), Ok(0))
+            }
+            Event::Detach { node, pid } => {
+                self.release(node, Owner::Process(pid));
+                (Some(node), Ok(0))
+            }
+            Event::Cancel { id } => {
+                let node = self
+                    .waiters
+                    .iter()
+                    .position(|waiter| waiter.tag.req_id() == id)
+                    .map(|index| {
+                        let waiter = self.waiters.remove(index);
+                        replies.push(self.reply(waiter.tag, waiter.node, Err(Error::new(EINTR))));
+                        waiter.node
+                    });
+                (node, Ok(0))
+            }
+        };
+        if let Some(node) = node {
+            self.settle(node, alive, replies);
+        }
+        outcome
+    }
+
+    fn apply_lock(
+        &mut self,
+        call: &Call,
+        tag: Tag,
+        arg1: u64,
+        arg2: u64,
+        flags: u64,
+        replies: &mut Vec<Reply>,
+    ) {
         let request = match self.request_for(call, arg1, arg2, flags) {
             Ok(request) => request,
             Err(err) => {
@@ -519,11 +697,7 @@ impl LockTable {
                 replies.push(self.reply(tag, call.node, Ok(0)));
                 return;
             }
-            let held = file.flocks.len();
             file.flocks.retain(|&(other, _)| other != handle);
-            if file.flocks.len() != held {
-                self.wake(call.node, alive, replies);
-            }
         }
         if !self.blocked(call.node, &request) {
             let result = self.admit(call.node, &request, RANGE_GROWTH_PER_SET);
@@ -550,7 +724,6 @@ impl LockTable {
             None
         };
         if let Some(errno) = refusal {
-            self.prune(call.node);
             replies.push(self.reply(tag, call.node, Err(Error::new(errno))));
             return;
         }
@@ -567,15 +740,7 @@ impl LockTable {
         );
     }
 
-    pub fn unlock(
-        &mut self,
-        call: &Call,
-        arg1: u64,
-        arg2: u64,
-        flags: u64,
-        alive: &dyn Fn(usize) -> bool,
-        replies: &mut Vec<Reply>,
-    ) -> Result<usize> {
+    fn apply_unlock(&mut self, call: &Call, arg1: u64, arg2: u64, flags: u64) -> Result<usize> {
         if flags & LOCK_FLOCK == LOCK_FLOCK {
             if let Some(file) = self.files.get_mut(&call.node) {
                 file.flocks.retain(|&(other, _)| other != call.handle);
@@ -598,76 +763,16 @@ impl LockTable {
                 self.edit(call.node, owner, None, start, end);
             }
         }
-        self.wake(call.node, alive, replies);
         Ok(0)
     }
 
-    pub fn get_lock(&self, call: &Call, payload: &mut [u8]) -> Result<usize> {
-        let words: &mut [u8; 16] = payload
-            .get_mut(..16)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or(Error::new(EINVAL))?;
-        let arg1 = u64::from_ne_bytes(words[..8].try_into().unwrap());
-        let arg2 = u64::from_ne_bytes(words[8..].try_into().unwrap());
-        let (start, end) = span(arg1 & !OFD_BIT, arg2 & !EXCLUSIVE_BIT)?;
-        let exclusive = arg2 & EXCLUSIVE_BIT == EXCLUSIVE_BIT;
-        let holder = self
-            .files
-            .get(&call.node)
-            .and_then(|file| file.range_conflict(owner_of(call, arg1), exclusive, start, end))
-            .ok_or(Error::new(ESRCH))?;
-        let len = holder.length() | if holder.exclusive { EXCLUSIVE_BIT } else { 0 };
-        words[..8].copy_from_slice(&holder.start.to_ne_bytes());
-        words[8..].copy_from_slice(&len.to_ne_bytes());
-        Ok(match holder.owner {
-            Owner::Process(pid) => pid,
-            Owner::Handle(_) => 0,
-        })
-    }
-
-    pub fn cancel(&mut self, id: Id, replies: &mut Vec<Reply>) {
-        if let Some(index) = self
-            .waiters
-            .iter()
-            .position(|waiter| waiter.tag.req_id() == id)
-        {
-            let waiter = self.waiters.remove(index);
-            replies.push(self.reply(waiter.tag, waiter.node, Err(Error::new(EINTR))));
-        }
-    }
-
-    pub fn on_detach(
+    fn wake_pass(
         &mut self,
         node: u32,
-        pid: usize,
         alive: &dyn Fn(usize) -> bool,
         replies: &mut Vec<Reply>,
-    ) {
-        self.release(node, Owner::Process(pid));
-        self.wake(node, alive, replies);
-    }
-
-    pub fn on_close(
-        &mut self,
-        node: u32,
-        handle: usize,
-        alive: &dyn Fn(usize) -> bool,
-        replies: &mut Vec<Reply>,
-    ) {
-        self.release(node, Owner::Handle(handle));
-        let mut index = 0;
-        while index < self.waiters.len() {
-            if self.waiters[index].handle == handle && self.waiters[index].node == node {
-                let waiter = self.waiters.remove(index);
-                replies.push(self.reply(waiter.tag, waiter.node, Err(Error::new(EINTR))));
-            } else {
-                index += 1;
-            }
-        }
-        self.wake(node, alive, replies);
-    }
-
-    fn wake(&mut self, node: u32, alive: &dyn Fn(usize) -> bool, replies: &mut Vec<Reply>) {
+    ) -> bool {
+        let mut progressed = false;
         let mut index = 0;
         while index < self.waiters.len() {
             let waiter = &self.waiters[index];
@@ -676,6 +781,7 @@ impl LockTable {
                 continue;
             }
             let waiter = self.waiters.remove(index);
+            progressed = true;
             let result = if alive(waiter.pid) {
                 self.admit(node, &waiter.request, RANGE_GROWTH_PER_SET)
             } else {
@@ -686,6 +792,41 @@ impl LockTable {
             }
             replies.push(self.reply(waiter.tag, node, result.map(|()| 0)));
         }
+        progressed
+    }
+
+    fn settle(&mut self, node: u32, alive: &dyn Fn(usize) -> bool, replies: &mut Vec<Reply>) {
+        let mut passes = 0;
+        let mut converged = false;
+        for _ in 0..MAX_SETTLE_PASSES {
+            passes += 1;
+            if !self.wake_pass(node, alive, replies) {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            let mut index = 0;
+            while index < self.waiters.len() {
+                let waiter = &self.waiters[index];
+                if waiter.node == node && !self.blocked(node, &waiter.request) {
+                    let waiter = self.waiters.remove(index);
+                    replies.push(self.reply(waiter.tag, node, Err(Error::new(ENOLCK))));
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        assert!(
+            passes <= MAX_SETTLE_PASSES,
+            "lock settle pass count over its bound"
+        );
         self.prune(node);
+        assert!(
+            self.waiters
+                .iter()
+                .all(|waiter| waiter.node != node || self.blocked(node, &waiter.request)),
+            "parked waiter left grantable after settle"
+        );
     }
 }

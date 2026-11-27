@@ -602,6 +602,279 @@ static void case_setlkw(void) {
                                            : child_status(status));
 }
 
+static int child_setlkw_downgrade(int arg) {
+    int cmd = arg & 0xff;
+    close(arg >> 8);
+    int fd = open_file();
+    post(up[1]);
+    double start = now();
+    if (range_lock(fd, cmd, F_RDLCK, SEEK_SET, 0, 1) != 0) {
+        printf("lock-probe: waiting read lock returned %s\n", strerror(errno));
+        return 1;
+    }
+    if (now() - start < 0.3) {
+        return 2;
+    }
+    return 0;
+}
+
+static void case_setlkw_downgrade(void) {
+    fresh("setlkw-downgrade");
+    int fd = open_file();
+    if (setlk(fd, F_WRLCK, 0, 1) != 0) {
+        result("setlkw-wakes-on-downgrade", "F_SETLK F_WRLCK failed");
+        close(fd);
+    } else {
+        struct child c;
+        if (spawn_child(child_setlkw_downgrade, F_SETLKW | fd << 8, 1, &c) != 0) {
+            result("setlkw-wakes-on-downgrade", "fork failed");
+        } else {
+            enum ready r = await_ready(&c, READY_LIMIT_MS);
+            if (r != READY) {
+                setlk(fd, F_UNLCK, 0, 1);
+                reap(c.pid, 5);
+                close_pipes();
+                result("setlkw-wakes-on-downgrade", ready_problem(r));
+            } else {
+                sleep_ms(1000);
+                int err = setlk(fd, F_RDLCK, 0, 1);
+                int status = reap(c.pid, 5);
+                close_pipes();
+                if (err != 0) {
+                    result("setlkw-wakes-on-downgrade",
+                           describe("parent downgrade failed: %s", strerror(err)));
+                } else {
+                    result("setlkw-wakes-on-downgrade",
+                           status == 2 ? "F_SETLKW returned before the lock was downgraded"
+                                       : child_status(status));
+                }
+            }
+        }
+        close(fd);
+    }
+
+    fresh("ofd-setlkw-downgrade");
+    fd = open_file();
+    if (range_lock(fd, F_OFD_SETLK, F_WRLCK, SEEK_SET, 0, 1) != 0) {
+        result("ofd-setlkw-wakes-on-downgrade", "F_OFD_SETLK F_WRLCK failed");
+        close(fd);
+        return;
+    }
+    struct child c;
+    if (spawn_child(child_setlkw_downgrade, F_OFD_SETLKW | fd << 8, 1, &c) != 0) {
+        close(fd);
+        result("ofd-setlkw-wakes-on-downgrade", "fork failed");
+        return;
+    }
+    enum ready r = await_ready(&c, READY_LIMIT_MS);
+    if (r != READY) {
+        close(fd);
+        reap(c.pid, 5);
+        close_pipes();
+        result("ofd-setlkw-wakes-on-downgrade", ready_problem(r));
+        return;
+    }
+    sleep_ms(1000);
+    int err = range_lock(fd, F_OFD_SETLK, F_RDLCK, SEEK_SET, 0, 1);
+    int status = reap(c.pid, 5);
+    close_pipes();
+    close(fd);
+    if (err != 0) {
+        result("ofd-setlkw-wakes-on-downgrade",
+               describe("parent OFD downgrade failed: %s", strerror(err)));
+    } else {
+        result("ofd-setlkw-wakes-on-downgrade",
+               status == 2 ? "F_OFD_SETLKW returned before the lock was downgraded"
+                           : child_status(status));
+    }
+}
+
+static enum ready await_fd_byte(int fd, int limit_ms) {
+    struct pollfd pfd = {.fd = fd, .events = POLLIN, .revents = 0};
+    int r = poll(&pfd, 1, limit_ms);
+    if (r == 0) {
+        return TIMED_OUT;
+    }
+    if (r < 0) {
+        return CHILD_EXITED;
+    }
+    char byte = 0;
+    return read(fd, &byte, 1) == 1 ? READY : CHILD_EXITED;
+}
+
+static void case_setlkw_cascade(void) {
+    fresh("setlkw-cascade");
+    int fd = open_file();
+    if (setlk(fd, F_WRLCK, 0, 10) != 0) {
+        result("setlkw-wakes-after-cascaded-downgrade", "parent F_SETLK [0,10) failed");
+        close(fd);
+        return;
+    }
+    int c2_hold[2] = {-1, -1};
+    int c2_go[2] = {-1, -1};
+    int c2_park[2] = {-1, -1};
+    int c2_woke[2] = {-1, -1};
+    int c2_done[2] = {-1, -1};
+    int c1_park[2] = {-1, -1};
+    if (pipe(c2_hold) != 0 || pipe(c2_go) != 0 || pipe(c2_park) != 0 || pipe(c2_woke) != 0 ||
+        pipe(c2_done) != 0 || pipe(c1_park) != 0) {
+        close_fd(&c2_hold[0]);
+        close_fd(&c2_hold[1]);
+        close_fd(&c2_go[0]);
+        close_fd(&c2_go[1]);
+        close_fd(&c2_park[0]);
+        close_fd(&c2_park[1]);
+        close_fd(&c2_woke[0]);
+        close_fd(&c2_woke[1]);
+        close_fd(&c2_done[0]);
+        close_fd(&c2_done[1]);
+        close_fd(&c1_park[0]);
+        close_fd(&c1_park[1]);
+        close(fd);
+        result("setlkw-wakes-after-cascaded-downgrade", "pipe failed");
+        return;
+    }
+
+    fflush(stdout);
+    pid_t c2 = fork();
+    if (c2 == 0) {
+        close(fd);
+        close_fd(&c2_hold[0]);
+        close_fd(&c2_go[1]);
+        close_fd(&c2_park[0]);
+        close_fd(&c2_woke[0]);
+        close_fd(&c2_done[1]);
+        close_fd(&c1_park[0]);
+        close_fd(&c1_park[1]);
+        alarm(30);
+        int cfd = open_file();
+        if (setlk(cfd, F_WRLCK, 10, 10) != 0) {
+            _exit(11);
+        }
+        post(c2_hold[1]);
+        await_byte(c2_go[0]);
+        post(c2_park[1]);
+        double start = now();
+        if (range_lock(cfd, F_SETLKW, F_RDLCK, SEEK_SET, 0, 20) != 0) {
+            _exit(12);
+        }
+        if (now() - start < 0.2) {
+            _exit(13);
+        }
+        post(c2_woke[1]);
+        await_byte(c2_done[0]);
+        close(cfd);
+        _exit(0);
+    }
+
+    const char *problem = NULL;
+    pid_t c1 = -1;
+    close_fd(&c2_hold[1]);
+    close_fd(&c2_go[0]);
+    close_fd(&c2_park[1]);
+    close_fd(&c2_woke[1]);
+    close_fd(&c2_done[0]);
+
+    if (c2 < 0) {
+        problem = "fork c2 failed";
+    } else {
+        enum ready r = await_fd_byte(c2_hold[0], READY_LIMIT_MS);
+        if (r != READY) {
+            problem = ready_problem(r);
+        }
+    }
+
+    if (!problem) {
+        fflush(stdout);
+        c1 = fork();
+        if (c1 == 0) {
+            close(fd);
+            close_fd(&c2_hold[0]);
+            close_fd(&c2_go[1]);
+            close_fd(&c2_park[0]);
+            close_fd(&c2_woke[0]);
+            close_fd(&c2_done[1]);
+            close_fd(&c1_park[0]);
+            alarm(20);
+            int cfd = open_file();
+            post(c1_park[1]);
+            double start = now();
+            if (range_lock(cfd, F_SETLKW, F_RDLCK, SEEK_SET, 10, 10) != 0) {
+                _exit(21);
+            }
+            if (now() - start < 0.2) {
+                _exit(22);
+            }
+            close(cfd);
+            _exit(0);
+        }
+        close_fd(&c1_park[1]);
+        if (c1 < 0) {
+            problem = "fork c1 failed";
+        } else {
+            enum ready r = await_fd_byte(c1_park[0], READY_LIMIT_MS);
+            if (r != READY) {
+                problem = ready_problem(r);
+            }
+        }
+    } else {
+        close_fd(&c1_park[1]);
+    }
+
+    if (!problem) {
+        sleep_ms(500);
+        if (post_parent(c2_go[1]) != 0) {
+            problem = "failed to signal c2";
+        } else {
+            enum ready r = await_fd_byte(c2_park[0], READY_LIMIT_MS);
+            if (r != READY) {
+                problem = ready_problem(r);
+            }
+        }
+    }
+
+    if (!problem) {
+        sleep_ms(500);
+        int err = setlk(fd, F_UNLCK, 0, 10);
+        if (err != 0) {
+            problem = describe("parent unlock [0,10) failed: %s", strerror(err));
+        } else {
+            enum ready r = await_fd_byte(c2_woke[0], 5000);
+            if (r != READY) {
+                problem = "c2 did not wake after parent unlock";
+            } else {
+                int c1_status = reap(c1, 5);
+                c1 = -1;
+                if (c1_status == 22) {
+                    problem = "c1 returned before c2 downgraded";
+                } else {
+                    problem = child_status(c1_status);
+                }
+            }
+        }
+    }
+
+    if (c2 > 0) {
+        post_parent(c2_done[1]);
+        int c2_status = reap(c2, 5);
+        if (!problem && c2_status != 0) {
+            problem = child_status(c2_status);
+        }
+    }
+    if (c1 > 0) {
+        kill(c1, SIGKILL);
+        reap(c1, 5);
+    }
+    close_fd(&c2_hold[0]);
+    close_fd(&c2_go[1]);
+    close_fd(&c2_park[0]);
+    close_fd(&c2_woke[0]);
+    close_fd(&c2_done[1]);
+    close_fd(&c1_park[0]);
+    close(fd);
+    result("setlkw-wakes-after-cascaded-downgrade", problem);
+}
+
 static volatile sig_atomic_t alarms;
 
 static void on_alarm(int sig) {
@@ -1010,6 +1283,8 @@ int main(void) {
     case_exit();
     case_ownership();
     case_setlkw();
+    case_setlkw_downgrade();
+    case_setlkw_cascade();
     case_eintr();
     case_deadlock();
     case_flock();
