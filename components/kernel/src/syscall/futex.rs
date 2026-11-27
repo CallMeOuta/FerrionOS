@@ -323,13 +323,13 @@ fn wake_futex(key: FutexKey, val: usize, token: &mut CleanLockToken) -> usize {
 
     if let Entry::Occupied(mut futexes_entry) = futexes_map.entry(key) {
         let futexes = futexes_entry.get_mut();
-        let mut i = 0;
-        while i < futexes.len() && woken < val {
-            if let Some(ctx) = futexes[i].context_lock.upgrade() {
-                unblock_context(&ctx, &mut token.token().downgrade());
+        while !futexes.is_empty() && woken < val {
+            let entry = futexes.swap_remove(0);
+            if let Some(ctx) = entry.context_lock.upgrade()
+                && unblock_context(&ctx, &mut token.token().downgrade())
+            {
+                woken += 1;
             }
-            futexes.swap_remove(i);
-            woken += 1;
         }
 
         if futexes.is_empty() {

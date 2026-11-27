@@ -145,7 +145,9 @@ pub fn contexts_mut(token: LockToken<'_, L1>) -> RwLockWriteGuard<'_, L2, BTreeS
 pub fn unblock_context(context_lock: &Arc<ContextLock>, token: &mut LockToken<'_, L3>) -> bool {
     let cpu_id = {
         let mut guard = context_lock.write(token.token());
+        let was_blocked = guard.status.is_soft_blocked();
         if !guard.unblock_no_ipi() {
+            assert!(!was_blocked);
             let guard_runnable = guard.status.is_runnable();
             let guard_cpu_id = guard.cpu_id;
             if guard_runnable {
@@ -155,6 +157,7 @@ pub fn unblock_context(context_lock: &Arc<ContextLock>, token: &mut LockToken<'_
             }
             return false;
         }
+        assert!(was_blocked && guard.status.is_runnable());
         guard.cpu_id
     };
 
