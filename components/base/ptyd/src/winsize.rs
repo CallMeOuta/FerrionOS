@@ -55,12 +55,20 @@ impl Resource for PtyWinsize {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         if let Some(pty_lock) = self.pty.upgrade() {
             let mut pty = pty_lock.borrow_mut();
-            let winsize: &mut [u8] = &mut pty.winsize;
-
+            let mut changed = false;
             let mut i = 0;
-            while i < buf.len() && i < winsize.len() {
-                winsize[i] = buf[i];
-                i += 1;
+            {
+                let winsize: &mut [u8] = &mut pty.winsize;
+                while i < buf.len() && i < winsize.len() {
+                    if winsize[i] != buf[i] {
+                        winsize[i] = buf[i];
+                        changed = true;
+                    }
+                    i += 1;
+                }
+            }
+            if changed {
+                pty.signal_foreground(libredox::flag::SIGWINCH as u32);
             }
             Ok(i)
         } else {

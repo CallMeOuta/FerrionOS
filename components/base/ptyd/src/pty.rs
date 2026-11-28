@@ -353,6 +353,14 @@ impl Pty {
         }
     }
 
+    pub fn signal_foreground(&self, sig: u32) {
+        if let Some(fd) = &self.pgrp_handle {
+            let _ = Pty::kill(fd, ProcKillTarget::ThisGroup, sig as usize);
+        } else if self.pgrp != 0 {
+            let _ = libredox::call::kill(-(self.pgrp as isize) as usize, sig);
+        }
+    }
+
     fn kill(fd: &libredox::Fd, target: ProcKillTarget, sig: usize) -> Result<()> {
         Ok(fd
             .call_wo(

@@ -4,19 +4,51 @@
 #include <limits.h>
 #include <poll.h>
 #include <pty.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 enum {
     MAX_READ_ITERS = 64,
     MAX_LINE_BUF = 512,
     MAX_WAIT_ITERS = 16,
-    POLL_TIMEOUT_MS = 5000
+    MAX_SLEEP_ITERS = 16,
+    POLL_TIMEOUT_MS = 5000,
+    SIGWINCH_WAIT_NS = 100000000L
 };
+
+static volatile sig_atomic_t g_winch_count = 0;
+
+static void handle_sigwinch(int signo) {
+    (void)signo;
+    g_winch_count++;
+}
+
+static void sleep_brief_bounded(void) {
+    struct timespec req;
+    struct timespec rem;
+    req.tv_sec = 0;
+    req.tv_nsec = SIGWINCH_WAIT_NS;
+    for (int i = 0; i < MAX_SLEEP_ITERS; i++) {
+        rem.tv_sec = 0;
+        rem.tv_nsec = 0;
+        if (nanosleep(&req, &rem) == 0) {
+            return;
+        }
+        if (errno != EINTR) {
+            return;
+        }
+        req = rem;
+        if (req.tv_sec == 0 && req.tv_nsec == 0) {
+            return;
+        }
+    }
+}
 
 static size_t read_line_bounded(int fd, char *buf, size_t cap) {
     size_t len = 0;
@@ -315,7 +347,134 @@ static int check_direct_tiocsctty(void) {
     return 0;
 }
 
-int main(void) {
+static int check_sigwinch(void) {
+    struct winsize orig_ws;
+    memset(&orig_ws, 0, sizeof(orig_ws));
+    if (ioctl(STDIN_FILENO, TIOCGWINSZ, &orig_ws) != 0) {
+        int err = errno;
+        printf("FAIL sigwinch tiocgwinsz_errno=%d (%s)\n", err, strerror(err));
+        return 0;
+    }
+
+    pid_t my_pgrp = getpgrp();
+    pid_t orig_pgrp = tcgetpgrp(STDIN_FILENO);
+    int changed_pgrp = 0;
+    struct sigaction ign_ttou;
+    struct sigaction old_ttou;
+    memset(&ign_ttou, 0, sizeof(ign_ttou));
+    memset(&old_ttou, 0, sizeof(old_ttou));
+    ign_ttou.sa_handler = SIG_IGN;
+    sigemptyset(&ign_ttou.sa_mask);
+    if (orig_pgrp != my_pgrp && my_pgrp > 0) {
+        if (sigaction(SIGTTOU, &ign_ttou, &old_ttou) == 0) {
+            if (tcsetpgrp(STDIN_FILENO, my_pgrp) == 0) {
+                changed_pgrp = 1;
+            }
+            sigaction(SIGTTOU, &old_ttou, NULL);
+        }
+    }
+    pid_t active_pgrp = tcgetpgrp(STDIN_FILENO);
+
+    g_winch_count = 0;
+    struct sigaction sa;
+    struct sigaction old_sa;
+    memset(&sa, 0, sizeof(sa));
+    memset(&old_sa, 0, sizeof(old_sa));
+    sa.sa_handler = handle_sigwinch;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGWINCH, &sa, &old_sa) != 0) {
+        int err = errno;
+        printf("FAIL sigwinch sigaction_errno=%d (%s)\n", err, strerror(err));
+        return 0;
+    }
+
+    struct winsize ws1 = orig_ws;
+    ws1.ws_row = (orig_ws.ws_row == 30) ? 31 : 30;
+    ws1.ws_col = (orig_ws.ws_col == 100) ? 101 : 100;
+    ws1.ws_xpixel = (unsigned short)(ws1.ws_col * 8);
+    ws1.ws_ypixel = (unsigned short)(ws1.ws_row * 16);
+
+    int rc1 = ioctl(STDIN_FILENO, TIOCSWINSZ, &ws1);
+    int err1 = (rc1 != 0) ? errno : 0;
+    sleep_brief_bounded();
+    int c1 = (int)g_winch_count;
+
+    struct winsize readback1;
+    memset(&readback1, 0, sizeof(readback1));
+    int rb1_rc = ioctl(STDIN_FILENO, TIOCGWINSZ, &readback1);
+
+    int rc_same = ioctl(STDIN_FILENO, TIOCSWINSZ, &ws1);
+    int err_same = (rc_same != 0) ? errno : 0;
+    sleep_brief_bounded();
+    int c_same = (int)g_winch_count;
+
+    struct winsize ws2 = ws1;
+    ws2.ws_row = (unsigned short)(ws1.ws_row + 1);
+    ws2.ws_col = (unsigned short)(ws1.ws_col + 1);
+    ws2.ws_xpixel = (unsigned short)(ws2.ws_col * 8);
+    ws2.ws_ypixel = (unsigned short)(ws2.ws_row * 16);
+
+    int rc2 = ioctl(STDIN_FILENO, TIOCSWINSZ, &ws2);
+    int err2 = (rc2 != 0) ? errno : 0;
+    sleep_brief_bounded();
+    int c2 = (int)g_winch_count;
+
+    struct winsize readback2;
+    memset(&readback2, 0, sizeof(readback2));
+    int rb2_rc = ioctl(STDIN_FILENO, TIOCGWINSZ, &readback2);
+
+    sigaction(SIGWINCH, &old_sa, NULL);
+    (void)ioctl(STDIN_FILENO, TIOCSWINSZ, &orig_ws);
+    if (changed_pgrp && orig_pgrp > 0) {
+        if (sigaction(SIGTTOU, &ign_ttou, &old_ttou) == 0) {
+            (void)tcsetpgrp(STDIN_FILENO, orig_pgrp);
+            sigaction(SIGTTOU, &old_ttou, NULL);
+        }
+    }
+
+    int dims_ok = (rb1_rc == 0 && readback1.ws_row == ws1.ws_row && readback1.ws_col == ws1.ws_col
+        && rb2_rc == 0 && readback2.ws_row == ws2.ws_row && readback2.ws_col == ws2.ws_col);
+    int ioctl_ok = (rc1 == 0 && rc_same == 0 && rc2 == 0);
+    int counts_ok = (c1 == 1 && c_same == 1 && c2 == 2);
+
+    if (ioctl_ok && dims_ok && counts_ok) {
+        printf(
+            "PASS sigwinch counts=%d,%d,%d pgrp=%d active_pgrp=%d orig_pgrp=%d\n",
+            c1,
+            c_same,
+            c2,
+            (int)my_pgrp,
+            (int)active_pgrp,
+            (int)orig_pgrp
+        );
+        return 1;
+    }
+
+    printf(
+        "FAIL sigwinch counts=%d,%d,%d rc=%d,%d,%d errno=%d,%d,%d dims_ok=%d pgrp=%d active_pgrp=%d orig_pgrp=%d\n",
+        c1,
+        c_same,
+        c2,
+        rc1,
+        rc_same,
+        rc2,
+        err1,
+        err_same,
+        err2,
+        dims_ok,
+        (int)my_pgrp,
+        (int)active_pgrp,
+        (int)orig_pgrp
+    );
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--sigwinch") == 0) {
+        int ok = check_sigwinch();
+        printf("SUMMARY pass=%d total=1\n", ok);
+        return ok == 1 ? 0 : 1;
+    }
     int passed = 0;
     passed += check_forkpty();
     passed += check_direct_tiocsctty();

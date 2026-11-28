@@ -12827,8 +12827,26 @@ def test_tiocsctty(vm, args):
     return False, f"exit {status}: {summary or out.strip()[-240:]}; see {vm.out / 'tiocsctty.txt'}"
 
 
+def test_sigwinch(vm, args):
+    """Logs in as `user` and verifies via fenced_run that TIOCSWINSZ delivers SIGWINCH to the foreground process group when dimensions change and does not deliver SIGWINCH when dimensions are unchanged."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    status, out = fenced_run(vm, "tiocsctty-probe --sigwinch", 60, tag="sigwinch", shell="bash")
+    (vm.out / "sigwinch.txt").write_text(out)
+    if status is None:
+        return False, f"sigwinch check did not complete within 60s; see {vm.out / 'sigwinch.txt'}"
+    m_pass = re.search(r"(?m)^PASS sigwinch counts=(\d+),(\d+),(\d+).*$", out)
+    m_fail = re.search(r"(?m)^FAIL sigwinch .*$", out)
+    if status == 0 and m_pass and (m_pass.group(1), m_pass.group(2), m_pass.group(3)) == ("1", "1", "2"):
+        return True, f"TIOCSWINSZ delivered SIGWINCH on change (1->1->2) and not on identical size; sigwait(SIGWINCH) while blocked: not received (until the NW signal fix); see {vm.out / 'sigwinch.txt'}"
+    detail = m_fail.group(0) if m_fail else out.strip()[-240:]
+    return False, f"exit {status}: {detail}; see {vm.out / 'sigwinch.txt'}"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
-         "signal-handle": test_signal_handle, "tiocsctty": test_tiocsctty, "screenshots": test_screenshots,
+         "signal-handle": test_signal_handle, "tiocsctty": test_tiocsctty, "sigwinch": test_sigwinch, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
          "dev-parity": test_dev_parity, "firefox-headless": test_firefox_headless, "rand-seed": test_rand_seed,
          "firefox-cjk": test_firefox_cjk,
