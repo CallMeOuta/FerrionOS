@@ -1,4 +1,4 @@
-"""M2c-b check: mpv Wayland wlshm and gpu-next (EGL/llvmpipe) window + ferrion audio on wm-session."""
+"""M2d-a check: mpv Wayland wlshm, gpu-next (EGL/GL), and gpu-next-vk (Vulkan/waylandvk) window + ferrion audio on wm-session."""
 import json
 import re
 import shutil
@@ -15,10 +15,22 @@ CLIP_SPECS = (
     ("1080p", 1920, 1080, "av1_1080p_tone.mkv"),
     ("4k", 3840, 2160, "av1_4k_tone.mkv"),
 )
-VO_SPECS = (
-    ("wlshm", "--vo=wlshm"),
-    ("gpu-next", "--vo=gpu-next --gpu-api=opengl --gpu-context=wayland --gpu-sw"),
-)
+ALL_VO_NAMES = ("wlshm", "gpu-next", "gpu-next-vk")
+DEFAULT_VO_NAMES = ("wlshm", "gpu-next")
+DEFAULT_GPU_MODE = "cpu"
+GPU_MODE_EXPECTATIONS = {
+    "cpu": {
+        "gpu-next": {
+            "allow_sw": True,
+            "gl_renderer_substr": "llvmpipe",
+            "gl_renderer_forbid_substr": "zink",
+        },
+        "gpu-next-vk": {
+            "allow_sw": True,
+            "vk_driver_id": "VK_DRIVER_ID_MESA_LLVMPIPE",
+        },
+    },
+}
 COUNTER_BITS = 8
 MIN_MARKER_SAMPLES = 8
 WAYLAND_SOCKET_WAIT_ITERS = 30
@@ -34,7 +46,42 @@ MIN_FRAME_DIFF = 1.5
 MAX_LOG_LINES = 20000
 MAX_JSON_SCAN_MATCHES = 128
 WAV_CONTINUITY_EXEMPT_MIN_WIDTH = 3840
-WAV_CONTINUITY_EXEMPT_RENDERER = "llvmpipe"
+WAV_CONTINUITY_EXEMPT_GL_RENDERER = "llvmpipe"
+WAV_CONTINUITY_EXEMPT_VK_DRIVER_ID = "VK_DRIVER_ID_MESA_LLVMPIPE"
+
+
+def parse_vo_selection(raw_vo):
+    if not raw_vo:
+        return list(DEFAULT_VO_NAMES), None
+    selected = []
+    for part in str(raw_vo).split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if token not in ALL_VO_NAMES:
+            return None, f"unknown --mpv-vo value {token!r} (expected subset of {', '.join(ALL_VO_NAMES)})"
+        if token not in selected:
+            selected.append(token)
+    if not selected:
+        return None, f"empty --mpv-vo selection (expected subset of {', '.join(ALL_VO_NAMES)})"
+    return selected, None
+
+
+def resolve_vo_spec(vo_name, gpu_mode):
+    if vo_name == "wlshm":
+        return "--vo=wlshm", None, None
+    mode_table = GPU_MODE_EXPECTATIONS.get(gpu_mode)
+    if mode_table is None:
+        return None, None, f"unknown --mpv-gpu mode {gpu_mode!r} (no expectation table entry)"
+    expect = mode_table.get(vo_name)
+    if expect is None:
+        return None, None, f"no expected renderer entry for --mpv-gpu={gpu_mode!r} and vo={vo_name!r}"
+    sw_flag = " --gpu-sw" if expect.get("allow_sw") else ""
+    if vo_name == "gpu-next":
+        return f"--vo=gpu-next --gpu-api=opengl --gpu-context=wayland{sw_flag}", expect, None
+    if vo_name == "gpu-next-vk":
+        return f"--vo=gpu-next --gpu-api=vulkan --gpu-context=waylandvk{sw_flag}", expect, None
+    return None, None, f"unsupported vo {vo_name!r}"
 
 
 def read_host_loadavg():
@@ -310,6 +357,17 @@ def parse_mpv_window_log(log_text):
     gl_version = None
     pl_gl_renderer = None
     pl_gl_version = None
+    vk_wayland_surface_ext = False
+    vk_device_name = None
+    vk_api_version = None
+    vk_driver_id = None
+    vk_driver_name = None
+    vk_driver_info = None
+    spirv_compiler = None
+    vk_surface_config = None
+    wl_has_fifo = False
+    wl_present_v2 = False
+    vk_present_mode_fallback = False
     avsync_vals = []
     frame_drop_max = None
     dec_drop_max = None
@@ -363,6 +421,35 @@ def parse_mpv_window_log(log_text):
         m_glv_pl = re.search(r"\[vo/[^\]]+\]\s+GL_VERSION:\s+(.+)$", line)
         if m_glv_pl and pl_gl_version is None:
             pl_gl_version = m_glv_pl.group(1).strip()
+        if "[vo/" in line and "VK_KHR_wayland_surface" in line:
+            vk_wayland_surface_ext = True
+        m_vk_dev = re.search(r"\[vo/[^\]]+\]\s+Device Name:\s+(.+)$", line)
+        if m_vk_dev and vk_device_name is None:
+            vk_device_name = m_vk_dev.group(1).strip()
+        m_vk_api = re.search(r"\[vo/[^\]]+\]\s+API version:\s+(.+)$", line)
+        if m_vk_api and vk_api_version is None:
+            vk_api_version = m_vk_api.group(1).strip()
+        m_vk_drv_id = re.search(r"\[vo/[^\]]+\]\s+Driver ID:\s+(\S+)", line)
+        if m_vk_drv_id and vk_driver_id is None:
+            vk_driver_id = m_vk_drv_id.group(1).strip()
+        m_vk_drv_name = re.search(r"\[vo/[^\]]+\]\s+Driver name:\s+(.+)$", line)
+        if m_vk_drv_name and vk_driver_name is None:
+            vk_driver_name = m_vk_drv_name.group(1).strip()
+        m_vk_drv_info = re.search(r"\[vo/[^\]]+\]\s+Driver info:\s+(.+)$", line)
+        if m_vk_drv_info and vk_driver_info is None:
+            vk_driver_info = m_vk_drv_info.group(1).strip()
+        m_spirv = re.search(r"\[vo/[^\]]+\]\s+Initialized SPIR-V compiler '([^']+)'", line)
+        if m_spirv and spirv_compiler is None:
+            spirv_compiler = m_spirv.group(1).strip()
+        m_surf = re.search(r"\[vo/[^\]]+\]\s+Picked surface configuration\s+\d+:\s+(.+)$", line)
+        if m_surf and vk_surface_config is None:
+            vk_surface_config = m_surf.group(1).strip()
+        if "[vo/" in line and "Registered interface wp_fifo_manager_v1 at version" in line:
+            wl_has_fifo = True
+        if "[vo/" in line and "Registered interface wp_presentation at version 2" in line:
+            wl_present_v2 = True
+        if "[vo/" in line and "falling back to VK_PRESENT_MODE_FIFO_KHR" in line:
+            vk_present_mode_fallback = True
         if stripped == "Exiting... (End of file)":
             eof = True
         if "Audio device underrun detected" in line:
@@ -416,6 +503,12 @@ def parse_mpv_window_log(log_text):
 
     effective_gl_renderer = gl_renderer or pl_gl_renderer
     effective_gl_version = gl_version or pl_gl_version
+    vk_present_mode = None
+    if gpu_context == "waylandvk" and vk_surface_config:
+        if vk_present_mode_fallback or (wl_has_fifo and wl_present_v2):
+            vk_present_mode = "VK_PRESENT_MODE_FIFO_KHR"
+        else:
+            vk_present_mode = "VK_PRESENT_MODE_MAILBOX_KHR"
 
     return {
         "vo_driver": vo_driver,
@@ -437,6 +530,18 @@ def parse_mpv_window_log(log_text):
         "gl_version": effective_gl_version,
         "pl_gl_renderer": pl_gl_renderer,
         "pl_gl_version": pl_gl_version,
+        "vk_wayland_surface_ext": vk_wayland_surface_ext,
+        "vk_device_name": vk_device_name,
+        "vk_api_version": vk_api_version,
+        "vk_driver_id": vk_driver_id,
+        "vk_driver_name": vk_driver_name,
+        "vk_driver_info": vk_driver_info,
+        "spirv_compiler": spirv_compiler,
+        "vk_surface_config": vk_surface_config,
+        "wl_has_fifo": wl_has_fifo,
+        "wl_present_v2": wl_present_v2,
+        "vk_present_mode_fallback": vk_present_mode_fallback,
+        "vk_present_mode": vk_present_mode,
         "ao_line": ao_line,
         "ao_driver": ao_driver,
         "ao_ferrion": ao_driver == "ferrion",
@@ -469,6 +574,8 @@ def run_single_clip(
     clip_sha,
     vo_name,
     vo_flags,
+    gpu_mode,
+    expected_renderer,
     fullscreen,
     clips_dir,
     helpers,
@@ -497,6 +604,8 @@ def run_single_clip(
         "clip_sha256": clip_sha,
         "vo": vo_name,
         "vo_flags": vo_flags,
+        "gpu_mode": gpu_mode,
+        "expected_renderer": expected_renderer,
         "fullscreen": bool(fullscreen),
         "launch_path": "ferrion-wm msg action spawn (unsandboxed mpv in ferrion-wm session)",
         "red_missing_vo": False,
@@ -576,11 +685,15 @@ def run_single_clip(
             has_wlshm = help_lists_token(vo_help, "wlshm")
             has_gpu_next = help_lists_token(vo_help, "gpu-next")
             has_opengl = help_lists_token(gpu_api_help, "opengl")
+            has_vulkan = help_lists_token(gpu_api_help, "vulkan")
             has_wayland_ctx = help_lists_token(gpu_ctx_help, "wayland")
+            has_waylandvk_ctx = help_lists_token(gpu_ctx_help, "waylandvk")
             clip_record["vo_help_lists_wlshm"] = has_wlshm
             clip_record["vo_help_lists_gpu_next"] = has_gpu_next
             clip_record["gpu_api_help_lists_opengl"] = has_opengl
+            clip_record["gpu_api_help_lists_vulkan"] = has_vulkan
             clip_record["gpu_context_help_lists_wayland"] = has_wayland_ctx
+            clip_record["gpu_context_help_lists_waylandvk"] = has_waylandvk_ctx
 
             rc_dl, dl_out = run_user(
                 f"{curl_get} {base}/{clip_name} -o /tmp/media/{clip_name} && "
@@ -595,6 +708,7 @@ def run_single_clip(
             missing_requested = (
                 (vo_name == "wlshm" and not has_wlshm)
                 or (vo_name == "gpu-next" and not (has_gpu_next and has_opengl and has_wayland_ctx))
+                or (vo_name == "gpu-next-vk" and not (has_gpu_next and has_vulkan and has_waylandvk_ctx))
             )
             if missing_requested:
                 rc_red, _ = run_user(
@@ -620,8 +734,9 @@ def run_single_clip(
                 clip_record["red_vo_exit_code"] = red_exit
                 clip_record["red_vo_log_head"] = red_head
                 clip_record["problems"].append(
-                    f"mpv lacks requested {vo_name} support (vo={has_gpu_next if vo_name == 'gpu-next' else has_wlshm}, "
-                    f"opengl={has_opengl}, wayland_ctx={has_wayland_ctx}); rc={red_exit}: {red_head}"
+                    f"mpv lacks requested {vo_name} support (vo={has_wlshm if vo_name == 'wlshm' else has_gpu_next}, "
+                    f"opengl={has_opengl}, vulkan={has_vulkan}, wayland_ctx={has_wayland_ctx}, "
+                    f"waylandvk_ctx={has_waylandvk_ctx}); rc={red_exit}: {red_head}"
                 )
                 return clip_record
 
@@ -856,7 +971,7 @@ def run_single_clip(
                     clip_record["problems"].append("mpv.log missing VO: [wlshm]")
                 if parsed["vo_gpu_next"]:
                     clip_record["problems"].append("mpv.log unexpectedly reported VO: [gpu-next] on wlshm run")
-            else:
+            elif vo_name == "gpu-next":
                 if not parsed["vo_gpu_next"]:
                     clip_record["problems"].append("mpv.log missing VO: [gpu-next]")
                 if parsed["vo_wlshm"]:
@@ -870,12 +985,65 @@ def run_single_clip(
                 renderer = parsed["gl_renderer"]
                 if not renderer:
                     clip_record["problems"].append("mpv.log missing GL_RENDERER")
-                elif "zink" in renderer.lower() or "llvmpipe" not in renderer.lower():
+                elif not expected_renderer:
                     clip_record["problems"].append(
-                        f"unexpected GL_RENDERER={renderer!r} (expected llvmpipe, not zink or another driver)"
+                        f"no expected renderer configured for gpu_mode={gpu_mode!r} vo={vo_name!r}"
                     )
+                else:
+                    want_sub = (expected_renderer.get("gl_renderer_substr") or "").lower()
+                    forbid_sub = (expected_renderer.get("gl_renderer_forbid_substr") or "").lower()
+                    if not want_sub:
+                        clip_record["problems"].append(
+                            f"empty gl_renderer_substr expectation for gpu_mode={gpu_mode!r}"
+                        )
+                    elif want_sub not in renderer.lower() or (forbid_sub and forbid_sub in renderer.lower()):
+                        clip_record["problems"].append(
+                            f"unexpected GL_RENDERER={renderer!r} for gpu_mode={gpu_mode!r} "
+                            f"(expected {want_sub!r}, forbid {forbid_sub!r})"
+                        )
                 if not parsed["gl_version"]:
                     clip_record["problems"].append("mpv.log missing GL_VERSION")
+            elif vo_name == "gpu-next-vk":
+                if not parsed["vo_gpu_next"]:
+                    clip_record["problems"].append("mpv.log missing VO: [gpu-next]")
+                if parsed["vo_wlshm"]:
+                    clip_record["problems"].append("mpv.log fell back to VO: [wlshm] on gpu-next-vk run")
+                if parsed["gpu_context"] != "waylandvk":
+                    clip_record["problems"].append(
+                        f"mpv.log missing Wayland Vulkan context init 'waylandvk' (got {parsed['gpu_context']!r})"
+                    )
+                if not parsed["vk_wayland_surface_ext"]:
+                    clip_record["problems"].append("mpv.log missing VK_KHR_wayland_surface extension")
+                if not parsed["vk_surface_config"]:
+                    clip_record["problems"].append("mpv.log missing Vulkan swapchain surface configuration")
+                if not parsed["vk_present_mode"]:
+                    clip_record["problems"].append("mpv.log missing Vulkan swapchain present mode")
+                if not parsed["vk_device_name"]:
+                    clip_record["problems"].append("mpv.log missing Vulkan Device Name")
+                if not parsed["vk_api_version"]:
+                    clip_record["problems"].append("mpv.log missing Vulkan API version")
+                if not parsed["spirv_compiler"]:
+                    clip_record["problems"].append("mpv.log missing Initialized SPIR-V compiler line")
+                driver_id = parsed["vk_driver_id"]
+                if not driver_id:
+                    clip_record["problems"].append("mpv.log missing Vulkan Driver ID")
+                elif not expected_renderer:
+                    clip_record["problems"].append(
+                        f"no expected renderer configured for gpu_mode={gpu_mode!r} vo={vo_name!r}"
+                    )
+                else:
+                    want_drv = expected_renderer.get("vk_driver_id") or ""
+                    if not want_drv:
+                        clip_record["problems"].append(
+                            f"empty vk_driver_id expectation for gpu_mode={gpu_mode!r}"
+                        )
+                    elif driver_id != want_drv:
+                        clip_record["problems"].append(
+                            f"unexpected Vulkan Driver ID={driver_id!r} for gpu_mode={gpu_mode!r} "
+                            f"(expected {want_drv!r})"
+                        )
+            else:
+                clip_record["problems"].append(f"unhandled vo {vo_name!r}")
             if fullscreen:
                 win_size = (clip_record.get("window") or {}).get("window_size")
                 if win_size != primary_output["mode"]:
@@ -915,10 +1083,17 @@ def run_single_clip(
         wav_report["gap_count"] = len(wav_report.get("gap_blocks") or [])
         wav_report["phase_jump_count"] = len(wav_report.get("phase_jumps") or [])
     clip_record["wav"] = wav_report
-    renderer = (clip_record.get("mpv") or {}).get("gl_renderer") or ""
+    mpv_parsed = clip_record.get("mpv") or {}
+    gl_renderer = (mpv_parsed.get("gl_renderer") or "").lower()
+    vk_driver_id = mpv_parsed.get("vk_driver_id") or ""
+    is_sw_gl = (
+        WAV_CONTINUITY_EXEMPT_GL_RENDERER in gl_renderer
+        and "zink" not in gl_renderer
+    )
+    is_sw_vk = vk_driver_id == WAV_CONTINUITY_EXEMPT_VK_DRIVER_ID
     exempt_wav_continuity = (
         width >= WAV_CONTINUITY_EXEMPT_MIN_WIDTH
-        and WAV_CONTINUITY_EXEMPT_RENDERER in renderer.lower()
+        and (is_sw_gl or is_sw_vk)
     )
     clip_record["wav_continuity_asserted"] = not exempt_wav_continuity
     if exempt_wav_continuity:
@@ -938,6 +1113,18 @@ def run_mpv_window(args, out, helpers):
         raise Blocked("host ffmpeg lacks libsvtav1 and libaom-av1")
 
     fullscreen = bool(getattr(args, "mpv_fullscreen", False))
+    gpu_mode = (getattr(args, "mpv_gpu", None) or DEFAULT_GPU_MODE).strip()
+    vo_names, vo_err = parse_vo_selection(getattr(args, "mpv_vo", ""))
+    if vo_err:
+        return False, vo_err
+
+    resolved_vos = []
+    for vo_name in vo_names:
+        vo_flags, expected_renderer, err = resolve_vo_spec(vo_name, gpu_mode)
+        if err:
+            return False, err
+        resolved_vos.append((vo_name, vo_flags, expected_renderer))
+
     out.mkdir(parents=True, exist_ok=True)
     clips_dir = out / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -947,6 +1134,8 @@ def run_mpv_window(args, out, helpers):
         "clip_duration_s": CLIP_DURATION_S,
         "clip_fps": CLIP_FPS,
         "fullscreen": fullscreen,
+        "gpu_mode": gpu_mode,
+        "vos": list(vo_names),
         "clips": {},
     }
 
@@ -964,7 +1153,7 @@ def run_mpv_window(args, out, helpers):
     for clip_label, width, height, clip_name in CLIP_SPECS:
         if stop_early:
             break
-        for vo_name, vo_flags in VO_SPECS:
+        for vo_name, vo_flags, expected_renderer in resolved_vos:
             case_label = f"{clip_label}-{vo_name}-fs" if fullscreen else f"{clip_label}-{vo_name}"
             clip_record = run_single_clip(
                 args,
@@ -976,6 +1165,8 @@ def run_mpv_window(args, out, helpers):
                 clip_shas[clip_label],
                 vo_name,
                 vo_flags,
+                gpu_mode,
+                expected_renderer,
                 fullscreen,
                 clips_dir,
                 helpers,
@@ -992,7 +1183,16 @@ def run_mpv_window(args, out, helpers):
                 win_size = (clip_record.get("window") or {}).get("window_size")
                 load1 = (clip_record.get("host_loadavg_after") or {}).get("load1")
                 av_max = (mpv_info.get("avsync") or {}).get("max_abs_s")
-                renderer_note = f" gl={mpv_info['gl_renderer']!r}" if vo_name == "gpu-next" else ""
+                if vo_name == "gpu-next":
+                    renderer_note = f" gl={mpv_info['gl_renderer']!r}"
+                elif vo_name == "gpu-next-vk":
+                    renderer_note = (
+                        f" vk={mpv_info['vk_driver_id']}"
+                        f" dev={mpv_info['vk_device_name']!r}"
+                        f" present={mpv_info['vk_present_mode']}"
+                    )
+                else:
+                    renderer_note = ""
                 summaries.append(
                     f"{case_label} win={win_size} mode={clip_record.get('output_mode')} "
                     f"counters={clip_record['picture']['decoded_counters']} "

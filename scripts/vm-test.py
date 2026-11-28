@@ -14054,7 +14054,7 @@ def test_mpv_sound(args, out):
 
 
 def test_mpv_window(args, out):
-    """M2c-b: checks mpv Wayland wlshm and gpu-next (EGL/llvmpipe) window and ferrion audio under ferrion-wm on 1080p and 4K AV1 clips, tiled or --mpv-fullscreen (default --config wm-session)."""
+    """M2d-a: checks mpv Wayland wlshm, gpu-next (EGL/GL), and gpu-next-vk (Vulkan/waylandvk) window and ferrion audio under ferrion-wm on 1080p and 4K AV1 clips, tiled or --mpv-fullscreen, with --mpv-vo and --mpv-gpu (default --config wm-session)."""
     import mpv_window
     return mpv_window.run_mpv_window(
         args,
@@ -14430,7 +14430,11 @@ def main():
     parser.add_argument("--no-aac-lc", action="store_true",
                         help="media-decode: verify an FFMPEG_AAC_LC=0 image omits fdk-aac-free and libfdk_aac")
     parser.add_argument("--mpv-fullscreen", action="store_true",
-                        help="mpv-window: run 1080p and 4K wlshm/gpu-next cases with --fs and assert window size equals output mode")
+                        help="mpv-window: run selected mpv-window cases with --fs and assert window size equals output mode")
+    parser.add_argument("--mpv-vo", default="",
+                        help="mpv-window: comma-separated VO subset from wlshm,gpu-next,gpu-next-vk (default: wlshm,gpu-next)")
+    parser.add_argument("--mpv-gpu", default="cpu",
+                        help="mpv-window: expected GPU mode table key for gpu-next/gpu-next-vk (default: cpu)")
     parser.add_argument("--lab", action="store_true",
                         help="run inside an unprivileged user and network namespace with no route out")
     parser.add_argument("--in-lab", action="store_true", help=argparse.SUPPRESS)
