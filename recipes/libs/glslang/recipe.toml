@@ -1,0 +1,42 @@
+[package]
+description = "Khronos reference GLSL and ESSL shader compiler and SPIR-V generator"
+
+[source]
+git = "https://github.com/KhronosGroup/glslang"
+rev = "a57276bf558f5cf94d3a9854ebdf5a2236849a5a"
+shallow_clone = true
+
+[build]
+template = "custom"
+dependencies = [
+    "libstdcxx",
+]
+script = """
+if [ "${TARGET}" = "${COOKBOOK_HOST_TARGET}" ]; then
+    generate_cookbook_cmake_file "${GNU_TARGET}" "" "${COOKBOOK_SYSROOT}" native.cmake
+    "${COOKBOOK_CMAKE}" "${COOKBOOK_SOURCE}" -GNinja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=native.cmake \
+        -DBUILD_SHARED_LIBS=OFF -DBUILD_EXTERNAL=OFF -DGLSLANG_TESTS=OFF \
+        -DENABLE_GLSLANG_BINARIES=ON -DENABLE_SPIRV=ON -DENABLE_HLSL=OFF \
+        -DENABLE_OPT=OFF -DGLSLANG_ENABLE_INSTALL=OFF
+    "${COOKBOOK_NINJA}" -j"${COOKBOOK_MAKE_JOBS}" glslang-standalone
+    mkdir -p "${COOKBOOK_STAGE}/usr/bin"
+    cp StandAlone/glslang "${COOKBOOK_STAGE}/usr/bin/glslangValidator"
+    "${COOKBOOK_STAGE}/usr/bin/glslangValidator" --version
+    exit 0
+fi
+
+DYNAMIC_INIT
+COOKBOOK_CMAKE_FLAGS+=(
+    -DBUILD_SHARED_LIBS=ON
+    -DBUILD_EXTERNAL=OFF
+    -DGLSLANG_TESTS=OFF
+    -DENABLE_GLSLANG_BINARIES=OFF
+    -DENABLE_SPIRV=ON
+    -DENABLE_HLSL=OFF
+    -DENABLE_OPT=OFF
+    -DGLSLANG_ENABLE_INSTALL=ON
+)
+cookbook_cmake
+install -Dm644 "${COOKBOOK_SOURCE}/LICENSE.txt" "${COOKBOOK_STAGE}/usr/share/licenses/glslang/LICENSE.txt"
+"""
