@@ -1,18 +1,19 @@
 FerrionOS change to the Khronos Vulkan loader (Apache-2.0 licence, kept), made against upstream tag vulkan-sdk-1.4.350.1 (commit a9e72c6):
-- CMakeLists.txt accepts the Redox target (the cookbook's cross file names the system UnixPaths), with no window-system platform;
+- CMakeLists.txt accepts the Redox target (the cookbook's cross file names the system UnixPaths), with Wayland as the window-system platform (VK_USE_PLATFORM_WAYLAND_KHR);
 - loader/vk_loader_platform.h treats __redox__ as a common Unix platform, and returns no executable path there.
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 4622e0a..10fd6c3 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -150,6 +150,9 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "QNX")
+@@ -150,6 +150,10 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "QNX")
      message(FATAL_ERROR "See BUILD.md for QNX build")
  elseif(CMAKE_SYSTEM_NAME MATCHES "Fuchsia")
      message(FATAL_ERROR "Fuchsia uses Chromium build. See BUILD.gn")
 +elseif(CMAKE_SYSTEM_NAME MATCHES "Redox|UnixPaths")
 +    # Redox and its derivatives (the Redox cookbook's cross file names the system UnixPaths).
-+    # No window-system platform: Orbital has no Vulkan surface extension.
++    # Wayland is the window-system platform on FerrionOS.
++    target_compile_definitions(platform_wsi INTERFACE VK_USE_PLATFORM_WAYLAND_KHR)
  else()
      message(FATAL_ERROR "Unsupported Platform!")
  endif()
