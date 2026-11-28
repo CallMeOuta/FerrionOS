@@ -1233,12 +1233,13 @@ impl RadixFdTbl {
         }
 
         while max_index >= self.capacity() {
+            let mut new_root =
+                FrameAllocated::try_new(Node::empty_branch()).ok_or(Error::new(ENOMEM))?;
             let old_root = self.root.take().unwrap();
-            let mut new_branch = Node::empty_branch();
-            if let Node::Branch(ref mut children) = new_branch {
+            if let Node::Branch(ref mut children) = *new_root {
                 children[0] = Some(old_root);
             }
-            self.root = Some(FrameAllocated::try_new(new_branch).ok_or(Error::new(ENOMEM))?);
+            self.root = Some(new_root);
             self.levels += 1;
         }
 
