@@ -14139,6 +14139,29 @@ def run_rune_window_check(args, out):
 
 
 OWN_IMAGE["rune-window"] = run_rune_window_check
+
+
+def run_rune_chooser_check(args, out):
+    """RU12a check: out-of-process /usr/libexec/ferrion-file-chooser under user-owned ferrion-wm (O3 scan, focus handoff/return, Open/Folder/Save/overwrite/Cancel, reap, and stdin-EOF exit on demo SIGKILL; use --config wm-session-rune)."""
+    import rune_chooser
+    vm = VM(args, out)
+    try:
+        return rune_chooser.run_rune_chooser(
+            vm,
+            args,
+            {
+                "Blocked": Blocked,
+                "root_shell": root_shell,
+                "run_status": run_status,
+                "sendkeys": sendkeys,
+                "settle": settle,
+            },
+        )
+    finally:
+        vm.close()
+
+
+OWN_IMAGE["rune-chooser"] = run_rune_chooser_check
 def test_gtk4_window(args, out):
     """Checks GTK 4 + libadwaita Wayland window (CPU Cairo), key input, AdwAboutDialog, and libappstream under ferrion-run --no-network (use --config wm-session)."""
     import gtk4_window

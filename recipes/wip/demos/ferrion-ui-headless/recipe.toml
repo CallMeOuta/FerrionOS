@@ -1,5 +1,5 @@
 [package]
-description = "Rune headless rendering examples (hello, settings, launcher, clipboard-demo, term-demo) for FerrionOS"
+description = "Rune headless rendering examples (hello, settings, launcher, clipboard-demo, term-demo, chooser-demo) and ferrion-file-chooser for FerrionOS"
 dependencies = [
     "libwayland",
     "libxkbcommon",
@@ -21,8 +21,18 @@ dependencies = [
 script = """
 DYNAMIC_INIT
 COOKBOOK_SOURCE="$(realpath "${COOKBOOK_SOURCE}")"
-COOKBOOK_CARGO_FLAGS+=(--features rune/tooling)
-for app in hello settings launcher clipboard-demo term-demo; do
+COOKBOOK_CARGO_FLAGS+=(--features rune/tooling,rune/native-file-dialog)
+for app in hello settings launcher clipboard-demo term-demo chooser-demo; do
     bin_name="${app}" bin_flags="--package ${app}" bin_final_name="rune-${app}" cookbook_cargo_build
 done
+"${COOKBOOK_CARGO}" build \
+    --manifest-path "${COOKBOOK_SOURCE}/Cargo.toml" \
+    --package ferrion-file-chooser \
+    --no-default-features \
+    --features svg,embedded-fonts \
+    ${build_flags} \
+    -j "${COOKBOOK_MAKE_JOBS}"
+install -Dm755 \
+    "target/${TARGET}/${build_type}/ferrion-file-chooser" \
+    "${COOKBOOK_STAGE}/usr/libexec/ferrion-file-chooser"
 """
