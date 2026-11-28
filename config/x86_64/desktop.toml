@@ -95,6 +95,7 @@ exec-handles-probe = {}
 forcekill-wakeup-probe = {}
 sigkill-exit-probe = {}
 spawn-failure-probe = {}
+tiocsctty-probe = {}
 ffmpeg = {}
 
 # A ferrion-run profile, one per program: ferrion-run-probe is the test helper the

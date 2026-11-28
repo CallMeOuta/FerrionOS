@@ -1,0 +1,10 @@
+[package]
+description = "Verifies forkpty/login_tty and direct TIOCSCTTY controlling terminal attachment"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+${CC} ${CFLAGS} -O2 -Wall -Wextra -Werror -o "${COOKBOOK_STAGE}/usr/bin/tiocsctty-probe" "${COOKBOOK_RECIPE}/tiocsctty-probe.c" ${LDFLAGS}
+"""

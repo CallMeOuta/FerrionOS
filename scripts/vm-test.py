@@ -12805,8 +12805,30 @@ def test_echo_fence(vm, args):
     return True, "guest_run, pfr1_run_as_user, fenced_run(bash), read_root_contexts, and run_status fenced 1/2/4-row lines and preserved printf abc"
 
 
+def test_tiocsctty(vm, args):
+    """Logs in as `user` and runs tiocsctty-probe through fenced_run: checks forkpty/login_tty (no extra setsid/ioctl in the child) and direct setsid + ioctl(TIOCSCTTY, 0) attach the controlling terminal with tcgetpgrp == pid == sid and ttyname matching ptsname."""
+    if not vm.wait_serial(r"login: ", args.timeout):
+        return False, f"no serial login prompt within {args.timeout}s"
+    vm.type("user\n")
+    time.sleep(3)
+    status, out = fenced_run(vm, "tiocsctty-probe", 60, tag="tiocsctty", shell="bash")
+    (vm.out / "tiocsctty.txt").write_text(out)
+    if status is None:
+        return False, f"tiocsctty-probe did not complete within 60s; see {vm.out / 'tiocsctty.txt'}"
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    summary = " | ".join(line for line in lines if line.startswith(("PASS ", "FAIL ", "SUMMARY ")))
+    if (
+        status == 0
+        and any(line.startswith("PASS forkpty ") for line in lines)
+        and any(line.startswith("PASS direct-tiocsctty ") for line in lines)
+        and "SUMMARY pass=2 total=2" in lines
+    ):
+        return True, f"{summary}; see {vm.out / 'tiocsctty.txt'}"
+    return False, f"exit {status}: {summary or out.strip()[-240:]}; see {vm.out / 'tiocsctty.txt'}"
+
+
 TESTS = {"boot": test_boot, "shells": test_shells, "logout": test_logout, "ls-loop": test_ls_loop,
-         "signal-handle": test_signal_handle, "screenshots": test_screenshots,
+         "signal-handle": test_signal_handle, "tiocsctty": test_tiocsctty, "screenshots": test_screenshots,
          "tpm": test_tpm, "lockdown": test_lockdown, "login-namespace": test_login_namespace,
          "dev-parity": test_dev_parity, "firefox-headless": test_firefox_headless, "rand-seed": test_rand_seed,
          "firefox-cjk": test_firefox_cjk,

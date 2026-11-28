@@ -2859,7 +2859,7 @@
   "components/relibc/src/header/sys_ioctl/linux.rs": 2,
   "components/relibc/src/header/sys_ioctl/mod.rs": 12,
   "components/relibc/src/header/sys_ioctl/redox/drm.rs": 7,
-  "components/relibc/src/header/sys_ioctl/redox/mod.rs": 53,
+  "components/relibc/src/header/sys_ioctl/redox/mod.rs": 34,
   "components/relibc/src/header/sys_ioctl/redox/sync.rs": 0,
   "components/relibc/src/header/sys_ipc/cbindgen.toml": 4,
   "components/relibc/src/header/sys_ipc/mod.rs": 21,

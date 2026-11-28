@@ -4,7 +4,7 @@
 
 use crate::{
     header::{sys_ioctl, unistd},
-    platform::types::{c_int, c_void},
+    platform::types::c_int,
 };
 
 /// See <https://www.man7.org/linux/man-pages/man3/openpty.3.html>.
@@ -14,15 +14,7 @@ pub unsafe extern "C" fn login_tty(fd: c_int) -> c_int {
     unistd::setsid();
 
     // Set controlling terminal
-    let mut arg: c_int = 0;
-    if unsafe {
-        sys_ioctl::ioctl(
-            fd,
-            sys_ioctl::TIOCSCTTY,
-            core::ptr::from_mut::<c_int>(&mut arg).cast::<c_void>(),
-        )
-    } != 0
-    {
+    if unsafe { sys_ioctl::ioctl(fd, sys_ioctl::TIOCSCTTY, core::ptr::null_mut()) } != 0 {
         return -1;
     }
 
