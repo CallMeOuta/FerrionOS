@@ -18,12 +18,14 @@ dependencies = [
     "libglvnd",
     "libiconv",
     "libplacebo",
+    "libvulkan",
     "libwayland",
     "libxkbcommon",
     "zlib",
 ]
 dev-dependencies = [
     "linux-input-event-codes",
+    "vulkan-headers",
     "wayland-protocols",
 ]
 script = """
@@ -41,6 +43,7 @@ cookbook_meson \
     -Dgl=enabled \
     -Degl=enabled \
     -Degl-wayland=enabled \
+    -Dvulkan=enabled \
     -Dlua=disabled \
     -Dbuild-date=false \
     -Dcplayer=true \
