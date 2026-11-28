@@ -338,27 +338,36 @@ static HANDLES: RwLock<L1, HandleTable> = RwLock::new(HandleTable::new());
 
 fn close_filetable_iteratively(
     initial: FdTbl,
+    detach: bool,
     live_at_entry: usize,
     token: &mut CleanLockToken,
 ) {
     let mut worklist = VecDeque::new();
-    worklist.push_back(initial);
+    worklist.push_back((initial, detach));
     let mut drained = 0usize;
     let mut max_steps = live_at_entry
         .checked_add(1)
         .expect("filetable drain bound overflow");
     assert!(max_steps <= live_at_entry + drained + 1);
 
-    while let Some(mut ft) = worklist.pop_front() {
+    while let Some((mut ft, should_detach)) = worklist.pop_front() {
         assert!(drained < max_steps);
         drained += 1;
         ft.drain_with(|file| {
-            let Ok(Some(desc)) = file.detach_and_take_last(token) else {
-                return;
+            let desc = if should_detach {
+                let Ok(Some(desc)) = file.detach_and_take_last(token) else {
+                    return;
+                };
+                desc
+            } else {
+                let Some(desc) = file.take_last() else {
+                    return;
+                };
+                desc
             };
             if matches!(desc.scheme_ref, KernelSchemeRef::Global(GlobalSchemes::Proc)) {
                 event::unregister_file(GlobalSchemes::Proc.scheme_id(), desc.number, token);
-                if let Ok(Some((next_ft, from_live_swap, live_after))) =
+                if let Ok(Some((next_ft, from_live_swap, next_detach, live_after))) =
                     ProcScheme::close_nonrecursive(desc.number, token)
                 {
                     if from_live_swap {
@@ -372,7 +381,7 @@ fn close_filetable_iteratively(
                         max_steps = candidate;
                         assert!(max_steps <= live_total + drained + 1);
                     }
-                    worklist.push_back(next_ft);
+                    worklist.push_back((next_ft, next_detach));
                 }
             } else {
                 let _ = desc.try_close(token);
@@ -631,7 +640,7 @@ impl ProcScheme {
     fn close_nonrecursive(
         id: usize,
         token: &mut CleanLockToken,
-    ) -> Result<Option<(FdTbl, bool, usize)>> {
+    ) -> Result<Option<(FdTbl, bool, bool, usize)>> {
         let (handle, live_owned_now) = {
             let mut handles = HANDLES.write(token.token());
             let handle = handles.remove(&id).ok_or(Error::new(EBADF))?;
@@ -692,19 +701,25 @@ impl ProcScheme {
                 ..
             } => {
                 if let Some(ft) = Arc::into_inner(filetable) {
-                    return Ok(Some((ft.into_inner(), false, live_owned_now)));
+                    return Ok(Some((ft.into_inner(), false, false, live_owned_now)));
                 }
             }
             Handle {
                 kind: ContextHandle::AwaitingFiletableChange { new_ft },
                 context,
             } => {
-                let (table_to_close, from_live_swap) = {
+                let current_pid = context::current().read(token.token()).pid;
+                let (table_to_close, from_live_swap, detach) = {
                     let mut guard = context.write(token.token());
                     if guard.files_closed {
-                        (new_ft, false)
+                        (new_ft, false, false)
                     } else {
-                        (core::mem::replace(&mut guard.files, new_ft), true)
+                        let same_proc = guard.pid == current_pid;
+                        (
+                            core::mem::replace(&mut guard.files, new_ft),
+                            true,
+                            same_proc,
+                        )
                     }
                 };
                 let live_after_swap = if from_live_swap {
@@ -713,7 +728,12 @@ impl ProcScheme {
                     live_owned_now
                 };
                 if let Some(ft) = Arc::into_inner(table_to_close) {
-                    return Ok(Some((ft.into_inner(), from_live_swap, live_after_swap)));
+                    return Ok(Some((
+                        ft.into_inner(),
+                        from_live_swap,
+                        detach,
+                        live_after_swap,
+                    )));
                 }
             }
             _ => (),
@@ -749,8 +769,8 @@ impl KernelScheme for ProcScheme {
     }
 
     fn close(&self, id: usize, token: &mut CleanLockToken) -> Result<()> {
-        if let Some((ft, _, live_owned)) = Self::close_nonrecursive(id, token)? {
-            close_filetable_iteratively(ft, live_owned, token);
+        if let Some((ft, _, detach, live_owned)) = Self::close_nonrecursive(id, token)? {
+            close_filetable_iteratively(ft, detach, live_owned, token);
         }
         Ok(())
     }

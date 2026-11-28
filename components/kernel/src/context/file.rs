@@ -125,6 +125,12 @@ impl FileDescription {
 }
 
 impl FileDescriptor {
+    pub(crate) fn take_last(self) -> Option<FileDescription> {
+        Arc::try_unwrap(self.description)
+            .ok()
+            .map(RwLock::into_inner)
+    }
+
     pub(crate) fn detach_and_take_last(
         self,
         token: &mut CleanLockToken,
@@ -139,9 +145,7 @@ impl FileDescriptor {
             }
         }
 
-        Ok(Arc::try_unwrap(self.description)
-            .ok()
-            .map(RwLock::into_inner))
+        Ok(self.take_last())
     }
 
     pub fn close(self, token: &mut CleanLockToken) -> Result<()> {
